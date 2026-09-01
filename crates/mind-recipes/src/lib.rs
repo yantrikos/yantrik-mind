@@ -480,6 +480,7 @@ pub struct HorizonHistoryView {
     pub goal_id: String,
     pub active: Option<HorizonView>,
     pub outcome: Option<OutcomeReceipt>,
+    pub lifecycle: Vec<mind_spec::HorizonLifecycleReceipt>,
     pub controls: Vec<HorizonControlReceipt>,
 }
 
@@ -924,14 +925,16 @@ GOAL: GOAL_HERE"#;
             .into_iter()
             .find(|view| view.goal_id == goal_id);
         let outcome = store.load_horizon_outcome(goal_id)?;
+        let lifecycle = store.load_horizon_lifecycle(goal_id)?;
         let controls = store.load_horizon_controls(goal_id)?;
-        if active.is_none() && outcome.is_none() && controls.is_empty() {
+        if active.is_none() && outcome.is_none() && lifecycle.is_empty() && controls.is_empty() {
             anyhow::bail!("no durable horizon history matches that exact id");
         }
         Ok(HorizonHistoryView {
             goal_id: goal_id.to_string(),
             active,
             outcome,
+            lifecycle,
             controls,
         })
     }
@@ -964,7 +967,7 @@ GOAL: GOAL_HERE"#;
         // Scheduler-owned horizon segments are read-only. A crash after claim can therefore return
         // them to the pending queue; the durable HorizonRun action id handles a crash after the
         // post-execution checkpoint but before queue deletion.
-        resumed += store.recover_horizon_jobs();
+        resumed += store.recover_horizon_jobs(now_ms());
         resumed
     }
 
@@ -1029,7 +1032,7 @@ GOAL: GOAL_HERE"#;
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
             let failed = |reason: HorizonFailureReason, error: anyhow::Error| {
-                let error = match store.fail_horizon_job(&job.goal_id, reason) {
+                let error = match store.fail_horizon_job(&job.goal_id, reason, now_ms) {
                     Ok(()) => error,
                     Err(persist_error) => anyhow::anyhow!(
                         "horizon segment failed with {}; durable failure status could not be persisted: {persist_error}",
@@ -2297,7 +2300,22 @@ mod tests {
             .control_horizon(&run.goal_id, HorizonControlAction::Cancel, start + 201,)
             .is_err());
 
-        assert_eq!(store.recover_horizon_jobs(), 1);
+        assert_eq!(store.recover_horizon_jobs(start + 201), 1);
+        let lifecycle = store.load_horizon_lifecycle(&run.goal_id).unwrap();
+        assert_eq!(
+            lifecycle
+                .iter()
+                .map(|receipt| receipt.event)
+                .collect::<Vec<_>>(),
+            vec![
+                mind_spec::HorizonLifecycleEvent::Scheduled,
+                mind_spec::HorizonLifecycleEvent::WakeStarted,
+                mind_spec::HorizonLifecycleEvent::Recovered,
+            ]
+        );
+        assert!(lifecycle
+            .iter()
+            .all(mind_spec::HorizonLifecycleReceipt::verify));
         let cancelled = engine
             .control_horizon(&run.goal_id, HorizonControlAction::Cancel, start + 202)
             .unwrap();
@@ -2313,6 +2331,7 @@ mod tests {
         let history = engine.horizon_history(&run.goal_id, start + 203).unwrap();
         assert!(history.active.is_none());
         assert!(history.outcome.is_none());
+        assert_eq!(history.lifecycle, lifecycle);
         assert_eq!(history.controls, controls);
     }
 
@@ -2559,6 +2578,21 @@ mod tests {
             store.load_horizon_outcome("goal:complete").unwrap(),
             Some(receipt.clone())
         );
+        let lifecycle = store.load_horizon_lifecycle("goal:complete").unwrap();
+        assert_eq!(
+            lifecycle
+                .iter()
+                .map(|event| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                mind_spec::HorizonLifecycleEvent::Scheduled,
+                mind_spec::HorizonLifecycleEvent::WakeStarted,
+                mind_spec::HorizonLifecycleEvent::Completed,
+            ]
+        );
+        assert!(lifecycle
+            .iter()
+            .all(mind_spec::HorizonLifecycleReceipt::verify));
         assert!(engine.resume_due_horizons(start + 1).await.is_empty());
     }
 

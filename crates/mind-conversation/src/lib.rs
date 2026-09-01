@@ -7134,6 +7134,33 @@ impl ConversationEngine {
                                 &outcome.receipt_sha256[..16]
                             ));
                         }
+                        if history.lifecycle.is_empty() {
+                            report.push_str("Scheduler lifecycle: none (legacy goal predates lifecycle receipts)\n");
+                        } else {
+                            report.push_str("Scheduler lifecycle:\n");
+                            for event in history.lifecycle {
+                                let previous = event
+                                    .previous_queue_status
+                                    .as_deref()
+                                    .unwrap_or("no-queue");
+                                let next = event
+                                    .next_queue_status
+                                    .as_deref()
+                                    .unwrap_or("terminal");
+                                report.push_str(&format!(
+                                    "- {} {}: {} -> {} · receipt {}",
+                                    event.occurred_at_ms,
+                                    event.event.as_str().to_ascii_uppercase(),
+                                    previous,
+                                    next,
+                                    &event.receipt_sha256[..16]
+                                ));
+                                if let Some(reason) = event.failure_reason {
+                                    report.push_str(&format!(" · reason {reason}"));
+                                }
+                                report.push('\n');
+                            }
+                        }
                         if history.controls.is_empty() {
                             report.push_str("Operator controls: none\n");
                         } else {

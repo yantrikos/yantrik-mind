@@ -45,7 +45,8 @@ pub use control::{Controller, Decision, Limits, ReasonCode, StepOutcome};
 pub use goal::{Budget, CompletionCriteria, Contract, GoalSpec, OutputContract, Verdict};
 pub use horizon::{
     ActionTrace, Assumption, AssumptionChange, GoalCheckpoint, HorizonBudget, HorizonControlAction,
-    HorizonControlReceipt, HorizonError, HorizonRun, HorizonStatus, OutcomeReceipt,
+    HorizonControlReceipt, HorizonError, HorizonLifecycleEvent, HorizonLifecycleReceipt,
+    HorizonRun, HorizonStatus, OutcomeReceipt,
 };
 
 /// A number the runtime did not measure.

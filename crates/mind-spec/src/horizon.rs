@@ -136,6 +136,144 @@ pub struct HorizonControlReceipt {
     pub receipt_sha256: String,
 }
 
+/// A scheduler-owned lifecycle transition for a durable horizon goal.
+///
+/// Unlike [`HorizonControlReceipt`], these transitions are not operator requests. They are emitted
+/// by the durable scheduler itself and hash-chain to the preceding lifecycle receipt so a history
+/// reader can detect tampering, deletion from the middle, or reordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizonLifecycleEvent {
+    Scheduled,
+    Recovered,
+    WakeStarted,
+    Failed,
+    Completed,
+}
+
+impl HorizonLifecycleEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduled => "scheduled",
+            Self::Recovered => "recovered",
+            Self::WakeStarted => "wake_started",
+            Self::Failed => "failed",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HorizonLifecycleReceipt {
+    pub goal_id: String,
+    pub event: HorizonLifecycleEvent,
+    pub occurred_at_ms: Millis,
+    /// The exact active checkpoint digest, or the final-state digest for `completed`. Absent only
+    /// when the lifecycle event itself records that the checkpoint was already missing.
+    pub state_sha256: Option<String>,
+    pub previous_queue_status: Option<String>,
+    pub next_queue_status: Option<String>,
+    /// Present only for `failed`; callers expose only their typed, bounded reason vocabulary.
+    pub failure_reason: Option<String>,
+    pub previous_receipt_sha256: Option<String>,
+    pub receipt_sha256: String,
+}
+
+impl HorizonLifecycleReceipt {
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue(
+        goal_id: impl Into<String>,
+        event: HorizonLifecycleEvent,
+        occurred_at_ms: Millis,
+        state_sha256: Option<String>,
+        previous_queue_status: Option<String>,
+        next_queue_status: Option<String>,
+        failure_reason: Option<String>,
+        previous_receipt_sha256: Option<String>,
+    ) -> Result<Self, HorizonError> {
+        let mut receipt = Self {
+            goal_id: goal_id.into(),
+            event,
+            occurred_at_ms,
+            state_sha256,
+            previous_queue_status,
+            next_queue_status,
+            failure_reason,
+            previous_receipt_sha256,
+            receipt_sha256: String::new(),
+        };
+        if !receipt.valid_transition() {
+            return Err(HorizonError::InvalidInput);
+        }
+        receipt.receipt_sha256 = lifecycle_digest(&receipt);
+        Ok(receipt)
+    }
+
+    pub fn verify(&self) -> bool {
+        self.valid_transition()
+            && valid_sha256(&self.receipt_sha256)
+            && self.receipt_sha256 == lifecycle_digest(self)
+    }
+
+    fn valid_transition(&self) -> bool {
+        if !valid_id(&self.goal_id)
+            || self
+                .state_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+            || self
+                .previous_queue_status
+                .as_deref()
+                .is_some_and(|status| !valid_queue_status(status))
+            || self
+                .next_queue_status
+                .as_deref()
+                .is_some_and(|status| !valid_queue_status(status))
+            || self
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| !valid_id(reason))
+            || self
+                .previous_receipt_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+        {
+            return false;
+        }
+        match self.event {
+            HorizonLifecycleEvent::Scheduled => {
+                self.state_sha256.is_some()
+                    && self.previous_queue_status.is_none()
+                    && self.next_queue_status.as_deref() == Some("pending")
+                    && self.failure_reason.is_none()
+            }
+            HorizonLifecycleEvent::Recovered => {
+                self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.as_deref() == Some("pending")
+                    && self.failure_reason.is_none()
+            }
+            HorizonLifecycleEvent::WakeStarted => {
+                self.previous_queue_status.as_deref() == Some("pending")
+                    && self.next_queue_status.as_deref() == Some("running")
+                    && self.failure_reason.is_none()
+            }
+            HorizonLifecycleEvent::Failed => {
+                self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.as_deref() == Some("failed")
+                    && self.failure_reason.is_some()
+                    && (self.state_sha256.is_some()
+                        || self.failure_reason.as_deref() == Some("checkpoint_validation_failed"))
+            }
+            HorizonLifecycleEvent::Completed => {
+                self.state_sha256.is_some()
+                    && self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.is_none()
+                    && self.failure_reason.is_none()
+            }
+        }
+    }
+}
+
 impl HorizonControlReceipt {
     pub fn issue(
         goal_id: impl Into<String>,
@@ -629,6 +767,21 @@ fn control_digest(receipt: &HorizonControlReceipt) -> String {
     sha256(&payload)
 }
 
+fn lifecycle_digest(receipt: &HorizonLifecycleReceipt) -> String {
+    let payload = serde_json::to_vec(&(
+        &receipt.goal_id,
+        receipt.event,
+        receipt.occurred_at_ms,
+        &receipt.state_sha256,
+        &receipt.previous_queue_status,
+        &receipt.next_queue_status,
+        &receipt.failure_reason,
+        &receipt.previous_receipt_sha256,
+    ))
+    .expect("horizon lifecycle receipt tuple is serializable");
+    sha256(&payload)
+}
+
 fn valid_queue_status(status: &str) -> bool {
     matches!(status, "pending" | "running" | "failed" | "paused")
 }
@@ -798,6 +951,54 @@ mod tests {
             checkpoint,
             Some("running".into()),
             None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scheduler_lifecycle_receipts_bind_transitions_and_chain_order() {
+        let state = "b".repeat(64);
+        let scheduled = HorizonLifecycleReceipt::issue(
+            "goal:lifecycle",
+            HorizonLifecycleEvent::Scheduled,
+            1_900_000_000_000,
+            Some(state.clone()),
+            None,
+            Some("pending".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        let failed = HorizonLifecycleReceipt::issue(
+            "goal:lifecycle",
+            HorizonLifecycleEvent::Failed,
+            1_900_000_000_001,
+            Some(state),
+            Some("running".into()),
+            Some("failed".into()),
+            Some("segment_contract_failed".into()),
+            Some(scheduled.receipt_sha256.clone()),
+        )
+        .unwrap();
+        assert!(scheduled.verify());
+        assert!(failed.verify());
+        assert_eq!(
+            failed.previous_receipt_sha256.as_deref(),
+            Some(scheduled.receipt_sha256.as_str())
+        );
+
+        let mut tampered = failed.clone();
+        tampered.failure_reason = Some("action_ledger_failed".into());
+        assert!(!tampered.verify());
+        assert!(HorizonLifecycleReceipt::issue(
+            "goal:lifecycle",
+            HorizonLifecycleEvent::Recovered,
+            1_900_000_000_002,
+            Some("c".repeat(64)),
+            Some("failed".into()),
+            Some("pending".into()),
+            None,
+            Some(failed.receipt_sha256),
         )
         .is_err());
     }

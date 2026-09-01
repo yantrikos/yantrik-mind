@@ -4132,7 +4132,12 @@ async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface()
         )
         .await;
     assert!(
-        history.contains("Failure reason: segment_contract_failed"),
+        history.contains("Failure reason: segment_contract_failed")
+            && history.contains("Scheduler lifecycle:")
+            && history.contains("SCHEDULED: no-queue -> pending")
+            && history.contains("WAKE_STARTED: pending -> running")
+            && history.contains("FAILED: running -> failed")
+            && history.contains("reason segment_contract_failed"),
         "{history}"
     );
     assert!(!history.contains("PRIVATE backend detail"), "{history}");

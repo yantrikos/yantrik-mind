@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use mind_spec::{
-    GoalCheckpoint, HorizonControlAction, HorizonControlReceipt, HorizonRun, OutcomeReceipt,
+    GoalCheckpoint, HorizonControlAction, HorizonControlReceipt, HorizonLifecycleEvent,
+    HorizonLifecycleReceipt, HorizonRun, OutcomeReceipt,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
@@ -124,6 +125,14 @@ impl RecipeStore {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 goal_id TEXT NOT NULL,
                 action TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                receipt_sha256 TEXT NOT NULL UNIQUE,
+                occurred_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mind_horizon_lifecycle (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                goal_id TEXT NOT NULL,
+                event TEXT NOT NULL,
                 receipt_json TEXT NOT NULL,
                 receipt_sha256 TEXT NOT NULL UNIQUE,
                 occurred_ms INTEGER NOT NULL
@@ -545,6 +554,107 @@ impl RecipeStore {
         Ok(receipts)
     }
 
+    /// Read and verify the scheduler-owned, hash-chained lifecycle for one goal.
+    pub fn load_horizon_lifecycle(
+        &self,
+        goal_id: &str,
+    ) -> anyhow::Result<Vec<HorizonLifecycleReceipt>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event,receipt_json,receipt_sha256
+             FROM mind_horizon_lifecycle WHERE goal_id=?1 ORDER BY id",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([goal_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut receipts = Vec::with_capacity(rows.len());
+        let mut previous_sha256: Option<String> = None;
+        for (event, receipt_json, stored_sha256) in rows {
+            let receipt: HorizonLifecycleReceipt = serde_json::from_str(&receipt_json)?;
+            if receipt.goal_id != goal_id
+                || receipt.event.as_str() != event
+                || receipt.receipt_sha256 != stored_sha256
+                || receipt.previous_receipt_sha256 != previous_sha256
+                || !receipt.verify()
+                || (receipt.event == HorizonLifecycleEvent::Failed
+                    && !receipt
+                        .failure_reason
+                        .as_deref()
+                        .is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason)))
+            {
+                anyhow::bail!("horizon lifecycle receipt chain failed validation");
+            }
+            previous_sha256 = Some(receipt.receipt_sha256.clone());
+            receipts.push(receipt);
+        }
+        Ok(receipts)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_horizon_lifecycle(
+        tx: &rusqlite::Transaction<'_>,
+        goal_id: &str,
+        event: HorizonLifecycleEvent,
+        occurred_at_ms: u64,
+        state_sha256: Option<&str>,
+        previous_queue_status: Option<&str>,
+        next_queue_status: Option<&str>,
+        failure_reason: Option<&str>,
+    ) -> anyhow::Result<HorizonLifecycleReceipt> {
+        if event == HorizonLifecycleEvent::Failed
+            && !failure_reason.is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason))
+        {
+            anyhow::bail!("unbounded horizon lifecycle failure reason");
+        }
+        let previous: Option<(String, String)> = tx
+            .query_row(
+                "SELECT receipt_json,receipt_sha256 FROM mind_horizon_lifecycle
+                 WHERE goal_id=?1 ORDER BY id DESC LIMIT 1",
+                [goal_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let previous_receipt_sha256 = if let Some((receipt_json, stored_sha256)) = previous {
+            let receipt: HorizonLifecycleReceipt = serde_json::from_str(&receipt_json)?;
+            if receipt.goal_id != goal_id
+                || receipt.receipt_sha256 != stored_sha256
+                || !receipt.verify()
+            {
+                anyhow::bail!("previous horizon lifecycle receipt failed validation");
+            }
+            Some(stored_sha256)
+        } else {
+            None
+        };
+        let receipt = HorizonLifecycleReceipt::issue(
+            goal_id,
+            event,
+            occurred_at_ms,
+            state_sha256.map(str::to_string),
+            previous_queue_status.map(str::to_string),
+            next_queue_status.map(str::to_string),
+            failure_reason.map(str::to_string),
+            previous_receipt_sha256,
+        )
+        .map_err(|error| anyhow::anyhow!("horizon lifecycle receipt rejected: {error:?}"))?;
+        let receipt_json = serde_json::to_string(&receipt)?;
+        let occurred_ms = i64::try_from(occurred_at_ms)
+            .map_err(|_| anyhow::anyhow!("horizon lifecycle timestamp is out of range"))?;
+        tx.execute(
+            "INSERT INTO mind_horizon_lifecycle
+                (goal_id,event,receipt_json,receipt_sha256,occurred_ms)
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                goal_id,
+                event.as_str(),
+                receipt_json,
+                receipt.receipt_sha256,
+                occurred_ms
+            ],
+        )?;
+        Ok(receipt)
+    }
+
     /// Atomically replace an active checkpoint with an immutable, verified completion receipt.
     /// A different receipt for the same goal can never overwrite the first terminal outcome.
     pub fn finish_horizon(&self, run: &HorizonRun, receipt: &OutcomeReceipt) -> anyhow::Result<()> {
@@ -604,6 +714,16 @@ impl RecipeStore {
         if inserted != 1 {
             anyhow::bail!("horizon outcome was not inserted");
         }
+        Self::append_horizon_lifecycle(
+            &tx,
+            &receipt.goal_id,
+            HorizonLifecycleEvent::Completed,
+            receipt.finished_at_ms,
+            Some(&receipt.final_state_sha256),
+            Some("running"),
+            None,
+            None,
+        )?;
         tx.execute(
             "DELETE FROM mind_horizon_checkpoints WHERE goal_id=?1",
             [&receipt.goal_id],
@@ -623,14 +743,13 @@ impl RecipeStore {
         let job_json = serde_json::to_string(job)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let has_checkpoint: bool = tx
+        let checkpoint: Option<(String, i64)> = tx
             .query_row(
-                "SELECT 1 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                "SELECT state_sha256,created_ms FROM mind_horizon_checkpoints WHERE goal_id=?1",
                 [&job.goal_id],
-                |_| Ok(true),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?
-            .unwrap_or(false);
+            .optional()?;
         let has_outcome: bool = tx
             .query_row(
                 "SELECT 1 FROM mind_horizon_outcomes WHERE goal_id=?1",
@@ -639,7 +758,7 @@ impl RecipeStore {
             )
             .optional()?
             .unwrap_or(false);
-        if !has_checkpoint || has_outcome {
+        if checkpoint.is_none() || has_outcome {
             anyhow::bail!("horizon job requires one active, non-terminal goal");
         }
         let existing: Option<String> = tx
@@ -661,6 +780,19 @@ impl RecipeStore {
              VALUES (?1,?2,?3,'pending',NULL)",
             rusqlite::params![job.goal_id, job_json, wake_ms],
         )?;
+        let (checkpoint_sha256, checkpoint_ms) =
+            checkpoint.expect("checked above: scheduled jobs require a checkpoint");
+        Self::append_horizon_lifecycle(
+            &tx,
+            &job.goal_id,
+            HorizonLifecycleEvent::Scheduled,
+            u64::try_from(checkpoint_ms)
+                .map_err(|_| anyhow::anyhow!("horizon checkpoint timestamp is out of range"))?,
+            Some(&checkpoint_sha256),
+            None,
+            Some("pending"),
+            None,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -672,15 +804,16 @@ impl RecipeStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let mut stmt = tx.prepare(
-            "SELECT goal_id,job_json FROM mind_horizon_jobs
-             WHERE status='pending' AND wake_ms<=?1 ORDER BY wake_ms,goal_id LIMIT 8",
+            "SELECT j.goal_id,j.job_json,c.state_sha256 FROM mind_horizon_jobs j
+             LEFT JOIN mind_horizon_checkpoints c ON c.goal_id=j.goal_id
+             WHERE j.status='pending' AND j.wake_ms<=?1 ORDER BY j.wake_ms,j.goal_id LIMIT 8",
         )?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?)))?
+        let rows: Vec<(String, String, Option<String>)> = stmt
+            .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
         let mut jobs = Vec::with_capacity(rows.len());
-        for (goal_id, job_json) in rows {
+        for (goal_id, job_json, checkpoint_sha256) in rows {
             let job: HorizonJob = serde_json::from_str(&job_json)?;
             job.validate()?;
             if job.goal_id != goal_id {
@@ -692,6 +825,17 @@ impl RecipeStore {
                 [&goal_id],
             )?;
             if changed == 1 {
+                Self::append_horizon_lifecycle(
+                    &tx,
+                    &goal_id,
+                    HorizonLifecycleEvent::WakeStarted,
+                    u64::try_from(now_ms)
+                        .map_err(|_| anyhow::anyhow!("horizon tick timestamp is out of range"))?,
+                    checkpoint_sha256.as_deref(),
+                    Some("pending"),
+                    Some("running"),
+                    None,
+                )?;
                 jobs.push(job);
             }
         }
@@ -709,12 +853,21 @@ impl RecipeStore {
         &self,
         goal_id: &str,
         reason: HorizonFailureReason,
+        occurred_at_ms: u64,
     ) -> anyhow::Result<()> {
         // This field is operator-visible, so callers can provide only this typed, code-owned
         // vocabulary. Free-text backend errors have no type-correct route into persistence.
         let reason_code = reason.as_str();
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let checkpoint_sha256: Option<String> = tx
+            .query_row(
+                "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                [goal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let changed = tx.execute(
             "UPDATE mind_horizon_jobs SET status='failed',error=?2
              WHERE goal_id=?1 AND status='running'",
             rusqlite::params![goal_id, reason_code],
@@ -722,19 +875,62 @@ impl RecipeStore {
         if changed != 1 {
             anyhow::bail!("horizon failure status did not match one running job");
         }
+        Self::append_horizon_lifecycle(
+            &tx,
+            goal_id,
+            HorizonLifecycleEvent::Failed,
+            occurred_at_ms,
+            checkpoint_sha256.as_deref(),
+            Some("running"),
+            Some("failed"),
+            Some(reason_code),
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
     /// All scheduler jobs are validated read-only segments, so a process crash may safely return a
     /// claimed-but-unfinished row to the pending queue. The HorizonRun action id deduplicates the
     /// case where the checkpoint committed but the job deletion did not.
-    pub fn recover_horizon_jobs(&self) -> usize {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE mind_horizon_jobs SET status='pending',error=NULL WHERE status='running'",
-            [],
-        )
-        .unwrap_or(0)
+    pub fn recover_horizon_jobs(&self, now_ms: u64) -> usize {
+        let recovered = (|| -> anyhow::Result<usize> {
+            let mut conn = self.conn.lock().unwrap();
+            let tx = conn.transaction()?;
+            let rows: Vec<(String, Option<String>)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT j.goal_id,c.state_sha256 FROM mind_horizon_jobs j
+                     LEFT JOIN mind_horizon_checkpoints c ON c.goal_id=j.goal_id
+                     WHERE j.status='running' ORDER BY j.goal_id",
+                )?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows
+            };
+            for (goal_id, checkpoint_sha256) in &rows {
+                let changed = tx.execute(
+                    "UPDATE mind_horizon_jobs SET status='pending',error=NULL
+                     WHERE goal_id=?1 AND status='running'",
+                    [goal_id],
+                )?;
+                if changed != 1 {
+                    anyhow::bail!("horizon recovery lost a scheduler race");
+                }
+                Self::append_horizon_lifecycle(
+                    &tx,
+                    goal_id,
+                    HorizonLifecycleEvent::Recovered,
+                    now_ms,
+                    checkpoint_sha256.as_deref(),
+                    Some("running"),
+                    Some("pending"),
+                    None,
+                )?;
+            }
+            tx.commit()?;
+            Ok(rows.len())
+        })();
+        recovered.unwrap_or(0)
     }
 
     /// Read a terminal receipt without reviving the completed goal.
@@ -865,14 +1061,26 @@ mod horizon_tests {
         store.save_horizon_checkpoint(&checkpoint).unwrap();
         store.schedule_horizon_job(&job).unwrap();
         assert!(store
-            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .fail_horizon_job(
+                &original.goal_id,
+                HorizonFailureReason::SegmentContract,
+                start + 20,
+            )
             .is_err());
         assert_eq!(store.claim_due_horizon_jobs(start + 20).unwrap().len(), 1);
         store
-            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .fail_horizon_job(
+                &original.goal_id,
+                HorizonFailureReason::SegmentContract,
+                start + 20,
+            )
             .unwrap();
         assert!(store
-            .fail_horizon_job(&original.goal_id, HorizonFailureReason::ActionLedger)
+            .fail_horizon_job(
+                &original.goal_id,
+                HorizonFailureReason::ActionLedger,
+                start + 21,
+            )
             .is_err());
         drop(store);
 
@@ -882,6 +1090,27 @@ mod horizon_tests {
         assert_eq!(failed[0].queue_status.as_deref(), Some("failed"));
         assert_eq!(
             failed[0].failure_reason.as_deref(),
+            Some("segment_contract_failed")
+        );
+        let lifecycle = reopened.load_horizon_lifecycle(&original.goal_id).unwrap();
+        assert_eq!(
+            lifecycle
+                .iter()
+                .map(|receipt| receipt.event)
+                .collect::<Vec<_>>(),
+            vec![
+                HorizonLifecycleEvent::Scheduled,
+                HorizonLifecycleEvent::WakeStarted,
+                HorizonLifecycleEvent::Failed,
+            ]
+        );
+        assert!(lifecycle.iter().all(HorizonLifecycleReceipt::verify));
+        assert_eq!(
+            lifecycle[2].previous_receipt_sha256.as_deref(),
+            Some(lifecycle[1].receipt_sha256.as_str())
+        );
+        assert_eq!(
+            lifecycle[2].failure_reason.as_deref(),
             Some("segment_contract_failed")
         );
         let receipt = reopened
@@ -901,7 +1130,11 @@ mod horizon_tests {
             .unwrap();
         assert_eq!(controls, vec![receipt]);
         assert!(after_retry_restart
-            .fail_horizon_job("goal:missing", HorizonFailureReason::SegmentContract)
+            .fail_horizon_job(
+                "goal:missing",
+                HorizonFailureReason::SegmentContract,
+                start + 40,
+            )
             .is_err());
         after_retry_restart
             .control_horizon(&original.goal_id, HorizonControlAction::Pause, start + 40)
@@ -957,7 +1190,11 @@ mod horizon_tests {
         store.schedule_horizon_job(&job).unwrap();
         assert_eq!(store.claim_due_horizon_jobs(start + 20).unwrap().len(), 1);
         store
-            .fail_horizon_job(&original.goal_id, HorizonFailureReason::SegmentContract)
+            .fail_horizon_job(
+                &original.goal_id,
+                HorizonFailureReason::SegmentContract,
+                start + 20,
+            )
             .unwrap();
         let bounded_current_error: String = store
             .conn
@@ -1057,5 +1294,64 @@ mod horizon_tests {
         assert!(store
             .control_horizon("goal:persisted", HorizonControlAction::Retry, start + 30,)
             .is_err());
+    }
+
+    #[test]
+    fn missing_checkpoint_is_still_a_receipted_scheduler_failure() {
+        let start = 1_900_000_000_000;
+        let mut original = run(start);
+        let checkpoint = original.checkpoint(start + 10).unwrap();
+        let job = HorizonJob {
+            goal_id: original.goal_id.clone(),
+            segment_id: "observe-once".into(),
+            recipe: crate::Recipe {
+                id: "observe-inbox".into(),
+                name: "Observe the inbox once".into(),
+                steps: vec![RecipeStep::Tool {
+                    tool_name: "inbox".into(),
+                    args: serde_json::json!({"limit": 1}),
+                    store_as: "fresh".into(),
+                    on_error: crate::ErrorAction::Fail,
+                }],
+            },
+            assumption_vars: BTreeMap::new(),
+            wake_at_ms: start + 20,
+            cost_units: 1,
+            complete_on_success: false,
+        };
+        let store = RecipeStore::open(":memory:").unwrap();
+        store.save_horizon_checkpoint(&checkpoint).unwrap();
+        store.schedule_horizon_job(&job).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                [&original.goal_id],
+            )
+            .unwrap();
+
+        assert_eq!(store.claim_due_horizon_jobs(start + 20).unwrap().len(), 1);
+        store
+            .fail_horizon_job(
+                &original.goal_id,
+                HorizonFailureReason::CheckpointValidation,
+                start + 20,
+            )
+            .unwrap();
+        let lifecycle = store.load_horizon_lifecycle(&original.goal_id).unwrap();
+        assert_eq!(lifecycle.len(), 3);
+        assert_eq!(lifecycle[0].event, HorizonLifecycleEvent::Scheduled);
+        assert!(lifecycle[0].state_sha256.is_some());
+        assert_eq!(lifecycle[1].event, HorizonLifecycleEvent::WakeStarted);
+        assert!(lifecycle[1].state_sha256.is_none());
+        assert_eq!(lifecycle[2].event, HorizonLifecycleEvent::Failed);
+        assert!(lifecycle[2].state_sha256.is_none());
+        assert_eq!(
+            lifecycle[2].failure_reason.as_deref(),
+            Some("checkpoint_validation_failed")
+        );
+        assert!(lifecycle.iter().all(HorizonLifecycleReceipt::verify));
     }
 }

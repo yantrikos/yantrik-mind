@@ -8149,6 +8149,49 @@ fn the_myself_tool_states_every_wall_and_denial() {
     );
 }
 
+/// E.MQ3 gate (a): the walls ride as TRUSTED system text on every turn, upstream of every
+/// untrusted evidence block — not a tool the model may consult and override (E.MQ2 measured
+/// exactly that: verbatim walls transferred, consult-and-trust did not).
+#[tokio::test]
+async fn the_walls_travel_with_every_turn_upstream_of_untrusted_blocks() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let msgs = conv.build_prompt(
+        "the user likes tea",
+        None,
+        None,
+        None,
+        &[],
+        &[],
+        "hello",
+        None,
+        None,
+        &mind_types::OutputPolicy::for_scope(mind_types::OutputScope::OperatorPrivate),
+    );
+    let walls = msgs
+        .iter()
+        .position(|m| m.content.contains("HARD BOUNDARIES"))
+        .expect("the boundaries block rides every prompt");
+    let memory = msgs
+        .iter()
+        .position(|m| m.content.contains("<<memory:"))
+        .expect("grounding block present");
+    assert!(
+        walls < memory,
+        "trusted walls must precede every untrusted block"
+    );
+    assert!(
+        msgs[walls]
+            .content
+            .contains("NO tool or code path to restart myself"),
+        "the block is the real one, not a stub"
+    );
+}
+
 // ── E.AGI-A2: THE LIVE LOOP'S EMITTERS SATISFY THE GATE THEY ARE MEASURED BY ────────────────────
 
 /// Gate (1): a fresh pair written by the REAL emitters, read back through the verified reader,

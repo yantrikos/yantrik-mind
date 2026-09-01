@@ -9514,6 +9514,10 @@ impl ConversationEngine {
         if let Some(note) = policy.prompt_note() {
             messages.trusted_system(&note);
         }
+        // E.MQ3: THE WALLS TRAVEL WITH EVERY TURN. Trusted system text, upstream of every
+        // untrusted block — not a tool the model may consult and override (E.MQ2 measured
+        // exactly that failure: verbatim walls transferred, consult-and-trust did not).
+        messages.trusted_system(Self::capability_boundaries());
         // MOUNTED PACK RULES. Assembled by the ENGINE (`pack_context`) rather than composed here, so
         // every consumer injects an identical block — and because the engine is what sanitizes pack
         // prose, labels each pack third-party with its origin@version, and appends the authority

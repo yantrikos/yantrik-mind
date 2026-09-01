@@ -2824,3 +2824,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Exact seams | Stage 1: `self_claims::shortlist(q) -> Vec<&Claim>` and `self_claims::singleton(q) -> Option<&Claim>` (deterministic, replayable with grep). Stage 2: `ConversationEngine::confirm_claim_with(&InferencePool, q, &Claim) -> (raw, confirmed)` (greedy, ≤ 8 tokens, think off, `chat_grounded`, prompt = `self_claims::confirm_prompt`). End-to-end: `ConversationEngine::route_claim_two_stage_with(&InferencePool, q) -> (candidate_id, raw, routed_id)`; no candidate ⇒ no model call. Versions: `self-claims-shortlist-v1`, `self-claims-confirm-v1`. |
 | Floor (author's own sentences, NOT the gate) | 10/10 own paraphrases → the intended singleton; 7/7 own negatives → nothing; a two-topic question → two candidates → nothing. One topical near-miss ("can you predict whether the trade will make real money?") is emitted by stage 1 as `real-money` on purpose — separating it is stage 2's job, and the prereg's stage-1 negative gate will say whether that is acceptable. |
 | Honest expectation | Stage-1 recall ≥ 18/20 and 0/40 negative candidates are demanding for a lexicon; the capability/explanation frame is the only precision instrument. A miss is a KILL, not a tuning round. |
+
+## E.WEB18b — the Board opens threads too (prereg)
+
+| Field | Value |
+| --- | --- |
+| Gap | The Board still shows one card per run and a single generic "Standing orders · see Activity" card built from the text blob, so an operator who starts on the Board cannot reach an agent's thread and cannot see when an order fires. |
+| Design | Board job cards open the agent's thread (switch to the Agents panel, `openThread(name)`); standing orders come typed (`/api/standing-orders`), one card each under Scheduled with the server's countdown, and open the same thread. Goal cards are unchanged. No endpoint change. |
+| Kill | Any endpoint change; a Board card that opens a different agent's thread than its name (same key rule as the lists); the Board reading `/api/orders` text; a screenshot on staging that does not show Board → thread. |

@@ -2707,3 +2707,16 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Readout (counts only, on the box) | Over the first ≥ 30 paired events: a 3 × 2 table, presence verdict × gate verdict, plus per-cell counts of knocks that were later engaged (the judgment ledger's graded engagement prediction, which `maybe_knock` already commits). Nothing leaves the box but the table. |
 | Kill / inconclusive | < 30 paired events within 14 days of the prod deploy → INCONCLUSIVE, recorded as such, no extension by loosening the knock gates. Any code that reads the shadow verdict on the decision path → the row is void (E.G1's source guard stays). Agreement, however high, activates nothing: activation is E.G3 with its own held-out gate. |
 | AGI feed | Phase G. The roadmap's gate is "beats correlation baselines on held-out interventions"; this row is the first table that could even be compared to one. |
+
+## E.MQ6 — two-stage self-claim router: deterministic singleton shortlist, LLM confirm-or-abstain (prereg, Codex's proposal, verbatim)
+
+| Field | Value |
+| --- | --- |
+| Sealed set | Fresh sealed v4, authored and withheld by Codex. SHA-256 commitment `2d565078128e28f1ab046ec878a3cab98c5fccc887cc4817a77fb1e69cd75f29`; exact JSON length 6,865 bytes; 60 rows = 20 positives (2 per each of the same 10 closed-schema claims) + 40 hard negatives (4 per claim family). No v3 reuse and no tuning on v4. |
+| Candidate class (the only one admitted) | A deterministic lexical shortlist emits AT MOST ONE candidate; only then may the owned local LLM confirm that singleton or abstain. It may never generate or select another label. |
+| Sequencing | Freeze candidate SHA + the exact production/eval seam BEFORE row disclosure. No candidate code before this row's SHA is ACKed by both agents. |
+| Stage-1 gates (shortlist alone, on v4) | Exact-target candidate ≥ 18/20; negative candidates 0/40; wrong-claim candidates 0/60; at most one candidate, structurally. |
+| End-to-end gates (three fresh runs, fixed owned local model) | Exact-target recall ≥ 18/20 EACH run; negative abstention 40/40 EACH; wrong-claim misroutes 0 EACH; LLM calls ≤ 20/60. |
+| Source guard | Router output remains shadow-only and cannot reach the user. |
+| Kill | Any gate miss = KILL: no activation, no prompt chasing. |
+| AGI feed | Phase B. The third router design; the first whose LLM stage structurally cannot invent or cross-route a claim. |

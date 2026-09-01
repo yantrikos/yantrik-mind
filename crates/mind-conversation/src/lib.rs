@@ -11980,14 +11980,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
     /// construction. A disabled recorder yields an empty feed, never an error.
     pub fn web_recent_decisions(&self, limit: usize) -> Vec<serde_json::Value> {
         let limit = limit.clamp(1, 200);
-        let Some(path) = self.recorder.trace_path() else {
-            return Vec::new();
+        // E.WEB7b (Codex's hardening finding): use the hash-chain-VERIFIED tail reader, not raw
+        // read_events. It validates the whole chain before slicing, sanitizes each event, and on
+        // ANY corruption returns Err — in which case the web feed withholds EVERYTHING rather than
+        // serve a tampered or truncated log. A disabled recorder yields an empty (Ok) feed.
+        let events = match self.recorder.read_tail_verified(limit) {
+            Ok(events) => events,
+            Err(_) => return Vec::new(),
         };
-        let mut events = mind_observability::read_events(&path);
-        let n = events.len();
-        if n > limit {
-            events.drain(0..n - limit);
-        }
         events
             .into_iter()
             .rev()

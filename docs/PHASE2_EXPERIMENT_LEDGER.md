@@ -2127,3 +2127,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What shipped | GET /api/dreaming serves `dmn_log_tail(n)` (Codex's ring, sanitized at write and read) as at_ms/tick_no/phase/message; a "Dreaming" panel renders the default-mode rotor (rehearse/reconcile/associate) as a phase-tagged timeline. Operator-only, read-only. The first joint feature where Codex's engine half and Claude's UI half meet on one commit rather than across a coordination gap. |
 | Kill criteria | (1) `the_dreaming_route_exposes_only_the_sanitized_entry_shape` asserts the serialized entry carries exactly the four sanitized fields, nothing raw: PASS. (2) Empty ring → empty feed. (3) Operator-only. (4) Workspace 1441/0/4: PASS. |
 | AGI feed | The "visible memory formation" differentiator from E.WEB0, realized against the ACTUAL offline-cognition organ — the operator watches consolidation/reconciliation/association between turns; the substrate a metacognition review reads. |
+
+## E.WEB7b — the decisions feed rides the verified reader (Codex's hardening finding)
+
+| Field | Value |
+| --- | --- |
+| The finding | Codex's post-fold review: `web_recent_decisions` (E.WEB7) read the log via raw `read_events`, not the hash-chain-verified `read_tail_verified` that landed in the fold. The web feed could therefore serve a tampered or truncated log. |
+| The fix | `web_recent_decisions` now uses `recorder.read_tail_verified(limit)` — the whole chain is validated before slicing, each event is sanitized by the reader, and ANY corruption returns Err, in which case the web feed WITHHOLDS EVERYTHING rather than serve a compromised log. A disabled recorder still yields an empty Ok feed; the existing redaction test passes unchanged. Workspace 1441/0/4. |
+| AGI feed | Integrity of the mind's self-observation surface: the operator's window onto the decision trace cannot be quietly falsified — the precondition for trusting any oversight or learning loop that reads it. |

@@ -737,10 +737,14 @@ const AGENT_VIEWS = {
   new: ["New agent", "Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Durable goals survive restarts and act on schedule."],
 };
 function setAgentsView(view) {
-  const v = AGENT_VIEWS[view] ? view : "running";
+  // "thread" is one agent's own view (E.WEB18); its title is the agent's name, set by renderThread.
+  const v = view === "thread" || AGENT_VIEWS[view] ? view : "running";
   $("panel-tasks").dataset.view = v;
-  $("tasks-title").textContent = AGENT_VIEWS[v][0];
-  $("tasks-sub").textContent = AGENT_VIEWS[v][1];
+  if (v !== "thread") {
+    $("tasks-title").textContent = AGENT_VIEWS[v][0];
+    $("tasks-sub").textContent = AGENT_VIEWS[v][1];
+  }
+  document.querySelectorAll(".nav-sub[data-view]").forEach((n) => n.classList.toggle("active", n.dataset.view === (v === "thread" ? threadReturnView : v)));
 }
 const bucketCounts = { running: 0, dormant: 0 };
 function bucketReset() { bucketCounts.running = 0; bucketCounts.dormant = 0; }
@@ -759,104 +763,221 @@ function bucketPaint() {
   }
 }
 
+/* E.WEB18: each agent is its own THREAD. Runs and standing orders group by the agent name the
+   composer already uses; the lists show agents, and a thread shows one agent's history like a
+   conversation — brief, then every run in time order, then what is scheduled, then the reply box
+   (run again). One pure function does the grouping so a run can never sit in two threads. */
+function agentThreads(jobs, orders) {
+  const byName = new Map();
+  const get = (name) => {
+    const key = String(name || "(unnamed)");
+    if (!byName.has(key)) byName.set(key, { name: key, runs: [], orders: [], running: false, last_ms: 0, task: "" });
+    return byName.get(key);
+  };
+  for (const j of jobs || []) {
+    const a = get(j.name || j.id);
+    a.runs.push(j);
+    if (agentBucket(j) === "running") a.running = true;
+    const t = Number(j.finished_ms || j.started_ms || 0);
+    if (t > a.last_ms) a.last_ms = t;
+    if (!a.task && (j.task || j.goal)) a.task = j.task || j.goal;
+  }
+  for (const o of orders || []) {
+    const a = get(o.name || o.id);
+    a.orders.push(o);
+  }
+  for (const a of byName.values()) a.runs.sort((x, y) => Number(x.started_ms || 0) - Number(y.started_ms || 0));
+  // Running agents first, then most recent activity.
+  return [...byName.values()].sort((x, y) => (y.running - x.running) || (y.last_ms - x.last_ms));
+}
+// The classifier's view of an agent: running if any run is, else dormant (a standing order is
+// waiting by definition).
+function agentState(a) { return { state: a.running ? "running" : "dormant" }; }
+
+let agentsCache = { jobs: [], orders: [] };
+let openThreadName = null;
+let threadReturnView = "running";
+
 async function loadTasks() {
   const host = $("job-cards");
   loadTemplates();
   loadAllowance();
   bucketReset();
+  let anyRunning = false;
   try {
     const r = await fetch("/api/tasks", { headers: { "X-YM-Web": "1" } });
     if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
     const data = await r.json();
-    host.replaceChildren();
-    const jobs = data.jobs || [];
-    let anyRunning = false;
-    // newest first — the board reads like a feed
-    for (const j of [...jobs].reverse()) {
-      const state = String(j.state || j.status || "?").toLowerCase();
-      const running = state.includes("run");
-      if (running) anyRunning = true;
-      const card = el("div", "run " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
-      bucketAdd(card, j);
-      // head: name · state · elapsed
-      const head = el("div", "run-head");
-      const name = el("span", "run-name"); name.textContent = j.name || j.id; head.appendChild(name);
-      const st = el("span", "job-state " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
-      st.textContent = state; head.appendChild(st);
-      const kind = el("span", "tag"); kind.textContent = j.kind || "agent"; head.appendChild(kind);
-      const elapsed = el("span", "run-elapsed");
-      const notes = Array.isArray(j.notes) ? j.notes : [];
-      const lastT = notes.length ? notes[notes.length - 1].t : null;
-      const endMs = running ? Date.now() : (j.finished_ms || lastT || j.started_ms);
-      elapsed.textContent = j.started_ms ? `${fmtTs(j.started_ms)} · ${fmtElapsed(endMs - j.started_ms)}${running ? " and counting" : ""}` : "";
-      head.appendChild(elapsed);
-      card.appendChild(head);
-      // the brief, clamped — never dumped
-      const brief = el("div", "card-desc"); brief.textContent = j.task || j.goal || ""; card.appendChild(brief);
-      if (brief.textContent.length > 280) {
-        brief.classList.add("clamp");
-        const more = el("button", "link-btn"); more.type = "button"; more.textContent = "show full brief";
-        more.addEventListener("click", () => { const c = brief.classList.toggle("clamp"); more.textContent = c ? "show full brief" : "hide"; });
-        card.appendChild(more);
-      }
-      // the timeline: started → each note → finished, from the job's own timestamps
-      const tl = el("div", "timeline");
-      const addStep = (t, text, terminal) => {
-        const row = el("div", "tl" + (terminal ? " terminal" : ""));
-        const tt = el("span", "tl-t"); tt.textContent = t ? fmtTs(t) : ""; row.appendChild(tt);
-        const tx = el("span", "tl-text"); tx.textContent = text; row.appendChild(tx);
-        tl.appendChild(row);
-      };
-      if (j.started_ms) addStep(j.started_ms, "started");
-      for (const n of notes) addStep(n.t, String(n.note || ""));
-      if (!running) addStep(j.finished_ms || lastT || null, state.includes("fail") ? "failed" : "finished", true);
-      else addStep(null, "working…", true);
-      card.appendChild(tl);
-      // the result, rendered — model output is hostile input, so DOM-only markdown
-      if (j.result) {
-        const md = el("div", "md");
-        renderMarkdown(md, String(j.result));
-        card.appendChild(md);
-      }
-      const meta = el("div", "setting-key"); meta.textContent = j.id; card.appendChild(meta);
-      const actions = el("div", "job-actions");
-      for (const [verb, label, ask] of [["keep", "Keep", null], ["drop", "Drop scratch", null], ["delete", "Delete", "Delete this job's record from the board?"]]) {
-        const b = el("button"); b.type = "button"; b.textContent = label;
-        b.addEventListener("click", async () => {
-          if (ask && !confirm(ask)) return;
-          const res = await postJson("/api/task-action", { verb, id: j.id });
-          if (!res.ok) alert(`${verb} failed (${res.status || "offline"}): ${res.text}`);
-          else loadTasks();
-        });
-        actions.appendChild(b);
-      }
-      // Run again re-submits the same name + brief through the same gate as a new delegation.
-      if (!running && (j.task || j.goal)) {
-        const again = el("button"); again.type = "button"; again.textContent = "Run again";
-        again.addEventListener("click", async () => {
-          again.disabled = true;
-          const res = await postJson("/api/agent", { name: j.name || j.id, task: j.task || j.goal });
-          if (!res.ok) { alert(`re-run failed (${res.status || "offline"}): ${res.text}`); again.disabled = false; }
-          else loadTasks();
-        });
-        actions.appendChild(again);
-      }
-      card.appendChild(actions);
-      host.appendChild(card);
+    agentsCache.jobs = data.jobs || [];
+  } catch (_) { host.replaceChildren(textP("Could not read the board.")); agentsCache.jobs = []; }
+  agentsCache.orders = await fetchStandingOrders();
+  const agents = agentThreads(agentsCache.jobs, agentsCache.orders);
+  host.replaceChildren();
+  for (const a of agents) {
+    if (a.running) anyRunning = true;
+    const row = el("button", "agent-row");
+    row.type = "button";
+    bucketAdd(row, agentState(a));
+    const dot = el("span", "agent-dot " + (a.running ? "running" : "dormant")); row.appendChild(dot);
+    const main = el("div", "agent-row-main");
+    const name = el("div", "agent-row-name"); name.textContent = a.name; main.appendChild(name);
+    const meta = el("div", "agent-row-meta");
+    const runs = a.runs.length ? `${a.runs.length} run${a.runs.length === 1 ? "" : "s"}` : "no runs yet";
+    const last = a.last_ms ? ` · last ${fmtTs(a.last_ms)}` : "";
+    const sched = a.orders.length ? ` · ${a.orders.length === 1 ? "scheduled" : a.orders.length + " schedules"}${a.orders.some((o) => o.state === "paused") ? " (paused)" : ""}` : "";
+    meta.textContent = `${a.running ? "working now" : "dormant"} · ${runs}${last}${sched}`;
+    main.appendChild(meta);
+    row.appendChild(main);
+    const lastRun = a.runs[a.runs.length - 1];
+    if (lastRun) {
+      const st = el("span", "job-state " + (a.running ? "running" : String(lastRun.state || lastRun.status || "").includes("fail") ? "failed" : "done"));
+      st.textContent = a.running ? "running" : String(lastRun.state || lastRun.status || "done");
+      row.appendChild(st);
     }
-    if (!jobs.length) host.appendChild(textP("No runs yet — compose one under New agent."));
-    else {
-      // Each view says so when its half of the feed is empty, instead of showing a blank.
-      if (!anyRunning) { const p = textP("Nothing running right now."); p.classList.add("bucket-running"); host.appendChild(p); }
-      if (!jobs.some((j) => agentBucket(j) === "dormant")) { const p = textP("No past runs."); p.classList.add("bucket-dormant"); host.appendChild(p); }
-    }
-    // A running agent keeps the board live; a quiet board stops polling.
-    clearTimeout(tasksTimer);
-    if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
-  } catch (_) { host.replaceChildren(textP("Could not read the board.")); }
+    row.addEventListener("click", () => openThread(a.name));
+    host.appendChild(row);
+  }
+  if (!agents.length) host.appendChild(textP("No agents yet — compose one under New agent."));
+  else {
+    if (!anyRunning) { const p = textP("Nothing running right now."); p.classList.add("bucket-running"); host.appendChild(p); }
+    if (!agents.some((a) => !a.running)) { const p = textP("Every agent is working."); p.classList.add("bucket-dormant"); host.appendChild(p); }
+  }
+  // A running agent keeps the board live; a quiet board stops polling.
+  clearTimeout(tasksTimer);
+  if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
   await loadHorizons();
-  await loadStandingOrders();
   bucketPaint();
+  if (openThreadName && $("panel-tasks").dataset.view === "thread") renderThread(openThreadName);
+}
+
+function openThread(name) {
+  openThreadName = name;
+  const v = $("panel-tasks").dataset.view;
+  if (v !== "thread") threadReturnView = v || "running";
+  setAgentsView("thread");
+  renderThread(name);
+}
+function closeThread() {
+  openThreadName = null;
+  setAgentsView(threadReturnView);
+}
+
+function renderThread(name) {
+  const agent = agentThreads(agentsCache.jobs, agentsCache.orders).find((a) => a.name === name);
+  const host = $("agent-thread");
+  host.replaceChildren();
+  $("tasks-title").textContent = name;
+  $("tasks-sub").textContent = agent ? (agent.running ? "Working now." : agent.orders.length ? "Dormant · scheduled." : "Dormant.") : "No such agent.";
+  const back = el("button", "link-btn thread-back"); back.type = "button"; back.textContent = "← all agents";
+  back.addEventListener("click", closeThread);
+  host.appendChild(back);
+  if (!agent) return;
+  // The brief opens the thread, once, clamped — never dumped.
+  if (agent.task) {
+    const wrap = el("div", "thread-brief");
+    const lab = el("div", "cap-group"); lab.textContent = "Brief"; wrap.appendChild(lab);
+    const brief = el("div", "card-desc"); brief.textContent = agent.task; wrap.appendChild(brief);
+    if (brief.textContent.length > 280) {
+      brief.classList.add("clamp");
+      const more = el("button", "link-btn"); more.type = "button"; more.textContent = "show full brief";
+      more.addEventListener("click", () => { const c = brief.classList.toggle("clamp"); more.textContent = c ? "show full brief" : "hide"; });
+      wrap.appendChild(more);
+    }
+    host.appendChild(wrap);
+  }
+  for (const j of agent.runs) host.appendChild(runEntry(j));
+  for (const o of agent.orders) host.appendChild(orderEntry(o));
+  if (!agent.runs.length && !agent.orders.length) host.appendChild(textP("Nothing in this thread yet."));
+  // The reply box: run it again with the same brief, through the same gate as a new delegation.
+  if (agent.task && !agent.running) {
+    const reply = el("div", "thread-reply");
+    const again = el("button"); again.type = "button"; again.textContent = "Run again";
+    again.addEventListener("click", async () => {
+      again.disabled = true;
+      const res = await postJson("/api/agent", { name: agent.name, task: agent.task });
+      if (!res.ok) { alert(`re-run failed (${res.status || "offline"}): ${res.text}`); again.disabled = false; }
+      else loadTasks();
+    });
+    reply.appendChild(again);
+    host.appendChild(reply);
+  }
+}
+
+// One run, as an entry in its agent's thread: head, the timeline from the job's own
+// timestamps, the result through DOM-only markdown, and the lifecycle actions.
+function runEntry(j) {
+  const state = String(j.state || j.status || "?").toLowerCase();
+  const running = state.includes("run");
+  const card = el("div", "run " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
+  const head = el("div", "run-head");
+  const st = el("span", "job-state " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
+  st.textContent = state; head.appendChild(st);
+  const kind = el("span", "tag"); kind.textContent = j.kind || "agent"; head.appendChild(kind);
+  const elapsed = el("span", "run-elapsed");
+  const notes = Array.isArray(j.notes) ? j.notes : [];
+  const lastT = notes.length ? notes[notes.length - 1].t : null;
+  const endMs = running ? Date.now() : (j.finished_ms || lastT || j.started_ms);
+  elapsed.textContent = j.started_ms ? `${fmtTs(j.started_ms)} · ${fmtElapsed(endMs - j.started_ms)}${running ? " and counting" : ""}` : "";
+  head.appendChild(elapsed);
+  card.appendChild(head);
+  const tl = el("div", "timeline");
+  const addStep = (t, text, terminal) => {
+    const row = el("div", "tl" + (terminal ? " terminal" : ""));
+    const tt = el("span", "tl-t"); tt.textContent = t ? fmtTs(t) : ""; row.appendChild(tt);
+    const tx = el("span", "tl-text"); tx.textContent = text; row.appendChild(tx);
+    tl.appendChild(row);
+  };
+  if (j.started_ms) addStep(j.started_ms, "started");
+  for (const n of notes) addStep(n.t, String(n.note || ""));
+  if (!running) addStep(j.finished_ms || lastT || null, state.includes("fail") ? "failed" : "finished", true);
+  else addStep(null, "working…", true);
+  card.appendChild(tl);
+  if (j.result) {
+    const md = el("div", "md");
+    renderMarkdown(md, String(j.result));
+    card.appendChild(md);
+  }
+  const meta = el("div", "setting-key"); meta.textContent = j.id; card.appendChild(meta);
+  const actions = el("div", "job-actions");
+  for (const [verb, label, ask] of [["keep", "Keep", null], ["drop", "Drop scratch", null], ["delete", "Delete", "Delete this run's record from the board?"]]) {
+    const b = el("button"); b.type = "button"; b.textContent = label;
+    b.addEventListener("click", async () => {
+      if (ask && !confirm(ask)) return;
+      const res = await postJson("/api/task-action", { verb, id: j.id });
+      if (!res.ok) alert(`${verb} failed (${res.status || "offline"}): ${res.text}`);
+      else loadTasks();
+    });
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+// A standing order, as a future entry in its agent's thread, with the actions the server says
+// apply — through the existing order-action gate.
+function orderEntry(o) {
+  const card = el("div", "run scheduled");
+  const head = el("div", "run-head");
+  const st = el("span", "job-state " + (o.state === "paused" ? "failed" : "done")); st.textContent = o.state; head.appendChild(st);
+  const secs = Number(o.in_seconds);
+  const when = !Number.isFinite(secs) ? "" : secs <= 0 ? "due now" : secs < 3600 ? `in ${Math.round(secs / 60)}m` : secs < 172800 ? `in ${Math.round(secs / 3600)}h` : `in ${Math.round(secs / 86400)}d`;
+  const meta = el("span", "run-elapsed"); meta.textContent = o.state === "paused" ? `paused · would have fired ${when}` : `next ${when}`; head.appendChild(meta);
+  card.appendChild(head);
+  const key = el("div", "setting-key"); key.textContent = o.id; card.appendChild(key);
+  const actions = el("div", "job-actions");
+  for (const verb of o.actions || []) {
+    const b = el("button"); b.type = "button"; b.textContent = verb;
+    b.addEventListener("click", async () => {
+      if (verb === "cancel" && !confirm("Cancel this standing order?")) return;
+      b.disabled = true;
+      const res = await postJson("/api/order-action", { verb, id: o.id });
+      if (!res.ok) { alert(`${verb} failed (${res.status || "offline"}): ${res.text}`); b.disabled = false; }
+      else loadTasks();
+    });
+    actions.appendChild(b);
+  }
+  card.appendChild(actions);
+  return card;
 }
 
 function fmtElapsed(ms) {
@@ -985,53 +1106,25 @@ async function loadHorizons() {
       card.appendChild(side);
       host.appendChild(card);
     }
-    if (!(data.goals || []).length) host.appendChild(textP("No durable goals — schedule one above. They survive restarts and act on schedule."));
+    const goals = data.goals || [];
+    if (!goals.length) host.appendChild(textP("No durable goals — schedule one under New agent. They survive restarts and act on schedule."));
+    else {
+      // E.WEB17: each view says so when its half is empty, instead of a heading over nothing.
+      if (!goals.some((g) => agentBucket(g) === "running")) { const p = textP("No goal is running right now."); p.classList.add("bucket-running"); host.appendChild(p); }
+      if (!goals.some((g) => agentBucket(g) === "dormant")) { const p = textP("No goals waiting or finished."); p.classList.add("bucket-dormant"); host.appendChild(p); }
+    }
   } catch (_) { host.replaceChildren(textP("Could not read durable goals.")); }
 }
 
-/* E.WEB17: standing orders as items — the typed report from the same store the tick reads.
-   Every order is dormant by definition (it is waiting for its time, or paused); the actions are
-   the ones the server says apply, through the existing order-action gate. */
-async function loadStandingOrders() {
-  const host = $("orders-cards");
+/* E.WEB17/18: standing orders, typed — the same store the tick reads. They join their agent's
+   thread by name; there is no separate list to drift from it. */
+async function fetchStandingOrders() {
   try {
     const r = await fetch("/api/standing-orders", { headers: { "X-YM-Web": "1" } });
-    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    if (!r.ok) return [];
     const data = await r.json();
-    host.replaceChildren();
-    if (data.store === false) { host.appendChild(textP("The schedule store is not available on this build.")); return; }
-    for (const o of data.orders || []) {
-      const card = el("div", "card setting-row");
-      bucketAdd(card, o);
-      const main = el("div", "card-main");
-      const t = el("div", "card-title"); t.textContent = o.name || o.id; main.appendChild(t);
-      const meta = el("div", "dev-meta");
-      const secs = Number(o.in_seconds);
-      const when = !Number.isFinite(secs) ? "" : secs <= 0 ? "due now" : secs < 3600 ? `in ${Math.round(secs / 60)}m` : secs < 172800 ? `in ${Math.round(secs / 3600)}h` : `in ${Math.round(secs / 86400)}d`;
-      meta.textContent = o.state === "paused" ? `paused · would have fired ${when}` : `next ${when}`;
-      main.appendChild(meta);
-      const key = el("div", "setting-key"); key.textContent = o.id; main.appendChild(key);
-      card.appendChild(main);
-      const side = el("div", "card-side");
-      const st = el("span", "job-state " + (o.state === "paused" ? "failed" : "done")); st.textContent = o.state; side.appendChild(st);
-      const actions = el("div", "job-actions");
-      for (const verb of o.actions || []) {
-        const b = el("button"); b.type = "button"; b.textContent = verb;
-        b.addEventListener("click", async () => {
-          if (verb === "cancel" && !confirm("Cancel this standing order?")) return;
-          b.disabled = true;
-          const res = await postJson("/api/order-action", { verb, id: o.id });
-          if (!res.ok) { alert(`${verb} failed (${res.status || "offline"}): ${res.text}`); b.disabled = false; }
-          else loadTasks();
-        });
-        actions.appendChild(b);
-      }
-      side.appendChild(actions);
-      card.appendChild(side);
-      host.appendChild(card);
-    }
-    if (!(data.orders || []).length) host.appendChild(textP("No standing orders — schedule an agent under New agent to create one."));
-  } catch (_) { host.replaceChildren(textP("Could not read standing orders.")); }
+    return data.store === false ? [] : (data.orders || []);
+  } catch (_) { return []; }
 }
 
 $("tab-delegate").addEventListener("click", () => {

@@ -179,6 +179,24 @@ body {
 #panel-tasks[data-view="new"] .view-new { display: block; }
 #panel-tasks[data-view="running"] .bucket-dormant,
 #panel-tasks[data-view="dormant"] .bucket-running { display: none; }
+#panel-tasks[data-view="thread"] .view-thread { display: block; }
+/* E.WEB18: agent rows open threads. */
+.agent-list { display: flex; flex-direction: column; gap: 6px; }
+.agent-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+  background: var(--bg1); color: var(--ink); font: inherit; transition: background .15s, border-color .15s;
+}
+.agent-row:hover { background: var(--bg2); border-color: var(--line-strong, var(--line)); }
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-faint); }
+.agent-dot.running { background: var(--accent, #4fd1c5); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #4fd1c5) 25%, transparent); }
+.agent-row-main { flex: 1; min-width: 0; }
+.agent-row-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-row-meta { font-size: 12px; color: var(--ink-dim); margin-top: 2px; }
+.thread-back { margin-bottom: 10px; }
+.thread-brief { margin-bottom: 14px; }
+.run.scheduled { border-style: dashed; }
+.thread-reply { display: flex; justify-content: flex-end; padding: 12px 0 4px; }
 .nav-ico { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
 
 /* work area */

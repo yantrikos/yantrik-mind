@@ -2283,14 +2283,44 @@ mod tests {
         );
         assert!(
             js.contains("function agentBucket(item)")
-                && [
-                    "bucketAdd(card, j)",
-                    "bucketAdd(card, g)",
-                    "bucketAdd(card, o)"
-                ]
-                .iter()
-                .all(|call| js.contains(call)),
-            "one classifier, applied to jobs, goals and orders alike"
+                && ["bucketAdd(row, agentState(a))", "bucketAdd(card, g)"]
+                    .iter()
+                    .all(|call| js.contains(call)),
+            "one classifier, applied to agents and goals alike"
+        );
+        // E.WEB18: each agent is its own thread — one pure grouping function, a thread view that
+        // keeps every affordance the run card had, and a way back.
+        assert!(
+            js.contains("function agentThreads(jobs, orders)")
+                && js.contains("function renderThread(name)")
+                && js.contains("function runEntry(j)")
+                && js.contains("function orderEntry(o)"),
+            "grouping and rendering are named functions"
+        );
+        assert!(
+            html.contains("id=\"agent-thread\"")
+                && APP_CSS.contains("#panel-tasks[data-view=\"thread\"] .view-thread"),
+            "the thread has its own view"
+        );
+        let run_entry = js.find("function runEntry(j)").unwrap();
+        let run_body = &js[run_entry..run_entry + 2600];
+        for keep in [
+            "renderMarkdown(md, String(j.result))",
+            "postJson(\"/api/task-action\"",
+            "el(\"div\", \"timeline\")",
+        ] {
+            assert!(
+                run_body.contains(keep),
+                "the thread keeps the run card's {keep}"
+            );
+        }
+        assert!(
+            js.contains("postJson(\"/api/agent\", { name: agent.name, task: agent.task })"),
+            "run again is the thread's reply box, through the same gate"
+        );
+        assert!(
+            js.contains("back.addEventListener(\"click\", closeThread)"),
+            "a thread can be left"
         );
         // The classifier's contract names every state the server emits.
         for word in [
@@ -2320,8 +2350,8 @@ mod tests {
             .find("async function loadTasks()")
             .expect("loadTasks exists");
         let orders_fn = js
-            .find("async function loadStandingOrders()")
-            .expect("loadStandingOrders exists");
+            .find("async function fetchStandingOrders()")
+            .expect("fetchStandingOrders exists");
         for start in [tasks_fn, orders_fn] {
             assert!(
                 !js[start..start + 1500].contains("fetch(\"/api/orders\""),
@@ -2349,10 +2379,15 @@ mod tests {
             !src[skills..skills + 900].contains("(\"POST\", \"/api/skills\")"),
             "skills is read-only"
         );
+        // E.WEB18 moved the run renderer into `runEntry` inside the agents block; the window
+        // covers the whole block (grouping → lists → thread → run/order entries).
         let tasks = APP_JS
-            .find("async function loadTasks()")
-            .expect("run renderer exists");
-        let body: String = APP_JS[tasks..].chars().take(6000).collect();
+            .find("function agentThreads(jobs, orders)")
+            .expect("agents block exists");
+        let block_end = APP_JS[tasks..]
+            .find("function fmtElapsed(ms)")
+            .expect("agents block ends before fmtElapsed");
+        let body: String = APP_JS[tasks..tasks + block_end].to_string();
         assert!(
             body.contains("renderMarkdown(md, String(j.result))"),
             "results render DOM-only"
@@ -2366,10 +2401,8 @@ mod tests {
             "timeline from the job's notes"
         );
         assert!(
-            body.contains(
-                "postJson(\"/api/agent\", { name: j.name || j.id, task: j.task || j.goal })"
-            ),
-            "re-run rides the delegation gate"
+            body.contains("postJson(\"/api/agent\", { name: agent.name, task: agent.task })"),
+            "re-run (the thread's reply box) rides the delegation gate"
         );
         assert!(
             body.contains("brief.classList.add(\"clamp\")"),

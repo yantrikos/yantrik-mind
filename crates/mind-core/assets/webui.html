@@ -183,13 +183,11 @@
           <p id="agent-reply" class="loading hidden"></p>
           </div>
           <div class="agents-section view-running view-dormant">
-            <div class="cap-group">Agent runs</div>
-            <div id="job-cards"><p class="loading">reading the board…</p></div>
+            <div class="cap-group">Agents</div>
+            <div id="job-cards" class="agent-list"><p class="loading">reading the board…</p></div>
           </div>
-          <div class="agents-section view-dormant">
-            <div class="cap-group">Standing orders</div>
-            <div id="orders-cards"><p class="loading">reading standing orders…</p></div>
-          </div>
+          <!-- E.WEB18: one agent's thread — brief, runs in order, what is scheduled, reply box. -->
+          <div class="agents-section view-thread" id="agent-thread"></div>
           <div class="agents-section view-running view-dormant">
             <div class="cap-group">Long-horizon goals</div>
             <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>

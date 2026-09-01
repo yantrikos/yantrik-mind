@@ -2076,3 +2076,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What shipped | A "Board" view, CLIENT-ONLY, fetching the existing /api/tasks, /api/horizons, /api/orders and routing each item through a pure `columnFor(kind,status)` into Scheduled / Running / Done / Needs-review. No new route, no engine change — a lens on data three panels already render. |
 | Kill criteria | (1) Column routing is a pure, closed-set classifier — `the_board_classifier_is_closed_and_read_only` asserts the four column outcomes and that the classifier body neither fetches nor mutates: PASS. (2) Cards are read-only; existing gated routes own all mutation. (3) Empty/403 sources degrade to empty columns. (4) Workspace 1405/0/4: PASS. |
 | AGI feed | Workload legibility: committed vs in-flight vs stuck work as one picture — the substrate a prioritization/scheduling loop reads. |
+
+## E.WEB11 — pre-registered: the mind's published pages, listed in the app
+
+| Field | Value |
+| --- | --- |
+| The gap (competitive study) | Hermes ships a Files panel. The mind already publishes shareable dashboards (`publish_page` → the `public` dir served by the static web server on :8088), but the app itself has no index of them — an operator must know a URL to find one. |
+| Design, deliberately narrow | GET /api/files: list ONLY the published-pages directory (`YM_WEB_DIR`, default /var/lib/yantrik-mind/public), files only, name + size + mtime, with the SAME confinement the static server already enforces — canonicalize, reject dotfiles, allowlist the servable extensions, never traverse. No arbitrary path input from the client (the directory is fixed server-side); the client cannot ask for another folder. A Files card in the app links each entry to its existing :8088 URL. Read-only; no upload, no delete (those are separate, riskier slices). |
+| Kill criteria | (1) The listing contains only files inside the fixed dir — a guard test seeds a file outside it and a dotfile inside and asserts neither appears. (2) No client-supplied path reaches the filesystem — the route takes no path parameter. (3) A missing/empty dir yields an empty list, not an error. (4) Workspace green. |
+| AGI feed | The mind's own outputs made discoverable — the artifact surface a future "show me what I made" self-review would read; small, but it closes the loop between the mind producing pages and anyone finding them. |

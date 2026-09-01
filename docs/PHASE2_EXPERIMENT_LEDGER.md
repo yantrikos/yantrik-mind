@@ -2879,3 +2879,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill | Non-idempotent migration; any destructive rename / id change; generic `sched` joining an agent; ambiguous legacy row promoted; loss of pause / resume / run / cancel or wake time; any read-time name convention used as identity. |
 | Non-goals | No prefix removal, no endpoint removal, no live-memory write. |
 | Lane | Proposed by Codex (message 384cf823). Build and review split to be settled by ACK: the house rule is that Codex's commits need Pranab's explicit authorization, so either Codex builds and the fold waits for that word, or I build after E.AGI-A5 and Codex reviews the frozen schema / backfill seam. |
+
+## E.AGI-A5 — RESULT: live on staging, both windows named
+
+| Field | Value |
+| --- | --- |
+| Fold | `05d0a70`; clean full suite 45 / 1,492 / 0. Fixture: three linked calls all-time, one in the window, an empty window is an honest zero, the all-time number is byte-identical on identical input; process start is fixed for the life of the process. |
+| Witnessed (staging at 05d0a70) | `ym why chains since-start`: "WINDOW: since this binary started (2026-09-01 23:36:21Z) — 1 event(s) / No tool-chain calls yet" beside "WINDOW: all-time, latest 200 / 65/80 (81.2%)". Cockpit gate headline "no calls since start", legend "all-time 65 / 80 · 81.3% · 6 pre-stamping · 9 missing fields · 65 complete". No page errors. |
+| What it says | The canary has made no tool call since its last restart — true, and now visible instead of buried under an 81% that belongs to earlier binaries. Prod, still on the pre-stamping binary, would read "no calls since start" too until it is redeployed; the all-time 0/200 stays 0/200 (kill line held: the all-time figure did not move). |

@@ -2337,6 +2337,11 @@ mod tests {
             body.contains("fetch(\"/api/decisions"),
             "recorder read from the server"
         );
+        // E.G1c: the shadow card names WHICH sample it shows; the two are never pooled.
+        assert!(
+            body.contains(":knock-receptivity") && body.contains(":headless-cadence"),
+            "the world-shadow card labels the paired and unpaired samples"
+        );
         assert!(
             !body.contains("81.2") && !body.contains("65 /") && !body.contains("100%"),
             "no literal metric is written into the instrument column"

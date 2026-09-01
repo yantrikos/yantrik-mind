@@ -173,8 +173,12 @@ async function loadInstruments() {
     const r = await fetch("/api/decisions?n=40", H);
     const rows = r.ok ? ((await r.json()).decisions || []) : [];
     const shadow = rows.find((d) => d.kind === "world_shadow");
+    // E.G1c: two samples, never pooled — say which one this is.
+    const sample = (shadow && shadow.goal_id || "").endsWith(":knock-receptivity") ? "paired · at a knock decision"
+      : (shadow && shadow.goal_id || "").endsWith(":headless-cadence") ? "unpaired · headless cadence"
+      : "sample unlabelled";
     $("shadow-text").textContent = shadow
-      ? `presence: ${shadow.outcome || "?"} · ${hhmmss(shadow.ts_ms)}\nrecorded, never consulted by the decision`
+      ? `presence: ${shadow.outcome || "?"} · ${hhmmss(shadow.ts_ms)}\n${sample} · never consulted by any decision`
       : "no shadow verdict recorded yet";
     const lines = $("recorder-lines"); lines.replaceChildren();
     for (const d of rows.slice(0, 7)) {

@@ -12296,6 +12296,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     "chosen": e.chosen,
                     "confidence": e.confidence,
                     "goal": e.goal.map(|g| crate::redact::redact_answer(&g)),
+                    // E.G1c: the stable goal identity is an opaque label (`worldshadow:<sample>`,
+                    // `freeform:<opaque>`, `goal:horizon:<id>`), never text — it is what lets the
+                    // instrument say WHICH world-shadow sample it is showing.
+                    "goal_id": e.goal_id,
                     // E.WEB15: the shadow verdict and tool outcomes, redacted like goals.
                     "outcome": e.outcome.map(|o| crate::redact::redact_answer(&o)),
                 })

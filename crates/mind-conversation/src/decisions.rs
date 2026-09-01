@@ -1140,6 +1140,39 @@ mod flight_recorder_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// E.AGI-A3: the REAL packet gate over the REAL emitters — the field-by-field wiring proof
+    /// above cannot see a divergence between what the emitters write and what
+    /// `render_packet_chain_completeness` requires (the blind spot that hid E.AGI-A2's goal_id).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packet_emitters_satisfy_the_packet_gate() {
+        let (eng, path) = engine_with_recorder("pkt_gate");
+        let id = eng
+            .packet_add(
+                "node:gate",
+                None,
+                "checklist",
+                "Gate-checked packet",
+                "prepared body",
+                "window opened",
+                vec!["E1".into()],
+                0.7,
+                false,
+                i64::MAX,
+            )
+            .await;
+        eng.packet_decide("1", true, "approved for the gate").await;
+        let events = eng
+            .recorder()
+            .read_tail_verified(50)
+            .expect("the chain verifies");
+        let report = mind_observability::render_packet_chain_completeness(&events);
+        assert!(
+            report.contains("1/1 latest packet lifecycle(s) complete (100.0%"),
+            "a fresh lifecycle passes the gate it is measured by (packet {id}):\n{report}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn packet_expiry_is_graded_and_parented_to_its_proposal() {
         let (eng, path) = engine_with_recorder("pkt_expiry");

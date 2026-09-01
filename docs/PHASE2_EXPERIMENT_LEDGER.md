@@ -2185,7 +2185,7 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Noted residual (not this slice) | Malformed calls record an observation with no prediction BY DESIGN (P.2d: nothing to predict) yet the checker requires a prediction link — zero such rows in the live window today; the contract question goes to Codex's evaluator lane. |
 | AGI feed | Phase A directly: the live loop joins the observation contract, unblocking Phase C (evaluator identity) and Phase F (goal identity) from measuring a log production actually writes. |
 
-## E.AGI-A3 — malformed preflight refusals must not forge tool predictions (prereg)
+## E.AGI-A4 — malformed preflight refusals must not forge tool predictions (prereg)
 
 | Field | Value |
 | --- | --- |
@@ -2225,3 +2225,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Prediction (pre-registered, honest) | UNKNOWN. The gate checks requires the wiring test never exercised (creation cardinality, expiry-horizon linkage, trigger-authority stamp, evaluator version). Pass → prod's 0/6 is dated history and the next live packet should read complete. Fail → a real emitter/gate divergence found in-process before it costs another live cycle — the finding this row exists to catch. |
 | Kill criteria | None applicable — a read-only in-process measurement; either outcome is recorded as the result. |
 | AGI feed | Phase A: the second of the three chain gates gets the same emitters-through-gate lock the tool chain now has. |
+
+## E.AGI-A3 — RESULT: PASS — the packet emitters satisfy the packet gate; prod's 0/6 is dated history
+
+| Field | Value |
+| --- | --- |
+| Reading | New in-process test `packet_emitters_satisfy_the_packet_gate`: real `packet_add` + `packet_decide`, verified reader, REAL `render_packet_chain_completeness` → **1/1 (100.0%)** on first run. |
+| What review found | The expiry path ALREADY had emitters-through-gate coverage (`packet_expiry_is_graded_...` drives the public `why packet-chains` command and checks fail-closed on a forged line). Only the decision-terminal path lacked it; both terminal kinds are now gate-locked. |
+| Conclusion | The prod 0/6 reading is confirmed as pre-stamping stratigraphy, not a live defect: current emitters pass the gate for both terminal kinds. The next naturally-created packet on an e942f72+ binary should read complete — no code change needed, and none made beyond the test. |
+| AGI feed | Phase A: all three chain gates now have their measuring instrument locked to their emitters in-process (tool: E.AGI-A2 test; packet: this row + the existing expiry test; forecast: existing coverage per roadmap section 3). |

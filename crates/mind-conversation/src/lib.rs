@@ -93,6 +93,7 @@ mod reflex;
 pub(crate) mod research;
 mod say;
 pub mod scoreboard;
+mod self_claims;
 mod skills;
 #[cfg(test)]
 mod source_audit;
@@ -12127,6 +12128,22 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // A language model is the wrong instrument for arithmetic and the right one for conversation.
         // This routes the first to code and leaves the second alone: no model call, no latency, and it
         // cannot be wrong. Everything not recognisably a sum falls straight through.
+        // E.MQ4: the same registry wall as the full path — a spoken self-capability question
+        // gets the typed claim verbatim, not a model's opinion of itself. Same tier-0 logic as
+        // arithmetic: code answers what code enforces.
+        if let Some(claim) = self_claims::match_claim(user_text) {
+            let answer = self_claims::render(claim);
+            let scope = id.write_scope();
+            let _ = self
+                .memory
+                .append_message_scoped("user", user_text, scope.clone())
+                .await;
+            let _ = self
+                .memory
+                .append_message_scoped("assistant", &answer, scope)
+                .await;
+            return Ok(answer);
+        }
         if let Some(answer) = spoken_arithmetic(user_text) {
             let scope = id.write_scope();
             let _ = self
@@ -12430,6 +12447,22 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Intercepted here so the pre-committed engagement prediction gets GRADED (a knock the user
         // deferred or muted must cost the ledger, not quietly vanish). Parsing is tight, so ordinary
         // conversation that merely contains "later" flows straight through to the normal path.
+        // E.MQ4: SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE REGISTRY, NOT THE MODEL. A matched
+        // question returns the typed claim VERBATIM — no memory read, no LLM, no paraphrase
+        // (E.MQ4a). Three audits measured the generative path confidently wrong about the mind's
+        // own powers; a wall answers for the walls now. Unmatched questions flow through untouched.
+        if let Some(claim) = self_claims::match_claim(user_text) {
+            let reply = self_claims::render(claim);
+            let _ = self
+                .memory
+                .append_message_scoped("user", user_text, ws.clone())
+                .await;
+            let _ = self
+                .memory
+                .append_message_scoped("assistant", &reply, ws)
+                .await;
+            return Ok(reply);
+        }
         if let Some(reply) = self.knock_reply(user_text).await {
             let _ = self
                 .memory

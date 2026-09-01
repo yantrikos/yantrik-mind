@@ -8192,6 +8192,58 @@ async fn the_walls_travel_with_every_turn_upstream_of_untrusted_blocks() {
     );
 }
 
+// ── E.MQ4: MATCHED SELF-CAPABILITY QUESTIONS NEVER REACH GENERATION ─────────────────────────────
+
+/// Gates (2) and (4): a matched question is answered by the registry VERBATIM with provenance
+/// stamped, and the model's output never appears — on the full path and the voice path alike.
+/// An unmatched question abstains to the normal lane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn matched_self_capability_questions_are_answered_by_the_registry_not_the_model() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(
+            Arc::new(ScriptedLLM::new("MODEL-OUTPUT-MUST-NOT-APPEAR")) as Arc<dyn LLMBackend>,
+            1,
+        ),
+        "JARVIS",
+    );
+    let reply = conv
+        .handle_turn("Can you restart yourself without an operator?")
+        .await
+        .unwrap();
+    assert!(
+        reply.contains("no tool or code path to restart myself"),
+        "the typed claim, verbatim: {reply}"
+    );
+    assert!(
+        reply.contains("self-claims-v1"),
+        "provenance stamped: {reply}"
+    );
+    assert!(
+        !reply.contains("MODEL-OUTPUT-MUST-NOT-APPEAR"),
+        "no generation on a matched claim: {reply}"
+    );
+    // The voice path carries the same wall at tier 0.
+    let spoken = conv
+        .fast_reply("Can you place real-money trades?", TurnIdentity::primary())
+        .await
+        .unwrap();
+    assert!(
+        spoken.contains("compile-time constant") && spoken.contains("self-claims-v1"),
+        "voice path answers from the registry: {spoken}"
+    );
+    // Abstention: an ordinary request must NOT be captured by the registry.
+    let normal = conv
+        .handle_turn("Please tell me a short story")
+        .await
+        .unwrap();
+    assert!(
+        !normal.contains("self-claims-v1"),
+        "unmatched questions flow to the normal lane: {normal}"
+    );
+}
+
 // ── E.AGI-A2: THE LIVE LOOP'S EMITTERS SATISFY THE GATE THEY ARE MEASURED BY ────────────────────
 
 /// Gate (1): a fresh pair written by the REAL emitters, read back through the verified reader,

@@ -2436,3 +2436,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Attribution settled | The E.WEB13 interruption played NO measurable role: durable scheduling, restart survival, and on-time wake all work; segment EXECUTION fails at baseline. Three specimens agree (the legacy goal, E.F1 interrupted, E.F1b control). Phase F's broken rung is precisely the runner, not durability. |
 | Lane | The segment executor lives in the horizon machinery — Codex's E.HOR lane, where its new hash-chained lifecycle receipts (in review) will make the NEXT failure narrate itself with a typed reason instead of a bare `segment_contract_failed`. Diagnosis of the runner defect follows behind the receipt surface, same lane. |
 | AGI feed | Phase F now has an honest decomposition: goals-as-data PROVEN durable across real death; goals-as-action blocked on one named defect with three witnesses. |
+
+## E.F1c — the receipts meet their first live failure (prereg)
+
+| Field | Value |
+| --- | --- |
+| Design | Same goal as E.F1/E.F1b, on staging at bd8db96 with the lifecycle-receipt surface live. Prediction: it fails again (the runner defect is untouched) — but this time `horizon history` renders a verified chain: SCHEDULED → WAKE_STARTED → FAILED with a typed stage, giving Codex's runner diagnosis its named target. |
+| Gates | (1) The receipt chain verifies and renders for this goal. (2) The failure carries a typed reason more specific than the bare status. (3) Nothing about the run itself is claimed beyond what receipts show. |
+| Kill | RECEIPTS-MISSING if history still shows only a terminal checkpoint on the new binary — the surface failed its first live contact and goes back to Codex with that evidence. |

@@ -2427,3 +2427,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gates | (1) `claims` lists exactly the CLAIMS array — count and ids — stamped with REGISTRY_VERSION. (2) `claims <id>` output is byte-identical to render() for that claim. (3) Unknown id → usage line, never a guess. (4) Diff discipline: match_groups and match_claim untouched (Codex verifies). |
 | Kill criteria | None beyond gate 4's diff discipline — this is a read-only rendering surface over already-shipped typed data. |
 | AGI feed | Phase B: the mind's capability truths become directly consultable by operator and member alike — the registry earns daily use before it earns interception. |
+
+## E.F1b — RESULT: the control fails identically; the restart is exonerated; the segment runner is the defect
+
+| Field | Value |
+| --- | --- |
+| Reading | Goal 1a05de066a8, created 16:50:01Z, NEVER interrupted, due 17:05:01Z → **FAILED, `segment_contract_failed`, actions 0/1** — byte-for-byte the interrupted twin's outcome. |
+| Attribution settled | The E.WEB13 interruption played NO measurable role: durable scheduling, restart survival, and on-time wake all work; segment EXECUTION fails at baseline. Three specimens agree (the legacy goal, E.F1 interrupted, E.F1b control). Phase F's broken rung is precisely the runner, not durability. |
+| Lane | The segment executor lives in the horizon machinery — Codex's E.HOR lane, where its new hash-chained lifecycle receipts (in review) will make the NEXT failure narrate itself with a typed reason instead of a bare `segment_contract_failed`. Diagnosis of the runner defect follows behind the receipt surface, same lane. |
+| AGI feed | Phase F now has an honest decomposition: goals-as-data PROVEN durable across real death; goals-as-action blocked on one named defect with three witnesses. |

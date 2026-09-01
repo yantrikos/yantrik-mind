@@ -92,3 +92,64 @@ fn the_auditor_window_argument_is_start_or_an_epoch_millisecond() {
         "since 2026-09-01 22:07:19Z"
     );
 }
+
+/// Dispatch-level: the auditor's block is ADDITIVE. Every key of the plain report is byte-identical
+/// with and without `since=`, the aggregate's own `window` (its timestamp span) survives, and an
+/// unreadable argument adds nothing. This is the fixture the live probe asked for after the first
+/// cut named the block `window` and clobbered the span.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_auditor_block_is_additive_and_never_clobbers_the_all_time_report() {
+    use mind_inference::{InferencePool, ScriptedLLM};
+    use mind_memory::MemoryHandle;
+    use std::sync::Arc;
+    use yantrik_ml::LLMBackend;
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn crate::MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let dir = std::env::temp_dir().join(format!("ym-a5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = Arc::new(mind_observability::DecisionLog::open(dir.join("d.jsonl")));
+    let conv = conv.with_recorder(log);
+    // Two linked calls, so the all-time report has a real span.
+    for trace in ["one", "two"] {
+        conv.recorder().record(ev("tool_predicted", 1_000, trace));
+        conv.recorder().record(ev("tool_observed", 1_001, trace));
+    }
+    let ctx = mind_types::AccessContext::operator_audit();
+    let plain: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("chains_json", &ctx).await).unwrap();
+    let explicit: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("chains_json since=1", &ctx).await).unwrap();
+    let bad: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("chains_json since=yesterday", &ctx).await)
+            .unwrap();
+    assert_eq!(plain["available"], serde_json::json!(true));
+    assert!(
+        plain.get("since_start").is_some(),
+        "since-start is unconditional"
+    );
+    assert!(
+        plain.get("auditor_window").is_none(),
+        "no auditor block without an argument"
+    );
+    assert!(
+        bad.get("auditor_window").is_none(),
+        "an unreadable argument adds nothing"
+    );
+    let aud = explicit.get("auditor_window").expect("the auditor block");
+    assert_eq!(aud["since_ms"], serde_json::json!(1));
+    assert!(
+        aud["label"].as_str().unwrap().starts_with("since "),
+        "the block is named"
+    );
+    // Every key the plain report has is byte-identical in the explicit one — including the
+    // aggregate's own `window` span, which the first cut overwrote.
+    for (k, v) in plain.as_object().unwrap() {
+        assert_eq!(&explicit[k], v, "key {k} must not change under since=");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

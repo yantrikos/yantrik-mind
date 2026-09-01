@@ -6808,11 +6808,13 @@ impl ConversationEngine {
                             }
                             // The auditor's own boundary (`since=start` | `since=<ts_ms>`): the
                             // same helper, the window named beside its number. Unreadable
-                            // arguments yield no block rather than a silent default.
+                            // arguments yield no block rather than a silent default. Named
+                            // `auditor_window`: the aggregate already owns `window` (its
+                            // timestamp span), and the live probe showed the two colliding.
                             if let Some(explicit) = parse_since_arg(rest.trim(), since) {
                                 let wr = Self::completeness_since(&events, explicit);
                                 if let Ok(w) = serde_json::to_value(&wr) {
-                                    v["window"] = serde_json::json!({
+                                    v["auditor_window"] = serde_json::json!({
                                         "since_ms": explicit,
                                         "label": window_label(explicit),
                                         "report": w,

@@ -2234,3 +2234,24 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What review found | The expiry path ALREADY had emitters-through-gate coverage (`packet_expiry_is_graded_...` drives the public `why packet-chains` command and checks fail-closed on a forged line). Only the decision-terminal path lacked it; both terminal kinds are now gate-locked. |
 | Conclusion | The prod 0/6 reading is confirmed as pre-stamping stratigraphy, not a live defect: current emitters pass the gate for both terminal kinds. The next naturally-created packet on an e942f72+ binary should read complete — no code change needed, and none made beyond the test. |
 | AGI feed | Phase A: all three chain gates now have their measuring instrument locked to their emitters in-process (tool: E.AGI-A2 test; packet: this row + the existing expiry test; forecast: existing coverage per roadmap section 3). |
+
+## E.AGI-A4 — RESULT: PASS — malformed refusals are visible without becoming fictional calls
+
+| Field | Value |
+| --- | --- |
+| Reading | `mind-observability` closed-chain tests: **3/3** green, including complete and incomplete preflight rows plus a dangling-parent non-exemption. The real live-loop malformed-argument test: **1/1** green; two refused steps produce zero predictions and report **2/2 complete preflight refusals** with no prediction-link defect. Full `mind-observability` library: **45/45** green. |
+| Contract resolved | Only `verdict=malformed` + no parent is a preflight refusal. It is excluded from the executed-call denominator but shown in a separate count and must carry event, trace, actor, lane, context, goal, runtime, route, object, and evaluator provenance. A malformed row that claims a missing parent remains an ordinary broken chain. |
+| Prediction vs outcome | Confirmed in-process: safe boundary behavior no longer poisons the call gate, incomplete refusal evidence does not read green, and the report cannot hide the excluded population. |
+| Rung | BENCHMARKED, not REACHABLE: the A2 live staging window contained zero malformed rows, so the first naturally occurring post-deploy malformed refusal remains the live witness. |
+| AGI feed | Phase A now distinguishes planner-boundary integrity from tool-execution integrity while keeping both populations measurable. |
+
+## E.AGI-I0 — scoring the two-agent arrangement from its own record (prereg)
+
+| Field | Value |
+| --- | --- |
+| Question | Phase I runs live and unmeasured: the roadmap calls scoring it retrospectively "the cheapest experiment in this document." Does the second agent's review earn its cost? |
+| Honest framing (pre-registered) | A true quality-lift-vs-solo number needs a counterfactual solo baseline that does not exist. What IS mechanically computable from the record: the peer CATCH RATE — defects the second agent found AFTER the author's own gates were green. Each such catch is, by construction, a defect solo-as-practiced would have shipped. This is a LOWER BOUND on the arrangement's contribution, and the cost side must be counted too. |
+| Metrics (all computable from ledger text + git log, no judgment calls) | M1: rows/commits where a peer finding is attributed after author-green. M2: total slices with clear authorship in scope. M3 = M1/M2 catch rate. M4: severity classes named in the rows (security / correctness / honesty-overclaim). M5: coordination failures CAUSED by the arrangement (cross-lane collisions, folds, protocol overhead) — the cost column, counted with the same diligence. |
+| Scope | The full Phase-2 ledger as of this row, plus this session's git log. Attribution phrases searched mechanically; ambiguous rows counted as ambiguous, never resolved by interpretation. |
+| Kill criteria | REFUSED-INSUFFICIENT-RECORD if attribution cannot be classified unambiguously for ≥90% of in-scope slices. No lift claim beyond the lower-bound framing — "the arrangement beats solo" is NOT concludable from this design and must not be written. |
+| AGI feed | Phase I gets its first number, from persisted evidence (Doctrine 3's cheap form), including the arrangement's failure cost — not a testimonial. |

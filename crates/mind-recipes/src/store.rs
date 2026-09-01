@@ -32,6 +32,9 @@ const LEGACY_HORIZON_FAILURE: &str = "legacy_unclassified_failure";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HorizonFailureReason {
     CheckpointValidation,
+    SegmentToolExecution,
+    SegmentReasoning,
+    SegmentExecution,
     SegmentContract,
     ActionLedger,
     AssumptionObservation,
@@ -42,16 +45,38 @@ impl HorizonFailureReason {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CheckpointValidation => "checkpoint_validation_failed",
+            Self::SegmentToolExecution => "segment_tool_execution_failed",
+            Self::SegmentReasoning => "segment_reasoning_failed",
+            Self::SegmentExecution => "segment_execution_failed",
             Self::SegmentContract => "segment_contract_failed",
             Self::ActionLedger => "action_ledger_failed",
             Self::AssumptionObservation => "assumption_observation_failed",
             Self::StatePersistence => "state_persistence_failed",
         }
     }
+
+    /// Convert the durable recipe runner's failed-step pointer into a bounded diagnosis.
+    ///
+    /// The free-text backend error deliberately remains private. The step kind is code-owned and
+    /// lets lifecycle receipts distinguish a connector/tool failure from local reasoning failure
+    /// without persisting provider details, prompts, or tool output.
+    pub(crate) fn from_failed_step(step: Option<&RecipeStep>) -> Self {
+        match step {
+            Some(RecipeStep::Tool { .. }) => Self::SegmentToolExecution,
+            Some(RecipeStep::Think { .. } | RecipeStep::ThinkCited { .. }) => {
+                Self::SegmentReasoning
+            }
+            Some(_) => Self::SegmentExecution,
+            None => Self::SegmentExecution,
+        }
+    }
 }
 
 const HORIZON_FAILURE_CODES: &[&str] = &[
     HorizonFailureReason::CheckpointValidation.as_str(),
+    HorizonFailureReason::SegmentToolExecution.as_str(),
+    HorizonFailureReason::SegmentReasoning.as_str(),
+    HorizonFailureReason::SegmentExecution.as_str(),
     HorizonFailureReason::SegmentContract.as_str(),
     HorizonFailureReason::ActionLedger.as_str(),
     HorizonFailureReason::AssumptionObservation.as_str(),

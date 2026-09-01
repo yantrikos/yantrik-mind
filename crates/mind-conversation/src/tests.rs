@@ -2264,6 +2264,19 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
     );
 }
 
+#[tokio::test]
+async fn recipe_due_tasks_treats_an_empty_read_as_data() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+
+    assert_eq!(
+        host.call_tool("due_tasks", &serde_json::json!({}))
+            .await
+            .unwrap(),
+        "0 tasks due soon"
+    );
+}
+
 /// ARCH-3A acceptance: the egress broker mediates the recognized external-connector tools at the
 /// agent-loop AND recipe-host chokepoints — a credential marker in an outbound tool arg is refused
 /// before dispatch, a benign call passes, and Local tools are never gated.
@@ -4070,6 +4083,38 @@ async fn operator_horizon_command_enters_the_durable_read_only_scheduler() {
         .contains("No active durable horizon goals"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_due_tasks_horizon_completes_instead_of_failing_its_contract() {
+    use mind_recipes::RecipeStore;
+
+    let authored = r#"[
+        {"Tool":{"tool_name":"due_tasks","args":{},"store_as":"tasks"}},
+        {"Notify":{"message":"{{tasks}}"}}
+    ]"#;
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new(authored)) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+    let host = Arc::new(MindRecipeHost::new(None, None, mem));
+    let recipes = RecipeEngine::new(pool, host, "JARVIS").with_store(store.clone());
+    let start = ConversationEngine::now_ms();
+    let goal_id = recipes
+        .schedule_read_only_horizon("Check tasks and report how many are pending", 60_000, start)
+        .await
+        .unwrap();
+
+    let outcomes = recipes.resume_due_horizons(start + 60_000).await;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].state, mind_recipes::HorizonTickState::Completed);
+    assert!(outcomes[0].receipt.as_ref().is_some_and(|r| r.verify()));
+    assert!(store
+        .load_horizon(&goal_id, start + 60_001)
+        .unwrap()
+        .is_none());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface() {
     use mind_recipes::RecipeStore;
@@ -4121,7 +4166,7 @@ async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface()
         .cli_dispatch("horizons", &mind_types::AccessContext::operator_audit())
         .await;
     assert!(
-        listing.contains("FAILED") && listing.contains("segment_contract_failed"),
+        listing.contains("FAILED") && listing.contains("segment_tool_execution_failed"),
         "{listing}"
     );
     assert!(!listing.contains("PRIVATE backend detail"), "{listing}");
@@ -4132,12 +4177,12 @@ async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface()
         )
         .await;
     assert!(
-        history.contains("Failure reason: segment_contract_failed")
+        history.contains("Failure reason: segment_tool_execution_failed")
             && history.contains("Scheduler lifecycle:")
             && history.contains("SCHEDULED: no-queue -> pending")
             && history.contains("WAKE_STARTED: pending -> running")
             && history.contains("FAILED: running -> failed")
-            && history.contains("reason segment_contract_failed"),
+            && history.contains("reason segment_tool_execution_failed"),
         "{history}"
     );
     assert!(!history.contains("PRIVATE backend detail"), "{history}");
@@ -4153,7 +4198,7 @@ async fn failed_horizon_reason_and_retry_are_visible_on_every_operator_surface()
     assert_eq!(typed["goals"][0]["queue_status"], "failed");
     assert_eq!(
         typed["goals"][0]["failure_reason"],
-        "segment_contract_failed"
+        "segment_tool_execution_failed"
     );
     assert!(!typed.to_string().contains("PRIVATE backend detail"));
 

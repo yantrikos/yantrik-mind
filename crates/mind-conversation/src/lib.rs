@@ -13627,7 +13627,10 @@ impl RecipeHost for MindRecipeHost {
                     .map(|t| format!("- {}", t.description))
                     .collect();
                 if due.is_empty() {
-                    anyhow::bail!("no tasks due soon");
+                    // An empty read is observed state, not an execution failure. Treating zero due
+                    // tasks as an error makes a healthy read-only horizon segment fail its contract
+                    // precisely when the answer to its question is "none".
+                    return Ok("0 tasks due soon".into());
                 }
                 Ok(due.join("\n"))
             }

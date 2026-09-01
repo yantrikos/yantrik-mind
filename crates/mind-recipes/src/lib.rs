@@ -17,6 +17,8 @@ pub mod store;
 use store::HorizonFailureReason;
 pub use store::{ActiveHorizonRecord, RecipeStore, RunRecord};
 
+const HORIZON_RECIPE_RUN_PREFIX: &str = "horizon-segment:";
+
 use async_trait::async_trait;
 use mind_inference::InferencePool;
 use mind_spec::{
@@ -948,6 +950,12 @@ GOAL: GOAL_HERE"#;
         };
         let mut resumed = 0;
         for rec in store.resumable() {
+            // The horizon queue owns recovery for these read-only runs. Letting the generic recipe
+            // recovery lane replay one here and then returning its queue row to pending below would
+            // execute the same segment twice after one crash.
+            if rec.id.starts_with(HORIZON_RECIPE_RUN_PREFIX) {
+                continue;
+            }
             match rec.steps.get(rec.current_step) {
                 Some(step) if !step.is_idempotent() => {
                     store.set_status(
@@ -1031,8 +1039,10 @@ GOAL: GOAL_HERE"#;
         };
         let mut outcomes = Vec::with_capacity(jobs.len());
         for job in jobs {
-            let failed = |reason: HorizonFailureReason, error: anyhow::Error| {
-                let error = match store.fail_horizon_job(&job.goal_id, reason, now_ms) {
+            let failed_at = |reason: HorizonFailureReason,
+                             error: anyhow::Error,
+                             occurred_at_ms: u64| {
+                let error = match store.fail_horizon_job(&job.goal_id, reason, occurred_at_ms) {
                     Ok(()) => error,
                     Err(persist_error) => anyhow::anyhow!(
                         "horizon segment failed with {}; durable failure status could not be persisted: {persist_error}",
@@ -1045,6 +1055,9 @@ GOAL: GOAL_HERE"#;
                     receipt: None,
                     error: Some(error.to_string()),
                 }
+            };
+            let failed = |reason: HorizonFailureReason, error: anyhow::Error| {
+                failed_at(reason, error, now_ms)
             };
 
             let mut run = match store.load_horizon(&job.goal_id, now_ms) {
@@ -1097,21 +1110,59 @@ GOAL: GOAL_HERE"#;
                 continue;
             }
 
-            // A just-scheduled immediate segment can be claimed in the same wall-clock
-            // millisecond as its pre-execution checkpoint. Advance the ledger's logical clock by
-            // one millisecond so a different state can never conflict at the same checkpoint time.
+            // Keep the goal ledger on the caller-provided logical clock so deterministic schedulers
+            // may advance simulated time without a later read appearing to move backwards.
             let segment_ms = now_ms.max(run.last_checkpoint_ms.saturating_add(1));
 
-            let recipe_outcome = self.run(&job.recipe).await;
-            if !recipe_outcome.ok
-                || recipe_outcome.pending_action.is_some()
+            // Give scheduler-owned executions a stable, collision-resistant run id. Besides making
+            // retries overwrite their own diagnostic row instead of minting timestamp orphans, this
+            // lets the lifecycle path recover the code-owned failed-step kind without retaining the
+            // backend's free-text error.
+            let recipe_run_id = format!(
+                "{HORIZON_RECIPE_RUN_PREFIX}{}:{}",
+                job.goal_id, job.segment_id
+            );
+            let recipe_outcome = self
+                .run_from(
+                    &recipe_run_id,
+                    &job.recipe.name,
+                    job.recipe.steps.clone(),
+                    0,
+                    HashMap::new(),
+                )
+                .await;
+            // `now_ms` is the scheduler tick captured before execution. Receipt timestamps after an
+            // await must use an observed post-execution clock or every run appears to take 0 ms.
+            // Preserve monotonicity when deterministic tests intentionally pass a future tick.
+            let execution_finished_ms = crate::now_ms().max(now_ms);
+            if !recipe_outcome.ok {
+                let reason = store
+                    .load(&recipe_run_id)
+                    .map(|record| {
+                        HorizonFailureReason::from_failed_step(
+                            record.steps.get(record.current_step),
+                        )
+                    })
+                    .unwrap_or(HorizonFailureReason::SegmentExecution);
+                outcomes.push(failed_at(
+                    reason,
+                    anyhow::anyhow!(
+                        "horizon segment failed during bounded recipe execution ({})",
+                        reason.as_str()
+                    ),
+                    execution_finished_ms,
+                ));
+                continue;
+            }
+            if recipe_outcome.pending_action.is_some()
                 || recipe_outcome.pending_question.is_some()
                 || recipe_outcome.sleeping_until.is_some()
                 || !recipe_outcome.notifications.is_empty()
             {
-                outcomes.push(failed(
+                outcomes.push(failed_at(
                     HorizonFailureReason::SegmentContract,
                     anyhow::anyhow!("horizon segment violated the unattended execution contract"),
+                    execution_finished_ms,
                 ));
                 continue;
             }
@@ -1123,9 +1174,10 @@ GOAL: GOAL_HERE"#;
                 reversible: true,
                 authorization_receipt: None,
             }) {
-                outcomes.push(failed(
+                outcomes.push(failed_at(
                     HorizonFailureReason::ActionLedger,
                     anyhow::anyhow!("horizon action ledger rejected the segment: {error:?}"),
+                    segment_ms,
                 ));
                 continue;
             }
@@ -1154,7 +1206,11 @@ GOAL: GOAL_HERE"#;
                 }
             }
             if let Some(error) = observation_error {
-                outcomes.push(failed(HorizonFailureReason::AssumptionObservation, error));
+                outcomes.push(failed_at(
+                    HorizonFailureReason::AssumptionObservation,
+                    error,
+                    segment_ms,
+                ));
                 continue;
             }
 
@@ -1171,9 +1227,11 @@ GOAL: GOAL_HERE"#;
                         receipt: None,
                         error: None,
                     }),
-                    Err(error) => {
-                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
-                    }
+                    Err(error) => outcomes.push(failed_at(
+                        HorizonFailureReason::StatePersistence,
+                        error,
+                        segment_ms,
+                    )),
                 }
                 continue;
             }
@@ -1193,9 +1251,11 @@ GOAL: GOAL_HERE"#;
                         receipt: Some(receipt),
                         error: None,
                     }),
-                    Err(error) => {
-                        outcomes.push(failed(HorizonFailureReason::StatePersistence, error))
-                    }
+                    Err(error) => outcomes.push(failed_at(
+                        HorizonFailureReason::StatePersistence,
+                        error,
+                        segment_ms,
+                    )),
                 }
                 continue;
             }
@@ -1212,7 +1272,11 @@ GOAL: GOAL_HERE"#;
                     receipt: None,
                     error: None,
                 }),
-                Err(error) => outcomes.push(failed(HorizonFailureReason::StatePersistence, error)),
+                Err(error) => outcomes.push(failed_at(
+                    HorizonFailureReason::StatePersistence,
+                    error,
+                    segment_ms,
+                )),
             }
         }
         outcomes
@@ -2342,6 +2406,7 @@ mod tests {
         impl RecipeHost for FailingHost {
             async fn call_tool(&self, _tool: &str, _args: &Value) -> anyhow::Result<String> {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 anyhow::bail!("TOP-SECRET backend detail must not reach status")
             }
         }
@@ -2369,11 +2434,25 @@ mod tests {
         assert_eq!(before.queue_status.as_deref(), Some("failed"));
         assert_eq!(
             before.failure_reason.as_deref(),
-            Some("segment_contract_failed")
+            Some("segment_tool_execution_failed")
         );
         assert!(!before.failure_reason.unwrap().contains("TOP-SECRET"));
         assert_eq!(before.actions_used, 0);
         assert_eq!(before.spent_cost_units, 0);
+        let lifecycle = store.load_horizon_lifecycle(&run.goal_id).unwrap();
+        assert_eq!(
+            lifecycle
+                .last()
+                .and_then(|event| event.failure_reason.as_deref()),
+            Some("segment_tool_execution_failed")
+        );
+        assert!(
+            lifecycle[2].occurred_at_ms > lifecycle[1].occurred_at_ms,
+            "post-execution receipt must not reuse the pre-execution tick timestamp"
+        );
+        assert!(!serde_json::to_string(&lifecycle)
+            .unwrap()
+            .contains("TOP-SECRET"));
 
         let receipt = engine
             .control_horizon(&run.goal_id, HorizonControlAction::Retry, start + 2)
@@ -2425,7 +2504,7 @@ mod tests {
         assert_eq!(expired_view.queue_status.as_deref(), Some("failed"));
         assert_eq!(
             expired_view.failure_reason.as_deref(),
-            Some("segment_contract_failed")
+            Some("segment_tool_execution_failed")
         );
     }
 
@@ -2602,13 +2681,36 @@ mod tests {
         let start = now_ms();
         let mut run = horizon_run("goal:restart", BTreeMap::new(), start);
         let job = horizon_job(&run.goal_id, false, start);
+        let recipe_run_id = format!(
+            "{HORIZON_RECIPE_RUN_PREFIX}{}:{}",
+            job.goal_id, job.segment_id
+        );
         plain_engine_with_store(store.clone())
-            .schedule_horizon_segment(&mut run, job, start)
+            .schedule_horizon_segment(&mut run, job.clone(), start)
             .unwrap();
         assert_eq!(store.claim_due_horizon_jobs(start).unwrap().len(), 1);
+        store
+            .save(
+                &RunRecord {
+                    id: recipe_run_id.clone(),
+                    name: job.recipe.name,
+                    status: "running".into(),
+                    current_step: 0,
+                    steps: job.recipe.steps,
+                    vars: HashMap::new(),
+                    error: None,
+                },
+                start,
+            )
+            .unwrap();
 
         let restarted = plain_engine_with_store(store.clone());
         assert_eq!(restarted.resume_incomplete().await, 1);
+        assert_eq!(
+            store.load(&recipe_run_id).unwrap().status,
+            "running",
+            "generic recipe recovery must not replay a scheduler-owned segment"
+        );
         let outcomes = restarted.resume_due_horizons(start).await;
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -2626,6 +2728,7 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(store.load(&recipe_run_id).unwrap().status, "done");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

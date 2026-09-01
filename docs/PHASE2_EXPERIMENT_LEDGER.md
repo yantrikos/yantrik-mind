@@ -2631,3 +2631,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Verified live | `/api/horizon-history` returns 200 for every listed goal: the three legacy goals honestly report zero lifecycle rows (pre-receipt era), E.F1c reports its three. The cockpit's goal instrument now shows that chain — `SCHEDULED ea481cab → WAKE_STARTED 7856a911 → FAILED faf7ffd0 · chain verified` — instead of "no readable receipts". |
 | Lesson kept | Two composition bugs on one route slipped past tests of the halves; the cure both times was exercising the deployed route with real ids. Route-level extraction is now guarded on `target`, not the stripped path. |
+
+## Typed completeness report — the console and the prose can no longer disagree (Codex's slice, folded)
+
+| Field | Value |
+| --- | --- |
+| Change | `mind_observability::tool_chain_completeness()` returns one serializable aggregate (complete/total, named defect counts, the sampled window, the separate preflight-refusal contract); the prose `why chains` is now a renderer over it (36db6ba, Codex-authored, user-approved). The console's `chains_json` serializes that struct over the verified log and the text parser is deleted (00cb4ef); the existing regression passed unchanged against the struct — parity by construction, not by parse. |
+| Process note | The first full-suite run on the handoff read 17/45 binaries with one unnamed failure — my concurrent rebuild colliding with it. Pranab's approval was held until a clean logged run read 1476/0. Rule kept: an ambiguous red is a red. |

@@ -5015,7 +5015,18 @@ impl ConversationEngine {
             recorder: Arc::new(mind_observability::DecisionLog::disabled()),
             // E.G1: 30-minute presence freshness — a "user was here" older than that reads
             // Stale, which is exactly the epistemic honesty the shadow exists to measure.
-            world: Mutex::new(mind_world::WorldLog::new().with_freshness_ms(30 * 60 * 1000)),
+            // E.G1b: a REAL purpose gate from day one — only a proactive-serving purpose may read
+            // the primary's presence; any other AccessContext reads Unknown (A6: absence of
+            // authorization is indistinguishable from absence of fact).
+            world: Mutex::new(
+                mind_world::WorldLog::new()
+                    .with_freshness_ms(30 * 60 * 1000)
+                    .with_gate(Box::new(
+                        |ctx: &mind_types::AccessContext, _entity: &str| {
+                            ctx.purpose().activity == mind_types::Activity::Proactive
+                        },
+                    )),
+            ),
             world_seq: std::sync::atomic::AtomicU64::new(0),
             scan_mail: Vec::new(),
             home: None,
@@ -9919,13 +9930,29 @@ impl ConversationEngine {
         });
     }
 
-    /// E.G1: what world-state-v1.1 WOULD say about the recipient's presence right now —
+    /// E.G1: what world-state-v1.1 WOULD say about the PRIMARY's presence right now —
     /// rendered for the flight recorder, NEVER read by any decision path (source-guarded).
+    /// E.G1b: the query carries the proactive-serving purpose the gate demands.
     pub(crate) fn world_shadow_presence(&self, now_ms: i64) -> String {
+        self.world_presence_with(
+            mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                mind_types::Activity::Proactive,
+            )),
+            now_ms,
+        )
+    }
+
+    /// The gated read itself, with the caller's context — so a test can show that a
+    /// non-proactive purpose reads Unknown even when the fact is present.
+    pub(crate) fn world_presence_with(
+        &self,
+        access: mind_types::AccessContext,
+        now_ms: i64,
+    ) -> String {
         let q = mind_world::WorldQuery {
             valid_at: now_ms,
             known_at: now_ms,
-            access: mind_types::AccessContext::operator_audit(),
+            access,
         };
         match self.world.lock().unwrap().state_at("user", "presence", &q) {
             mind_world::StateAt::Known(v) => format!("known:{v}"),
@@ -12604,11 +12631,17 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
-                                   // E.MQ4 (placement per E.MQ4b, gate 4): SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE
-                                   // REGISTRY, NOT THE MODEL — and the deterministic decision happens BEFORE any memory-
-                                   // touching operation (episode recording, proactive resolution, ledger) runs. A matched
-                                   // question returns the typed claim VERBATIM; only the transcript appends follow the
-                                   // decision. Unmatched questions flow through untouched.
+                                   // E.G1b: the world model sees EVERY primary turn — before any early return (a turn
+                                   // answered by the self-claims registry is still the primary being here) — and NO member
+                                   // turn: presence means the primary's presence, by construction, never by inference.
+        if id.owner == mind_types::PRIMARY {
+            self.world_ingest_presence();
+        }
+        // E.MQ4 (placement per E.MQ4b, gate 4): SELF-CAPABILITY QUESTIONS ARE ANSWERED BY THE
+        // REGISTRY, NOT THE MODEL — and the deterministic decision happens BEFORE any memory-
+        // touching operation (episode recording, proactive resolution, ledger) runs. A matched
+        // question returns the typed claim VERBATIM; only the transcript appends follow the
+        // decision. Unmatched questions flow through untouched.
         if let Some(claim) = self_claims::match_claim(user_text) {
             let reply = self_claims::render(claim);
             let _ = self
@@ -12631,7 +12664,6 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts),
         // labeled by life-bucket so the causal/motif miners have event TYPES to work with.
-        self.world_ingest_presence(); // E.G1: the model sees a turn happen — nothing else
         let _ = self.memory.record_episode(episode_label(user_text)).await;
         // Resolve any outstanding proactive send: replying now (within the window) counts as
         // ENGAGED — the world model learns when pings actually land.

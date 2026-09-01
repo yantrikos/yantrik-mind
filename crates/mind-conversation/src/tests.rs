@@ -8315,6 +8315,98 @@ async fn the_world_model_sees_turns_and_shadows_the_knock() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// E.G1b gates (a) and (b): a PRIMARY turn — even one the self-claims registry answers before
+/// any other code runs — makes presence Known; a MEMBER turn leaves it Unknown; and a query
+/// whose purpose is not proactive-serving reads Unknown even when the fact is present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_primary_turns_feed_the_world_model_and_only_proactive_purposes_may_read_it() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    // A member's turn: nothing ingested — the primary is not made to look present.
+    let member = TurnIdentity {
+        owner: "asha".into(),
+        ..TurnIdentity::primary()
+    };
+    let _ = conv
+        .handle_turn_as("Can you restart yourself without an operator?", member)
+        .await;
+    assert_eq!(
+        conv.world_shadow_presence(now),
+        "unknown",
+        "a member turn is not the primary"
+    );
+    // The primary's turn, answered by the registry BEFORE any other code runs — still ingested.
+    let _ = conv
+        .handle_turn("Can you restart yourself without an operator?")
+        .await
+        .unwrap();
+    // Temporal semantics: the fact is valid from its occurrence, so ask about NOW, after the turn.
+    let now = chrono::Utc::now().timestamp_millis();
+    assert_eq!(
+        conv.world_shadow_presence(now),
+        "known:active",
+        "an early-return turn still counts"
+    );
+    // The gate: an audit purpose is not a proactive-serving purpose — the fact reads Unknown.
+    assert_eq!(
+        conv.world_presence_with(mind_types::AccessContext::operator_audit(), now),
+        "unknown",
+        "the purpose gate is real, not decorative"
+    );
+}
+
+/// E.G1b gate (c): the knock DECISION is byte-identical with the shadow present vs absent — two
+/// engines, the same told-and-prepared packet, one with a populated world log, one empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_knock_decision_is_identical_with_and_without_a_populated_world_model() {
+    let future = chrono::Utc::now().timestamp_millis() + 86_400_000;
+    let mut results = Vec::new();
+    for populate in [false, true] {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(
+            Arc::new(mem) as Arc<dyn MemoryFacade>,
+            InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1),
+            "JARVIS",
+        );
+        if populate {
+            conv.world_ingest_presence();
+            conv.world_ingest_presence();
+        }
+        conv.packet_add_told(
+            "node-2",
+            None,
+            "draft",
+            "Vendor quote — accept / counter / decline",
+            "Accept at 4,200 / counter at 3,900 / decline with the comparison table attached.",
+            "told me to revisit the vendor quote before Friday",
+            vec!["she said Friday (0.91)".into()],
+            0.9,
+            false,
+            future,
+        )
+        .await;
+        let pid = conv
+            .load_packets()
+            .await
+            .last()
+            .and_then(|p| p["id"].as_str().map(str::to_string))
+            .unwrap();
+        conv.packet_mark_prepared(&pid, true).await;
+        results.push(conv.maybe_knock().await);
+    }
+    assert_eq!(
+        results[0].is_some(),
+        results[1].is_some(),
+        "the shadow must not change WHETHER the mind knocks"
+    );
+    assert_eq!(results[0], results[1], "nor WHAT it says");
+}
+
 /// Gate (3): the shadow cannot influence the decision — a source guard on the wall. The world
 /// is consulted exactly once in proactive.rs, inside the shadow block, and nothing below it
 /// references the world or the verdict.

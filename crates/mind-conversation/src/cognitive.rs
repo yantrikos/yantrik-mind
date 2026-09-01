@@ -821,10 +821,14 @@ impl ConversationEngine {
         prior_n: u64,
         object_id: &str,
         lane: &str,
+        goal_id: &str,
     ) -> Option<String> {
         let mut e = mind_observability::DecisionEvent::span(trace, None, "tool_predicted");
         e.actor = Some("conversation".into());
         e.lane = Some(lane.to_string());
+        // E.AGI-A2: free-form turns carry a turn-level goal IDENTITY, prefix-marked so no
+        // analytic can mistake them for compiled GoalSpec runs.
+        e.goal_id = Some(goal_id.to_string());
         e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
         e.model_route = Some(self.inference.provider().to_string());
         e.context_fingerprint = Some(mind_observability::opaque_id("context", goal));
@@ -863,6 +867,7 @@ impl ConversationEngine {
         latency_ms: Option<u64>,
         context_fingerprint: &str,
         lane: &str,
+        goal_id: &str,
     ) {
         use crate::tool_outcome::Outcome;
         // Unavailable/Denied say nothing about whether the tool WOULD have worked: they feed
@@ -882,6 +887,7 @@ impl ConversationEngine {
         let mut e = mind_observability::DecisionEvent::span(trace, parent, "tool_observed");
         e.actor = Some("conversation".into());
         e.lane = Some(lane.to_string());
+        e.goal_id = Some(goal_id.to_string());
         e.tool_version = Some(TOOL_RUNTIME_VERSION.into());
         e.model_route = Some(self.inference.provider().to_string());
         e.context_fingerprint = Some(context_fingerprint.to_string());

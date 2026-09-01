@@ -8112,6 +8112,72 @@ async fn web_decisions_fail_empty_when_the_decision_chain_does_not_verify() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── E.AGI-A2: THE LIVE LOOP'S EMITTERS SATISFY THE GATE THEY ARE MEASURED BY ────────────────────
+
+/// Gate (1): a fresh pair written by the REAL emitters, read back through the verified reader,
+/// judged by the REAL completeness checker, is 100% complete — the test that would have caught
+/// the missing goal_id behind E.AGI-A1's 0/200.
+#[tokio::test]
+async fn live_loop_emitters_produce_a_complete_tool_chain_pair() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let dir = std::env::temp_dir().join(format!("ym-agia2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&dir.join("d.jsonl")));
+    let conv = conv.with_recorder(log);
+
+    // Exactly what the loop computes per step: turn-level identity, prefix-marked free-form.
+    let user_text = "what is 2+2";
+    let goal_id = format!(
+        "freeform:{}",
+        mind_observability::opaque_id("goal", user_text)
+    );
+    let context = mind_observability::opaque_id("context", user_text);
+    let object_id = mind_observability::opaque_id("calc", "sig");
+    let predicted = conv.record_tool_prediction(
+        "trace-live",
+        "calc",
+        user_text,
+        0.5,
+        9,
+        &object_id,
+        "primary",
+        &goal_id,
+    );
+    conv.record_tool_observation(
+        "trace-live",
+        predicted.as_deref(),
+        "calc",
+        &object_id,
+        crate::tool_outcome::Outcome::Ok,
+        "4",
+        0.5,
+        Some(3),
+        &context,
+        "primary",
+        &goal_id,
+    );
+    let events = conv
+        .recorder()
+        .read_tail_verified(50)
+        .expect("the chain verifies");
+    let report = mind_observability::render_tool_chain_completeness(&events);
+    assert!(
+        report.contains("1/1 latest call(s) complete (100.0%"),
+        "a fresh live pair passes the gate it is measured by: {report}"
+    );
+    assert!(
+        report.contains("window spans ts_ms"),
+        "the report says WHEN its evidence is from: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── E.WEB6: THE CEREMONY WAKES THE BRAIN BEFORE PROMISING ONE ───────────────────────────────────
 
 /// Criterion (1): a live pool preflights ok, and the serving label is captured from the same lane

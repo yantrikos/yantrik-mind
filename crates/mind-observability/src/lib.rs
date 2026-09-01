@@ -1471,6 +1471,24 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     let mut out = format!(
         "TOOL CHAIN COMPLETENESS — {complete}/{total} latest call(s) complete ({percent:.1}%; gate ≥99%)\n"
     );
+    // E.AGI-A2: a live reading must say WHEN its evidence is from — a window full of history
+    // reads very differently from a window of yesterday's traffic. Timestamps only, aggregate.
+    let mut span_ts: Vec<u64> = calls
+        .iter()
+        .flat_map(|(_, prediction, observation)| {
+            prediction
+                .iter()
+                .chain(observation.iter())
+                .map(|event| event.ts_ms)
+        })
+        .filter(|ts| *ts > 0)
+        .collect();
+    span_ts.sort_unstable();
+    if let (Some(oldest), Some(newest)) = (span_ts.first(), span_ts.last()) {
+        out.push_str(&format!(
+            "  window spans ts_ms {oldest}..{newest} across {total} sampled call(s)\n"
+        ));
+    }
     if defects.is_empty() {
         out.push_str("  no missing or mismatched provenance in this sample\n");
     } else {

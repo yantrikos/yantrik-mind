@@ -11562,6 +11562,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             let context_fingerprint = mind_observability::opaque_id("context", user_text);
+            // E.AGI-A2: one turn-level goal identity per step, prefix-marked as a free-form
+            // turn so it can never inflate compiled-GoalSpec coverage claims.
+            let goal_id = format!(
+                "freeform:{}",
+                mind_observability::opaque_id("goal", user_text)
+            );
             let lane = if id.owner == mind_types::PRIMARY {
                 "primary"
             } else {
@@ -11593,6 +11599,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         None,
                         &context_fingerprint,
                         lane,
+                        &goal_id,
                     );
                     barren += 1;
                     if barren >= MAX_BARREN_STEPS {
@@ -11708,7 +11715,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let object_id =
                 mind_observability::opaque_id(&tool, &mind_agents::bus::signature(&tool, &args));
             let predicted = self.record_tool_prediction(
-                &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane,
+                &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane, &goal_id,
             );
             let tool_started = std::time::Instant::now();
             let obs = self.run_agent_tool_as(&tool, &args, id).await;
@@ -11742,6 +11749,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 Some(latency_ms),
                 &context_fingerprint,
                 lane,
+                &goal_id,
             );
             // …and what came back. The badge carries the classifier's five-way distinction rather
             // than a tick or a cross, because "found nothing" and "the tool broke" are the two the

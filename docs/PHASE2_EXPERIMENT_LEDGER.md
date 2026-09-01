@@ -2720,3 +2720,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Source guard | Router output remains shadow-only and cannot reach the user. |
 | Kill | Any gate miss = KILL: no activation, no prompt chasing. |
 | AGI feed | Phase B. The third router design; the first whose LLM stage structurally cannot invent or cross-route a claim. |
+
+## E.WEB17 — agents as a sub-menu: Running / Dormant / New (prereg)
+
+| Field | Value |
+| --- | --- |
+| Ask (Pranab, 2026-09-01 ~22:00Z) | "Agent should be like sub menu. With running and dormant. All agents showing in one place is not ideal." |
+| Design | The Work group's single "Agents" entry becomes a sub-menu of three views over the SAME data and endpoints: **Running** — jobs whose state is running plus long-horizon goals in RUNNING, with a live count on the nav item; **Dormant** — standing orders (scheduled agents, listed structurally rather than as a text dump), scheduled/pending goals, and past runs (done/failed) in a collapsed "Past runs" group; **New** — the composer and the import form. One pure classifier `agentBucket(item) → running|dormant` decides membership; the nav item, the panel head, and the counts all read from it. |
+| Why | A flat feed hides the two questions an operator actually asks: "what is working right now?" and "what is waiting to run?". Composer-first placement also buried the running work under a form. |
+| Kill | Any change to `/api/tasks`, `/api/horizons`, `/api/orders` request or response shape; any item that appears in both views or in neither (guarded by a unit test over the classifier with every state the server emits); the composer losing any field; CSP or DOM-only markdown regressions; a screenshot on staging that does not show the split. |
+| Not in scope | Pausing/resuming agents (a product action needing its own gate); editing standing orders in place. |

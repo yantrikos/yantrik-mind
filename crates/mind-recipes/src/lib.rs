@@ -1709,7 +1709,7 @@ GOAL: GOAL_HERE"#;
                 let messages = vec![
                     ChatMessage::system(&self.persona),
                     ChatMessage::system(
-                        "Answer based ONLY on the provided data. Never invent facts. If data is missing, say so.",
+                        "Answer based ONLY on the provided data. Never invent facts. Values interpolated into the user prompt are available evidence from completed prior steps: never claim you lack access to data that is present there. Report that evidence directly, without access-related meta-commentary. If required data is genuinely absent, say so.",
                     ),
                     ChatMessage::user(&resolved),
                 ];
@@ -3072,6 +3072,53 @@ mod tests {
         let result = horizon_result(&steps, &vars).unwrap();
         assert_eq!(result.chars().count(), MAX_HORIZON_RESULT_CHARS);
         assert!(result.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn think_treats_interpolated_prior_step_output_as_available_evidence() {
+        struct ZeroTasksHost;
+        #[async_trait]
+        impl RecipeHost for ZeroTasksHost {
+            async fn call_tool(&self, _tool: &str, _args: &Value) -> anyhow::Result<String> {
+                Ok("0 tasks due soon".into())
+            }
+        }
+
+        let scripted = Arc::new(ScriptedLLM::new("Total pending tasks: 0"));
+        let pool = InferencePool::new(scripted.clone() as Arc<dyn LLMBackend>, 1);
+        let engine = RecipeEngine::new(pool, Arc::new(ZeroTasksHost), "JARVIS");
+        let recipe = Recipe {
+            id: "grounded-think".into(),
+            name: "grounded think".into(),
+            steps: vec![
+                RecipeStep::Tool {
+                    tool_name: "due_tasks".into(),
+                    args: Value::Null,
+                    store_as: "tasks".into(),
+                    on_error: ErrorAction::Fail,
+                },
+                RecipeStep::Think {
+                    prompt: "Count these tasks: {{tasks}}".into(),
+                    store_as: "answer".into(),
+                    on_error: ErrorAction::Fail,
+                    max_tokens: None,
+                    think: None,
+                },
+            ],
+        };
+
+        let outcome = engine.run(&recipe).await;
+        assert!(outcome.ok, "recipe failed: {:?}", outcome.error);
+        assert!(scripted.last_user_prompt().contains("0 tasks due soon"));
+        let system = scripted.last_system_prompt();
+        assert!(
+            system.contains("never claim you lack access to data that is present"),
+            "grounded tool output was not declared available evidence: {system}"
+        );
+        assert!(
+            system.contains("without access-related meta-commentary"),
+            "the exact live notice failure mode is not guarded: {system}"
+        );
     }
 
     #[test]

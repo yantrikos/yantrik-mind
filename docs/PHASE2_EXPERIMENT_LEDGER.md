@@ -2093,3 +2093,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What shipped | GET /api/files lists the fixed published-pages directory (`YM_WEB_DIR`) — files only, servable extensions, no dotfiles, no client-supplied path; a Files panel links each to its live :8088 URL. Read-only; upload/delete deliberately deferred as riskier slices. |
 | Kill criteria | (1) `files_listing_is_confined_to_the_published_dir` seeds a file outside the dir, a dotfile inside, and a non-servable extension, and asserts only the servable in-dir file appears: PASS. (2) The route takes no path parameter — nothing to traverse with. (3) Missing dir → empty list. (4) Workspace 1406/0/4: PASS. |
 | AGI feed | The mind's own outputs made discoverable — the artifact surface a "show me what I made" self-review would read. |
+
+## E.WEB10 — pre-registered: a light theme, chooseable and remembered
+
+| Field | Value |
+| --- | --- |
+| The gap (competitive study) | Hermes ships a theme switcher. The mind's UI is dark-only. (Locale/i18n is EXPLICITLY DEFERRED: full translation of every string is disproportionate for a single-household product; recorded as a non-goal rather than half-built.) |
+| Design | CLIENT-ONLY: a `[data-theme]` attribute on the root drives a light token override block; a toggle in the sidebar footer flips it and persists the choice to localStorage (wrapped in try/catch — a private window that throws still renders). Default follows the dark house look; the toggle is a per-viewer convenience, never server state. |
+| Kill criteria | (1) The light block redefines only tokens already defined on `:root` — no color gets its sole definition inside the theme block (a guard test greps the CSS for the token names in both places). (2) The toggle persists and restores across reload; a storage exception is swallowed and the UI still renders (default theme). (3) Workspace green (assets embedded). |
+| AGI feed | None claimed — this is honest UX polish, and the ledger says so rather than inventing a feed. Not every slice feeds the AGI journey; pretending otherwise would cheapen the field. |

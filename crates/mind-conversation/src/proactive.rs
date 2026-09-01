@@ -621,6 +621,32 @@ impl super::ConversationEngine {
         Some(s)
     }
 
+    /// E.G1/E.G1c: THE WORLD MODEL'S SHADOW. Record what world-state-v1.1 would say about the
+    /// recipient's presence at this moment. The verdict goes to the flight recorder and is read by
+    /// nothing that decides (source-guarded): shadow ranks, it does not choose (E.PK3's discipline).
+    ///
+    /// `moment` names the sample: `knock-receptivity` is the PAIRED sample (recorded at the knock's
+    /// own decision moment, Telegram path); `headless-cadence` is the UNPAIRED sample the headless
+    /// tick records on a fixed cadence, because E.G1c found the paired one lived inside a gate the
+    /// canary can never open (no phone channel ⇒ no knock loop ⇒ zero events, ever). The two must
+    /// never be pooled: one measures agreement with a decision, the other only that the pipeline
+    /// ingestion → gate → verdict is alive.
+    pub fn record_world_shadow(&self, now_ms: i64, moment: &str) {
+        let mut shadow = mind_observability::DecisionEvent::new(
+            &format!("world-shadow-{now_ms}"),
+            "world_shadow",
+        );
+        shadow.actor = Some("proactive".into());
+        shadow.lane = Some("primary".into());
+        shadow.goal_id = Some(format!("worldshadow:{moment}"));
+        shadow.context_fingerprint = Some(mind_observability::opaque_id("context", moment));
+        shadow.chosen = Some("shadow-only".into());
+        shadow.outcome = Some(self.world_shadow_presence(now_ms));
+        shadow.verdict = Some("shadowed".into());
+        shadow.evaluator_id = Some("world-state-v1.1".into());
+        self.recorder.record(shadow);
+    }
+
     /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
     /// of the contract holds: proof-carrying prepared work exists, its trigger was OBSERVED or TOLD,
     /// the recipient looks receptive, and the predicted engagement clears the bar for a speakable
@@ -637,28 +663,9 @@ impl super::ConversationEngine {
             return None;
         }
         let now = chrono::Utc::now().timestamp_millis();
-        // E.G1: THE WORLD MODEL'S SHADOW. Record what world-state-v1.1 would say about the
-        // recipient's presence at this decision moment, then decide EXACTLY as before — the
-        // verdict goes to the flight recorder and is never read by anything below this block
-        // (source-guarded). Shadow ranks; it does not choose (E.PK3's discipline).
-        {
-            let mut shadow = mind_observability::DecisionEvent::new(
-                &format!("world-shadow-{now}"),
-                "world_shadow",
-            );
-            shadow.actor = Some("proactive".into());
-            shadow.lane = Some("primary".into());
-            shadow.goal_id = Some("worldshadow:knock-receptivity".into());
-            shadow.context_fingerprint = Some(mind_observability::opaque_id(
-                "context",
-                "knock-receptivity",
-            ));
-            shadow.chosen = Some("shadow-only".into());
-            shadow.outcome = Some(self.world_shadow_presence(now));
-            shadow.verdict = Some("shadowed".into());
-            shadow.evaluator_id = Some("world-state-v1.1".into());
-            self.recorder.record(shadow);
-        }
+        // E.G1: THE WORLD MODEL'S SHADOW, recorded at this decision moment and never read by
+        // anything below this line (source-guarded). Shadow ranks; it does not choose.
+        self.record_world_shadow(now, "knock-receptivity");
         // ORDER CHANGED for INTERRUPTION ESCROW: find the CANDIDATE first, then evaluate the gates.
         // A silence is only meaningful — and only worth recording — when there was something real to
         // say. Checking gates first would discard the candidate and leave no trace of what was held,

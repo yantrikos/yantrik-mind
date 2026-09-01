@@ -1793,6 +1793,9 @@ fn frame_handle(
 /// found on the first staging box ever built). Deliberately absent: the poll loop and every
 /// proactive cadence riding on it — they target chats that do not exist here, so a headless
 /// instance exercises turn paths only.
+/// E.G1c: the headless tick records the world shadow's unpaired sample every this-many 30 s beats.
+pub(crate) const HEADLESS_WORLD_SHADOW_EVERY: u64 = 20;
+
 pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
     let devices = arch2_open_device_store();
     let conv = match &devices {
@@ -1824,8 +1827,18 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
     tokio::spawn(async move {
         let mut beat = tokio::time::interval(std::time::Duration::from_secs(30));
         beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // E.G1c: the world-model shadow's UNPAIRED sample. The paired one lives at the knock's
+        // decision moment, which only the Telegram loop reaches — so a headless box recorded
+        // nothing, ever. One record per cadence (every 20th 30 s beat = 10 min); the knock itself is
+        // NOT run here: it commits an engagement prediction, and a prediction about an engagement
+        // that cannot happen would poison what `judgment_trend` measures.
+        let mut beats: u64 = 0;
         loop {
             beat.tick().await;
+            if beats % HEADLESS_WORLD_SHADOW_EVERY == 0 {
+                ticker.record_world_shadow(now_ms() as i64, "headless-cadence");
+            }
+            beats = beats.wrapping_add(1);
             for note in ticker.tick_delegations().await {
                 eprintln!("[headless-tick] {note}");
             }
@@ -3059,6 +3072,88 @@ mod tests {
         assert!(is_quiet_hour(3, 1, 5));
         assert!(!is_quiet_hour(6, 1, 5));
         assert!(!is_quiet_hour(0, 1, 5));
+    }
+
+    // ── E.G1c: the world shadow must be able to fire on a box with no phone channel ──
+
+    const SELF_SRC: &str = include_str!("telegram.rs");
+    const PROACTIVE_SRC: &str = include_str!("../../mind-conversation/src/proactive.rs");
+
+    fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+        let start = src.find(sig).unwrap_or_else(|| panic!("`{sig}` not found"));
+        let rest = &src[start..];
+        // The body ends at the next top-level `pub async fn` / `pub fn` after this one.
+        let end = rest[sig.len()..]
+            .find("\npub async fn ")
+            .or_else(|| rest[sig.len()..].find("\npub fn "))
+            .or_else(|| rest[sig.len()..].find("\n    pub async fn "))
+            .or_else(|| rest[sig.len()..].find("\n    pub fn "))
+            .map(|i| i + sig.len())
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// The headless tick records the UNPAIRED sample under its own label, rate-limited, and never
+    /// runs the knock (which would commit a prediction about an engagement that cannot happen).
+    #[test]
+    fn headless_tick_records_the_world_shadow_and_never_knocks() {
+        let body = fn_body(SELF_SRC, "pub async fn run_headless(");
+        assert!(
+            body.contains("record_world_shadow(") && body.contains("\"headless-cadence\""),
+            "headless records the shadow under its own label"
+        );
+        assert!(
+            !body.contains("maybe_knock"),
+            "the knock is Telegram-only: headless must not evaluate it"
+        );
+        assert!(
+            body.contains("beats % HEADLESS_WORLD_SHADOW_EVERY == 0"),
+            "one record per cadence, not one per beat"
+        );
+        assert_eq!(
+            super::HEADLESS_WORLD_SHADOW_EVERY * 30,
+            600,
+            "the cadence is ten minutes (144 rows/day)"
+        );
+        // The delegation notes are printed exactly as before: the shadow call sits before them.
+        // (Line endings normalised: a CRLF checkout must not fail a guard about content.)
+        let body = body.replace('\r', "");
+        assert!(
+            body.contains("for note in ticker.tick_delegations().await {\n                eprintln!(\"[headless-tick] {note}\");"),
+            "tick_delegations notes are byte-identical"
+        );
+    }
+
+    /// The paired sample stays at the knock's own evaluation moment, under its original label, and
+    /// the seam is side-effect free: it reads presence and records — no await, no send.
+    #[test]
+    fn the_knock_keeps_its_paired_shadow_and_the_seam_has_no_side_effects() {
+        let knock = fn_body(PROACTIVE_SRC, "pub async fn maybe_knock(");
+        assert!(
+            knock.contains("self.record_world_shadow(now, \"knock-receptivity\")"),
+            "the paired record keeps its label"
+        );
+        let paired_at = knock.find("record_world_shadow").unwrap();
+        let packets_at = knock.find("self.load_packets()").unwrap();
+        assert!(
+            paired_at < packets_at,
+            "recorded before the candidate search, as in E.G1"
+        );
+        assert!(
+            !knock[paired_at + 20..].contains("world_shadow"),
+            "nothing below the record reads the shadow"
+        );
+
+        let seam = fn_body(PROACTIVE_SRC, "pub fn record_world_shadow(");
+        assert!(!seam.contains(".await"), "the seam does no async work");
+        assert!(
+            !seam.contains("send") && !seam.contains("escrow") && !seam.contains("profile"),
+            "the seam mutates nothing but the recorder"
+        );
+        assert!(
+            seam.contains("format!(\"worldshadow:{moment}\")"),
+            "the sample label is carried in goal_id so the two samples can never be pooled"
+        );
     }
 
     #[test]

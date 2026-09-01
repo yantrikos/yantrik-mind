@@ -2614,3 +2614,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gates | (1) No new mutation path — source-guarded (import gate ×2 call sites, re-run via /api/agent, no /api/schedule). (2) Results through the DOM-only renderer; no innerHTML in the run renderer. (3) Allowance from `/api/claims`. (4) 22/22 web guards + full suite. (5) Staging screenshot of a real run's timeline: done. |
 | The timeline's first catch | The smoke agent honestly refused to invent a device count ("no observation or tool result in this run reports a device count, so I cannot state one without inventing it") — and then stated today's date as 2026-06-16, months wrong, because its run had no `now` step. The old raw-dump card would have buried both. Residual for the agents lane: research runs must ground "today" with the clock tool before asserting a date. |
 | Found while verifying (fixed in the follow-up commit) | The goal instrument's "no readable receipts": every `/api/horizon-history` request was still a 400 — the route matched on the query-STRIPPED path and handed that to the extractor, so the decode fix never saw an id. The E.WEB14 composed regression tested the extractor on a full string, not what the route passes. Now the route reads `target`, and a guard pins it. Two composition bugs on one route, both caught by using the thing rather than testing its halves — Doctrine 1 again. |
+
+## E.WEB16b — research runs know what day it is, by code (prereg)
+
+| Field | Value |
+| --- | --- |
+| Finding | E.WEB16's first live run: a research agent asserted "Today's date: 2026-06-16" — months wrong — while honestly refusing to invent a device count. Its run had no clock step; the date came from the model's training prior. |
+| Change | At the delegation site, the task handed to the researcher is prefixed by CODE with the wall-clock date (`Today is <ISO date> (UTC).`) — a deterministic fact from the process clock, not a model opinion, the same shape as tier-0 arithmetic on the voice path. |
+| Gates | (1) A test proves the researcher receives the dated prefix ahead of the brief, verbatim. (2) The scratch timeline's task note keeps the ORIGINAL brief (the operator sees what they wrote; the date rides only into the executor). (3) No other executor path changes. |
+| Kill | If the prefix would leak into a stored deliverable as if the user had written it, the prefix moves to the executor's system context instead. |
+| AGI feed | Calibration hygiene: a claim about today should never be a prior. |

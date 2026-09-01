@@ -89,6 +89,8 @@ mod plugins_mod;
 mod privacy_audit;
 mod proactive;
 pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
+#[cfg(test)]
+mod mq6_seam_tests;
 mod reflex;
 pub(crate) mod research;
 mod say;
@@ -9926,6 +9928,47 @@ impl ConversationEngine {
             .unwrap_or_default();
         let routed = self_claims::parse_route(&raw);
         (raw, routed)
+    }
+
+    /// E.MQ6, the whole two-stage router over any pool: stage 1 is deterministic and emits at
+    /// most one claim (`self_claims::singleton`); only then does the model confirm THAT claim or
+    /// abstain. Returns (stage-1 candidate id, raw model emission if a call was made, routed id).
+    /// No candidate ⇒ no model call ⇒ `(None, None, None)`. The evaluator and any future shadow
+    /// call exactly this; nothing on the reply path does.
+    pub(crate) async fn route_claim_two_stage_with(
+        inference: &InferencePool,
+        question: &str,
+    ) -> (Option<&'static str>, Option<String>, Option<&'static str>) {
+        let Some(claim) = self_claims::singleton(question) else {
+            return (None, None, None);
+        };
+        let (raw, confirmed) = Self::confirm_claim_with(inference, question, claim).await;
+        (
+            Some(claim.id),
+            Some(raw),
+            if confirmed { Some(claim.id) } else { None },
+        )
+    }
+
+    /// Stage 2's seam: one question, one claim, one word back. Greedy, no thinking, no memory.
+    pub(crate) async fn confirm_claim_with(
+        inference: &InferencePool,
+        question: &str,
+        claim: &self_claims::Claim,
+    ) -> (String, bool) {
+        let prompt = self_claims::confirm_prompt(question, claim);
+        let cfg = GenerationConfig {
+            max_tokens: 8,
+            think: Some(false),
+            ..GenerationConfig::greedy()
+        };
+        let raw = inference
+            .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+            .await
+            .map(|r| r.text.trim().to_string())
+            .unwrap_or_default();
+        let confirmed = self_claims::parse_confirm(&raw);
+        (raw, confirmed)
     }
 
     /// E.MQ5: record what the closed-schema router WOULD route this turn to. Detached: the

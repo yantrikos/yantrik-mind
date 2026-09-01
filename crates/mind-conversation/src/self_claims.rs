@@ -239,6 +239,396 @@ pub fn match_claim(user_text: &str) -> Option<&'static Claim> {
     })
 }
 
+// ───────────────────────────── E.MQ6: two-stage router ─────────────────────────────
+// Stage 1 is a SECOND lexicon, never the tier-0 intercept's `match_groups` (that path stays
+// byte-identical whatever this finds). It emits AT MOST ONE claim: every claim whose groups all
+// match is a candidate, and only a lone candidate survives — no ranking, no scores. A capability
+// frame ("can you …", "do you …") is required and an explanation frame ("explain …", "what is …")
+// excludes, because the near-miss negatives a sealed set contains are topical by construction and
+// only the frame separates "can you place a real trade?" from "can you explain paper trading?".
+// Stage 2 is the ONLY model call: confirm-or-abstain on that one claim, never a choice among ids.
+
+pub const SHORTLIST_VERSION: &str = "self-claims-shortlist-v1";
+pub const CONFIRM_VERSION: &str = "self-claims-confirm-v1";
+pub const CONFIRM: &str = "CONFIRM";
+
+/// Broader topic lexicon per claim, keyed by claim id. Groups AND, terms OR, word-bounded.
+/// Written from the registry's own answers and ordinary paraphrase — never from a sealed set.
+const SHORTLIST: &[(&str, &[&[&str]])] = &[
+    (
+        "real-money",
+        &[
+            &[
+                "trade",
+                "trades",
+                "trading",
+                "buy",
+                "sell",
+                "order",
+                "orders",
+                "position",
+                "positions",
+                "invest",
+            ],
+            &[
+                "real",
+                "real-money",
+                "live",
+                "actual",
+                "money",
+                "funds",
+                "cash",
+                "capital",
+                "brokerage",
+                "account",
+                "for real",
+                "genuinely",
+                "dollars",
+                "rupees",
+            ],
+        ],
+    ),
+    (
+        "self-restart",
+        &[
+            &[
+                "restart",
+                "reboot",
+                "relaunch",
+                "reload yourself",
+                "bring yourself back",
+                "start yourself",
+            ],
+            &[
+                "yourself",
+                "your own",
+                "your process",
+                "without an operator",
+                "on your own",
+                "by yourself",
+                "your service",
+                "your daemon",
+                "you restart",
+            ],
+        ],
+    ),
+    (
+        "tool-predictions",
+        &[
+            &[
+                "predict",
+                "predicted",
+                "prediction",
+                "predictions",
+                "forecast",
+                "expect",
+                "anticipate",
+                "estimate",
+                "probability",
+                "brier",
+                "grade",
+                "graded",
+            ],
+            &[
+                "tool",
+                "tools",
+                "invoke",
+                "tool call",
+                "tool calls",
+                "call",
+                "calls",
+            ],
+        ],
+    ),
+    (
+        "privacy-lanes",
+        &[
+            &["private", "privacy", "confidential", "personal"],
+            &[
+                "household",
+                "family",
+                "shared",
+                "public lane",
+                "other people",
+                "others",
+                "guests",
+                "guest",
+            ],
+        ],
+    ),
+    (
+        "pack-choice",
+        &[
+            &[
+                "pack",
+                "packs",
+                "expertise",
+                "expert",
+                "specialist",
+                "specialism",
+                "domain expert",
+            ],
+            &[
+                "choose", "chooses", "pick", "picks", "select", "selects", "decide", "decides",
+                "route", "routes", "routing", "switch", "which",
+            ],
+        ],
+    ),
+    (
+        "self-edit",
+        &[
+            &[
+                "config",
+                "configuration",
+                "settings",
+                "builder",
+                "builds you",
+                "own code",
+                "source code",
+                "codebase",
+                "privacy controls",
+                "guardrails",
+                "walls",
+                "prompt",
+            ],
+            &[
+                "edit",
+                "change",
+                "modify",
+                "alter",
+                "rewrite",
+                "update",
+                "tweak",
+                "reconfigure",
+                "patch",
+                "adjust",
+            ],
+            &["your", "yourself"],
+        ],
+    ),
+    (
+        "offline-cognition",
+        &[
+            &[
+                "dream",
+                "dreams",
+                "dreaming",
+                "offline",
+                "sleep",
+                "sleeping",
+                "asleep",
+                "between conversations",
+                "between our conversations",
+                "idle",
+                "when nobody is talking",
+                "when no one is talking",
+                "consolidate",
+                "consolidation",
+                "background",
+            ],
+            &[
+                "do you",
+                "you run",
+                "your",
+                "are you",
+                "you dream",
+                "you sleep",
+                "you think",
+                "you keep",
+                "you still",
+            ],
+        ],
+    ),
+    (
+        "tamper-evidence",
+        &[
+            &[
+                "log",
+                "logs",
+                "ledger",
+                "record",
+                "records",
+                "history",
+                "audit trail",
+                "decision log",
+            ],
+            &[
+                "tamper",
+                "tampered",
+                "tampering",
+                "edited",
+                "mutated",
+                "forged",
+                "altered",
+                "deleted",
+                "rewritten",
+                "falsified",
+                "doctored",
+                "modified",
+                "detect",
+                "notice",
+            ],
+        ],
+    ),
+    (
+        "tool-learning",
+        &[
+            &["tool", "tools", "api", "integration", "plugin"],
+            &[
+                "documentation",
+                "docs",
+                "manual",
+                "readme",
+                "spec",
+                "reference",
+            ],
+            &[
+                "learn",
+                "master",
+                "figure out",
+                "teach yourself",
+                "pick up",
+                "work out",
+                "use it",
+            ],
+        ],
+    ),
+    (
+        "ran-vs-worked",
+        &[
+            &[
+                "ran",
+                "completed",
+                "executed",
+                "finished",
+                "returned",
+                "run",
+            ],
+            &[
+                "worked",
+                "succeeded",
+                "succeed",
+                "success",
+                "successful",
+                "actually",
+                "really",
+                "difference",
+                "distinguish",
+                "tell apart",
+            ],
+        ],
+    ),
+];
+
+const CAPABILITY_FRAMES: &[&str] = &[
+    "can you",
+    "could you",
+    "are you able",
+    "do you",
+    "did you",
+    "will you",
+    "would you",
+    "have you",
+    "is it possible for you",
+    "are you allowed",
+    "may you",
+    "might you",
+    "you can",
+    "you could",
+    "you able",
+    "you allowed",
+    "you will",
+    "you would",
+    "you do",
+    // The mind as the OBJECT of a capability question ("can household members see X through you?").
+    "through you",
+    "via you",
+    "with you",
+    "from you",
+    "using you",
+    "by you",
+    "ask you",
+];
+const EXPLANATION_FRAMES: &[&str] = &[
+    "explain",
+    "describe",
+    "what is",
+    "what are",
+    "what's",
+    "tell me about",
+    "how does",
+    "how do i",
+    "how would i",
+    "define",
+    "definition",
+    "meaning of",
+    "summarize",
+    "summarise",
+];
+
+/// Stage 1, verbatim: every claim whose shortlist groups all match. Public so an evaluator can
+/// count candidates per row (the "at most one, structurally" gate is `singleton`).
+pub fn shortlist(user_text: &str) -> Vec<&'static Claim> {
+    let lower = user_text.to_lowercase();
+    if !self_directed(&lower) || !interrogative(&lower) {
+        return Vec::new();
+    }
+    if !CAPABILITY_FRAMES.iter().any(|f| word_bounded(&lower, f)) {
+        return Vec::new();
+    }
+    if EXPLANATION_FRAMES.iter().any(|f| word_bounded(&lower, f)) {
+        return Vec::new();
+    }
+    SHORTLIST
+        .iter()
+        .filter(|(_, groups)| {
+            groups
+                .iter()
+                .all(|group| group.iter().any(|term| word_bounded(&lower, term)))
+        })
+        .filter_map(|(id, _)| CLAIMS.iter().find(|c| c.id == *id))
+        .collect()
+}
+
+/// The singleton rule: exactly one candidate or nothing. Two candidates is not "pick the first";
+/// it is the shortlist admitting it cannot tell, which is what abstention is for.
+pub fn singleton(user_text: &str) -> Option<&'static Claim> {
+    let mut found = shortlist(user_text);
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
+}
+
+/// Stage 2's prompt: the question and ONE topic line. No other claim id exists in the prompt,
+/// so the model cannot cross-route; it can only confirm this one or abstain.
+pub fn confirm_prompt(question: &str, claim: &Claim) -> String {
+    let topic = claim
+        .match_groups
+        .first()
+        .map(|g| g.join(" / "))
+        .unwrap_or_default();
+    format!(
+        "You are checking whether a question asks an AI assistant about ITS OWN capability on one \
+         specific topic.\nTopic: {} ({})\nQuestion: {}\n\nAnswer with exactly one word: {} if the \
+         question asks the assistant whether it can, does, or will do this on the topic; {} if it \
+         asks about something else, asks for an explanation of the concept, or is not about the \
+         assistant itself.",
+        claim.id, topic, question, CONFIRM, ABSTAIN
+    )
+}
+
+/// Closed parse for stage 2: exactly `CONFIRM` → true; anything else (ABSTAIN, prose, empty)
+/// is not a confirmation. Malformed output can only fail closed.
+pub fn parse_confirm(output: &str) -> bool {
+    let t = output
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '.' || c == '`');
+    let mut words = t.split_whitespace();
+    matches!((words.next(), words.next()), (Some(w), None) if w.eq_ignore_ascii_case(CONFIRM))
+}
+
 /// E.MQ5: the router's closed-schema prompt. The model sees claim IDS and one-line topics —
 /// never an answer — and must emit exactly one id or ABSTAIN. Anything else parses as
 /// malformed, which is recorded and counts as ABSTAIN. This prompt is the whole of the
@@ -424,6 +814,137 @@ mod tests {
 
     /// E.MQ5: the router's schema is CLOSED — only a known id or ABSTAIN parses; explanations,
     /// unknown ids, and multi-token output all read as ABSTAIN (None).
+    /// E.MQ6 stage 1: one plain paraphrase per claim yields exactly that claim; explanation
+    /// requests, statements, third-party targets and two-topic questions yield nothing. These
+    /// are the author's own sentences, not sealed rows — a floor, not the gate.
+    #[test]
+    fn the_shortlist_is_a_singleton_or_nothing() {
+        let positives = [
+            (
+                "real-money",
+                "Can you actually buy stocks with real money for me?",
+            ),
+            (
+                "self-restart",
+                "Could you restart yourself if you got stuck?",
+            ),
+            (
+                "tool-predictions",
+                "Do you predict whether a tool call will work before you make it?",
+            ),
+            (
+                "privacy-lanes",
+                "Can household members see my private notes through you?",
+            ),
+            (
+                "pack-choice",
+                "Do you pick which expertise pack answers me?",
+            ),
+            (
+                "self-edit",
+                "Are you able to change your own configuration from this chat?",
+            ),
+            (
+                "offline-cognition",
+                "Do you dream or consolidate memories between our conversations?",
+            ),
+            (
+                "tamper-evidence",
+                "Would you notice if someone tampered with your decision log?",
+            ),
+            (
+                "tool-learning",
+                "Can you learn a brand new tool just from its documentation?",
+            ),
+            (
+                "ran-vs-worked",
+                "Do you distinguish a tool that merely ran from one that actually worked?",
+            ),
+        ];
+        for (id, q) in positives {
+            let got = singleton(q).map(|c| c.id);
+            assert_eq!(got, Some(id), "{q:?} → {got:?}");
+        }
+        let negatives = [
+            "Can you explain what paper trading is?",
+            "What is a hash-chained log?",
+            "Restart the router for me, it's stuck.",
+            "Can you change the settings on the TV?",
+            "Tell me about how expertise packs are leased.",
+            "I read that you dream between conversations.",
+            // Two topics in one question → two candidates → nothing (the singleton rule).
+            "Can you predict whether a tool call will work, and can you trade with real money?",
+        ];
+        for q in negatives {
+            assert_eq!(singleton(q).map(|c| c.id), None, "{q:?} must abstain");
+        }
+        // Structural: at most one, by construction — never "the first of several".
+        let two =
+            "Can you predict whether a tool call will work, and can you trade with real money?";
+        assert!(shortlist(two).len() >= 2);
+        assert!(singleton(two).is_none());
+        // A topical near-miss is stage 2's problem, not stage 1's: the shortlist emits the one
+        // claim it can see, and only the confirm step can say "this asks about a forecast, not
+        // about placing a trade". Recorded here so the gate's meaning is not misread later.
+        assert_eq!(
+            singleton("Can you predict whether the trade will make real money?").map(|c| c.id),
+            Some("real-money")
+        );
+    }
+
+    /// E.MQ6 stage 2 is closed: exactly CONFIRM confirms; everything else fails closed.
+    #[test]
+    fn the_confirm_schema_is_closed() {
+        for ok in [
+            "CONFIRM",
+            "confirm",
+            " CONFIRM.",
+            "\"CONFIRM\"",
+            "`CONFIRM`",
+        ] {
+            assert!(parse_confirm(ok), "{ok:?}");
+        }
+        for no in [
+            "ABSTAIN",
+            "",
+            "CONFIRM ABSTAIN",
+            "yes",
+            "CONFIRM: real-money",
+            "I confirm",
+            "CONFIRMED",
+        ] {
+            assert!(!parse_confirm(no), "{no:?}");
+        }
+        let claim = CLAIMS.iter().find(|c| c.id == "real-money").unwrap();
+        let p = confirm_prompt("Can you trade for real?", claim);
+        assert!(p.contains("real-money") && p.contains(CONFIRM) && p.contains(ABSTAIN));
+        // No other claim id, and no registry answer, is in the prompt.
+        for c in CLAIMS.iter().filter(|c| c.id != "real-money") {
+            assert!(!p.contains(c.id), "prompt must not mention {}", c.id);
+        }
+        assert!(
+            !p.contains("compile-time constant"),
+            "answers never enter the prompt"
+        );
+    }
+
+    /// The tier-0 intercept is untouched by E.MQ6: the shortlist reads its own lexicon and only
+    /// LOOKS UP claims by id; `match_claim` still reads `match_groups`.
+    #[test]
+    fn the_shortlist_never_reaches_the_intercept() {
+        let src = include_str!("self_claims.rs");
+        let s = src.find("pub fn shortlist(").unwrap();
+        let e = s + src[s..].find("pub fn singleton(").unwrap();
+        assert!(
+            !src[s..e].contains("match_groups"),
+            "stage 1 reads SHORTLIST, not match_groups"
+        );
+        assert!(src[s..e].contains("SHORTLIST"));
+        let m = src.find("pub fn match_claim(").unwrap();
+        let me = m + src[m..].find("E.MQ6").unwrap();
+        assert!(!src[m..me].contains("shortlist") && !src[m..me].contains("SHORTLIST"));
+    }
+
     #[test]
     fn the_router_schema_is_closed() {
         assert_eq!(parse_route("self-restart"), Some("self-restart"));

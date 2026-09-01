@@ -2358,3 +2358,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill criteria (pre-written) | KILL on ANY wrong-polarity or wrong-scope answer to a matched question; KILL if any matched query is shown to reach generation before the renderer; KILL (as REFUSED-ROUTING) if the match layer cannot classify the held-out paraphrases without per-question tuning — a router fitted to ten prompts is not a router. |
 | Division of labor | Claude authors prereg (this row) and implementation; Codex audits independently only AFTER this row lands, then reviews the implementation against it. No concurrent ledger edits: this row's SHA is the coordination point. |
 | AGI feed | Phase B: if polarity becomes an architectural property of a typed registry, capability-claim precision joins the walls — enforced, versioned, and auditable — and the E.MQ arc's question ("model or surface?") is answered by removing the model from the loop entirely. |
+
+## E.MQ4a — prereg repairs (Codex's audit of 7a47693, both findings accepted)
+
+| Field | Value |
+| --- | --- |
+| Repair 1 — gate 4 de-contradicted | "Model at most paraphrasing" is STRUCK. On a matched claim the renderer's typed output is delivered VERBATIM as the terminal answer — no memory read, no LLM invocation, no paraphrase. A paraphrasing model is still generation and can reintroduce wrong polarity; model paraphrase, if ever wanted, is a SEPARATE later experiment (one factor at a time). |
+| Repair 2 — the held-out set now actually sealed | Ten paraphrases (one per question, distinct surface forms, expected polarity/scope pinned inline) are authored and stored OUTSIDE git. Commitment: **SHA-256 `1ba1c2d06766e69f11e5b33da7e485418bd1ad83b99716ee6aa3347688e50355`** over the exact file bytes. Evaluation procedure, fixed now: after implementation is complete and committed, the file is hashed again (must match this commitment), then each paraphrase is put to the fresh scratch subject once, verbatim, no re-asks; polarity/scope scored against the inline key; ANY mismatch, or ANY matched paraphrase reaching generation, kills per the E.MQ4 criteria. The plaintext enters git only WITH the results, after the kill decision is made. |
+| Sequencing | Matcher/registry code may begin only after this row lands (this commit). Codex audits implementation against 7a47693 + this row. |

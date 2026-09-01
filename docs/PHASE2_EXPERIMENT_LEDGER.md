@@ -2008,3 +2008,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill criteria | (1) Every listener_plan entry reports with a bind classification: by construction, the map covers the plan. (2) No secret renders — guard test seeds a live invite and a paired device, asserts the JSON carries `live_member_invites: 1` and provably neither the invite code nor the device token: PASS. (3) JSON round-trips; surfaced on three routes. (4) Workspace 1400/0/4: PASS. |
 | Recorded deviation | The prereg placed the verb in the conversation layer's TYPED_VERBS; the instruments (listener plan, device store, build commit, invites) all meet only in mind-core, so the audit lives there — a dependency-direction fact, recorded rather than worked around with a layering violation. |
 | AGI feed | Self-model: "how exposed am I right now?" answered from the mind's own instruments — the read surface a future posture-policy loop would consult before changing anything about itself. |
+
+## E.WEB6 — pre-registered: the ceremony wakes the brain before promising one
+
+| Field | Value |
+| --- | --- |
+| The gap | The pairing ceremony declares the mind ready the moment names are chosen; the first turn then discovers whether a brain actually answers — at worst 180s of silence into an error, on the very first impression. (OpenClaw 2.0 validates the model at setup; the E.WEB0 runs measured our own cold-start at 87s.) |
+| Design | `ConversationEngine::brain_preflight()`: one tiny Household-lane call (a few tokens, ~25s outer timeout), its serving label captured from the SAME lane events the badge uses — no new instrumentation. POST /api/brain-check for any paired device. The ceremony's name step becomes "waking the brain…": on ok, the intro turn proceeds and the header already shows the real lane; on failure, an HONEST banner — paired, but the brain is not answering right now — and the app still opens (fail-open UX, fail-closed honesty; nothing pretends). |
+| Kill criteria | (1) Scripted pool: preflight ok with the serving label captured. (2) All-dead chain: preflight returns not-ok within the timeout, no served label, and the UI path shows the honest banner (source-guarded copy, no fake ready state). (3) The preflight adds at most one model call, only during the ceremony — never on routine loads. (4) Workspace green. |
+| AGI feed | Capability reliability, sensed before promised: the self-model checks an organ before presenting it — the smallest version of act-only-on-verified-capability. |

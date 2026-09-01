@@ -2832,3 +2832,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gap | The Board still shows one card per run and a single generic "Standing orders · see Activity" card built from the text blob, so an operator who starts on the Board cannot reach an agent's thread and cannot see when an order fires. |
 | Design | Board job cards open the agent's thread (switch to the Agents panel, `openThread(name)`); standing orders come typed (`/api/standing-orders`), one card each under Scheduled with the server's countdown, and open the same thread. Goal cards are unchanged. No endpoint change. |
 | Kill | Any endpoint change; a Board card that opens a different agent's thread than its name (same key rule as the lists); the Board reading `/api/orders` text; a screenshot on staging that does not show Board → thread. |
+
+## E.MQ6 — SEALED v4 RESULT: KILL at stage 1
+
+| Field | Value |
+| --- | --- |
+| Run (Codex, independent) | Frozen candidate `69b9e82af1e7ec2a5180f6254b2aed518bcbdbdc`; sealed payload SHA-256 matched the commitment `2d565078…75f29` (6,865 bytes). Focused frozen seam tests passed 3/3 before disclosure. |
+| Counts (stage 1 only) | Positive singleton recall **5/20** (gate ≥ 18). Negative abstention **38/40** (gate 40/40). Wrong candidate **2** (gate 0). Structural overflow (> 1 candidate) 0. |
+| Verdict | KILL at stage 1. No owned-model call was made; stage 2 and the three end-to-end runs were not executed. No tuning on v4. The tier-0 intercept and `ym claims` remain the only self-claim path. |
+| What four kills now say together | Lexicon (2/10), closed-schema LLM (7/10, 3 misroutes), and a singleton lexical shortlist (5/20, 2 wrong) all fail the same way: paraphrase recall. The capability frame bought precision (0 overflow, 38/40) but not recall — the frame's own words are what a paraphrase drops. The honest state of the self-model: truthful when the question matches the registry's words, silent otherwise. A different candidate CLASS (semantic, not lexical; or the question routed to `ym claims` explicitly by the user) needs its own prereg; this lane does not iterate. |
+| AGI feed | Phase B. Recorded as a negative result with counts, which is the only way this ledger lets a design die. |

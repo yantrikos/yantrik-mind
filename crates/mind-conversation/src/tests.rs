@@ -8112,6 +8112,43 @@ async fn web_decisions_fail_empty_when_the_decision_chain_does_not_verify() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── E.MQ2: SELF-CLAIMS ARE GROUNDED IN THE WALLS THAT ENFORCE THEM ──────────────────────────────
+
+/// Gate (1): the boundaries block names every wall and both non-capability denials, and the
+/// `myself` tool carries it — the model has evidence to consult instead of free-generating
+/// claims about its own powers (E.MQ1 recorded it confidently wrong both ways without this).
+#[test]
+fn the_myself_tool_states_every_wall_and_denial() {
+    let block = ConversationEngine::capability_boundaries();
+    for needle in [
+        "NO tool or code path to restart myself",
+        "walled off by a compile-time constant",
+        "cannot edit my own configuration, builder, or privacy controls",
+        "private lane fails closed",
+        "activity feeds show NOTHING",
+        "record a prediction before each tool call",
+        "'it ran' from 'it worked'",
+        "offline consolidation",
+        "learning an unseen tool from its documentation alone",
+        "leases are operator-driven",
+    ] {
+        assert!(
+            block.contains(needle),
+            "the boundaries block must state: {needle}"
+        );
+    }
+    // And the agent prompt binds capability claims to the tool, not to memory.
+    let src = include_str!("lib.rs");
+    assert!(
+        src.contains("setup OR CAPABILITIES"),
+        "the grounding rule covers capabilities, not only setup"
+    );
+    assert!(
+        src.contains("never contradict them"),
+        "the prompt subordinates generation to the stated boundaries"
+    );
+}
+
 // ── E.AGI-A2: THE LIVE LOOP'S EMITTERS SATISFY THE GATE THEY ARE MEASURED BY ────────────────────
 
 /// Gate (1): a fresh pair written by the REAL emitters, read back through the verified reader,
@@ -10274,6 +10311,19 @@ async fn a_malformed_call_never_reaches_egress_or_prediction_on_the_live_loop() 
             .iter()
             .any(|(t, _, _)| t == "run_skill" || t == "discover_tools"),
         "the bandit must not have been fed: {track:?}"
+    );
+    let report = mind_observability::render_tool_chain_completeness(&ev);
+    assert!(
+        report.starts_with("No tool-chain calls yet"),
+        "a refused request never becomes a tool call: {report}"
+    );
+    assert!(
+        report.contains("PREFLIGHT REFUSALS — 2/2 latest malformed refusal(s) complete"),
+        "the real live-loop emitter satisfies the separate refusal contract: {report}"
+    );
+    assert!(
+        !report.contains("prediction link"),
+        "the evaluator must not demand a prediction the boundary was required not to make: {report}"
     );
 
     // 2. Required fields, per field (Codex's review of P.2d): a run_skill without a name and an

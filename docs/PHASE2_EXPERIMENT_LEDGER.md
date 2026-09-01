@@ -2557,3 +2557,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gates | (1) The history JSON is the verified view — nothing invented client-side; a corrupt chain surfaces as the server's error, never as a partial render. (2) Route gates: horizon-history operator-only with id charset check; claims authenticated. (3) One renderer principle holds: the JSON for a claim equals `render()`'s inputs (id/answer/authority/evidence/version). (4) Source-guards on both routes + a conversation test for both JSON arms. |
 | Kill | If the client can request a goal id the server did not charset-check, or if claims JSON diverges from the registry constants, the slice does not ship. |
 | AGI feed | Phase B/F transparency: the operator can now read, in the console, exactly the receipts the peer verified cryptographically and the boundaries the mind states about itself — evidence surfaces, not narration. |
+
+## Notice-quality residual — LIVE GATE: PASS, contradiction gone; a smaller residual replaces it
+
+| Field | Value |
+| --- | --- |
+| Reading (staging at 8729f0b, goal 1a05e8e69b4) | SCHEDULED(d36018d1) → WAKE_STARTED(96f32cd8) → COMPLETED(1b8a2ff0) at +4,472ms; outcome cc61b1cb, actions 1/1. Completion notice, verbatim: `0` then `Receipt cc61b1cbfc2e`. The "I don't have access to…" self-contradiction is ABSENT. Presence PASS; contradiction residual CLOSED with live evidence, as Codex's fold scope required. |
+| New, smaller residual (recorded, not glossed) | The answer lost its label: `0` alone, where the previous notice at least said "Total pending tasks: 0". Correct and grounded, but terse to the point of ambiguity for a human reading a notification. Quality lane (Codex): the Think contract may want "state the answer with its unit/label" alongside the anti-denial clause. |
+| Planner datum | Creation for this goal was first-try (greedy planner tally now 7/7 identical accepts). |

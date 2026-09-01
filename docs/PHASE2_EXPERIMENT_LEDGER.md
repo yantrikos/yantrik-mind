@@ -2624,3 +2624,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gates | (1) A test proves the researcher receives the dated prefix ahead of the brief, verbatim. (2) The scratch timeline's task note keeps the ORIGINAL brief (the operator sees what they wrote; the date rides only into the executor). (3) No other executor path changes. |
 | Kill | If the prefix would leak into a stored deliverable as if the user had written it, the prefix moves to the executor's system context instead. |
 | AGI feed | Calibration hygiene: a claim about today should never be a prior. |
+
+## E.WEB15/16 — live closure of the screenshot findings (b6fd4ca on staging)
+
+| Field | Value |
+| --- | --- |
+| Verified live | `/api/horizon-history` returns 200 for every listed goal: the three legacy goals honestly report zero lifecycle rows (pre-receipt era), E.F1c reports its three. The cockpit's goal instrument now shows that chain — `SCHEDULED ea481cab → WAKE_STARTED 7856a911 → FAILED faf7ffd0 · chain verified` — instead of "no readable receipts". |
+| Lesson kept | Two composition bugs on one route slipped past tests of the halves; the cure both times was exercising the deployed route with real ids. Route-level extraction is now guarded on `target`, not the stripped path. |

@@ -6747,41 +6747,18 @@ impl ConversationEngine {
             // E.WEB15: the provenance gate as numbers for the instrument column. Parsed from the
             // VERIFIED text report so the console can never show a number the gate did not
             // compute (and a corrupt chain surfaces as unavailable, never as a partial bar).
-            "chains_json" => {
-                // Boxed: this arm re-enters the dispatcher, which is an async fn (E0733).
-                let text = Box::pin(self.cli_dispatch("why chains", ctx)).await;
-                let mut out = serde_json::json!({ "available": false });
-                if let Some(rest) = text.strip_prefix("TOOL CHAIN COMPLETENESS — ") {
-                    let head = rest.split('/').next().unwrap_or("");
-                    let total = rest
-                        .split('/')
-                        .nth(1)
-                        .and_then(|s| s.split_whitespace().next())
-                        .and_then(|s| s.parse::<u64>().ok());
-                    let complete = head.trim().parse::<u64>().ok();
-                    let mut defects = serde_json::Map::new();
-                    for line in text.lines().skip(1) {
-                        if let Some(d) = line.trim().strip_prefix("missing or mismatched ") {
-                            if let Some((name, n)) = d.rsplit_once(": ") {
-                                if let Ok(n) = n.trim().parse::<u64>() {
-                                    defects.insert(name.to_string(), serde_json::json!(n));
-                                }
-                            }
-                        }
-                    }
-                    if let (Some(c), Some(t)) = (complete, total) {
-                        out = serde_json::json!({
-                            "available": true,
-                            "complete": c,
-                            "total": t,
-                            "defects": defects,
-                        });
-                    }
-                } else if text.contains("No tool-chain calls yet") {
-                    out = serde_json::json!({ "available": true, "complete": 0, "total": 0, "defects": {} });
+            // E.WEB15 → typed: the provenance gate as numbers for the instrument column, read
+            // from ONE typed aggregate (Codex's mind-observability report) over the VERIFIED log.
+            // A corrupt chain reads unavailable, never a partial bar; no prose is parsed.
+            "chains_json" => match self.recorder.read_all_verified() {
+                Ok(events) => {
+                    let report = mind_observability::tool_chain_completeness(&events);
+                    let mut v = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
+                    v["available"] = serde_json::json!(true);
+                    v.to_string()
                 }
-                out.to_string()
-            }
+                Err(_) => serde_json::json!({ "available": false }).to_string(),
+            },
             "claims_json" => serde_json::json!({
                 "version": self_claims::REGISTRY_VERSION,
                 "claims": self_claims::CLAIMS.iter().map(|c| serde_json::json!({

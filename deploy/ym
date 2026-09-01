@@ -10,7 +10,11 @@ KEY="${YM_KEY:-$HOME/.ssh/id_deploy}"
 CTL="${YM_CTL_URL:-http://127.0.0.1:8077}"
 ssh_box() { ssh -i "$KEY" -o ConnectTimeout=8 "$BOX" "$@"; }
 # Forward a line to the server-side router; the message is piped via stdin so quotes/spaces never hit a shell.
-ym_send() { printf '%s' "$1" | ssh_box "curl -s -m 150 --data-binary @- $CTL/cli"; echo; }
+# ARCH-2: /cli authenticates every call. The console token is read ON the box inside the ssh
+# session and goes straight into the local curl header — it never crosses the wire or appears
+# in any argv on this side. SSH remains the trust boundary, exactly as before.
+YM_TOKEN_FILE="${YM_TOKEN_FILE:-/var/lib/yantrik-mind/console.token}"
+ym_send() { printf '%s' "$1" | ssh_box "curl -s -m 150 -H \"Authorization: Bearer \$(cat $YM_TOKEN_FILE)\" --data-binary @- $CTL/cli"; echo; }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 

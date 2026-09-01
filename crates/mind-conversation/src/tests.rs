@@ -7769,6 +7769,65 @@ fn rendering_rich_does_not_disturb_read_isolation() {
 // exactly that: the same tool, never the same arguments twice. It fails against the old guard (which
 // would run all 30 scripted steps) and passes against the observation-based one.
 
+// ── E.WEB6: THE CEREMONY WAKES THE BRAIN BEFORE PROMISING ONE ───────────────────────────────────
+
+/// Criterion (1): a live pool preflights ok, and the serving label is captured from the same lane
+/// events the badge uses.
+#[tokio::test]
+async fn brain_preflight_reports_ok_and_the_serving_label() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("ready")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+    let (ok, served) = conv.brain_preflight().await;
+    assert!(ok, "a live pool preflights ok");
+    assert_eq!(
+        served.as_deref(),
+        Some("scripted"),
+        "the serving label is the badge's truth"
+    );
+}
+
+/// Criterion (2): an erroring backend preflights not-ok with no served label — the ceremony's
+/// honest-banner path, decided by the same post-success rule as everything else.
+#[tokio::test]
+async fn brain_preflight_fails_honestly_when_nothing_answers() {
+    struct Dead;
+    impl LLMBackend for Dead {
+        fn chat(
+            &self,
+            _m: &[yantrik_ml::ChatMessage],
+            _c: &yantrik_ml::GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            anyhow::bail!("nothing home")
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "dead"
+        }
+        fn chat_streaming(
+            &self,
+            _m: &[yantrik_ml::ChatMessage],
+            _c: &yantrik_ml::GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+            _on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            anyhow::bail!("nothing home")
+        }
+    }
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = InferencePool::new(Arc::new(Dead) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+    let (ok, served) = conv.brain_preflight().await;
+    assert!(!ok, "a dead pool must not preflight ok");
+    assert!(served.is_none(), "no served label without a usable answer");
+}
+
 // ── E.WEB5: HISTORY IS SERVED UNDER THE DEVICE'S OWN SCOPE ──────────────────────────────────────
 
 /// The web history route builds the same identity the WG chat listener builds; the memory layer's

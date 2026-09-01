@@ -158,8 +158,19 @@ $("name-form").addEventListener("submit", async (e) => {
   const me = await fetch("/api/me", { headers: { "X-YM-Web": "1" } }).then((r) => r.json()).catch(() => ({}));
   if (me.person) $("person-chip").textContent = me.person;
   if (me.operator === false) hideOperatorPanels();
-  input.value = `Hi, I'm ${userName} — that's what you should call me. And we've named you ${mindName}: that's your name now, please use it when you talk about yourself.`;
-  sendTurn();
+  // E.WEB6: wake the brain before promising one. On failure the ceremony stays HONEST — paired,
+  // app open, but no pretend readiness and no intro turn fired into a void.
+  $("mind-state").textContent = "waking the brain…";
+  const check = await postJson("/api/brain-check", {});
+  if (check.ok && check.data && check.data.ok) {
+    $("mind-state").textContent = check.data.served ? "brain ready · " + check.data.served : "brain ready";
+    input.value = `Hi, I'm ${userName} — that's what you should call me. And we've named you ${mindName}: that's your name now, please use it when you talk about yourself.`;
+    sendTurn();
+  } else {
+    $("mind-state").textContent = "brain unreachable — paired; the mind will answer when it's back";
+    input.value = `Hi, I'm ${userName} — that's what you should call me. And we've named you ${mindName}: that's your name now, please use it when you talk about yourself.`;
+    input.focus();
+  }
 });
 
 /* ── transcript persistence (this browser only — the mind's memory is its own) ── */

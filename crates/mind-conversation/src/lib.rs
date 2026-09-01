@@ -11918,6 +11918,38 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         Ok(ans)
     }
 
+    /// E.WEB6: one tiny call to prove a brain answers, BEFORE the ceremony promises one. The
+    /// serving label rides the same lane events the badge uses — no new instrumentation, and the
+    /// label is therefore post-success truth, never the configured route. Household lane on
+    /// purpose: the question is "does anything answer", and household is the lane with fallbacks.
+    pub async fn brain_preflight(&self) -> (bool, Option<String>) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let cfg = GenerationConfig {
+            max_tokens: 8,
+            ..GenerationConfig::default()
+        };
+        let call = TURN_PROGRESS.scope(tx, async {
+            self.inference
+                .chat_scoped(
+                    vec![ChatMessage::user("Reply with the single word: ready")],
+                    cfg,
+                    mind_inference::PrivacyScope::Household,
+                )
+                .await
+        });
+        let ok = matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(25), call).await,
+            Ok(Ok(r)) if !r.text.trim().is_empty()
+        );
+        let mut served = None;
+        while let Ok(p) = rx.try_recv() {
+            if let Some(l) = p.strip_prefix(LANE_MARK) {
+                served = l.split_once(':').map(|(_, label)| label.to_string());
+            }
+        }
+        (ok, served.filter(|_| ok))
+    }
+
     /// The web surface's scoped transcript read (E.WEB5): the SAME lines the engine itself would
     /// see for this identity — an operator reads under the primary's private scope, a member under
     /// their own. Scoping is the memory layer's filter, exercised through the identity, so a route

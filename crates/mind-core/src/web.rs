@@ -745,6 +745,35 @@ fn handle(
                 }
             }
         }
+        ("POST", "/api/brain-check") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "",
+                    "not paired",
+                );
+                return;
+            };
+            let (ok, served) = rt.block_on(conv.brain_preflight());
+            send_json(
+                &mut stream,
+                "200 OK",
+                "",
+                &serde_json::json!({ "ok": ok, "served": served }),
+            );
+        }
         ("GET", "/api/security") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {

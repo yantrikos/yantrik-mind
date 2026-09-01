@@ -2017,3 +2017,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | `ConversationEngine::brain_preflight()`: one tiny Household-lane call (a few tokens, ~25s outer timeout), its serving label captured from the SAME lane events the badge uses — no new instrumentation. POST /api/brain-check for any paired device. The ceremony's name step becomes "waking the brain…": on ok, the intro turn proceeds and the header already shows the real lane; on failure, an HONEST banner — paired, but the brain is not answering right now — and the app still opens (fail-open UX, fail-closed honesty; nothing pretends). |
 | Kill criteria | (1) Scripted pool: preflight ok with the serving label captured. (2) All-dead chain: preflight returns not-ok within the timeout, no served label, and the UI path shows the honest banner (source-guarded copy, no fake ready state). (3) The preflight adds at most one model call, only during the ceremony — never on routine loads. (4) Workspace green. |
 | AGI feed | Capability reliability, sensed before promised: the self-model checks an organ before presenting it — the smallest version of act-only-on-verified-capability. |
+
+## E.WEB6 — RESULTS: the ceremony wakes the brain, and failure gets an honest sentence
+
+| Field | Value |
+| --- | --- |
+| What shipped | `brain_preflight()` — one 8-token Household call under a 25 s timeout, its serving label captured from the SAME post-success lane events as the badge; POST /api/brain-check; the ceremony's name step shows "waking the brain…", then either "brain ready · <label>" and the intro turn, or the honest banner — paired, brain unreachable, the app opens anyway with the intro pre-filled and never fired into a void. Worst first impression: from ~3 minutes of silence to one honest sentence in 25 s. |
+| Kill criteria | (1) Live pool → ok with label ("scripted" in fixture): PASS. (2) Dead backend → not-ok, no label, banner path: PASS. (3) One model call, ceremony-only — the check runs solely on the name-step submit path: by construction. (4) Workspace 1402/0/4: PASS. |
+| AGI feed | Capability sensed before promised — the self-model verifies an organ before presenting it; the seed of act-only-on-verified-capability. |

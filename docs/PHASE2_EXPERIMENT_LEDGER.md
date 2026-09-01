@@ -2850,3 +2850,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Fold | `3917c14` (Board opens threads; orders typed on the Board) + `495e643` (one `agentKey` rule for grouping AND opening). Clean full suites 45 / 1,490 / 0 on both trees. |
 | Witnessed (staging, Playwright, device minted → used → revoked) | Board shows three cards that open threads — the daily order ("fires in 15h"), Ticker Intelligence Agent, staging-smoke. First click on the order card (build 3917c14) landed in a thread titled with the store's name and reading "No such agent." — the opener compared the raw `standing:` name against the stripped grouping key. After 495e643 the same click lands in the thread "pending-tasks-daily" with its scheduled entry. Page errors: none, both runs. |
 | Lesson | Two callers of one convention is two conventions. The key rule is now one function, and the guard checks both call sites, not the regex. |
+
+## E.WEB18b — keyboard activation folded (Codex's residual)
+
+| Field | Value |
+| --- | --- |
+| Fold | `368ba9e`: one `activate` closure for click and Enter/Space on Board cards with `role=button`; `:focus-visible` ring; the new CSS uses the cockpit's `--signal` token (the first cut had guessed an `--accent` token that does not exist). Clean full suite 45 / 1,490 / 0. |
+| Witnessed (staging, Playwright) | Focus the first thread-opening card by script, press Enter → Agents panel, view `thread`, title "pending-tasks-daily"; no page errors. The focus ring itself was NOT witnessed: script-driven `focus()` does not satisfy Chromium's focus-visible heuristic, so `outlineStyle` read "none". The rule is guard-pinned; a human Tab press is the honest witness and is left as such. |

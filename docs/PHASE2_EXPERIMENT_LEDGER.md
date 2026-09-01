@@ -2184,3 +2184,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill criteria | KILL the stamp if any downstream analytic conflates `freeform:` ids with GoalSpec ids in a way that inflates goal coverage claims (the two populations must stay separable); KILL the window-span line if it would print anything but timestamps/counts. |
 | Noted residual (not this slice) | Malformed calls record an observation with no prediction BY DESIGN (P.2d: nothing to predict) yet the checker requires a prediction link — zero such rows in the live window today; the contract question goes to Codex's evaluator lane. |
 | AGI feed | Phase A directly: the live loop joins the observation contract, unblocking Phase C (evaluator identity) and Phase F (goal identity) from measuring a log production actually writes. |
+
+## E.AGI-A2 — RESULT: the first fresh call under the new binary passes the gate
+
+| Field | Value |
+| --- | --- |
+| Reading (2026-09-01, staging canary at e942f72, live decision log) | Drove ONE tool-using turn (calc lookup, outcome Empty — a first-class recorded pair). `why chains`: **1/16 complete (6.2%)** — and the 1 is the fresh call. Window span line live: ts_ms 1787927043382..1788242766921. |
+| The stratigraphy (the defect counts date the binaries) | 6 calls missing ALL fields (pre-stamping era) · 9 calls missing ONLY goal_id (stamped era, pre-A2 — the defect this slice fixed) · 1 call complete (this binary). The provenance log is a fossil record of its own instrumentation history, and the report now says so with dates. |
+| Prediction vs outcome | Prereg: "fresh live tool calls read complete; the aggregate rises only as new traffic displaces history." Confirmed on first contact. The 6.2% aggregate is history, not defect — and will climb one call at a time. |
+| Doctrine 1 status | The live loop's observation contract is now REACHABLE: witnessed end-to-end on a live box, not only in the integration test. Prod confirmation pending deploy (blocked on session permissions, flagged to the operator). |
+| AGI feed | Phase A's completeness gate now measures a log production actually writes. Phase C (evaluator identity) and Phase F (goal identity) have a live substrate. |

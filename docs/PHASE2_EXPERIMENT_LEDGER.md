@@ -2407,3 +2407,14 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What stands vs what dies | Gate-4 placement and corrected anchors pass static audit; focused tests pass. The typed-registry + deterministic-verbatim-renderer ARCHITECTURE stands. The keyword ROUTING mechanism is refuted for generalization and stops here. |
 | Process forward (agreed) | This row lands BEFORE plaintext disclosure; on disclosure the v2 set burns into permanent regressions; any next routing mechanism requires its own prereg AND a fresh independently sealed v3 authored before that code. Non-routing repairs (clippy id-in-provenance, version bump to `self-claims-v2` so distinct contents carry distinct stamps) are declared here and must not touch match terms — Codex verifies the diff. Prod stays held for this surface. |
 | AGI feed | Phase B's honest ledger: deterministic ANSWERING is proven; deterministic ROUTING by hand lexicon is disproven at 2/10. The open problem is now precisely named — routing generalization — which is what the next prereg must solve, not paper over. |
+
+## E.F1 — RESULT: the goal survives its death and wakes on time; the segment fails its contract; the receipts cannot tell the story
+
+| Field | Value |
+| --- | --- |
+| Gate 1 — durability: PASS | The goal was witnessed PENDING with its schedule intact AFTER the operator restart killed the process mid-flight (PID 43841→44015 at 16:37:20Z, ~5.5 min into the 15). Phase F's core property is real: a goal is not a process. |
+| Gate 2 — wake: PARTIAL | The wake fired on schedule (headless-tick at 16:46:19Z) — and execution failed its own segment contract: `segment_contract_failed`, actions 0/1, "stopped safely; its scheduled segment needs local review." Fail-closed, no writes, no invented success. |
+| Gate 3 — accounting: FAIL | `horizon history` reconstructs only the terminal checkpoint. Creation, the interruption gap, recovery, and the wake attempt are not in the receipt trail — a recovery that cannot narrate itself is FAILED-ACCOUNTING as pre-written (E.R2's sin, still unpaid on this surface). |
+| Gate 4 — read-only: PASS | Zero actions, zero writes, safe stop. |
+| Attribution honesty | The interruption is NOT established as the cause of the execution failure: a pre-existing goal on the same box shows `legacy_unclassified_failure` with zero interruptions — the segment runner may fail at baseline. **Control preregistered here as E.F1b: an identical 15-minute goal, created the same way, NEVER interrupted. If it also fails its segment, the defect is the runner's baseline and the restart is exonerated; if it succeeds, the interruption path is implicated.** Kill criteria inherit from E.F1. |
+| AGI feed | Phase F's first live measurement, exactly as the row promised: durability PROVEN on a real interruption, execution and accounting named as the broken rungs — with the control that will say which defect belongs to whom. |

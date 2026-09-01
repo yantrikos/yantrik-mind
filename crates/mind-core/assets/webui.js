@@ -174,9 +174,13 @@ async function loadInstruments() {
     const rows = r.ok ? ((await r.json()).decisions || []) : [];
     const shadow = rows.find((d) => d.kind === "world_shadow");
     // E.G1c: two samples, never pooled — say which one this is.
-    const sample = (shadow && shadow.goal_id || "").endsWith(":knock-receptivity") ? "paired · at a knock decision"
-      : (shadow && shadow.goal_id || "").endsWith(":headless-cadence") ? "unpaired · headless cadence"
+    const gid = (shadow && shadow.goal_id) || "";
+    const sample = gid.endsWith(":knock-receptivity") ? "paired · at a knock decision"
+      : gid.endsWith(":headless-cadence") ? "unpaired · headless cadence"
       : "sample unlabelled";
+    // The header names the sample too, so the card never reads as a knock decision on a box
+    // that cannot make one.
+    $("shadow-sample").textContent = !shadow ? "presence" : sample.split(" · ")[0];
     $("shadow-text").textContent = shadow
       ? `presence: ${shadow.outcome || "?"} · ${hhmmss(shadow.ts_ms)}\n${sample} · never consulted by any decision`
       : "no shadow verdict recorded yet";

@@ -2525,6 +2525,15 @@ mod tests {
             body.contains("fetch(\"/api/chains\""),
             "gate read from the server"
         );
+        // E.AGI-A5: the headline is this binary's window; all-time is printed beneath, never
+        // dropped — a number always travels with its window's name.
+        assert!(
+            body.contains("g.since_start && g.since_start.report")
+                && body.contains("% since start")
+                && body.contains("no calls since start")
+                && body.contains("`all-time ${g.complete} / ${g.total}"),
+            "the gate shows since-start as headline with all-time beneath"
+        );
         assert!(
             body.contains("fetch(\"/api/horizons\""),
             "goal read from the server"

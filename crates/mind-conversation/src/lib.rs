@@ -90,8 +90,22 @@ mod privacy_audit;
 mod proactive;
 pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
 #[cfg(test)]
+mod chains_window_tests;
+#[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
+
+/// E.AGI-A5: when this process started, fixed on first use (the engine constructor touches it),
+/// so "since this binary started" means one thing for the life of the process.
+static PROCESS_STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+pub(crate) fn process_started_ms() -> u64 {
+    *PROCESS_STARTED_MS.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    })
+}
 pub(crate) mod research;
 mod say;
 pub mod scoreboard;
@@ -4984,6 +4998,8 @@ impl ConversationEngine {
         inference: InferencePool,
         persona: impl Into<String>,
     ) -> Self {
+        // E.AGI-A5: pin "since this binary started" at construction, not at first report.
+        let _ = process_started_ms();
         // E.OBS1: the lane badge's single source of truth. The dispatch boundary fires with the
         // scope it enforced and the provider that served; this forwards it onto the turn's own
         // progress channel (a no-op outside a streaming scope). First install wins process-wide,
@@ -6761,6 +6777,18 @@ impl ConversationEngine {
                     match serde_json::to_value(&report) {
                         Ok(mut v) => {
                             v["available"] = serde_json::json!(true);
+                            // E.AGI-A5: the same aggregate over the events of THIS binary only,
+                            // beside the all-time figure (which is untouched above). The window
+                            // is always named by its start, so a number never travels alone.
+                            let since = process_started_ms();
+                            let windowed = Self::completeness_since(&events, since);
+                            if let Ok(w) = serde_json::to_value(&windowed) {
+                                v["since_start"] = serde_json::json!({
+                                    "since_ms": since,
+                                    "label": "since this binary started",
+                                    "report": w,
+                                });
+                            }
                             v.to_string()
                         }
                         Err(_) => serde_json::json!({ "available": false }).to_string(),
@@ -7715,6 +7743,33 @@ impl ConversationEngine {
                 }
                 if prefix == "resources" {
                     return verified_report(mind_observability::render_model_call_resources);
+                }
+                // E.AGI-A5: the same gate, both windows named — all-time beside "since this
+                // binary started" — so stratigraphy from an older binary cannot hide the current one.
+                if prefix == "chains since-start" {
+                    return match self.recorder.read_all_verified() {
+                        Ok(events) => {
+                            let since = process_started_ms();
+                            let fresh: Vec<mind_observability::DecisionEvent> =
+                                events.iter().filter(|e| e.ts_ms >= since).cloned().collect();
+                            let when = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since as i64)
+                                .map(|t| t.format("%Y-%m-%d %H:%M:%SZ").to_string())
+                                .unwrap_or_else(|| since.to_string());
+                            format!(
+                                "WINDOW: since this binary started ({when}) — {} event(s)
+{}
+
+WINDOW: all-time, latest 200
+{}",
+                                fresh.len(),
+                                mind_observability::render_tool_chain_completeness(&fresh),
+                                mind_observability::render_tool_chain_completeness(&events)
+                            )
+                        }
+                        Err(valid) => format!(
+                            "DECISION ANALYTICS UNAVAILABLE — the decision log failed integrity after {valid} valid event(s); repair or rotate it before using this report."
+                        ),
+                    };
                 }
                 if prefix == "chains" {
                     return verified_report(mind_observability::render_tool_chain_completeness);
@@ -9928,6 +9983,21 @@ impl ConversationEngine {
             .unwrap_or_default();
         let routed = self_claims::parse_route(&raw);
         (raw, routed)
+    }
+
+    /// E.AGI-A5: the completeness aggregate over the events of one window only — the SAME
+    /// function the all-time figure uses, fed fewer events. Pure, so a fixture can pin that the
+    /// window never admits an event before its start and never changes the all-time number.
+    pub(crate) fn completeness_since(
+        events: &[mind_observability::DecisionEvent],
+        since_ms: u64,
+    ) -> mind_observability::ToolChainCompleteness {
+        let windowed: Vec<mind_observability::DecisionEvent> = events
+            .iter()
+            .filter(|e| e.ts_ms >= since_ms)
+            .cloned()
+            .collect();
+        mind_observability::tool_chain_completeness(&windowed)
     }
 
     /// E.MQ6, the whole two-stage router over any pool: stage 1 is deterministic and emits at

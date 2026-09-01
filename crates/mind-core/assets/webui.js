@@ -118,7 +118,17 @@ async function loadInstruments() {
     else if (!g.total) { score.textContent = "no calls yet"; }
     else {
       const pct = (100 * g.complete / g.total).toFixed(1);
-      score.textContent = `${g.complete} / ${g.total} · ${pct}%`;
+      // E.AGI-A5: the headline is THIS binary's own honesty; the all-time figure sits beneath it,
+      // so an older binary's stratigraphy can neither flatter nor hide the one that is running.
+      const fresh = g.since_start && g.since_start.report;
+      if (fresh) {
+        score.textContent = fresh.total
+          ? `${fresh.complete} / ${fresh.total} · ${(100 * fresh.complete / fresh.total).toFixed(1)}% since start`
+          : "no calls since start";
+        const sub = el("span"); sub.textContent = `all-time ${g.complete} / ${g.total} · ${pct}%`; legend.appendChild(sub);
+      } else {
+        score.textContent = `${g.complete} / ${g.total} · ${pct}%`;
+      }
       const defects = g.defects || {};
       const incomplete = g.total - g.complete;
       const eraOld = Math.min(defects.actor || 0, incomplete);

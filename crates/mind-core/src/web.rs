@@ -279,6 +279,48 @@ fn operator(
     }
 }
 
+/// E.WEB11: the published-pages directory — the ONE folder the Files listing may read, fixed
+/// server-side. Same source the static server on :8088 serves; the client never names a path.
+fn published_pages_dir() -> String {
+    std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string())
+}
+
+/// List the published pages: files only, servable extensions only, no dotfiles, no traversal —
+/// the directory is fixed and the client supplies no path, so there is nothing to traverse WITH.
+fn list_published_pages() -> Vec<serde_json::Value> {
+    const ALLOWED: &[&str] = &[
+        ".html", ".txt", ".css", ".js", ".json", ".png", ".jpg", ".svg",
+    ];
+    let dir = published_pages_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue; // no dotfiles
+        }
+        let low = name.to_lowercase();
+        if !ALLOWED.iter().any(|x| low.ends_with(x)) {
+            continue; // servable types only
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() {
+            continue; // files only — never a subdir, never a symlink to elsewhere
+        }
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        out.push(serde_json::json!({ "name": name, "size": meta.len(), "modified_ms": modified }));
+    }
+    out.sort_by(|a, b| b["modified_ms"].as_u64().cmp(&a["modified_ms"].as_u64()));
+    out
+}
+
 /// The identity a WEB device speaks and reads as (E.WEB5). Same rule as the WG chat listener:
 /// an operator device is the primary's private surface; a member device is Principal-scoped as its
 /// bound person, NEVER operator — and history reads use the same identity as turns, so a route
@@ -1008,6 +1050,29 @@ fn handle(
         }
         // Panels below are read surfaces over structures the engine already maintains. Settings and
         // devices are operator-only: a member browser gets the chat, not the cockpit.
+        ("GET", "/api/files") => {
+            let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
+                send(
+                    &mut stream,
+                    "401 Unauthorized",
+                    "text/plain",
+                    "",
+                    "not paired",
+                );
+                return;
+            };
+            // The web static server's port, for building the shareable links the client shows.
+            let web_port: u16 = std::env::var("YM_WEB_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8088);
+            send_json(
+                &mut stream,
+                "200 OK",
+                "",
+                &serde_json::json!({ "files": list_published_pages(), "web_port": web_port }),
+            );
+        }
         ("GET", "/api/plugins") => {
             let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -1912,6 +1977,46 @@ mod tests {
         let body = &APP_JS[start..start + 400];
         assert!(!body.contains("fetch("), "columnFor must not fetch");
         assert!(!body.contains("postJson"), "columnFor must not mutate");
+    }
+
+    /// E.WEB11: the Files listing reads ONLY the fixed published-pages dir — a file outside it and
+    /// a dotfile inside it never appear, and only servable extensions do.
+    #[test]
+    fn files_listing_is_confined_to_the_published_dir() {
+        let _env = WEB_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("ym-files-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("ym-files-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("dashboard.html"), "<html></html>").unwrap();
+        std::fs::write(dir.join(".secret.html"), "hidden").unwrap();
+        std::fs::write(dir.join("notes.md"), "not servable").unwrap();
+        std::fs::write(outside.join("elsewhere.html"), "<html></html>").unwrap();
+        std::env::set_var("YM_WEB_DIR", dir.to_string_lossy().to_string());
+
+        let names: Vec<String> = super::list_published_pages()
+            .into_iter()
+            .filter_map(|f| f["name"].as_str().map(String::from))
+            .collect();
+        assert!(
+            names.contains(&"dashboard.html".to_string()),
+            "servable file listed: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with('.')),
+            "no dotfiles: {names:?}"
+        );
+        assert!(
+            !names.contains(&"notes.md".to_string()),
+            "non-servable excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"elsewhere.html".to_string()),
+            "nothing outside the dir: {names:?}"
+        );
+        std::env::remove_var("YM_WEB_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

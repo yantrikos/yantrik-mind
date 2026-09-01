@@ -70,6 +70,9 @@
         <button class="nav-item" data-panel="board">
           <span class="nav-ico">▦</span> Board
         </button>
+        <button class="nav-item" data-panel="files">
+          <span class="nav-ico">▤</span> Files
+        </button>
         <button class="nav-item" data-panel="activity">
           <span class="nav-ico">≣</span> Activity
         </button>
@@ -154,6 +157,15 @@
           <div class="cap-group">Standing orders</div>
           <pre id="orders-text" class="orders glass">…</pre>
         </div>
+      </div>
+
+      <!-- Files: the mind's published pages -->
+      <div class="panel" id="panel-files">
+        <header class="panel-head">
+          <h2>Files</h2>
+          <p class="panel-sub">Pages the mind has published. Served read-only on the local network; links open the live page.</p>
+        </header>
+        <div class="cards" id="files-cards"><p class="loading">reading published pages…</p></div>
       </div>
 
       <!-- Board: kanban over agents + horizons + orders -->

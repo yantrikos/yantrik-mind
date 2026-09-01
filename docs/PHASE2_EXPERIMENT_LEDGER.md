@@ -2085,3 +2085,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design, deliberately narrow | GET /api/files: list ONLY the published-pages directory (`YM_WEB_DIR`, default /var/lib/yantrik-mind/public), files only, name + size + mtime, with the SAME confinement the static server already enforces — canonicalize, reject dotfiles, allowlist the servable extensions, never traverse. No arbitrary path input from the client (the directory is fixed server-side); the client cannot ask for another folder. A Files card in the app links each entry to its existing :8088 URL. Read-only; no upload, no delete (those are separate, riskier slices). |
 | Kill criteria | (1) The listing contains only files inside the fixed dir — a guard test seeds a file outside it and a dotfile inside and asserts neither appears. (2) No client-supplied path reaches the filesystem — the route takes no path parameter. (3) A missing/empty dir yields an empty list, not an error. (4) Workspace green. |
 | AGI feed | The mind's own outputs made discoverable — the artifact surface a future "show me what I made" self-review would read; small, but it closes the loop between the mind producing pages and anyone finding them. |
+
+## E.WEB11 — RESULTS: the mind's published pages, discoverable in the app
+
+| Field | Value |
+| --- | --- |
+| What shipped | GET /api/files lists the fixed published-pages directory (`YM_WEB_DIR`) — files only, servable extensions, no dotfiles, no client-supplied path; a Files panel links each to its live :8088 URL. Read-only; upload/delete deliberately deferred as riskier slices. |
+| Kill criteria | (1) `files_listing_is_confined_to_the_published_dir` seeds a file outside the dir, a dotfile inside, and a non-servable extension, and asserts only the servable in-dir file appears: PASS. (2) The route takes no path parameter — nothing to traverse with. (3) Missing dir → empty list. (4) Workspace 1406/0/4: PASS. |
+| AGI feed | The mind's own outputs made discoverable — the artifact surface a "show me what I made" self-review would read. |

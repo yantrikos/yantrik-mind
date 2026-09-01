@@ -91,6 +91,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     if (btn.dataset.panel === "devices") loadDevices();
     if (btn.dataset.panel === "tasks") loadTasks();
     if (btn.dataset.panel === "board") loadBoard();
+    if (btn.dataset.panel === "files") loadFiles();
     if (btn.dataset.panel === "activity") loadActivity();
     if (btn.dataset.panel === "chat") input.focus();
   });
@@ -404,6 +405,32 @@ function columnFor(kind, status) {
   if (s.includes("pending") || s.includes("scheduled") || s.includes("sleep")) return "scheduled";
   if (s.includes("done") || s.includes("complete") || s.includes("finish")) return "done";
   return "running";
+}
+
+async function loadFiles() {
+  const host = $("files-cards");
+  try {
+    const r = await fetch("/api/files", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 401) { host.replaceChildren(textP("Not paired.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    const files = data.files || [];
+    if (!files.length) { host.appendChild(textP("No published pages yet — the mind creates these when it publishes a dashboard.")); return; }
+    const origin = `${location.protocol}//${location.hostname}:${data.web_port || 8088}/`;
+    for (const f of files) {
+      const card = el("div", "card setting-row");
+      const main = el("div", "card-main");
+      const a = el("a"); a.href = origin + encodeURIComponent(f.name); a.target = "_blank"; a.rel = "noopener noreferrer";
+      a.textContent = f.name; a.className = "card-title";
+      main.appendChild(a);
+      const meta = el("div", "setting-key");
+      const kb = f.size > 1024 ? (f.size / 1024).toFixed(1) + " KB" : f.size + " B";
+      meta.textContent = `${kb}${f.modified_ms ? " · " + new Date(f.modified_ms).toLocaleString() : ""}`;
+      main.appendChild(meta);
+      card.appendChild(main);
+      host.appendChild(card);
+    }
+  } catch (_) { host.replaceChildren(textP("Could not read published pages.")); }
 }
 
 async function loadBoard() {

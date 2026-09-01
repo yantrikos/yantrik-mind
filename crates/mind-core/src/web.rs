@@ -956,7 +956,10 @@ fn handle(
                 // Codex's E.WEB14 composition audit: the client percent-encodes the id (colons
                 // become %3A) and the server validated the RAW value — every real request was a
                 // 400. Decode first, then validate the decoded id against the charset.
-                let id = horizon_history_id(p).unwrap_or_default();
+                // The route matches on `path` (query stripped); the id lives in the QUERY, so the
+                // extractor must read `target`. Passing `p` here made every request a 400 on
+                // staging — found by curling each listed goal after the decode fix "landed".
+                let id = horizon_history_id(&target).unwrap_or_default();
                 if id.is_empty()
                     || id.len() > 64
                     || !id
@@ -2397,6 +2400,18 @@ mod tests {
             horizon_history_id("/api/horizon-history?id=%zz"),
             None,
             "bad escape refused"
+        );
+        // The route must hand the extractor the FULL target: a query-stripped path has no id.
+        assert_eq!(
+            horizon_history_id("/api/horizon-history"),
+            None,
+            "no query, no id"
+        );
+        let src = include_str!("web.rs");
+        let arm = src.find("p.starts_with(\"/api/horizon-history\")").unwrap();
+        assert!(
+            src[arm..arm + 900].contains("horizon_history_id(&target)"),
+            "the route reads the id from target (with query), never from the stripped path"
         );
         let smuggled = horizon_history_id("/api/horizon-history?id=..%2Fetc").unwrap();
         assert!(

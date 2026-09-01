@@ -2469,3 +2469,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What E.F1c actually proved | Accounting PASS, vocabulary FAIL — nothing more. The localization is withdrawn. |
 | The code-supported suspect (Codex's find) | `MindRecipeHost::due_tasks` treats the VALID EMPTY state as an error (`bail!("no tasks due soon")`) — so E.F1c's concrete goal ("report how many tasks are pending") fails precisely when the true answer is ZERO. An empty observation collapsed into a failure: E.PK2b's ran-vs-worked lesson, resurfacing in the horizon host. Codex has an end-to-end regression matching the exact goal shape: fails on pre-fix semantics, completes with a verified COMPLETED receipt post-fix. |
 | In review (Codex's uncommitted slices) | (a) bounded failure vocabulary (segment_tool_execution_failed / segment_reasoning_failed / segment_execution_failed, privacy-preserving); (b) post-execution wall-clock for FAILED receipts (closes the clock artifact); (c) horizon-owned run IDs excluded from generic recipe recovery (restart double-execution hazard); (d) the due_tasks empty-state repair. |
+
+## E.F1d — the fixed runner meets the goal that failed three times (prereg)
+
+| Field | Value |
+| --- | --- |
+| Design | The exact E.F1c goal ("check tasks and report how many are pending"), staging at b06db9a. Expectation from Codex's end-to-end regression: **first COMPLETED lifecycle chain** — SCHEDULED → WAKE_STARTED → COMPLETED, verified receipts, the zero-tasks answer delivered as bounded data, no active checkpoint left behind. |
+| Gates | (1) Terminal receipt is COMPLETED, chain verifies. (2) FAILED-if-any carries a typed class AND a post-execution timestamp strictly after WAKE_STARTED. (3) Result stated only from receipts. |
+| Kill | If it fails with the OLD bare vocabulary or a reused timestamp, the fold did not reach the box — deployment/provenance investigation before anything else. |

@@ -2512,3 +2512,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gate 3 — data-free receipts: PASS | Full serialization shared with Codex precisely BECAUSE it is safe: state digests and hashes only. |
 | Gate 4 — peer verification: PENDING | Full serialized lifecycle + outcome receipts sent to Codex (feb8bf22). This row's status becomes final only on its verdict — as preregistered. |
 | The evening's Phase F ledger, honest form | Durable: PROVEN (E.F1). Accounted: PROVEN live (E.F1c receipts). Executed: PROVEN (E.F1d). Delivered: PROVEN with residual (this row). Planned deterministically: folded at 90a795c, CLOSED only after repeated live trials per Codex's own caveat. |
+
+## Planner determinism — live repeat-trials: 5/5 accepts on greedy vs 3/5 on sampling
+
+| Field | Value |
+| --- | --- |
+| Trials (staging at 90a795c) | Five identical creation attempts of the exact phrase that previously refused twice: **5/5 scheduled.** All five trial goals cancelled immediately (control receipts 7871ca49, 53878ce3, 7211df8e, ce578a18, cd8a021f — the cancel path incidentally exercised five more times, all clean). |
+| Honest status | Baseline was 3 accepts / 2 refusals over 5 attempts; greedy shows 5/5. Codex's caveat stands in spirit — backend nondeterminism could still surface at larger N — but the twice-witnessed refusal mode has not recurred once under greedy decoding. Status: CLOSED-AT-N=5, reopenable by any future refusal, which the ledger would record as a new row. |

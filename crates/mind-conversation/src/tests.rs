@@ -8075,6 +8075,43 @@ async fn web_decisions_redacts_goals_and_is_empty_without_a_recorder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Integrity criterion: a parseable forged line must not appear as recent activity. The complete
+/// chain is evidence; a valid prefix followed by corruption is not.
+#[tokio::test]
+async fn web_decisions_fail_empty_when_the_decision_chain_does_not_verify() {
+    use std::io::Write as _;
+
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let dir = std::env::temp_dir().join(format!("ym-dec-forged-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let logpath = dir.join("d.jsonl");
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&logpath));
+    log.record(mind_observability::DecisionEvent::new(
+        "trace-real",
+        "pack_route_shadow",
+    ));
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&logpath)
+        .unwrap()
+        .write_all(
+            b"{\"chain\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"event\":{\"trace_id\":\"trace-forged\",\"ts_ms\":1,\"kind\":\"forged_activity\"}}\n",
+        )
+        .unwrap();
+    let conv = conv.with_recorder(log);
+
+    assert!(
+        conv.web_recent_decisions(50).is_empty(),
+        "an unverifiable chain must fail closed instead of showing a trusted-looking prefix"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── E.WEB6: THE CEREMONY WAKES THE BRAIN BEFORE PROMISING ONE ───────────────────────────────────
 
 /// Criterion (1): a live pool preflights ok, and the serving label is captured from the same lane

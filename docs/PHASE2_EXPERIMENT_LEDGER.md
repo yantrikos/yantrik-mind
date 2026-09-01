@@ -2135,3 +2135,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The finding | Codex's post-fold review: `web_recent_decisions` (E.WEB7) read the log via raw `read_events`, not the hash-chain-verified `read_tail_verified` that landed in the fold. The web feed could therefore serve a tampered or truncated log. |
 | The fix | `web_recent_decisions` now uses `recorder.read_tail_verified(limit)` — the whole chain is validated before slicing, each event is sanitized by the reader, and ANY corruption returns Err, in which case the web feed WITHHOLDS EVERYTHING rather than serve a compromised log. A disabled recorder still yields an empty Ok feed; the existing redaction test passes unchanged. Workspace 1441/0/4. |
 | AGI feed | Integrity of the mind's self-observation surface: the operator's window onto the decision trace cannot be quietly falsified — the precondition for trusting any oversight or learning loop that reads it. |
+
+## E.WEB7b closure — the forged-chain regression test (Codex-authored, folded)
+
+| Field | Value |
+| --- | --- |
+| The gap | E.WEB7b shipped the fail-closed behavior but no adversarial regression pinned it: nothing proved a VALID PREFIX plus one parseable forged line yields an EMPTY feed rather than a trusted-looking prefix. |
+| The test | `web_decisions_fail_empty_when_the_decision_chain_does_not_verify` (Codex-authored): records one genuine event, appends a parseable line with a zeroed chain hash, asserts `web_recent_decisions` returns nothing. Green on both workspaces; fmt clean. |
+| AGI feed | The oversight surface's integrity contract is now regression-locked — future refactors of the decision reader cannot silently weaken fail-closed without a red test. |

@@ -2746,3 +2746,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Guards | One disposition event per evaluation (source + fixture test); the id appears on both rows; the disposition enum equals the exit points in the source (a guard that fails when a `return None` is added without a disposition); nothing on the decision path reads either event. Testable on the existing knock fixtures — no Telegram box needed for the instrumentation, only for the sample. |
 | Kill | Any change to what `maybe_knock` sends or holds (existing knock tests must pass unmodified); more than one disposition per evaluation; an evaluation with a shadow row and no disposition, or vice versa. |
 | AGI feed | Phase G. Reachability is not a verdict stream; it is a verdict you can join to the decision it shadowed. |
+
+## E.G1c — cadence witness (uninterrupted)
+
+| Field | Value |
+| --- | --- |
+| Reading (staging, 22:08:47Z) | Service up since 21:57:19 UTC (366d2a8). `world_shadow` rows at 21:41:07, 21:49:19, 21:57:19.881 (each the first beat after a deploy) and **22:07:19.881** — exactly 600,000 ms after the last first-beat, no restart between. Four rows, all `worldshadow:headless-cadence`, all `unknown` (no PRIMARY turn on the canary since restart). |
+| Lesson recorded | Every deploy restarts the beat counter, so a cadence witness must be timed from the LAST restart and the box left alone for the interval. Two of my own redeploys (723bcd8, 366d2a8) reset the first attempt; the freeze was self-imposed and held. |
+| Status | E.G1c CLOSED on live evidence; Codex sent the timestamps for independent recomputation. |

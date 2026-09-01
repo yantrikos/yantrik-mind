@@ -137,15 +137,25 @@ async function loadInstruments() {
     const r = await fetch("/api/horizons", H);
     const data = r.ok ? await r.json() : { goals: [] };
     const goals = data.goals || [];
-    const pick = goals.find((g) => (g.queue_status || "") === "running") || goals.find((g) => (g.queue_status || "") === "pending") || goals[0];
+    // Prefer live work, then the NEWEST goal; and fall through past goals whose receipts predate
+    // the receipt surface (their history is unreadable) so the card shows a real chain.
+    const ordered = [
+      ...goals.filter((g) => (g.queue_status || "") === "running"),
+      ...goals.filter((g) => (g.queue_status || "") === "pending"),
+      ...goals.slice().reverse(),
+    ];
     const title = $("goal-title"), state = $("goal-state"), chain = $("goal-chain"), foot = $("goal-foot");
     chain.replaceChildren();
-    if (!pick) { title.textContent = "Goal"; state.textContent = "none carried"; foot.textContent = ""; }
+    let pick = null, h = null;
+    for (const g of ordered) {
+      const hr = await fetch(`/api/horizon-history?id=${encodeURIComponent(g.goal_id)}`, H);
+      const body = hr.ok ? await hr.json().catch(() => null) : null;
+      if (body && body.lifecycle && body.lifecycle.length) { pick = g; h = body; break; }
+    }
+    if (!pick) { title.textContent = "Goal"; state.textContent = goals.length ? "no readable receipts" : "none carried"; foot.textContent = ""; }
     else {
       title.textContent = "Goal · " + (pick.objective || pick.goal_id);
       state.textContent = pick.queue_status || pick.status || "?";
-      const hr = await fetch(`/api/horizon-history?id=${encodeURIComponent(pick.goal_id)}`, H);
-      const h = hr.ok ? await hr.json() : null;
       if (h && h.lifecycle) {
         let prev = null;
         for (const ev of h.lifecycle) {
@@ -171,7 +181,9 @@ async function loadInstruments() {
       const v = d.verdict ? ` · ${d.verdict}` : "";
       const c = d.confidence != null ? ` · p ${Number(d.confidence).toFixed(2)}` : "";
       const cls = d.kind === "tool_observed" ? "" : d.kind === "tool_predicted" ? "mid" : "old";
-      lines.appendChild(evLine(cls, d.kind || "?", `${d.chosen || d.outcome || ""}${v}${c}`, hhmmss(d.ts_ms)));
+      // observed: the verdict is the story; shadow: the verdict text; else: what was chosen
+      const what = d.kind === "tool_observed" ? (d.verdict || "") : d.kind === "world_shadow" ? (d.outcome || "") : (d.chosen || "");
+      lines.appendChild(evLine(cls, d.kind || "?", `${what}${d.kind === "tool_observed" ? "" : v}${c}`, hhmmss(d.ts_ms)));
     }
     if (!rows.length) lines.appendChild(textP("nothing recorded yet"));
   } catch (_) { $("shadow-text").textContent = "unavailable"; }
@@ -702,6 +714,8 @@ async function loadActivity() {
 
 async function loadTasks() {
   const host = $("job-cards");
+  loadTemplates();
+  loadAllowance();
   try {
     const r = await fetch("/api/tasks", { headers: { "X-YM-Web": "1" } });
     if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
@@ -712,27 +726,53 @@ async function loadTasks() {
     // newest first — the board reads like a feed
     for (const j of [...jobs].reverse()) {
       const state = String(j.state || j.status || "?").toLowerCase();
-      if (state.includes("run")) anyRunning = true;
-      const card = el("div", "card setting-row");
-      const main = el("div", "card-main");
-      const t = el("div", "card-title"); t.textContent = j.name || j.id; main.appendChild(t);
-      const d = el("div", "card-desc"); d.textContent = j.task || j.goal || ""; main.appendChild(d);
-      if (d.textContent.length > 280) {
-        d.classList.add("clamp");
-        const more = el("button", "link-btn"); more.textContent = "show full brief";
-        more.addEventListener("click", () => { const c = d.classList.toggle("clamp"); more.textContent = c ? "show full brief" : "hide"; });
-        main.appendChild(more);
+      const running = state.includes("run");
+      if (running) anyRunning = true;
+      const card = el("div", "run " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
+      // head: name · state · elapsed
+      const head = el("div", "run-head");
+      const name = el("span", "run-name"); name.textContent = j.name || j.id; head.appendChild(name);
+      const st = el("span", "job-state " + (running ? "running" : state.includes("fail") ? "failed" : "done"));
+      st.textContent = state; head.appendChild(st);
+      const kind = el("span", "tag"); kind.textContent = j.kind || "agent"; head.appendChild(kind);
+      const elapsed = el("span", "run-elapsed");
+      const notes = Array.isArray(j.notes) ? j.notes : [];
+      const lastT = notes.length ? notes[notes.length - 1].t : null;
+      const endMs = running ? Date.now() : (j.finished_ms || lastT || j.started_ms);
+      elapsed.textContent = j.started_ms ? `${fmtTs(j.started_ms)} · ${fmtElapsed(endMs - j.started_ms)}${running ? " and counting" : ""}` : "";
+      head.appendChild(elapsed);
+      card.appendChild(head);
+      // the brief, clamped — never dumped
+      const brief = el("div", "card-desc"); brief.textContent = j.task || j.goal || ""; card.appendChild(brief);
+      if (brief.textContent.length > 280) {
+        brief.classList.add("clamp");
+        const more = el("button", "link-btn"); more.type = "button"; more.textContent = "show full brief";
+        more.addEventListener("click", () => { const c = brief.classList.toggle("clamp"); more.textContent = c ? "show full brief" : "hide"; });
+        card.appendChild(more);
       }
+      // the timeline: started → each note → finished, from the job's own timestamps
+      const tl = el("div", "timeline");
+      const addStep = (t, text, terminal) => {
+        const row = el("div", "tl" + (terminal ? " terminal" : ""));
+        const tt = el("span", "tl-t"); tt.textContent = t ? fmtTs(t) : ""; row.appendChild(tt);
+        const tx = el("span", "tl-text"); tx.textContent = text; row.appendChild(tx);
+        tl.appendChild(row);
+      };
+      if (j.started_ms) addStep(j.started_ms, "started");
+      for (const n of notes) addStep(n.t, String(n.note || ""));
+      if (!running) addStep(j.finished_ms || lastT || null, state.includes("fail") ? "failed" : "finished", true);
+      else addStep(null, "working…", true);
+      card.appendChild(tl);
+      // the result, rendered — model output is hostile input, so DOM-only markdown
       if (j.result) {
-        const res = el("div", "job-result"); res.textContent = String(j.result); main.appendChild(res);
+        const md = el("div", "md");
+        renderMarkdown(md, String(j.result));
+        card.appendChild(md);
       }
-      const notes = Array.isArray(j.notes) ? j.notes.length : 0;
-      const meta = el("div", "setting-key");
-      meta.textContent = `${j.id}${notes ? ` · ${notes} note${notes > 1 ? "s" : ""}` : ""}`;
-      main.appendChild(meta);
+      const meta = el("div", "setting-key"); meta.textContent = j.id; card.appendChild(meta);
       const actions = el("div", "job-actions");
       for (const [verb, label, ask] of [["keep", "Keep", null], ["drop", "Drop scratch", null], ["delete", "Delete", "Delete this job's record from the board?"]]) {
-        const b = el("button"); b.textContent = label;
+        const b = el("button"); b.type = "button"; b.textContent = label;
         b.addEventListener("click", async () => {
           if (ask && !confirm(ask)) return;
           const res = await postJson("/api/task-action", { verb, id: j.id });
@@ -741,21 +781,91 @@ async function loadTasks() {
         });
         actions.appendChild(b);
       }
-      main.appendChild(actions);
-      card.appendChild(main);
-      const side = el("div", "card-side");
-      const st = el("span", "job-state " + (state.includes("run") ? "running" : state.includes("fail") ? "failed" : "done"));
-      st.textContent = state; side.appendChild(st);
-      card.appendChild(side);
+      // Run again re-submits the same name + brief through the same gate as a new delegation.
+      if (!running && (j.task || j.goal)) {
+        const again = el("button"); again.type = "button"; again.textContent = "Run again";
+        again.addEventListener("click", async () => {
+          again.disabled = true;
+          const res = await postJson("/api/agent", { name: j.name || j.id, task: j.task || j.goal });
+          if (!res.ok) { alert(`re-run failed (${res.status || "offline"}): ${res.text}`); again.disabled = false; }
+          else loadTasks();
+        });
+        actions.appendChild(again);
+      }
+      card.appendChild(actions);
       host.appendChild(card);
     }
-    if (!jobs.length) host.appendChild(textP("The board is empty — delegate something above."));
+    if (!jobs.length) host.appendChild(textP("No runs yet — compose one above."));
     // A running agent keeps the board live; a quiet board stops polling.
     clearTimeout(tasksTimer);
     if (anyRunning && $("panel-tasks").classList.contains("active")) tasksTimer = setTimeout(loadTasks, 5000);
   } catch (_) { host.replaceChildren(textP("Could not read the board.")); }
   loadHorizons();
   loadOrders();
+}
+
+function fmtElapsed(ms) {
+  if (!ms || ms < 0) return "0s";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/* E.WEB16: templates — the banked skills, with their real track record, as starting points. */
+let templatesLoaded = false;
+async function loadTemplates() {
+  if (templatesLoaded) return;
+  const host = $("agent-templates");
+  try {
+    const r = await fetch("/api/skills", { headers: { "X-YM-Web": "1" } });
+    if (!r.ok) { host.replaceChildren(textP(r.status === 403 ? "Operator only." : "Skill library unavailable.")); return; }
+    const rep = await r.json();
+    const skills = rep.skills || [];
+    host.replaceChildren();
+    if (!skills.length) { host.appendChild(textP("No banked skills yet — describe an agent from scratch.")); templatesLoaded = true; return; }
+    for (const sk of skills) {
+      const b = el("button", "tpl" + (sk.failing || sk.status === "quarantined" ? " bad" : "")); b.type = "button";
+      const main = el("div", "card-main");
+      const n = el("div", "tpl-name"); n.textContent = sk.name; main.appendChild(n);
+      const m = el("div", "tpl-meta");
+      const rate = sk.success_rate != null ? `${Math.round(sk.success_rate * 100)}% ok` : "untested";
+      m.textContent = `${sk.status || "?"} · ${sk.runs || 0} runs · ${rate}${(sk.tags || []).length ? " · " + sk.tags.slice(0, 3).join(", ") : ""}`;
+      main.appendChild(m);
+      b.appendChild(main);
+      b.addEventListener("click", () => {
+        document.querySelectorAll(".tpl.on").forEach((x) => x.classList.remove("on"));
+        b.classList.add("on");
+        $("agent-name").value = sk.name;
+        if (!$("agent-task").value.trim()) $("agent-task").value = sk.summary || "";
+        $("agent-task").focus();
+      });
+      host.appendChild(b);
+    }
+    templatesLoaded = true;
+  } catch (_) { host.replaceChildren(textP("Skill library unavailable.")); }
+}
+
+/* E.WEB16: what an agent may do — composed from the claims registry, never literal copy. */
+let allowanceLoaded = false;
+async function loadAllowance() {
+  if (allowanceLoaded) return;
+  const host = $("agent-allowance");
+  try {
+    const r = await fetch("/api/claims", { headers: { "X-YM-Web": "1" } });
+    if (!r.ok) { host.textContent = ""; return; }
+    const reg = await r.json();
+    const byId = new Map((reg.claims || []).map((c) => [c.id, c]));
+    const lines = ["An agent runs with the mind's own walls:"];
+    for (const id of ["real-money", "self-edit", "tool-learning"]) {
+      const c = byId.get(id); if (c) lines.push("· " + c.answer);
+    }
+    lines.push(`[${reg.version || "registry"}]`);
+    host.textContent = lines.join("\n");
+    host.style.whiteSpace = "pre-line";
+    allowanceLoaded = true;
+  } catch (_) { host.textContent = ""; }
 }
 
 async function loadHorizons() {
@@ -848,16 +958,41 @@ $("agent-form").addEventListener("submit", async (e) => {
   if (!name || !task) return;
   const btn = $("agent-btn"), reply = $("agent-reply");
   btn.disabled = true;
-  reply.classList.remove("hidden"); reply.textContent = "delegating…";
-  const res = await postJson("/api/agent", { name, task });
+  const sched = $("agent-schedule").value;
+  let res;
+  if (sched === "none") {
+    reply.classList.remove("hidden"); reply.textContent = "delegating…";
+    res = await postJson("/api/agent", { name, task });
+  } else {
+    // A standing order is an agent DOCUMENT with schedule frontmatter — composed here, judged by
+    // the import gate exactly as a pasted document would be. The console adds no new path.
+    const time = $("agent-time").value || "09:00";
+    const line = sched === "weekly" ? `weekly ${$("agent-weekday").value} ${time}` : `daily ${time}`;
+    const doc = `---
+name: ${name}
+description: ${task.split("\n")[0].slice(0, 120)}
+schedule: ${line}
+---
+# ${name}
+${task}
+`;
+    reply.classList.remove("hidden"); reply.textContent = "arming the schedule…";
+    res = await postJson("/api/import-agent", { doc });
+  }
   if (res.ok) {
     reply.textContent = (res.data && res.data.reply) || "delegated.";
     $("agent-name").value = ""; $("agent-task").value = "";
   } else {
-    reply.textContent = `delegation failed (${res.status || "offline"}): ${res.text}`;
+    reply.textContent = `${sched === "none" ? "delegation" : "schedule"} failed (${res.status || "offline"}): ${res.text}`;
   }
   btn.disabled = false;
   if (res.ok) loadTasks();
+});
+
+$("agent-schedule").addEventListener("change", () => {
+  const v = $("agent-schedule").value;
+  $("agent-weekday").classList.toggle("hidden", v !== "weekly");
+  $("agent-time").classList.toggle("hidden", v === "none");
 });
 
 $("horizon-form").addEventListener("submit", async (e) => {

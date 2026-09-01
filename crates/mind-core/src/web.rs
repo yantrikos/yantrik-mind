@@ -1009,6 +1009,25 @@ fn handle(
                 }
             }
         },
+        // E.WEB16: the skill library as templates for the agent composer (operator, read-only).
+        ("GET", "/api/skills") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let out = rt.block_on(
+                    conv.cli_dispatch("skills_json", &mind_types::AccessContext::operator_audit()),
+                );
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                    Err(_) => send(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "",
+                        "skills report failed",
+                    ),
+                }
+            }
+        },
         ("GET", "/api/claims") => {
             let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -2217,6 +2236,72 @@ mod tests {
         );
     }
 
+    /// E.WEB16 gates: no new mutation path (schedules become an agent DOCUMENT through the
+    /// existing import route; re-runs ride /api/agent; lifecycle rides /api/task-action), the
+    /// skills route is operator-gated and read-only, results render through the DOM-only
+    /// markdown renderer, the timeline is built from the job's own timestamps, and the
+    /// "what an agent may do" line is composed from the claims registry, not literal copy.
+    #[test]
+    fn the_agent_composer_adds_no_mutation_path_and_renders_results_safely() {
+        let src = include_str!("web.rs");
+        let skills = src
+            .find("(\"GET\", \"/api/skills\")")
+            .expect("skills route exists");
+        assert!(
+            src[skills..skills + 300].contains("operator(&head, &devices)"),
+            "skills is operator-gated"
+        );
+        assert!(
+            !src[skills..skills + 900].contains("(\"POST\", \"/api/skills\")"),
+            "skills is read-only"
+        );
+        let tasks = APP_JS
+            .find("async function loadTasks()")
+            .expect("run renderer exists");
+        let body: String = APP_JS[tasks..].chars().take(6000).collect();
+        assert!(
+            body.contains("renderMarkdown(md, String(j.result))"),
+            "results render DOM-only"
+        );
+        assert!(
+            !body.contains("innerHTML"),
+            "nothing in the run renderer touches innerHTML"
+        );
+        assert!(
+            body.contains("for (const n of notes) addStep(n.t, String(n.note || \"\"))"),
+            "timeline from the job's notes"
+        );
+        assert!(
+            body.contains(
+                "postJson(\"/api/agent\", { name: j.name || j.id, task: j.task || j.goal })"
+            ),
+            "re-run rides the delegation gate"
+        );
+        assert!(
+            body.contains("brief.classList.add(\"clamp\")"),
+            "briefs clamp, never dump"
+        );
+        // Schedules: composed as a document and submitted through the import gate only.
+        assert_eq!(
+            APP_JS.matches("postJson(\"/api/import-agent\"").count(),
+            2,
+            "import gate: the paste form and the composer, nothing else"
+        );
+        assert!(
+            APP_JS.contains("schedule: ${line}"),
+            "the composer writes schedule frontmatter"
+        );
+        assert!(
+            !APP_JS.contains("postJson(\"/api/schedule\""),
+            "no side door for schedules"
+        );
+        // Allowance from the registry.
+        assert!(
+            APP_JS.contains("for (const id of [\"real-money\", \"self-edit\", \"tool-learning\"])"),
+            "allowance composed from claims"
+        );
+    }
+
     /// E.WEB15 gates: the chains route is operator-gated; the instrument column renders ONLY
     /// from fetched JSON (no literal percentage or count is written into the page); the Board
     /// classifies horizon goals by queue_status so a failed goal can never read as RUNNING; the
@@ -2280,7 +2365,7 @@ mod tests {
         );
         // Long agent briefs are clamped, never dumped.
         assert!(
-            APP_JS.contains("d.classList.add(\"clamp\")"),
+            APP_JS.contains("brief.classList.add(\"clamp\")"),
             "long briefs clamp with an expander"
         );
         // Decisions speak plainly first, with the recorded kind beneath.

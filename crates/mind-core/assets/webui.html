@@ -139,10 +139,32 @@
             <button id="tab-delegate" class="agent-tab active" type="button">Delegate</button>
             <button id="tab-import" class="agent-tab" type="button">Import agent document</button>
           </div>
+          <!-- E.WEB16: the composer — start from a banked skill or from scratch; schedule rides
+               the import gate; what an agent may do is stated from the claims registry. -->
           <form id="agent-form" class="agent-form" autocomplete="off">
-            <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check) — a banked skill's name runs that skill" aria-label="Agent name" required>
-            <textarea id="agent-task" class="agent-desc" rows="4" maxlength="8000" placeholder="Describe the task as broadly as you like — goal, constraints, sources to prefer, what a good result looks like. The agent gets all of it." aria-label="Task description" required></textarea>
-            <button id="agent-btn" type="submit">Run agent</button>
+            <div class="composer-grid">
+              <div style="display: flex; flex-direction: column; gap: 8px; min-width: 0;">
+                <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check)" aria-label="Agent name" required>
+                <textarea id="agent-task" class="agent-desc" rows="5" maxlength="8000" placeholder="The brief — goal, constraints, sources to prefer, what a good result looks like. The agent gets all of it." aria-label="Task description" required></textarea>
+                <div class="compose-row">
+                  <select id="agent-schedule" class="agent-input delay-select" aria-label="Schedule">
+                    <option value="none" selected>run once, now</option>
+                    <option value="daily">every day at…</option>
+                    <option value="weekly">every week on…</option>
+                  </select>
+                  <select id="agent-weekday" class="agent-input delay-select hidden" aria-label="Weekday">
+                    <option value="mon">Monday</option><option value="tue">Tuesday</option><option value="wed">Wednesday</option><option value="thu">Thursday</option><option value="fri">Friday</option><option value="sat">Saturday</option><option value="sun">Sunday</option>
+                  </select>
+                  <input id="agent-time" class="agent-input delay-select hidden" type="time" value="09:00" aria-label="Time">
+                  <button id="agent-btn" type="submit">Run agent</button>
+                </div>
+                <div class="allowance" id="agent-allowance">reading the mind's boundaries…</div>
+              </div>
+              <div>
+                <div class="cap-group" style="margin-top: 0;">Start from a banked skill</div>
+                <div class="templates" id="agent-templates"><p class="loading">reading the skill library…</p></div>
+              </div>
+            </div>
           </form>
           <form id="import-form" class="agent-form hidden" autocomplete="off">
             <textarea id="import-doc" class="agent-desc tall" rows="12" maxlength="64000" placeholder="Paste a full agent document (SKILL.md style): name, instructions, and optional schedule: frontmatter to make it a standing order." aria-label="Agent document" required></textarea>

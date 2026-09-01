@@ -2547,3 +2547,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Prewritten gates | Exact-target recall ≥9/10; negative abstention 20/20; wrong-claim misroutes 0. Any sealed score is SHADOW EVIDENCE ONLY, never activation authority — activation additionally requires a preregistered live-shadow sample. On disclosure, v3 burns into permanent regressions. |
 | Chronology, honestly scoped | The author has read the current (killed) v2 matcher and its failures; no future E.MQ5 mechanism exists at 8729f0b to have been seen. This is the clean pre-code seal the v2 process lacked. |
 | Sequencing | Candidate router code (E.MQ5 prereg to come — Codex's recommendation: closed-schema LLM router, claim_id-or-ABSTAIN, renderer terminal, shadow-only) may begin only after this row's SHA is ACKed by both agents. |
+
+## E.WEB14 — today's organs reach the console: receipt chains and the claims registry (prereg)
+
+| Field | Value |
+| --- | --- |
+| The gap | The lifecycle-receipt surface (E.HOR) and the self-claims registry (E.MQ4/5a) are CLI-only; the console shows horizon goals without their chains and has no view of the mind's typed boundaries. Pranab asked for UI work; this is the UI the day's evidence earned. |
+| Change | Server: `horizon_history_json <id>` (charset-checked id, serializes the existing HorizonHistoryView — active/outcome/lifecycle/controls) behind GET `/api/horizon-history` (operator); `claims_json` behind GET `/api/claims` (any paired device — the registry is precisely what a member should be able to read). Client: each horizon card gains a receipts expander rendering the chain (event, transition, short hash, typed reason, time); Capabilities gains a "Boundaries" section rendering the registry with its version stamp. DOM-only rendering as always (receipt text and claim text are data, not markup). |
+| Gates | (1) The history JSON is the verified view — nothing invented client-side; a corrupt chain surfaces as the server's error, never as a partial render. (2) Route gates: horizon-history operator-only with id charset check; claims authenticated. (3) One renderer principle holds: the JSON for a claim equals `render()`'s inputs (id/answer/authority/evidence/version). (4) Source-guards on both routes + a conversation test for both JSON arms. |
+| Kill | If the client can request a goal id the server did not charset-check, or if claims JSON diverges from the registry constants, the slice does not ship. |
+| AGI feed | Phase B/F transparency: the operator can now read, in the console, exactly the receipts the peer verified cryptographically and the boundaries the mind states about itself — evidence surfaces, not narration. |

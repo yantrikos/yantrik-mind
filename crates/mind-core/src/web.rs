@@ -304,6 +304,75 @@ struct MemberInvite {
 static PENDING_INVITES: std::sync::Mutex<Vec<MemberInvite>> = std::sync::Mutex::new(Vec::new());
 const INVITE_TTL_MS: u64 = 15 * 60 * 1000;
 
+/// E.SEC18: the security posture, composed from existing read surfaces only — no new probes, no
+/// new state, and NEVER a secret: credentials render as counts and booleans. mind-core is the one
+/// crate where every instrument already meets (listeners, devices, capabilities, lanes, build),
+/// which is why the audit lives here rather than behind the conversation-layer verb table — a
+/// recorded deviation from the prereg's TYPED_VERBS placement, forced by dependency direction.
+pub(crate) fn security_audit_json(
+    conv: &ConversationEngine,
+    devices: &mind_governance::devices::DeviceStore,
+) -> serde_json::Value {
+    // Listeners, with each one's bind rule stated rather than guessed.
+    let listeners: Vec<serde_json::Value> = crate::telegram::listener_plan()
+        .into_iter()
+        .map(|(var, port)| {
+            let bind = match var {
+                "YM_CTL_PORT" => "loopback (authenticated bearer)".to_string(),
+                "YM_CHAT_PORT" => std::env::var("YM_CHAT_BIND")
+                    .map(|b| format!("wireguard {b} (fail-closed without it)"))
+                    .unwrap_or_else(|_| "disabled (no YM_CHAT_BIND)".to_string()),
+                "YM_FRAME_PORT" => {
+                    if std::env::var("YM_FRAME_TOKEN").is_ok() {
+                        "lan (token-guarded, read-only)".to_string()
+                    } else {
+                        "disabled (no YM_FRAME_TOKEN)".to_string()
+                    }
+                }
+                "YM_WEB_PORT" => "lan 0.0.0.0 (static read-only dashboards)".to_string(),
+                "YM_WEBUI_PORT" => std::env::var("YM_WEBUI_BIND")
+                    .map(|b| format!("bound {b} (cookie sessions)"))
+                    .unwrap_or_else(|_| "loopback (cookie sessions)".to_string()),
+                _ => "unknown".to_string(),
+            };
+            serde_json::json!({ "listener": var, "port": port, "bind": bind })
+        })
+        .collect();
+    let device_rows = devices.list();
+    let (mut operators, mut members, mut revoked) = (0u32, 0u32, 0u32);
+    for d in &device_rows {
+        if d.revoked {
+            revoked += 1;
+        } else if d.role.contains("perator") {
+            operators += 1;
+        } else {
+            members += 1;
+        }
+    }
+    let report = conv.capability_report();
+    let gated_write: Vec<serde_json::Value> = report
+        .capabilities
+        .iter()
+        .filter(|c| c.security == "gated_write")
+        .map(|c| serde_json::json!({ "id": c.id, "availability": serde_json::to_value(&c.availability).unwrap_or(serde_json::Value::Null) }))
+        .collect();
+    let dir = crate::telegram::state_dir();
+    let boot_code_outstanding = std::path::Path::new(&dir).join(PAIRING_CODE_FILE).exists();
+    let live_invites = {
+        let mut inv = PENDING_INVITES.lock().unwrap_or_else(|p| p.into_inner());
+        inv.retain(|i| i.expires_ms > now_ms());
+        inv.len()
+    };
+    serde_json::json!({
+        "build_commit": crate::build_commit(),
+        "listeners": listeners,
+        "devices": { "active_operators": operators, "active_members": members, "revoked": revoked },
+        "gated_write_capabilities": gated_write,
+        "privacy_lanes": mind_inference::privacy_lane_counts(),
+        "registration": { "boot_code_outstanding": boot_code_outstanding, "live_member_invites": live_invites },
+    })
+}
+
 /// The session cookie's value, if the request carries one. Only `ym_session` is read; everything
 /// else in the Cookie header is someone else's business.
 fn session_cookie(head: &str) -> Option<String> {
@@ -676,6 +745,13 @@ fn handle(
                 }
             }
         }
+        ("GET", "/api/security") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let audit = security_audit_json(&conv, &devices);
+                send_json(&mut stream, "200 OK", "", &audit);
+            }
+        },
         ("GET", "/api/history") => {
             let Some(d) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -1625,6 +1701,61 @@ mod tests {
             }
             Ok(_) => panic!("nothing left to redeem"),
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.SEC18 criterion (2): the audit never renders a secret — no code, token, or credential
+    /// value. With a live invite outstanding, the JSON carries its COUNT and nothing that matches
+    /// the code itself.
+    #[test]
+    fn the_security_audit_renders_counts_never_credentials() {
+        let _env = WEB_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!("ym-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("YM_DB", dir.join("mind.db").to_string_lossy().to_string());
+        let store = mind_governance::devices::DeviceStore::open(&dir).unwrap();
+        let secret = store
+            .pair(
+                "web:owner",
+                mind_governance::devices::DeviceRole::Operator {
+                    default_person: mind_types::PRIMARY.to_string(),
+                },
+            )
+            .unwrap();
+        PENDING_INVITES.lock().unwrap().clear();
+        PENDING_INVITES.lock().unwrap().push(super::MemberInvite {
+            code: "SECRET-INVITE-CODE".into(),
+            person: "brishti".into(),
+            expires_ms: now_ms() + 60_000,
+        });
+        let mem = mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(
+            std::sync::Arc::new(mem) as std::sync::Arc<dyn mind_types::MemoryFacade>,
+            mind_inference::InferencePool::new(
+                std::sync::Arc::new(mind_inference::ScriptedLLM::new("x"))
+                    as std::sync::Arc<dyn yantrik_ml::LLMBackend>,
+                1,
+            ),
+            "JARVIS",
+        );
+        let audit = super::security_audit_json(&conv, &store).to_string();
+        assert!(
+            !audit.contains("SECRET-INVITE-CODE"),
+            "an invite code must never render: {audit}"
+        );
+        assert!(
+            !audit.contains(secret.expose()),
+            "a device token must never render"
+        );
+        assert!(
+            audit.contains("\"live_member_invites\":1"),
+            "the count renders: {audit}"
+        );
+        assert!(
+            audit.contains("dispatched_exposure"),
+            "lane semantics named: {audit}"
+        );
+        PENDING_INVITES.lock().unwrap().clear();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

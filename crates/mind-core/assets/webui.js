@@ -227,6 +227,7 @@ async function loadCapabilities() {
 
 async function loadSettings() {
   const host = $("settings-cards");
+  loadSecurity();
   try {
     const r = await fetch("/api/settings", { headers: { "X-YM-Web": "1" } });
     if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
@@ -257,6 +258,38 @@ async function loadSettings() {
       }
     }
   } catch (_) { host.replaceChildren(textP("Could not read configuration.")); }
+}
+
+async function loadSecurity() {
+  // E.SEC18: the posture card — rendered from the audit JSON, counts and booleans only.
+  let card = $("security-card");
+  if (!card) {
+    card = el("div", "card setting-row"); card.id = "security-card";
+    $("settings-cards").parentElement.insertBefore(card, $("settings-cards"));
+  }
+  try {
+    const r = await fetch("/api/security", { headers: { "X-YM-Web": "1" } });
+    if (!r.ok) { card.classList.add("hidden"); return; }
+    const a = await r.json();
+    card.classList.remove("hidden");
+    card.replaceChildren();
+    const main = el("div", "card-main");
+    const t = el("div", "card-title"); t.textContent = "Security posture"; main.appendChild(t);
+    const lanes = a.privacy_lanes || {};
+    const esc = lanes.private_grounded_escalated_to_cloud ?? "?";
+    const d = el("div", "card-desc");
+    d.textContent = `build ${String(a.build_commit).slice(0, 8)} · devices: ${a.devices.active_operators} operator / ${a.devices.active_members} member (${a.devices.revoked} revoked) · invites live: ${a.registration.live_member_invites} · boot code out: ${a.registration.boot_code_outstanding ? "YES" : "no"} · private→cloud escalations: ${esc}`;
+    main.appendChild(d);
+    const list = el("div", "budget-chips");
+    for (const l of a.listeners || []) {
+      const chip = el("span", "tag");
+      chip.textContent = `${l.listener.replace("YM_", "").replace("_PORT", "").toLowerCase()}:${l.port} ${l.bind.split(" ")[0]}`;
+      chip.title = l.bind;
+      list.appendChild(chip);
+    }
+    main.appendChild(list);
+    card.appendChild(main);
+  } catch (_) { card.classList.add("hidden"); }
 }
 
 async function loadDevices() {

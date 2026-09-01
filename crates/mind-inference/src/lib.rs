@@ -143,6 +143,25 @@ fn scope_idx(s: PrivacyScope) -> usize {
 /// through `chat_grounded`/`chat_scoped(Private)` — which touch this counter — and never through an
 /// unscoped `chat()`, which silently takes the Household lane and never counts. A test that seeds a
 /// cloud-only pool and watches this move is proving "the private lane was at least ATTEMPTED".
+/// E.SEC18: the lane counters as numbers, for the security audit's JSON. Same atomics the text
+/// report reads; the names carry the exposure semantics (dispatched, not served).
+pub fn privacy_lane_counts() -> serde_json::Value {
+    use std::sync::atomic::Ordering;
+    serde_json::json!({
+        "dispatched_exposure": {
+            "private": PRIVACY_SERVED[0].load(Ordering::Relaxed),
+            "household": PRIVACY_SERVED[1].load(Ordering::Relaxed),
+            "public": PRIVACY_SERVED[2].load(Ordering::Relaxed),
+        },
+        "refused": {
+            "private": PRIVACY_REFUSED[0].load(Ordering::Relaxed),
+            "household": PRIVACY_REFUSED[1].load(Ordering::Relaxed),
+            "public": PRIVACY_REFUSED[2].load(Ordering::Relaxed),
+        },
+        "private_grounded_escalated_to_cloud": privacy_escalated_count(),
+    })
+}
+
 pub fn privacy_escalated_count() -> u64 {
     PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
 }

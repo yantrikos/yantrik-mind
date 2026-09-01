@@ -899,6 +899,8 @@ fn ctl_handle(
 
     // Every other route is a data route → authenticate FIRST, before reading a large body or dispatching.
     let openai_models_route = method == "GET" && path == "/v1/models";
+    // E.SEC18: the posture in one authenticated GET, for the `ym` CLI and scripts.
+    let security_route = method == "GET" && path == "/security";
     let post_route = method == "POST"
         && (path == "/cli"
             || path == "/chat"
@@ -907,7 +909,7 @@ fn ctl_handle(
             || path == "/chat-stream"
             || path == "/v1/chat/completions"
             || path == "/v1/responses");
-    if !openai_models_route && !post_route {
+    if !openai_models_route && !post_route && !security_route {
         send(&mut stream, "404 Not Found", "not found");
         return;
     }
@@ -932,6 +934,20 @@ fn ctl_handle(
     // handled before body parsing because GET has no request body.
     if openai_models_route {
         send_json(&mut stream, "200 OK", &openai_models());
+        return;
+    }
+    if security_route {
+        // Operator-only: the audit names listeners and counts credentials — member devices get
+        // the chat, not the posture.
+        if !authed.is_operator() {
+            send(&mut stream, "403 Forbidden", "operator only");
+            return;
+        }
+        send_json(
+            &mut stream,
+            "200 OK",
+            &crate::web::security_audit_json(&conv, &devices).to_string(),
+        );
         return;
     }
 

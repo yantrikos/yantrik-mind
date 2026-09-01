@@ -2477,3 +2477,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | The exact E.F1c goal ("check tasks and report how many are pending"), staging at b06db9a. Expectation from Codex's end-to-end regression: **first COMPLETED lifecycle chain** — SCHEDULED → WAKE_STARTED → COMPLETED, verified receipts, the zero-tasks answer delivered as bounded data, no active checkpoint left behind. |
 | Gates | (1) Terminal receipt is COMPLETED, chain verifies. (2) FAILED-if-any carries a typed class AND a post-execution timestamp strictly after WAKE_STARTED. (3) Result stated only from receipts. |
 | Kill | If it fails with the OLD bare vocabulary or a reused timestamp, the fold did not reach the box — deployment/provenance investigation before anything else. |
+
+## E.F1d — RESULT: COMPLETED — the first long-horizon goal in the mind's history finishes, and its receipts prove it
+
+| Field | Value |
+| --- | --- |
+| Reading (staging at b06db9a, goal 1a05e2d7b98) | **SCHEDULED (b7cabdea) → WAKE_STARTED (8c545cc2) → COMPLETED (fd57b161)**, outcome receipt 1d5fae6f: actions 1/1, cost 2, replans 0, active checkpoint NONE. The thrice-failed goal completed on the fixed runner — the zero-tasks answer delivered as data, exactly as Codex's end-to-end regression predicted. |
+| Gates | (1) COMPLETED terminal, chain verifies: PASS. (2) No failure occurred; the failure-timestamp gate is untested here (noted: WAKE_STARTED and COMPLETED share the tick timestamp — the wall-clock fix scoped FAILED receipts only; completion timing is a residual for the vocabulary lane). (3) Everything above is stated from receipts alone: PASS. |
+| The Phase F arc, one evening | E.F1: durability PROVEN across a real kill, accounting FAILED. E.F1b: control exonerates the interruption. Receipts built (Codex), folded, live. E.F1c: receipts pass first contact; my localization overturned by Codex's code audit; the real bug found (empty answer treated as error). Runner fixed (Codex), folded. **E.F1d: COMPLETED, witnessed.** Residuals on the ledger: creation-time planner nondeterminism (twice-witnessed), completion-timestamp granularity. |
+| AGI feed | Phase F's ladder now reads: durable ACTIVE, accounting ACTIVE and live-witnessed, execution ACTIVE with one completion — from ABSENT to first live completion in one preregistered evening. |

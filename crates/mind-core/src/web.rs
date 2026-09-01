@@ -1198,11 +1198,13 @@ fn handle(
                     // Witness 1: the hash-chained decision log. record() is fail-safe by
                     // construction — a broken chain logs its own degradation and must never
                     // block an operator's restart (E.WEB13 kill criterion).
-                    conv.recorder()
-                        .record(mind_observability::DecisionEvent::new(
-                            &format!("web-restart-{}", dev.id),
-                            "operator_restart",
-                        ));
+                    let mut restart_event = mind_observability::DecisionEvent::new(
+                        &format!("web-restart-{}", dev.id),
+                        "operator_restart",
+                    );
+                    restart_event.actor = Some("console".into());
+                    restart_event.lane = Some("operator".into());
+                    conv.recorder().record(restart_event);
                     // Witness 2: journald, unconditionally.
                     eprintln!("[restart] operator-requested restart (device={})", dev.id);
                     send_json(

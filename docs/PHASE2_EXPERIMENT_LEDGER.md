@@ -2194,3 +2194,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Prediction vs outcome | Prereg: "fresh live tool calls read complete; the aggregate rises only as new traffic displaces history." Confirmed on first contact. The 6.2% aggregate is history, not defect — and will climb one call at a time. |
 | Doctrine 1 status | The live loop's observation contract is now REACHABLE: witnessed end-to-end on a live box, not only in the integration test. Prod confirmation pending deploy (blocked on session permissions, flagged to the operator). |
 | AGI feed | Phase A's completeness gate now measures a log production actually writes. Phase C (evaluator identity) and Phase F (goal identity) have a live substrate. |
+
+## E.WEB13 — RESULT: live canary on staging; the wall refuses, the exit restarts, both witnesses saw it
+
+| Field | Value |
+| --- | --- |
+| Negative canary (staging, e942f72) | Headerless POST /api/restart → 403. Client header but no session → 401. MainPID unchanged (40620) — refused calls cannot touch the process. |
+| Positive canary | Minted a throwaway operator device via the console-token authority (`ym device pair --operator`), POSTed the exact confirm body: response `{"restarting":true}` flushed, MainPID 40620 → 40847, service active again in seconds. The canary device was revoked immediately after (dev-d770ef064db4, single-purpose, dead). |
+| Witnesses | journald: 1× "operator-requested restart". Hash chain: `ym why web-restart` reconstructs the `operator_restart` event from persisted state — Doctrine 3's independent-witness form. |
+| Follow-up folded same day | The reconstruction showed `actor ?` — the restart event itself lacked actor/lane stamps, found by the same lens E.AGI-A2 built. It now records actor=console, lane=operator. Source guards still 3/3. |
+| Rung | E.WEB13 is REACHABLE: refused live, exercised live, witnessed twice, recovered by the supervisor. Prod exercise pending the deploy permission decision. |

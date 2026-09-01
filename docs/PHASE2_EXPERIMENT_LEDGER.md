@@ -2669,3 +2669,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Freeze | Implementation SHA `fbeae7f`, clean full suite on that tree: 45 binaries, 1,479 passed, 0 failed. Single router seam `route_claim_with`; the turn path never reads `parse_route`. Named to Codex (98a8cdf8) — sealed v3 (`1e4c97bd…`) opens only now, against an isolated backend, counts reported only. |
 | Live sample | Staging deployed at `fbeae7f` with `YM_CLAIM_ROUTE_SHADOW=on` in `/etc/yantrik-mind.env`; the `claim_route_shadow` base-rate sample starts from this deploy. Prod is not opted in and would make no extra call even at this SHA. |
 | Hygiene | Screenshot device `ui-snap2` revoked (mint → use → revoke, as with `ui-snap`). |
+
+## E.G1c — the world shadow never fired: it lived inside a gate the canary cannot open (finding + prereg)
+
+| Field | Value |
+| --- | --- |
+| Finding | Staging decisions log since the E.G1 deploy: `world_shadow` = 0 of 220 events; journal "knock" lines in 6 h: 0. The shadow record sits inside `maybe_knock`, whose only caller is the Telegram loop (`chat != 0 && !quiet && idle ≥ 600 s`). Staging has no Telegram token (env key names inspected, no values) and runs `run_headless`; prod has Telegram but is pre-E.G1. The shadow has therefore never fired anywhere. E.WEB15's note "no verdict yet — correct, not a gap" was wrong: it was E.D2's censoring pattern, a measurement placed inside the gate it depends on. |
+| Hypothesis | Lifting the shadow RECORD (not the knock) into a frontend-independent cadence produces a live verdict stream on the canary within one tick interval of deploy, with the Telegram path's behaviour byte-identical. |
+| Design | `record_world_shadow(now)` is split out of `maybe_knock`; `maybe_knock` calls it first exactly as before (paired sample, prod). The headless tick calls it once every 10 minutes (unpaired sample, staging) — a presence verdict with no decision partner, which validates ingestion → gate → verdict live but says nothing about decision agreement. The ledger must never conflate the two samples. The knock itself is NOT run headless: it commits an engagement prediction to the judgment ledger, and a prediction about an engagement that cannot happen would pollute the thing `judgment_trend` measures. |
+| Kill | Any Telegram-path change beyond the extracted call (source-guarded); a headless tick that calls `maybe_knock`; a shadow that reads its own verdict; more than one record per cadence tick; `world_shadow` still 0 on staging 15 minutes after deploy. |
+| AGI feed | Phase G. A world model whose shadow cannot fire on the canary is not reachable; reachability is the whole of E.G1's claim. |

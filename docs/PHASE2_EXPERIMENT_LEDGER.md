@@ -2857,3 +2857,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Fold | `368ba9e`: one `activate` closure for click and Enter/Space on Board cards with `role=button`; `:focus-visible` ring; the new CSS uses the cockpit's `--signal` token (the first cut had guessed an `--accent` token that does not exist). Clean full suite 45 / 1,490 / 0. |
 | Witnessed (staging, Playwright) | Focus the first thread-opening card by script, press Enter → Agents panel, view `thread`, title "pending-tasks-daily"; no page errors. The focus ring itself was NOT witnessed: script-driven `focus()` does not satisfy Chromium's focus-visible heuristic, so `outlineStyle` read "none". The rule is guard-pinned; a human Tab press is the honest witness and is left as such. |
+
+## E.AGI-A5 — completeness since this binary started (prereg)
+
+| Field | Value |
+| --- | --- |
+| Problem | The Phase A gate reads the latest 200 calls of a log that spans binaries. Prod shows 0/200 on a pre-stamping binary; staging shows 65/80 with 9 misses that are all historical. A reader cannot tell "the current binary is incomplete" from "the log remembers an older one" — E.AGI-A2 called this stratigraphy and left it. |
+| Design | The typed aggregate `tool_chain_completeness(events)` is unchanged; the consumers gain a WINDOW: `ym why chains since-start` and `/api/chains?since=start` filter the verified events to `ts_ms ≥ process start` before sampling the latest 200, and the report prints both numbers side by side with their windows named ("all-time latest 200: 65/80 · since 21:57:19Z: 0/0"). An explicit `since=<ts_ms>` is accepted for an auditor. The cockpit's provenance gate shows the since-start figure as its headline with the all-time beneath, because the operator's question is "is THIS build honest", not "was the log ever". |
+| Kill | Any change to the all-time number on identical input (guard: same aggregate function, same sampling); a window that is not printed beside its number; a since-start sample that includes any event with `ts_ms` before process start (fixture); prod's all-time 0/200 must still read 0/200 after the change. |
+| AGI feed | Phase A. A gate that cannot name its window is a number, not a measurement. |

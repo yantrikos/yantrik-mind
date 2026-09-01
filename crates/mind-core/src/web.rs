@@ -279,6 +279,28 @@ fn operator(
     }
 }
 
+/// The `id=` query value of a horizon-history request, PERCENT-DECODED (the client encodes the
+/// colons in `goal:horizon:…`), before the caller applies the charset check. Malformed escapes
+/// yield None, which the caller treats as an invalid id.
+fn horizon_history_id(path: &str) -> Option<String> {
+    let raw = path.split_once("id=")?.1.split('&').next().unwrap_or("");
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let v = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+            out.push(v);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// E.WEB11: the published-pages directory — the ONE folder the Files listing may read, fixed
 /// server-side. Same source the static server on :8088 serves; the client never names a path.
 fn published_pages_dir() -> String {
@@ -931,10 +953,10 @@ fn handle(
         ("GET", p) if p.starts_with("/api/horizon-history") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let id = p
-                    .split_once("id=")
-                    .map(|(_, v)| v.split('&').next().unwrap_or("").to_string())
-                    .unwrap_or_default();
+                // Codex's E.WEB14 composition audit: the client percent-encodes the id (colons
+                // become %3A) and the server validated the RAW value — every real request was a
+                // 400. Decode first, then validate the decoded id against the charset.
+                let id = horizon_history_id(p).unwrap_or_default();
                 if id.is_empty()
                     || id.len() > 64
                     || !id
@@ -969,6 +991,24 @@ fn handle(
         },
         // E.WEB14: the self-claims registry — readable by ANY paired device: what the mind states
         // about its own boundaries is exactly what a household member is entitled to know.
+        // E.WEB15: the provenance gate as counts for the instrument column (operator).
+        ("GET", "/api/chains") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let out = rt.block_on(
+                    conv.cli_dispatch("chains_json", &mind_types::AccessContext::operator_audit()),
+                );
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                    Err(_) => send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "available": false }),
+                    ),
+                }
+            }
+        },
         ("GET", "/api/claims") => {
             let Some(_) = session_cookie(&head).and_then(|t| devices.authenticate(&t)) else {
                 send(
@@ -2174,6 +2214,114 @@ mod tests {
         assert!(
             chain < exit && journald < exit && respond < exit,
             "chain witness, journald witness, and the flushed response all precede the exit"
+        );
+    }
+
+    /// E.WEB15 gates: the chains route is operator-gated; the instrument column renders ONLY
+    /// from fetched JSON (no literal percentage or count is written into the page); the Board
+    /// classifies horizon goals by queue_status so a failed goal can never read as RUNNING; the
+    /// two looks are one code path behind a data-mode token switch.
+    #[test]
+    fn the_cockpit_instruments_are_evidence_only_and_the_board_classifies_by_queue_status() {
+        let src = include_str!("web.rs");
+        let chains = src
+            .find("(\"GET\", \"/api/chains\")")
+            .expect("chains route exists");
+        assert!(
+            src[chains..chains + 300].contains("operator(&head, &devices)"),
+            "chains is operator-gated"
+        );
+        // Instruments: the renderer exists and never invents a number.
+        let inst = APP_JS
+            .find("async function loadInstruments()")
+            .expect("instrument loader");
+        // Char-boundary safe: the JS carries "·" and "→", so a byte-offset slice can panic.
+        let body: String = APP_JS[inst..].chars().take(5200).collect();
+        assert!(
+            body.contains("fetch(\"/api/chains\""),
+            "gate read from the server"
+        );
+        assert!(
+            body.contains("fetch(\"/api/horizons\""),
+            "goal read from the server"
+        );
+        assert!(
+            body.contains("fetch(\"/api/decisions"),
+            "recorder read from the server"
+        );
+        assert!(
+            !body.contains("81.2") && !body.contains("65 /") && !body.contains("100%"),
+            "no literal metric is written into the instrument column"
+        );
+        // Board: horizon goals classify by queue_status (budget-expired reads as failed).
+        assert!(
+            APP_JS.contains(
+                "const st = g.budget_expired ? \"failed\" : (g.queue_status || g.status)"
+            ),
+            "the Board classifies horizon goals by queue_status"
+        );
+        // Two looks, one code path: a token switch persisted per device.
+        assert!(
+            APP_CSS.contains(":root[data-mode=\"companion\"]"),
+            "companion tokens exist"
+        );
+        assert!(
+            APP_JS.contains("document.documentElement.dataset.mode = mode"),
+            "mode switch sets the token root"
+        );
+        assert!(
+            APP_HTML.contains("id=\"mode-btn\""),
+            "the switch is in the top strip"
+        );
+        // Members: no instrument column, no operator facts.
+        assert!(
+            APP_JS.contains("const inst = $(\"instruments\"); if (inst) inst.remove();"),
+            "members never see the instrument column"
+        );
+        // Long agent briefs are clamped, never dumped.
+        assert!(
+            APP_JS.contains("d.classList.add(\"clamp\")"),
+            "long briefs clamp with an expander"
+        );
+        // Decisions speak plainly first, with the recorded kind beneath.
+        assert!(
+            APP_JS.contains("function phraseFor(d)"),
+            "plain-phrase renderer exists"
+        );
+    }
+
+    /// Codex's E.WEB14 composition finding: the client's encoded id must reach the engine as the
+    /// real id. A colon-bearing id round-trips through the actual query parser; a bad escape and
+    /// a smuggled slash are refused; the charset check runs on the DECODED value.
+    #[test]
+    fn horizon_history_ids_are_decoded_before_the_charset_check() {
+        let ok = |c: char| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_';
+        let decoded = horizon_history_id("/api/horizon-history?id=goal%3Ahorizon%3A1a05e8e69b4")
+            .expect("decodes");
+        assert_eq!(decoded, "goal:horizon:1a05e8e69b4");
+        assert!(
+            decoded.chars().all(ok),
+            "the decoded id passes the charset check"
+        );
+        assert_eq!(
+            horizon_history_id("/api/horizon-history?id=goal:horizon:abc&x=1").as_deref(),
+            Some("goal:horizon:abc"),
+            "an unencoded id still works, and trailing params are ignored"
+        );
+        assert_eq!(
+            horizon_history_id("/api/horizon-history?id=%zz"),
+            None,
+            "bad escape refused"
+        );
+        let smuggled = horizon_history_id("/api/horizon-history?id=..%2Fetc").unwrap();
+        assert!(
+            !smuggled.chars().all(ok),
+            "a decoded slash fails the charset check"
+        );
+        assert!(
+            APP_JS.contains("encodeURIComponent(g.goal_id)")
+                || APP_JS.contains("encodeURIComponent(pick.goal_id)"),
+            "the client still encodes — the server now meets it halfway"
         );
     }
 

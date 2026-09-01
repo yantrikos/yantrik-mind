@@ -6,14 +6,14 @@
 <meta name="color-scheme" content="dark">
 <title>Mind</title>
 <link rel="stylesheet" href="/app.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CradialGradient id='g' cx='35%25' cy='30%25'%3E%3Cstop offset='0%25' stop-color='%23a78bfa'/%3E%3Cstop offset='100%25' stop-color='%230ea5e9'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='32' cy='32' r='28' fill='url(%23g)'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%237fd3c1'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%230a0d12'/%3E%3C/svg%3E">
 </head>
 <body>
 
   <!-- ══ First-time registration: a two-step ceremony, not a form ══ -->
   <section id="pair-screen" class="screen hidden" aria-label="First-time registration">
-    <div class="pair-card glass">
-      <div class="orb big" aria-hidden="true"></div>
+    <div class="pair-card">
+      <div class="mark big" aria-hidden="true"></div>
       <h1 id="pair-title">Hello.</h1>
 
       <div id="pair-step-code">
@@ -40,54 +40,58 @@
     </div>
   </section>
 
-  <!-- ══ The app shell ══ -->
+  <!-- ══ The cockpit shell (E.WEB15, direction B): top strip · grouped nav · work · instruments ══ -->
   <section id="app" class="screen hidden">
-    <nav class="sidebar glass" aria-label="Navigation">
-      <div class="brand">
-        <div class="orb" id="status-orb" aria-hidden="true"></div>
-        <div class="who">
-          <span class="mind-name" id="mind-name">…</span>
-          <span class="mind-state" id="mind-state">at home</span>
-        </div>
-      </div>
+    <header class="topbar">
+      <div class="mark" id="status-orb" aria-hidden="true"></div>
+      <span class="mind-name" id="mind-name">…</span>
+      <span class="top-sep" aria-hidden="true">·</span>
+      <span class="top-fact" id="top-build">build …</span>
+      <span class="top-sep" aria-hidden="true">·</span>
+      <span class="top-fact" id="top-lane">private lane</span>
+      <span class="top-sep" aria-hidden="true">·</span>
+      <span class="top-fact" id="top-devices">devices …</span>
+      <span class="top-spacer"></span>
+      <span class="top-state"><span class="dot-live" aria-hidden="true"></span><span id="mind-state">awake</span></span>
+      <span class="person-chip" id="person-chip" title="Who this device speaks as"></span>
+      <button id="mode-btn" class="ghost" title="Switch between the companion view and the cockpit view">Companion view</button>
+      <button id="theme-btn" class="ghost" title="Toggle light/dark">Theme</button>
+      <button id="logout-btn" class="ghost" title="Sign out on this browser">Sign out</button>
+    </header>
 
+    <nav class="sidebar" aria-label="Navigation">
       <div class="nav">
+        <div class="nav-group">Talk</div>
         <button class="nav-item active" data-panel="chat">
-          <span class="nav-ico">◈</span> Chat
-        </button>
-        <button class="nav-item" data-panel="capabilities">
-          <span class="nav-ico">⬡</span> Capabilities
-        </button>
-        <button class="nav-item" data-panel="settings">
-          <span class="nav-ico">☰</span> Settings
-        </button>
-        <button class="nav-item" data-panel="devices">
-          <span class="nav-ico">▣</span> Devices
-        </button>
-        <button class="nav-item" data-panel="tasks">
-          <span class="nav-ico">◷</span> Agents
-        </button>
-        <button class="nav-item" data-panel="board">
-          <span class="nav-ico">▦</span> Board
-        </button>
-        <button class="nav-item" data-panel="files">
-          <span class="nav-ico">▤</span> Files
-        </button>
-        <button class="nav-item" data-panel="activity">
-          <span class="nav-ico">≣</span> Activity
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4V5z"/></svg>Chat
         </button>
         <button class="nav-item" data-panel="dreaming">
-          <span class="nav-ico">☾</span> Dreaming
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a7 7 0 0 0 0 14 6 6 0 0 1-6-6 7 7 0 0 0 6-8z"/></svg>Dreaming
         </button>
-        <div class="nav-soon" title="Being built next">
-          <span class="nav-item soon"><span class="nav-ico">✦</span> Memory <em>soon</em></span>
-        </div>
-      </div>
-
-      <div class="sidebar-foot">
-        <span class="person-chip" id="person-chip" title="Who this device speaks as"></span>
-        <button id="theme-btn" class="ghost" title="Toggle light/dark">◐ Theme</button>
-        <button id="logout-btn" class="ghost" title="Sign out on this browser">Sign out</button>
+        <div class="nav-group">Work</div>
+        <button class="nav-item" data-panel="board">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/></svg>Board
+        </button>
+        <button class="nav-item" data-panel="tasks">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z"/></svg>Agents &amp; goals
+        </button>
+        <button class="nav-item" data-panel="files">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>Files
+        </button>
+        <div class="nav-group">Evidence</div>
+        <button class="nav-item" data-panel="activity">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16M8 15l3-4 3 2 5-6"/></svg>Flight recorder
+        </button>
+        <div class="nav-group">Mind</div>
+        <button class="nav-item" data-panel="capabilities">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v7c0 5-3.5 8-7 9-3.5-1-7-4-7-9V4z"/></svg>Capabilities &amp; boundaries
+        </button>
+        <button class="nav-item" data-panel="settings">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg>Settings
+        </button>
+        <button class="nav-item" data-panel="devices">
+          <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8"/></svg>Devices
+        </button>
       </div>
     </nav>
 
@@ -96,17 +100,17 @@
       <div class="panel active" id="panel-chat">
         <main id="feed" class="feed" aria-live="polite">
           <div id="welcome" class="welcome hidden">
-            <div class="orb big soft" aria-hidden="true"></div>
+            <div class="mark big soft" aria-hidden="true"></div>
             <h2 id="welcome-line">…</h2>
             <p class="welcome-sub">Everything here stays on your hardware unless a turn explicitly needs the world.</p>
             <div class="suggest" id="suggest"></div>
           </div>
         </main>
         <footer class="composer-wrap">
-          <div class="composer glass">
-            <textarea id="input" rows="1" placeholder="Talk to the mind…" aria-label="Message"></textarea>
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="Message the mind…" aria-label="Message"></textarea>
             <button id="send-btn" title="Send (Enter)" aria-label="Send">
-              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2.3-7.2L3 11.5z" fill="currentColor"/></svg>
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
           </div>
           <div class="under-composer">
@@ -115,11 +119,11 @@
         </footer>
       </div>
 
-      <!-- Capabilities -->
+      <!-- Capabilities & boundaries -->
       <div class="panel" id="panel-capabilities">
         <header class="panel-head">
-          <h2>Capabilities</h2>
-          <p class="panel-sub">What this mind can do right now — and what's missing when it can't. <span id="cap-counts"></span></p>
+          <h2>Capabilities &amp; boundaries</h2>
+          <p class="panel-sub">What this mind can do right now, what it will never do, and what's missing when it can't. <span id="cap-counts"></span></p>
         </header>
         <div class="cards" id="cap-cards"><p class="loading">reading the capability report…</p></div>
       </div>
@@ -127,27 +131,27 @@
       <!-- Agents & standing orders -->
       <div class="panel" id="panel-tasks">
         <header class="panel-head">
-          <h2>Agents</h2>
-          <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Results wait on the board until you keep or drop them.</p>
+          <h2>Agents &amp; goals</h2>
+          <p class="panel-sub">Delegate a task and it runs in the background — name it after a banked skill and it runs that skill. Durable goals survive restarts and act on schedule.</p>
         </header>
         <div class="cards" id="tasks-cards">
           <div class="agent-tabs">
             <button id="tab-delegate" class="agent-tab active" type="button">Delegate</button>
             <button id="tab-import" class="agent-tab" type="button">Import agent document</button>
           </div>
-          <form id="agent-form" class="agent-form glass" autocomplete="off">
+          <form id="agent-form" class="agent-form" autocomplete="off">
             <input id="agent-name" class="agent-input" maxlength="48" placeholder="agent name (e.g. market-check) — a banked skill's name runs that skill" aria-label="Agent name" required>
             <textarea id="agent-task" class="agent-desc" rows="4" maxlength="8000" placeholder="Describe the task as broadly as you like — goal, constraints, sources to prefer, what a good result looks like. The agent gets all of it." aria-label="Task description" required></textarea>
             <button id="agent-btn" type="submit">Run agent</button>
           </form>
-          <form id="import-form" class="agent-form glass hidden" autocomplete="off">
+          <form id="import-form" class="agent-form hidden" autocomplete="off">
             <textarea id="import-doc" class="agent-desc tall" rows="12" maxlength="64000" placeholder="Paste a full agent document (SKILL.md style): name, instructions, and optional schedule: frontmatter to make it a standing order." aria-label="Agent document" required></textarea>
             <button id="import-btn" type="submit">Import</button>
           </form>
           <p id="agent-reply" class="loading hidden"></p>
           <div id="job-cards"><p class="loading">reading the board…</p></div>
           <div class="cap-group">Long-horizon goals</div>
-          <form id="horizon-form" class="agent-form glass" autocomplete="off">
+          <form id="horizon-form" class="agent-form" autocomplete="off">
             <select id="horizon-delay" class="agent-input delay-select" aria-label="When to act">
               <option value="15m">in 15 minutes</option>
               <option value="2h" selected>in 2 hours</option>
@@ -159,7 +163,7 @@
           <p id="horizon-reply" class="loading hidden"></p>
           <div id="horizon-cards"><p class="loading">reading durable goals…</p></div>
           <div class="cap-group">Standing orders</div>
-          <pre id="orders-text" class="orders glass">…</pre>
+          <pre id="orders-text" class="orders">…</pre>
         </div>
       </div>
 
@@ -190,15 +194,15 @@
         <div class="cards" id="dreaming-cards"><p class="loading">reading the mind's offline cognition…</p></div>
       </div>
 
-      <!-- Activity: decisions log + standing orders -->
+      <!-- Flight recorder: decisions log + standing orders -->
       <div class="panel" id="panel-activity">
         <header class="panel-head">
-          <h2>Activity</h2>
-          <p class="panel-sub">What the mind decided, and what it will do on a schedule. Read from the hash-chained decision log and the standing-orders store; goals are redacted.</p>
+          <h2>Flight recorder</h2>
+          <p class="panel-sub">What the mind decided, in plain words with the recorded event beneath. Read from the hash-chained decision log; goals are redacted.</p>
         </header>
         <div class="cards" id="activity-cards">
           <div class="cap-group">Standing orders &amp; durable goals</div>
-          <pre id="activity-orders" class="orders glass">…</pre>
+          <pre id="activity-orders" class="orders">…</pre>
           <div class="cap-group">Recent decisions</div>
           <div id="activity-decisions"><p class="loading">reading the decision log…</p></div>
         </div>
@@ -222,6 +226,29 @@
         <div class="cards" id="device-cards"><p class="loading">reading device store…</p></div>
       </div>
     </div>
+
+    <!-- Instruments: the mind's evidence, one glance from the conversation. Operator-only data;
+         every number here is read from receipts or the flight recorder, never narrated. -->
+    <aside class="instruments" id="instruments" aria-label="Instruments">
+      <section class="inst-card" id="inst-gate">
+        <div class="inst-head"><span>Provenance gate</span><b id="gate-score">…</b></div>
+        <div class="strata" id="gate-strata" aria-hidden="true"></div>
+        <div class="inst-legend" id="gate-legend"></div>
+      </section>
+      <section class="inst-card" id="inst-goal">
+        <div class="inst-head"><span id="goal-title">Goal</span><b id="goal-state">…</b></div>
+        <div class="chain" id="goal-chain"></div>
+        <div class="inst-foot" id="goal-foot"></div>
+      </section>
+      <section class="inst-card" id="inst-shadow">
+        <div class="inst-head"><span>World-model shadow</span><b>knock receptivity</b></div>
+        <div class="inst-mono" id="shadow-text">…</div>
+      </section>
+      <section class="inst-card grow" id="inst-recorder">
+        <div class="inst-head"><span>Flight recorder</span><b>live</b></div>
+        <div class="chain" id="recorder-lines"></div>
+      </section>
+    </aside>
   </section>
 
   <script src="/app.js"></script>

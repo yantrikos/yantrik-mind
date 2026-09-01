@@ -52,14 +52,129 @@ function setMindName(name) {
 
 function hideOperatorPanels() {
   document.querySelectorAll('[data-panel="settings"], [data-panel="devices"]').forEach((n) => n.remove());
+  // E.WEB15: the instrument column reads operator-only endpoints — members get the work area alone.
+  const inst = $("instruments"); if (inst) inst.remove();
+  $("app").classList.add("no-instruments");
+  document.querySelectorAll(".topbar .top-fact, .topbar .top-sep").forEach((n) => n.remove());
 }
 
 function showApp() {
   $("pair-screen").classList.add("hidden");
   $("app").classList.remove("hidden");
+  applyMode(loadMode());
   restoreHistory();
   refreshWelcome();
+  fillTopbar();
+  loadInstruments();
+  if (!window.__instTimer) window.__instTimer = setInterval(loadInstruments, 30000);
   input.focus();
+}
+
+/* ── E.WEB15: two looks, the user's choice — same data, same code, a token + layout switch ── */
+const MODE_KEY = "ym-mode";
+function loadMode() { try { return localStorage.getItem(MODE_KEY) === "companion" ? "companion" : "cockpit"; } catch (_) { return "cockpit"; } }
+function applyMode(mode) {
+  document.documentElement.dataset.mode = mode;
+  const b = $("mode-btn"); if (b) b.textContent = mode === "companion" ? "Cockpit view" : "Companion view";
+  try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+}
+const modeBtn = $("mode-btn");
+if (modeBtn) modeBtn.addEventListener("click", () => applyMode(loadMode() === "companion" ? "cockpit" : "companion"));
+
+/* ── E.WEB15: the top strip — facts an operator glances at, read from the security audit ── */
+async function fillTopbar() {
+  try {
+    const r = await fetch("/api/security", { headers: { "X-YM-Web": "1" } });
+    if (!r.ok) return;
+    const a = await r.json();
+    const build = $("top-build"); if (build && a.build_commit) build.textContent = `build ${String(a.build_commit).slice(0, 7)}`;
+    const dev = $("top-devices");
+    if (dev && a.devices) dev.textContent = `${(a.devices.active_operators || 0) + (a.devices.active_members || 0)} devices`;
+    const lane = $("top-lane");
+    if (lane && a.lanes && a.lanes.private_model) lane.textContent = `private lane ${a.lanes.private_model}`;
+  } catch (_) { /* the strip degrades to labels; nothing is invented */ }
+}
+
+/* ── E.WEB15: instruments — every number here is read from receipts or the recorder ── */
+const shortHash = (h) => String(h || "").slice(0, 8);
+const hhmmss = (ms) => ms ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+function evLine(dotCls, k, d, hsh) {
+  const row = el("div", "ev");
+  row.appendChild(el("span", "dot" + (dotCls ? " " + dotCls : "")));
+  const kk = el("span", "k"); kk.textContent = k; row.appendChild(kk);
+  const dd = el("span", "d"); dd.textContent = d; row.appendChild(dd);
+  const hh = el("span", "hsh"); hh.textContent = hsh; row.appendChild(hh);
+  return row;
+}
+async function loadInstruments() {
+  if (!$("instruments")) return;
+  const H = { headers: { "X-YM-Web": "1" } };
+  try {
+    const r = await fetch("/api/chains", H);
+    const g = r.ok ? await r.json() : { available: false };
+    const score = $("gate-score"), strata = $("gate-strata"), legend = $("gate-legend");
+    strata.replaceChildren(); legend.replaceChildren();
+    if (!g.available) { score.textContent = "unavailable"; legend.appendChild(textP("the verified chain could not be read")); }
+    else if (!g.total) { score.textContent = "no calls yet"; }
+    else {
+      const pct = (100 * g.complete / g.total).toFixed(1);
+      score.textContent = `${g.complete} / ${g.total} · ${pct}%`;
+      const defects = g.defects || {};
+      const incomplete = g.total - g.complete;
+      const eraOld = Math.min(defects.actor || 0, incomplete);
+      const eraMid = Math.max(0, incomplete - eraOld);
+      const bars = Math.min(40, g.total);
+      const counts = [Math.round(bars * eraOld / g.total), Math.round(bars * eraMid / g.total)];
+      counts.push(Math.max(0, bars - counts[0] - counts[1]));
+      counts.forEach((n, era) => { for (let i = 0; i < n; i++) strata.appendChild(el("i", "era-" + era)); });
+      for (const [era, n, label] of [[0, eraOld, "pre-stamping"], [1, eraMid, "missing fields"], [2, g.complete, "complete"]]) {
+        if (!n) continue;
+        const sp = el("span"); sp.appendChild(el("i", "era-" + era)); sp.appendChild(document.createTextNode(`${n} ${label}`)); legend.appendChild(sp);
+      }
+    }
+  } catch (_) { $("gate-score").textContent = "unavailable"; }
+  try {
+    const r = await fetch("/api/horizons", H);
+    const data = r.ok ? await r.json() : { goals: [] };
+    const goals = data.goals || [];
+    const pick = goals.find((g) => (g.queue_status || "") === "running") || goals.find((g) => (g.queue_status || "") === "pending") || goals[0];
+    const title = $("goal-title"), state = $("goal-state"), chain = $("goal-chain"), foot = $("goal-foot");
+    chain.replaceChildren();
+    if (!pick) { title.textContent = "Goal"; state.textContent = "none carried"; foot.textContent = ""; }
+    else {
+      title.textContent = "Goal · " + (pick.objective || pick.goal_id);
+      state.textContent = pick.queue_status || pick.status || "?";
+      const hr = await fetch(`/api/horizon-history?id=${encodeURIComponent(pick.goal_id)}`, H);
+      const h = hr.ok ? await hr.json() : null;
+      if (h && h.lifecycle) {
+        let prev = null;
+        for (const ev of h.lifecycle) {
+          const name = String(ev.event).toUpperCase();
+          const delta = prev ? ` · +${((ev.occurred_at_ms - prev) / 1000).toFixed(1)}s` : ` · ${hhmmss(ev.occurred_at_ms)}`;
+          const cls = name === "COMPLETED" ? "" : name === "FAILED" ? "bad" : name === "WAKE_STARTED" ? "mid" : "old";
+          chain.appendChild(evLine(cls, name, `${ev.previous_queue_status || "no-queue"} → ${ev.next_queue_status || "terminal"}${delta}${ev.failure_reason ? " · " + ev.failure_reason : ""}`, shortHash(ev.receipt_sha256)));
+          prev = ev.occurred_at_ms;
+        }
+        foot.textContent = h.outcome ? `chain verified · outcome ${h.outcome.status} · receipt ${shortHash(h.outcome.receipt_sha256)}` : "chain verified · no outcome yet";
+      } else { foot.textContent = "receipts not readable"; }
+    }
+  } catch (_) { $("goal-state").textContent = "unavailable"; }
+  try {
+    const r = await fetch("/api/decisions?n=40", H);
+    const rows = r.ok ? ((await r.json()).decisions || []) : [];
+    const shadow = rows.find((d) => d.kind === "world_shadow");
+    $("shadow-text").textContent = shadow
+      ? `presence: ${shadow.outcome || "?"} · ${hhmmss(shadow.ts_ms)}\nrecorded, never consulted by the decision`
+      : "no shadow verdict recorded yet";
+    const lines = $("recorder-lines"); lines.replaceChildren();
+    for (const d of rows.slice(0, 7)) {
+      const v = d.verdict ? ` · ${d.verdict}` : "";
+      const c = d.confidence != null ? ` · p ${Number(d.confidence).toFixed(2)}` : "";
+      const cls = d.kind === "tool_observed" ? "" : d.kind === "tool_predicted" ? "mid" : "old";
+      lines.appendChild(evLine(cls, d.kind || "?", `${d.chosen || d.outcome || ""}${v}${c}`, hhmmss(d.ts_ms)));
+    }
+    if (!rows.length) lines.appendChild(textP("nothing recorded yet"));
+  } catch (_) { $("shadow-text").textContent = "unavailable"; }
 }
 
 function refreshWelcome() {
@@ -485,7 +600,7 @@ async function loadBoard() {
   async function pull(url) { try { const r = await fetch(url, { headers: { "X-YM-Web": "1" } }); return r.ok ? await r.json() : {}; } catch (_) { return {}; } }
   const [tasks, horizons, orders] = await Promise.all([pull("/api/tasks"), pull("/api/horizons"), pull("/api/orders")]);
   for (const j of (tasks.jobs || [])) cols[columnFor("job", j.state || j.status)].push({ title: j.name || j.id, meta: (j.task || j.goal || "").slice(0, 80), cls: columnFor("job", j.state || j.status) });
-  for (const g of (horizons.goals || [])) cols[columnFor("horizon", g.status)].push({ title: g.objective || g.goal_id, meta: g.budget_expired ? "budget expired" : (g.queue_status || g.status || ""), cls: columnFor("horizon", g.status) });
+  for (const g of (horizons.goals || [])) { const st = g.budget_expired ? "failed" : (g.queue_status || g.status); const col = columnFor("horizon", st); cols[col].push({ title: g.objective || g.goal_id, meta: g.budget_expired ? "budget expired" : (g.queue_status || g.status || ""), cls: col }); }
   // Standing orders text is a blob; show a single card pointing to Activity for detail.
   if (orders.text && !orders.text.includes("No standing")) cols.scheduled.push({ title: "Standing orders", meta: "see Activity for schedule + controls", cls: "scheduled" });
   host.replaceChildren();
@@ -530,6 +645,27 @@ async function loadDreaming() {
   } catch (_) { host.replaceChildren(textP("Could not read the dreaming log.")); }
 }
 
+/* E.WEB15: the recorded event, said plainly. The internal name stays beneath it. */
+function phraseFor(d) {
+  const k = d.kind || "";
+  const tool = d.chosen ? ` (${d.chosen})` : "";
+  switch (k) {
+    case "tool_predicted": return `Predicted a tool would work${tool}${d.confidence != null ? ` — ${Math.round(d.confidence * 100)}% sure` : ""}`;
+    case "tool_observed": return d.verdict === "ok" ? "The tool worked" : d.verdict === "empty" ? "The tool ran but found nothing" : d.verdict === "denied" ? "A tool call was refused by the walls" : d.verdict === "malformed" ? "A malformed tool call was refused before it ran" : `The tool ${d.verdict || "finished"}`;
+    case "grounding_assembled": return "Gathered context for a reply";
+    case "pack_route_shadow": return "The pack router weighed in (shadow only)";
+    case "world_shadow": return "The world model gave its opinion (shadow only)";
+    case "operator_restart": return "An operator restarted the mind";
+    case "packet_created": return "Prepared something to bring up";
+    case "packet_resolved": return d.verdict === "confirmed" ? "You approved prepared work" : "You declined prepared work";
+    case "packet_expired": return "Prepared work expired unused";
+    case "prediction_made": return "Made a forecast";
+    case "prediction_graded": return "Graded a forecast";
+    case "goal_compiled": return "Compiled a bounded plan";
+    default: return k.replace(/_/g, " ") || "Recorded an event";
+  }
+}
+
 async function loadActivity() {
   // Standing orders (reuse the orders verb) + a redacted decisions timeline.
   try {
@@ -548,8 +684,11 @@ async function loadActivity() {
       const card = el("div", "card setting-row");
       const main = el("div", "card-main");
       const t = el("div", "card-title");
-      t.textContent = (d.kind || "?") + (d.verdict ? " · " + d.verdict : "") + (d.chosen ? " → " + d.chosen : "");
+      t.textContent = phraseFor(d);
       main.appendChild(t);
+      const rec = el("div", "dec-kind");
+      rec.textContent = (d.kind || "?") + (d.verdict ? " · " + d.verdict : "") + (d.chosen ? " → " + d.chosen : "");
+      main.appendChild(rec);
       if (d.goal) { const g = el("div", "card-desc"); g.textContent = d.goal; main.appendChild(g); }
       const meta = el("div", "setting-key");
       const when = d.ts_ms ? new Date(d.ts_ms).toLocaleString() : "";
@@ -578,6 +717,12 @@ async function loadTasks() {
       const main = el("div", "card-main");
       const t = el("div", "card-title"); t.textContent = j.name || j.id; main.appendChild(t);
       const d = el("div", "card-desc"); d.textContent = j.task || j.goal || ""; main.appendChild(d);
+      if (d.textContent.length > 280) {
+        d.classList.add("clamp");
+        const more = el("button", "link-btn"); more.textContent = "show full brief";
+        more.addEventListener("click", () => { const c = d.classList.toggle("clamp"); more.textContent = c ? "show full brief" : "hide"; });
+        main.appendChild(more);
+      }
       if (j.result) {
         const res = el("div", "job-result"); res.textContent = String(j.result); main.appendChild(res);
       }
@@ -770,7 +915,9 @@ function addUserMsg(text, ts, save = true) {
 function addMindMsg() {
   const msg = el("div", "msg mind");
   const avatar = el("div", "orb avatar");
+  avatar.textContent = fmtTs(Date.now());
   const bubble = el("div", "bubble");
+  bubble.dataset.who = MIND;
   const steps = el("div", "steps hidden");
   const lanes = el("div", "lanes hidden");
   const think = document.createElement("details"); think.className = "think hidden";

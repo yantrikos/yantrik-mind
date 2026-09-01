@@ -8337,6 +8337,56 @@ fn the_knock_decision_never_reads_the_world_shadow() {
     );
 }
 
+// ── E.WEB15: THE PROVENANCE GATE AS NUMBERS, PARSED FROM THE VERIFIED REPORT ────────────────────
+
+/// chains_json carries exactly what the verified text report says — complete/total and the
+/// named defect counts — and reports unavailable when the report is not the completeness shape.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chains_json_mirrors_the_verified_completeness_report() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let dir = std::env::temp_dir().join(format!("ym-chains-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&dir.join("d.jsonl")));
+    let conv = conv.with_recorder(log);
+    let ctx = mind_types::AccessContext::operator_audit();
+    // An empty recorder: available, zero calls — never "unavailable" for an honest empty log.
+    let empty: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("chains_json", &ctx).await).unwrap();
+    assert_eq!(empty["available"], serde_json::json!(true));
+    assert_eq!(empty["total"], serde_json::json!(0));
+    // One incomplete pair (prediction without goal_id) reads 0/1 with goal_id named as a defect.
+    let mut p = mind_observability::DecisionEvent::span("t1", None, "tool_predicted");
+    p.actor = Some("conversation".into());
+    p.lane = Some("primary".into());
+    p.object_id = Some("obj".into());
+    p.predicted = Some("works".into());
+    p.confidence = Some(0.5);
+    let pid = p.event_id.clone();
+    conv.recorder().record(p);
+    let mut o = mind_observability::DecisionEvent::span("t1", pid.as_deref(), "tool_observed");
+    o.actor = Some("conversation".into());
+    o.lane = Some("primary".into());
+    o.object_id = Some("obj".into());
+    o.verdict = Some("ok".into());
+    o.evaluator_id = Some("tool-outcome-v1".into());
+    o.latency_ms = Some(3);
+    o.semantic_success = Some(true);
+    conv.recorder().record(o);
+    let one: serde_json::Value =
+        serde_json::from_str(&conv.cli_dispatch("chains_json", &ctx).await).unwrap();
+    assert_eq!(one["available"], serde_json::json!(true));
+    assert_eq!(one["total"], serde_json::json!(1));
+    assert_eq!(one["complete"], serde_json::json!(0));
+    assert_eq!(one["defects"]["goal_id"], serde_json::json!(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── E.WEB14: THE CONSOLE'S JSON DOORS — CLAIMS AND RECEIPT CHAINS ──────────────────────────────
 
 /// Gate (3): claims_json is the registry verbatim — same ids, answers, authority, evidence, and

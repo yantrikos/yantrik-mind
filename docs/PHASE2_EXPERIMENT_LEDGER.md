@@ -2418,3 +2418,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Gate 4 — read-only: PASS | Zero actions, zero writes, safe stop. |
 | Attribution honesty | The interruption is NOT established as the cause of the execution failure: a pre-existing goal on the same box shows `legacy_unclassified_failure` with zero interruptions — the segment runner may fail at baseline. **Control preregistered here as E.F1b: an identical 15-minute goal, created the same way, NEVER interrupted. If it also fails its segment, the defect is the runner's baseline and the restart is exonerated; if it succeeds, the interruption path is implicated.** Kill criteria inherit from E.F1. |
 | AGI feed | Phase F's first live measurement, exactly as the row promised: durability PROVEN on a real interruption, execution and accounting named as the broken rungs — with the control that will say which defect belongs to whom. |
+
+## E.MQ5a — the explicit self-claims command: the trustworthy surface ships before the clever one (prereg)
+
+| Field | Value |
+| --- | --- |
+| Design (Codex's product recommendation, adopted) | Natural-language interception awaits E.MQ5's shadow router + sealed v3. Meanwhile the registry gets an EXPLICIT typed surface today: `ym claims` lists every claim (id, one-line answer head, version); `ym claims <id>` renders one claim in full via the SAME render() the interceptor uses — one renderer, two doors. No matcher involvement, no routing code touched. |
+| Gates | (1) `claims` lists exactly the CLAIMS array — count and ids — stamped with REGISTRY_VERSION. (2) `claims <id>` output is byte-identical to render() for that claim. (3) Unknown id → usage line, never a guess. (4) Diff discipline: match_groups and match_claim untouched (Codex verifies). |
+| Kill criteria | None beyond gate 4's diff discipline — this is a read-only rendering surface over already-shipped typed data. |
+| AGI feed | Phase B: the mind's capability truths become directly consultable by operator and member alike — the registry earns daily use before it earns interception. |

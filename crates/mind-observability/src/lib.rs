@@ -1321,14 +1321,47 @@ pub fn render_model_call_resources(events: &[DecisionEvent]) -> String {
     out
 }
 
+/// Aggregate time bounds for one completeness sample. `timestamped` is explicit because a
+/// partially malformed sample can still have honest bounds without pretending every row carried a
+/// usable timestamp.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletenessWindow {
+    pub oldest_ts_ms: u64,
+    pub newest_ts_ms: u64,
+    pub timestamped: usize,
+}
+
+/// The deliberately separate completeness contract for malformed preflight refusals. These rows
+/// never enter the executed-call denominator because no tool prediction or egress occurred.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreflightCompleteness {
+    pub complete: usize,
+    pub total: usize,
+    pub defects: std::collections::BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<CompletenessWindow>,
+}
+
+/// Typed, aggregate-only result of the tool-chain provenance gate. This is the source of truth for
+/// both human prose and machine surfaces; callers must not recover numbers by parsing the prose.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolChainCompleteness {
+    pub complete: usize,
+    pub total: usize,
+    pub defects: std::collections::BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<CompletenessWindow>,
+    pub preflight: PreflightCompleteness,
+}
+
 /// Measure the roadmap's closed-chain gate over the latest 200 tool calls. A call is
 /// complete only when its observation joins to one prediction and the pair carries the provenance
 /// needed to compare behavior across goals, contexts, lanes, evaluators, and runtime versions.
 /// Malformed arguments refused before prediction are not tool calls; they are reported separately
 /// under a strict preflight-refusal contract so safe boundary behavior cannot either poison or evade
 /// the executed-call gate. Aggregate defect counts are reported instead of identifiers, so this
-/// remains safe to paste into an operations channel.
-pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
+/// remains safe to expose to an operations surface.
+pub fn tool_chain_completeness(events: &[DecisionEvent]) -> ToolChainCompleteness {
     const SAMPLE_LIMIT: usize = 200;
 
     let mut compiled_roots: std::collections::HashMap<&str, Vec<Option<&str>>> = Default::default();
@@ -1424,7 +1457,7 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     calls.sort_unstable_by_key(|(index, _, _)| std::cmp::Reverse(*index));
     calls.truncate(SAMPLE_LIMIT);
     if calls.is_empty() && preflight_refusals.is_empty() {
-        return "No tool-chain calls yet — completeness appears after a tool decision.".into();
+        return ToolChainCompleteness::default();
     }
 
     let mut complete = 0usize;
@@ -1622,122 +1655,174 @@ pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
     }
 
     let total = calls.len();
-    let mut out = if total == 0 {
+    // E.AGI-A2: a live reading must say WHEN its evidence is from — a window full of history
+    // reads very differently from a window of yesterday's traffic. Timestamps only, aggregate.
+    let mut span_ts: Vec<u64> = calls
+        .iter()
+        .flat_map(|(_, prediction, observation)| {
+            prediction
+                .iter()
+                .chain(observation.iter())
+                .map(|event| event.ts_ms)
+        })
+        .filter(|ts| *ts > 0)
+        .collect();
+    span_ts.sort_unstable();
+    let window = span_ts
+        .first()
+        .zip(span_ts.last())
+        .map(|(oldest, newest)| CompletenessWindow {
+            oldest_ts_ms: *oldest,
+            newest_ts_ms: *newest,
+            timestamped: span_ts.len(),
+        });
+
+    let mut refusal_complete = 0usize;
+    let mut refusal_defects: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (_, observation) in &preflight_refusals {
+        let mut row_complete = true;
+        let present = |value: &Option<String>| {
+            value
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        };
+        let mut require = |condition: bool, label: &'static str| {
+            if !condition {
+                row_complete = false;
+                *refusal_defects.entry(label).or_insert(0) += 1;
+            }
+        };
+        require(present(&observation.event_id), "event_id");
+        if let Some(event_id) = observation.event_id.as_deref() {
+            require(
+                events_by_id
+                    .get(event_id)
+                    .is_some_and(|matches| matches.len() == 1),
+                "event_id uniqueness",
+            );
+        }
+        require(!observation.trace_id.trim().is_empty(), "trace_id");
+        require(observation.ts_ms > 0, "ts_ms");
+        if let Some(parent_id) = observation.parent_event_id.as_deref() {
+            require(
+                !parent_id.trim().is_empty()
+                    && events_by_id.get(parent_id).is_some_and(|matches| {
+                        matches.len() == 1
+                            && matches[0].kind == "goal_compiled"
+                            && matches[0].trace_id == observation.trace_id
+                            && matches[0].ts_ms > 0
+                            && matches[0].ts_ms <= observation.ts_ms
+                    }),
+                "bounded root integrity",
+            );
+        }
+        require(present(&observation.actor), "actor");
+        require(present(&observation.lane), "lane");
+        require(
+            present(&observation.context_fingerprint),
+            "context_fingerprint",
+        );
+        require(present(&observation.goal_id), "goal_id");
+        require(present(&observation.tool_version), "tool_version");
+        require(present(&observation.model_route), "model_route");
+        require(present(&observation.object_id), "object_id");
+        require(
+            observation.evaluator_id.as_deref() == Some("tool-outcome-v1"),
+            "evaluator_id",
+        );
+        require(present(&observation.outcome), "outcome");
+        require(present(&observation.lesson), "lesson");
+        require(
+            observation.prediction_error.is_none() && observation.brier.is_none(),
+            "calibration exclusion",
+        );
+        if row_complete {
+            refusal_complete += 1;
+        }
+    }
+    let refusal_total = preflight_refusals.len();
+    let mut refusal_ts: Vec<u64> = preflight_refusals
+        .iter()
+        .map(|(_, observation)| observation.ts_ms)
+        .filter(|ts| *ts > 0)
+        .collect();
+    refusal_ts.sort_unstable();
+    let refusal_window = refusal_ts
+        .first()
+        .zip(refusal_ts.last())
+        .map(|(oldest, newest)| CompletenessWindow {
+            oldest_ts_ms: *oldest,
+            newest_ts_ms: *newest,
+            timestamped: refusal_ts.len(),
+        });
+
+    ToolChainCompleteness {
+        complete,
+        total,
+        defects: defects
+            .into_iter()
+            .map(|(field, count)| (field.to_string(), count))
+            .collect(),
+        window,
+        preflight: PreflightCompleteness {
+            complete: refusal_complete,
+            total: refusal_total,
+            defects: refusal_defects
+                .into_iter()
+                .map(|(field, count)| (field.to_string(), count))
+                .collect(),
+            window: refusal_window,
+        },
+    }
+}
+
+/// Render the typed tool-chain report for operators. Keep this prose stable, but never require a
+/// machine consumer to reverse-engineer it.
+pub fn render_tool_chain_completeness(events: &[DecisionEvent]) -> String {
+    let report = tool_chain_completeness(events);
+    if report.total == 0 && report.preflight.total == 0 {
+        return "No tool-chain calls yet — completeness appears after a tool decision.".into();
+    }
+
+    let mut out = if report.total == 0 {
         "No tool-chain calls yet — completeness appears after a tool decision.\n".into()
     } else {
-        let percent = 100.0 * complete as f64 / total as f64;
-        let mut report = format!(
-            "TOOL CHAIN COMPLETENESS — {complete}/{total} latest call(s) complete ({percent:.1}%; gate ≥99%)\n"
+        let percent = 100.0 * report.complete as f64 / report.total as f64;
+        let mut out = format!(
+            "TOOL CHAIN COMPLETENESS — {}/{} latest call(s) complete ({percent:.1}%; gate ≥99%)\n",
+            report.complete, report.total
         );
-        // E.AGI-A2: a live reading must say WHEN its evidence is from — a window full of history
-        // reads very differently from a window of yesterday's traffic. Timestamps only, aggregate.
-        let mut span_ts: Vec<u64> = calls
-            .iter()
-            .flat_map(|(_, prediction, observation)| {
-                prediction
-                    .iter()
-                    .chain(observation.iter())
-                    .map(|event| event.ts_ms)
-            })
-            .filter(|ts| *ts > 0)
-            .collect();
-        span_ts.sort_unstable();
-        if let (Some(oldest), Some(newest)) = (span_ts.first(), span_ts.last()) {
-            report.push_str(&format!(
-                "  window spans ts_ms {oldest}..{newest} across {total} sampled call(s)\n"
+        if let Some(window) = &report.window {
+            out.push_str(&format!(
+                "  window spans ts_ms {}..{} across {} sampled call(s)\n",
+                window.oldest_ts_ms, window.newest_ts_ms, report.total
             ));
         }
-        if defects.is_empty() {
-            report.push_str("  no missing or mismatched provenance in this sample\n");
+        if report.defects.is_empty() {
+            out.push_str("  no missing or mismatched provenance in this sample\n");
         } else {
-            for (field, count) in defects {
-                report.push_str(&format!("  missing or mismatched {field}: {count}\n"));
+            for (field, count) in &report.defects {
+                out.push_str(&format!("  missing or mismatched {field}: {count}\n"));
             }
         }
-        report
+        out
     };
 
-    if !preflight_refusals.is_empty() {
-        let mut refusal_complete = 0usize;
-        let mut refusal_defects: std::collections::BTreeMap<&str, usize> = Default::default();
-        for (_, observation) in &preflight_refusals {
-            let mut row_complete = true;
-            let present = |value: &Option<String>| {
-                value
-                    .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-            };
-            let mut require = |condition: bool, label: &'static str| {
-                if !condition {
-                    row_complete = false;
-                    *refusal_defects.entry(label).or_insert(0) += 1;
-                }
-            };
-            require(present(&observation.event_id), "event_id");
-            if let Some(event_id) = observation.event_id.as_deref() {
-                require(
-                    events_by_id
-                        .get(event_id)
-                        .is_some_and(|matches| matches.len() == 1),
-                    "event_id uniqueness",
-                );
-            }
-            require(!observation.trace_id.trim().is_empty(), "trace_id");
-            require(observation.ts_ms > 0, "ts_ms");
-            if let Some(parent_id) = observation.parent_event_id.as_deref() {
-                require(
-                    !parent_id.trim().is_empty()
-                        && events_by_id.get(parent_id).is_some_and(|matches| {
-                            matches.len() == 1
-                                && matches[0].kind == "goal_compiled"
-                                && matches[0].trace_id == observation.trace_id
-                                && matches[0].ts_ms > 0
-                                && matches[0].ts_ms <= observation.ts_ms
-                        }),
-                    "bounded root integrity",
-                );
-            }
-            require(present(&observation.actor), "actor");
-            require(present(&observation.lane), "lane");
-            require(
-                present(&observation.context_fingerprint),
-                "context_fingerprint",
-            );
-            require(present(&observation.goal_id), "goal_id");
-            require(present(&observation.tool_version), "tool_version");
-            require(present(&observation.model_route), "model_route");
-            require(present(&observation.object_id), "object_id");
-            require(
-                observation.evaluator_id.as_deref() == Some("tool-outcome-v1"),
-                "evaluator_id",
-            );
-            require(present(&observation.outcome), "outcome");
-            require(present(&observation.lesson), "lesson");
-            require(
-                observation.prediction_error.is_none() && observation.brier.is_none(),
-                "calibration exclusion",
-            );
-            if row_complete {
-                refusal_complete += 1;
-            }
-        }
-        let refusal_total = preflight_refusals.len();
+    if report.preflight.total > 0 {
         out.push_str(&format!(
-            "  PREFLIGHT REFUSALS — {refusal_complete}/{refusal_total} latest malformed refusal(s) complete (prediction intentionally absent)\n"
+            "  PREFLIGHT REFUSALS — {}/{} latest malformed refusal(s) complete (prediction intentionally absent)\n",
+            report.preflight.complete, report.preflight.total
         ));
-        let mut refusal_ts: Vec<u64> = preflight_refusals
-            .iter()
-            .map(|(_, observation)| observation.ts_ms)
-            .filter(|ts| *ts > 0)
-            .collect();
-        refusal_ts.sort_unstable();
-        if let (Some(oldest), Some(newest)) = (refusal_ts.first(), refusal_ts.last()) {
-            let timestamped = refusal_ts.len();
+        if let Some(window) = &report.preflight.window {
             out.push_str(&format!(
-                "    refusal window spans ts_ms {oldest}..{newest} across {timestamped}/{refusal_total} timestamped refusal(s)\n"
+                "    refusal window spans ts_ms {}..{} across {}/{} timestamped refusal(s)\n",
+                window.oldest_ts_ms,
+                window.newest_ts_ms,
+                window.timestamped,
+                report.preflight.total
             ));
         }
-        for (field, count) in refusal_defects {
+        for (field, count) in &report.preflight.defects {
             out.push_str(&format!(
                 "    missing or mismatched preflight {field}: {count}\n"
             ));
@@ -3050,13 +3135,20 @@ mod tests {
 
         let unobserved = DecisionEvent::span("abandoned", None, "tool_predicted");
 
-        let report = render_tool_chain_completeness(&[
+        let events = [
             compile.clone(),
             prediction.clone(),
             observation.clone(),
             orphan,
             unobserved,
-        ]);
+        ];
+        let typed = tool_chain_completeness(&events);
+        assert_eq!((typed.complete, typed.total), (1, 3));
+        assert_eq!(typed.defects.get("prediction link"), Some(&1));
+        assert_eq!(typed.defects.get("observation link"), Some(&1));
+        assert_eq!(typed.defects.get("evaluator_id"), Some(&1));
+        assert!(typed.window.is_some());
+        let report = render_tool_chain_completeness(&events);
         assert!(
             report.contains("1/3 latest call(s) complete (33.3%; gate ≥99%)"),
             "{report}"
@@ -3314,6 +3406,10 @@ mod tests {
         refusal.lesson = Some("planner arguments did not fit the tool".into());
         refusal.event_id = Some("refusal-1".into());
 
+        let typed = tool_chain_completeness(&[refusal.clone()]);
+        assert_eq!((typed.complete, typed.total), (0, 0));
+        assert_eq!((typed.preflight.complete, typed.preflight.total), (1, 1));
+        assert_eq!(typed.preflight.window.as_ref().unwrap().timestamped, 1);
         let report = render_tool_chain_completeness(&[refusal.clone()]);
         assert!(report.starts_with("No tool-chain calls yet"), "{report}");
         assert!(

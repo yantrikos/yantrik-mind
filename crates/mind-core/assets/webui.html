@@ -67,6 +67,9 @@
         <button class="nav-item" data-panel="tasks">
           <span class="nav-ico">◷</span> Agents
         </button>
+        <button class="nav-item" data-panel="board">
+          <span class="nav-ico">▦</span> Board
+        </button>
         <button class="nav-item" data-panel="activity">
           <span class="nav-ico">≣</span> Activity
         </button>
@@ -151,6 +154,15 @@
           <div class="cap-group">Standing orders</div>
           <pre id="orders-text" class="orders glass">…</pre>
         </div>
+      </div>
+
+      <!-- Board: kanban over agents + horizons + orders -->
+      <div class="panel" id="panel-board">
+        <header class="panel-head">
+          <h2>Board</h2>
+          <p class="panel-sub">Every piece of work the mind is carrying — scheduled, running, done, or needing review — in one view.</p>
+        </header>
+        <div class="cards"><div id="board-columns" class="board"><p class="loading">assembling the board…</p></div></div>
       </div>
 
       <!-- Activity: decisions log + standing orders -->

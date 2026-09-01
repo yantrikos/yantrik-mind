@@ -90,6 +90,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     if (btn.dataset.panel === "settings") loadSettings();
     if (btn.dataset.panel === "devices") loadDevices();
     if (btn.dataset.panel === "tasks") loadTasks();
+    if (btn.dataset.panel === "board") loadBoard();
     if (btn.dataset.panel === "activity") loadActivity();
     if (btn.dataset.panel === "chat") input.focus();
   });
@@ -393,6 +394,42 @@ function textP(s) { const p = el("p", "loading"); p.textContent = s; return p; }
 
 /* ── agents & standing orders ─────────────────────────────────────────── */
 let tasksTimer = null;
+// E.WEB9: pure column classifier — the ONE routing rule, extractable and deterministic. Every
+// work item lands in exactly one of four columns from its own status; no mutation, no fetch.
+function columnFor(kind, status) {
+  const s = String(status || "").toLowerCase();
+  if (s.includes("fail")) return "needs";
+  if (kind === "order") return "scheduled";
+  if (s.includes("run") || s.includes("active")) return "running";
+  if (s.includes("pending") || s.includes("scheduled") || s.includes("sleep")) return "scheduled";
+  if (s.includes("done") || s.includes("complete") || s.includes("finish")) return "done";
+  return "running";
+}
+
+async function loadBoard() {
+  const host = $("board-columns");
+  const cols = { scheduled: [], running: [], done: [], needs: [] };
+  async function pull(url) { try { const r = await fetch(url, { headers: { "X-YM-Web": "1" } }); return r.ok ? await r.json() : {}; } catch (_) { return {}; } }
+  const [tasks, horizons, orders] = await Promise.all([pull("/api/tasks"), pull("/api/horizons"), pull("/api/orders")]);
+  for (const j of (tasks.jobs || [])) cols[columnFor("job", j.state || j.status)].push({ title: j.name || j.id, meta: (j.task || j.goal || "").slice(0, 80), cls: columnFor("job", j.state || j.status) });
+  for (const g of (horizons.goals || [])) cols[columnFor("horizon", g.status)].push({ title: g.objective || g.goal_id, meta: g.budget_expired ? "budget expired" : (g.queue_status || g.status || ""), cls: columnFor("horizon", g.status) });
+  // Standing orders text is a blob; show a single card pointing to Activity for detail.
+  if (orders.text && !orders.text.includes("No standing")) cols.scheduled.push({ title: "Standing orders", meta: "see Activity for schedule + controls", cls: "scheduled" });
+  host.replaceChildren();
+  for (const [key, label] of [["scheduled", "Scheduled"], ["running", "Running"], ["done", "Done"], ["needs", "Needs review"]]) {
+    const col = el("div", "board-col");
+    const h = el("h3"); h.textContent = `${label} · ${cols[key].length}`; col.appendChild(h);
+    for (const c of cols[key]) {
+      const card = el("div", "board-card " + (key === "needs" ? "needs" : key === "running" ? "running" : ""));
+      const t = el("div", "bc-title"); t.textContent = c.title; card.appendChild(t);
+      if (c.meta) { const m = el("div", "bc-meta"); m.textContent = c.meta; card.appendChild(m); }
+      col.appendChild(card);
+    }
+    if (!cols[key].length) { const e = el("div", "bc-meta"); e.textContent = "—"; col.appendChild(e); }
+    host.appendChild(col);
+  }
+}
+
 async function loadActivity() {
   // Standing orders (reuse the orders verb) + a redacted decisions timeline.
   try {

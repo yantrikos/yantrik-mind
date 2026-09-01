@@ -1892,6 +1892,28 @@ mod tests {
         );
     }
 
+    /// E.WEB9: the board is a read-only lens — its classifier routes by status into a CLOSED set
+    /// of four columns and performs no fetch or mutation itself. Source-guarded like the other
+    /// client logic.
+    #[test]
+    fn the_board_classifier_is_closed_and_read_only() {
+        assert!(
+            APP_JS.contains("function columnFor("),
+            "the classifier exists"
+        );
+        for col in ["\"needs\"", "\"scheduled\"", "\"running\"", "\"done\""] {
+            assert!(
+                APP_JS.contains(&format!("return {col}")),
+                "column {col} is a classifier outcome"
+            );
+        }
+        // The classifier body must not fetch or mutate — it is pure routing.
+        let start = APP_JS.find("function columnFor(").unwrap();
+        let body = &APP_JS[start..start + 400];
+        assert!(!body.contains("fetch("), "columnFor must not fetch");
+        assert!(!body.contains("postJson"), "columnFor must not mutate");
+    }
+
     #[test]
     fn session_cookie_extraction_ignores_other_cookies() {
         let head = "GET / HTTP/1.1\r\ncookie: theme=dark; ym_session=tok123; other=x\r\n";

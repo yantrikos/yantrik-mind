@@ -383,3 +383,15 @@ body {
 .lane-chip.lane-private { color: #86efac; border-color: rgba(52,211,153,.45); }
 .lane-chip.lane-household { color: #fcd34d; border-color: rgba(251,191,36,.45); }
 .lane-chip.lane-public { color: #93c5fd; border-color: rgba(147,197,253,.45); }
+
+/* board (kanban) */
+.board { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.board-col { background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 14px; padding: 10px; min-height: 120px; }
+.board-col h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--ink-faint); margin-bottom: 8px; }
+.board-card { background: var(--glass); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; margin-bottom: 8px; }
+.board-card .bc-title { font-size: 13.5px; font-weight: 600; }
+.board-card .bc-meta { font-size: 11px; color: var(--ink-faint); margin-top: 3px; }
+.board-card.needs { border-color: rgba(248,113,113,.4); }
+.board-card.running { border-color: rgba(34,211,238,.4); }
+@media (max-width: 900px) { .board { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .board { grid-template-columns: 1fr; } }

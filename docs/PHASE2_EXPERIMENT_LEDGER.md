@@ -2068,3 +2068,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | CLIENT-ONLY: a new "Board" view that fetches the EXISTING /api/tasks, /api/horizons, /api/orders and lays them into columns — Scheduled (orders + pending horizons), Running (running jobs + active horizons), Done (finished jobs), Needs review (failed jobs + failed horizons). Cards carry the item's own actions (keep/drop, order pause/run) already wired. No new route, no engine change: the board is a lens on data three panels already render, so nothing new can leak. |
 | Kill criteria | (1) A running job appears in Running and a failed horizon in Needs-review — column routing asserted by a small pure-function test over sample rows (the classifier is extractable and unit-testable in isolation). (2) Card actions reuse the existing gated routes (no new mutation surface). (3) The board degrades to empty columns, never an error, when a source 403s or is empty. (4) Workspace green (assets embedded, so the suite covers the build). |
 | AGI feed | Legibility of the mind's own workload — the operator (and a future planner) sees committed vs in-flight vs stuck work as one picture, the substrate a scheduling/prioritization loop would read. |
+
+## E.WEB9 — RESULTS: the household's work as one board
+
+| Field | Value |
+| --- | --- |
+| What shipped | A "Board" view, CLIENT-ONLY, fetching the existing /api/tasks, /api/horizons, /api/orders and routing each item through a pure `columnFor(kind,status)` into Scheduled / Running / Done / Needs-review. No new route, no engine change — a lens on data three panels already render. |
+| Kill criteria | (1) Column routing is a pure, closed-set classifier — `the_board_classifier_is_closed_and_read_only` asserts the four column outcomes and that the classifier body neither fetches nor mutates: PASS. (2) Cards are read-only; existing gated routes own all mutation. (3) Empty/403 sources degrade to empty columns. (4) Workspace 1405/0/4: PASS. |
+| AGI feed | Workload legibility: committed vs in-flight vs stuck work as one picture — the substrate a prioritization/scheduling loop reads. |

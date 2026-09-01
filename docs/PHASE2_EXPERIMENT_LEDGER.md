@@ -2771,3 +2771,19 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Verified by using it (Playwright through the tunnel, operator device minted → used → revoked) | Running: title "Running", 2 sections visible, feed says "Nothing running right now." Dormant: 3 sections visible, nav badge **6**, past runs listed with their timelines, standing orders section present. New agent: composer + import + goal form. Page errors: none. Running badge hidden at 0 — a zero is not news. |
 | Found while verifying | The goals section in Running shows a heading over nothing when no goal is running; the job feed already says so per bucket, the goals list does not. Fixed in the follow-up commit (empty-state line per bucket for goals). Also my screenshot harness read the pair token from the wrong output line for three runs — a 401 on `/api/me` that looked like an auth regression and was a `head -1`; recorded in memory so it is not re-learned. |
 | Scope note | The prereg listed pause/resume as out of scope because it "needs its own gate"; the gate already existed (`/api/order-action`), so the Dormant view offers the actions the server itself reports for each order. No new mutation path. |
+
+## E.G2a — FOLDED at b932309
+
+| Field | Value |
+| --- | --- |
+| Fold | `b932309`; clean full suite 45 binaries / 1,484 passed / 0 failed; E.G1's guard and runtime test green unmodified; fixture + source guards in `proactive::knock_disposition_tests`. Peer-ACKed prereg (bf54207/195157b) and amendment (ed1043f). |
+| Two things the tests taught | (1) E.G1's guard scans to end-of-file, so E.G2a's tests live ABOVE the consult, with split needles so the guard's own literal is never the first match. (2) A runtime test that flips `YM_KNOCK` process-wide raced the E.G1 runtime test once on the full suite — dropped; the "off emits neither row" constraint is a source guard (the precheck's return precedes the shadow record). |
+| Live | Staging at `b932309`: no `knock_disposition` will be recorded on a headless box, correctly. E.G2 waits for a Telegram box (prod batch, Pranab's call). |
+
+## E.WEB18 — each agent is its own thread (prereg)
+
+| Field | Value |
+| --- | --- |
+| Ask (Pranab, 2026-09-01 ~22:35Z) | "The agents should show like its own thread not in a single window." |
+| Design | Running and Dormant list AGENTS, one row each (name, state, last activity, run count, next scheduled time if a standing order shares the name), not runs. Selecting an agent opens its THREAD in the work column: the brief at the top, then every run of that name in time order rendered like a conversation — started, notes, result — with scheduled orders shown as future entries and the run-again composer at the bottom, like a reply box. Back returns to the list. Grouping key is the agent name the composer already uses; runs and orders are the same `/api/tasks`, `/api/standing-orders`, `/api/horizons` data. Durable goals stay their own rows (a goal is not an agent). |
+| Kill | Any endpoint change; an agent whose runs appear in two threads or in none (the grouping is one pure function, guarded); the thread losing any of the run card's existing affordances (timeline, DOM-only markdown result, keep/drop/delete, run again); a screenshot on staging that does not show list → thread → back. |

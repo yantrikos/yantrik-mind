@@ -2519,3 +2519,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Trials (staging at 90a795c) | Five identical creation attempts of the exact phrase that previously refused twice: **5/5 scheduled.** All five trial goals cancelled immediately (control receipts 7871ca49, 53878ce3, 7211df8e, ce578a18, cd8a021f — the cancel path incidentally exercised five more times, all clean). |
 | Honest status | Baseline was 3 accepts / 2 refusals over 5 attempts; greedy shows 5/5. Codex's caveat stands in spirit — backend nondeterminism could still surface at larger N — but the twice-witnessed refusal mode has not recurred once under greedy decoding. Status: CLOSED-AT-N=5, reopenable by any future refusal, which the ledger would record as a new row. |
+
+## E.F1e — FINALIZED: Gate 4 peer-verified — CRYPTOGRAPHIC PASS
+
+| Field | Value |
+| --- | --- |
+| Codex's independent verdict (quoted) | "I independently recomputed all four SHA-256 digests from mind-spec's canonical tuple serialization and verified exact previous-hash links, valid queue transitions, scheduled/start equality, completed/finish equality, completed-state/outcome-state equality, actions/replans/cost, and +7,832ms clock separation." Gate 4: PASS, peer-verified. |
+| Scope, precisely | Cryptographic verification covers lifecycle + outcome receipts. Gate 2 (delivery) was locally witnessed; exact sanitized notice bytes (SHA-256 8dd90f88…) have now been shared for Codex's independent read. |
+| Gate 2 refined per the exact bytes | Answer-presence PASS is STRONGER than first recorded — the notice contains an explicit "**Total pending tasks: 0**" line. Answer-QUALITY is WORSE than first recorded — the same notice opens by denying access to the very data it then reports. Presence and quality are scored separately, never collapsed (Codex's rule, adopted). Quality residual on Codex's lane. |
+| The horizon arc: final form | E.F1→E.F1e in one evening: durable, accounted, executed, delivered — each rung live-witnessed, the capstone receipt chain verified by independent recomputation on a second machine. First fully peer-verified long-horizon completion in the mind's history. |

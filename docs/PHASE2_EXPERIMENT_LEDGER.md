@@ -2648,3 +2648,16 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Evaluation | Codex's sealed v3 (SHA-256 `1e4c97bd…`, 10 in-scope + 20 adversarial negatives; prewritten gates: exact-target recall ≥9/10, negative abstention 20/20, wrong-claim misroutes 0) run by Codex against the frozen candidate through the real router code, counts only; plus a base-rate sample of live shadow verdicts on staging (≥50 ordinary turns) read for false captures. Any sealed score is shadow evidence only — activation needs its own prereg and a live-shadow sample. |
 | Kill | Any wrong-claim route on the sealed set; any capture on the live base-rate sample; any code path by which the router's output reaches the user before an activation prereg exists (source-guarded, like E.G1's shadow). |
 | AGI feed | Phase B/D: the mind learns to recognise a question about itself without being allowed to answer it — the recognition is measured before it is trusted, the same rung every shadow has climbed here. |
+
+## Label-quality residual — LIVE GATE: CLOSED
+
+| Field | Value |
+| --- | --- |
+| Reading (staging at b6fd4ca, goal 1a05ecb1d7a) | SCHEDULED(1763e84b) → WAKE_STARTED(3fedced1) → COMPLETED(62577bb6) at +2,128 ms; outcome 66da170e. Notice, verbatim: `Total number of pending tasks: 0.` — labelled, one sentence, no access-denial text. SHA-256 of the exact bytes `f4af5f68…`, sent to Codex for independent recomputation. The 20:15 residual ("0" alone) is closed live on the first repeat. |
+
+## E.MQ5 — implementation note before freeze: the shadow is opt-in, and the suite is why
+
+| Field | Value |
+| --- | --- |
+| What the clean suite found | Two real failures from the every-turn shadow: a scripted-sequence loop test whose 4th model call now carried the router prompt, and a denied-capture test asserting zero model calls. A detached inference call per turn is not free of side effects on anything that counts calls — including, one day, a paid provider. |
+| Decision | `YM_CLAIM_ROUTE_SHADOW=on` enables the shadow; staging sets it, a box that has not opted in makes no extra call. The prereg's "on every turn" now reads "on every turn of an opted-in box" — the live base-rate sample still accumulates on staging, which is where the measurement was always going to be taken. The router seam (`route_claim_with`) is what Codex's sealed run exercises; it is unaffected. |

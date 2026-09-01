@@ -83,6 +83,19 @@ def main() -> int:
         "Claude/Qwen goal generation path disappeared",
     )
 
+    require("BUILD_RC=0" in improve, "builder exit status is not initialized")
+    require(
+        improve.count("BUILD_RC=$?") == 3,
+        "every builder lane must capture its process exit status",
+    )
+    abort = improve.index("ABORT-BUILDER:")
+    stage = improve.index("git add -A")
+    require(abort < stage, "a failed builder could stage or propose its partial edits")
+    require(
+        "IMPROVE_RC=$?" in tick and 'grep -q "ABORT-BUILDER:"' in tick,
+        "the tick cannot distinguish and preserve a pre-staging builder failure",
+    )
+
     print("self-build builder isolation: ok")
     return 0
 

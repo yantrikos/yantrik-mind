@@ -219,18 +219,31 @@ echo "TICK GOAL: $GOAL"
 # Run the build with auto-merge enabled (self_improve still gates every merge).
 set +e
 OUT="$(YM_AUTOMERGE=1 bash /root/codes/yantrik-mind/deploy/self_improve.sh "$GOAL" 2>&1)"
+IMPROVE_RC=$?
 set -e
 echo "$OUT"
 # Builder unavailable (credit/quota/auth) — the goal never got a fair attempt, so DON'T let the pop
 # consume it. Re-queue it (if it came from the human queue) and log a distinct outcome; otherwise a
 # dry builder silently drains the whole queue over successive ticks (4/day) with nothing to show.
+AUTH_FAILURE=0
 if echo "$OUT" | grep -qiE "credit balance is too low|usage limit|quota exceeded|invalid api key|authentication_error|oauth token.*expired|401 unauthorized|failed to authenticate|access token has been revoked|invalid authentication credentials"; then
+  AUTH_FAILURE=1
   echo "$(date -u +%FT%TZ) | build | BUILDER-NO-CREDIT | $GOAL" >> "$EVLOG"
   if [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
     printf '%s\n' "$GOAL" >> "$GOALS"
     echo "==> builder unavailable — goal re-queued (not consumed)"
   fi
   tg_alert builder "builder unavailable mid-run (credit/quota/auth) — goal re-queued; check token + Max window"
+fi
+# A non-auth builder crash or timeout is equally not a fair attempt. `self_improve` emits this exact
+# marker only before staging; do not requeue compile/harm-gate failures that earned a terminal handoff.
+if [ "$AUTH_FAILURE" = "0" ] && [ "$IMPROVE_RC" -ne 0 ] && echo "$OUT" | grep -q "ABORT-BUILDER:"; then
+  echo "$(date -u +%FT%TZ) | build | BUILDER-FAILED | $GOAL" >> "$EVLOG"
+  if [ "$FROM_QUEUE" = "1" ] && ! grep -qxF "$GOAL" "$GOALS" 2>/dev/null; then
+    printf '%s\n' "$GOAL" >> "$GOALS"
+    echo "==> builder failed before staging — goal re-queued (not consumed)"
+  fi
+  tg_alert builderfail "builder crashed or timed out before staging — queued goal preserved; check selfbuild-cron.log"
 fi
 # CRASH SAFETY: an empty OUT means self_improve died before producing anything (workdir deleted,
 # OOM, kill) — the goal never got a fair attempt, so put it back (dup-guarded).

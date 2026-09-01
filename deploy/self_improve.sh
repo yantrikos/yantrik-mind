@@ -83,6 +83,7 @@ Rules: make a focused, minimal, idiomatic change. Do NOT modify anything under c
 # quota, self-refreshing auth in ~/.codex); default = Claude Code (Max). Both edit files + run cargo,
 # then the SAME gates below (compile + eval-custody + test-presence + behavioral suite + small-diff)
 # decide auto-merge vs draft — the builder identity doesn't change what's allowed to merge.
+BUILD_RC=0
 if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   # QWEN BUILDER: Claude Code driving QwenCloud over its Anthropic-compatible endpoint. Same CLI,
   # same tool allowlist, same gates below - only the model behind it changes, which is what makes
@@ -93,7 +94,10 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   export ANTHROPIC_BASE_URL="https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
   export ANTHROPIC_AUTH_TOKEN="$QWEN_API_KEY"
   export ANTHROPIC_MODEL="${YM_QWEN_MODEL:-qwen3.8-max}"
+  set +e
   BUILD_JSON="$(timeout 1500 claude -p "$BUILDER_PROMPT"     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format json 2>&1)"
+  BUILD_RC=$?
+  set -e
   # Recover the prose for the gates (ALREADY-EXISTS detection) and RECORD THE SPEND.
   # Both delegate to real scripts on the box: inline python inside a shell inside ssh does not
   # survive the quoting - the first attempt died silently behind `2>/dev/null || true`, leaving no
@@ -103,16 +107,28 @@ if [ "${YM_BUILDER:-claude}" = "qwen" ]; then
   echo "$BUILD_OUT"
 elif [ "${YM_BUILDER:-claude}" = "codex" ]; then
   echo "==> builder: OpenAI Codex CLI (codex exec)"
+  set +e
   BUILD_OUT="$(timeout 1500 codex exec --skip-git-repo-check --sandbox danger-full-access "$BUILDER_PROMPT" </dev/null 2>&1 | tail -25)"
+  BUILD_RC=$?
+  set -e
   echo "$BUILD_OUT"
 else
   echo "==> builder: Claude Code"
+  set +e
   BUILD_OUT="$(timeout 1500 claude -p "$BUILDER_PROMPT" \
     --permission-mode acceptEdits --allowedTools "Write Edit Read Bash(cargo build:*) Bash(cargo test:*) Bash(cargo check:*)" --output-format text 2>&1 | tail -25)"
+  BUILD_RC=$?
+  set -e
   echo "$BUILD_OUT"
 fi
 
 BUILD_OUT="${BUILD_OUT:-}"
+if [ "$BUILD_RC" -ne 0 ]; then
+  echo "ABORT-BUILDER: builder process failed (exit $BUILD_RC) — partial edits discarded, no PR"
+  echo "$(date -u +%FT%TZ) | build | ABORT-BUILDER | $GOAL" >> "$EVLOG"
+  handoff ABORT-BUILDER "The selected builder exited $BUILD_RC before completing. No partial diff was staged or proposed; retry after checking its auth, quota, and runtime health."
+  exit 1
+fi
 echo "==> enforce bounds"
 git add -A   # stage everything incl. NEW files (git diff alone ignores untracked)
 if git diff --cached --quiet; then

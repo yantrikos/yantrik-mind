@@ -2444,3 +2444,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | Same goal as E.F1/E.F1b, on staging at bd8db96 with the lifecycle-receipt surface live. Prediction: it fails again (the runner defect is untouched) — but this time `horizon history` renders a verified chain: SCHEDULED → WAKE_STARTED → FAILED with a typed stage, giving Codex's runner diagnosis its named target. |
 | Gates | (1) The receipt chain verifies and renders for this goal. (2) The failure carries a typed reason more specific than the bare status. (3) Nothing about the run itself is claimed beyond what receipts show. |
 | Kill | RECEIPTS-MISSING if history still shows only a terminal checkpoint on the new binary — the surface failed its first live contact and goes back to Codex with that evidence. |
+
+## E.F1c — RESULT: the receipts work on first contact, and they localize the defect to the instant of wake
+
+| Field | Value |
+| --- | --- |
+| Gate 1 — chain verifies and renders: PASS | First live failure under the new surface: `SCHEDULED (no-queue→pending, ea481cab…) → WAKE_STARTED (pending→running, 7856a911…) → FAILED (running→failed, faf7ffd0…, reason segment_contract_failed)`. Hash-chained, timestamped, queue transitions explicit. The E.F1 accounting sin is gone: this goal narrates its life. |
+| Gate 2 — deeper typed reason: FAIL as written | The reason string is still the bare `segment_contract_failed` — the vocabulary did not deepen. Honest score. BUT the receipts delivered something better than a longer string: **WAKE_STARTED and FAILED share one millisecond (1788283707755)** — the segment dies INSTANTLY at wake, before any execution. |
+| The localization, combined with the creation-refusal finding | Two independent witnesses now point at one place: (a) the same goal phrasing was nondeterministically REFUSED at creation ("planner did not produce a recipe"); (b) accepted recipes fail their contract at wake-load in 0ms. Candidate root cause for the whole family: the LLM-planned segment recipe is sometimes contract-violating — caught at the door when creation validation runs, dying at wake when it does not. The fix target is the recipe contract at PLAN time vs WAKE time — Codex's runner lane, now with a named stage. |
+| AGI feed | Phase F: the accounting rung is REPAIRED AND LIVE-WITNESSED on its first failure; the execution rung has a localized, twice-witnessed defect hypothesis instead of a mystery. |

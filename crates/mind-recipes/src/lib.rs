@@ -456,7 +456,38 @@ pub struct HorizonTickOutcome {
     pub goal_id: String,
     pub state: HorizonTickState,
     pub receipt: Option<OutcomeReceipt>,
+    /// Bounded, ephemeral output from the final read/reason step. This is deliberately absent from
+    /// the durable lifecycle receipt: receipts prove execution state without retaining user data.
+    pub result: Option<String>,
     pub error: Option<String>,
+}
+
+const MAX_HORIZON_RESULT_CHARS: usize = 1_000;
+
+fn horizon_result(steps: &[RecipeStep], vars: &HashMap<String, Value>) -> Option<String> {
+    let output_var = steps.iter().rev().find_map(|step| match step {
+        RecipeStep::Tool { store_as, .. }
+        | RecipeStep::Think { store_as, .. }
+        | RecipeStep::ThinkCited { store_as, .. }
+        | RecipeStep::Validate { store_as, .. }
+        | RecipeStep::Render { store_as, .. } => Some(store_as),
+        _ => None,
+    })?;
+    let value = vars.get(output_var)?;
+    let rendered = match value {
+        Value::String(text) => text.trim().to_string(),
+        other => serde_json::to_string(other).ok()?,
+    };
+    if rendered.is_empty() {
+        return None;
+    }
+    let mut chars = rendered.chars();
+    let mut bounded: String = chars.by_ref().take(MAX_HORIZON_RESULT_CHARS).collect();
+    if chars.next().is_some() {
+        bounded.pop();
+        bounded.push('…');
+    }
+    Some(bounded)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1033,6 +1064,7 @@ GOAL: GOAL_HERE"#;
                     goal_id: "scheduler".into(),
                     state: HorizonTickState::Failed,
                     receipt: None,
+                    result: None,
                     error: Some(error.to_string()),
                 }];
             }
@@ -1053,6 +1085,7 @@ GOAL: GOAL_HERE"#;
                     goal_id: job.goal_id.clone(),
                     state: HorizonTickState::Failed,
                     receipt: None,
+                    result: None,
                     error: Some(error.to_string()),
                 }
             };
@@ -1087,6 +1120,7 @@ GOAL: GOAL_HERE"#;
                         goal_id: job.goal_id.clone(),
                         state: HorizonTickState::Advanced,
                         receipt: None,
+                        result: None,
                         error: None,
                     }),
                     Err(error) => {
@@ -1101,6 +1135,7 @@ GOAL: GOAL_HERE"#;
                         goal_id: job.goal_id.clone(),
                         state: HorizonTickState::AwaitingReplan,
                         receipt: None,
+                        result: None,
                         error: None,
                     }),
                     Err(error) => {
@@ -1225,6 +1260,7 @@ GOAL: GOAL_HERE"#;
                         goal_id: job.goal_id.clone(),
                         state: HorizonTickState::AwaitingReplan,
                         receipt: None,
+                        result: None,
                         error: None,
                     }),
                     Err(error) => outcomes.push(failed_at(
@@ -1237,8 +1273,13 @@ GOAL: GOAL_HERE"#;
             }
 
             if job.complete_on_success {
+                let result = horizon_result(&job.recipe.steps, &recipe_outcome.vars);
+                // Completion is observed after recipe execution, not at the scheduler tick that
+                // claimed the job. Keep it monotonic with the goal's logical action timestamp for
+                // deterministic callers that intentionally pass a future clock.
+                let completion_ms = execution_finished_ms.max(segment_ms);
                 let completed = run
-                    .complete(segment_ms)
+                    .complete(completion_ms)
                     .map_err(|error| anyhow::anyhow!("horizon completion rejected: {error:?}"))
                     .and_then(|receipt| {
                         store.finish_horizon(&run, &receipt)?;
@@ -1249,6 +1290,7 @@ GOAL: GOAL_HERE"#;
                         goal_id: job.goal_id.clone(),
                         state: HorizonTickState::Completed,
                         receipt: Some(receipt),
+                        result,
                         error: None,
                     }),
                     Err(error) => outcomes.push(failed_at(
@@ -1270,6 +1312,7 @@ GOAL: GOAL_HERE"#;
                     goal_id: job.goal_id.clone(),
                     state: HorizonTickState::Advanced,
                     receipt: None,
+                    result: None,
                     error: None,
                 }),
                 Err(error) => outcomes.push(failed_at(
@@ -2576,6 +2619,44 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn completed_horizon_receipt_uses_the_observed_post_execution_clock() {
+        struct DelayedSuccessHost;
+        #[async_trait]
+        impl RecipeHost for DelayedSuccessHost {
+            async fn call_tool(&self, _tool: &str, _args: &Value) -> anyhow::Result<String> {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                Ok("observed".into())
+            }
+        }
+
+        let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+        let scripted = Arc::new(ScriptedLLM::new("unused"));
+        let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+        let engine = RecipeEngine::new(pool, Arc::new(DelayedSuccessHost), "JARVIS")
+            .with_store(store.clone());
+        let start = now_ms();
+        let mut run = horizon_run("goal:completion-clock", BTreeMap::new(), start);
+        let job = horizon_job(&run.goal_id, true, start);
+        engine
+            .schedule_horizon_segment(&mut run, job, start)
+            .unwrap();
+
+        let outcomes = engine.resume_due_horizons(start).await;
+        let receipt = outcomes[0].receipt.as_ref().unwrap();
+        let lifecycle = store.load_horizon_lifecycle(&run.goal_id).unwrap();
+        let wake_started_ms = lifecycle
+            .iter()
+            .find(|event| event.event == mind_spec::HorizonLifecycleEvent::WakeStarted)
+            .unwrap()
+            .occurred_at_ms;
+        assert!(receipt.finished_at_ms > wake_started_ms);
+        assert_eq!(
+            lifecycle.last().unwrap().occurred_at_ms,
+            receipt.finished_at_ms
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn explicit_natural_language_horizon_rejects_a_planner_authored_write() {
         let store = Arc::new(RecipeStore::open(":memory:").unwrap());
@@ -2965,6 +3046,25 @@ mod tests {
         let mut v = HashMap::new();
         v.insert("name".to_string(), Value::String("world".into()));
         assert_eq!(resolve_vars("hi {{name}}", &v), "hi world");
+    }
+
+    #[test]
+    fn horizon_result_is_bounded_before_it_reaches_a_notification() {
+        let steps = vec![RecipeStep::Tool {
+            tool_name: "due_tasks".into(),
+            args: Value::Null,
+            store_as: "tasks".into(),
+            on_error: ErrorAction::Fail,
+        }];
+        let mut vars = HashMap::new();
+        vars.insert(
+            "tasks".into(),
+            Value::String("x".repeat(MAX_HORIZON_RESULT_CHARS + 1)),
+        );
+
+        let result = horizon_result(&steps, &vars).unwrap();
+        assert_eq!(result.chars().count(), MAX_HORIZON_RESULT_CHARS);
+        assert!(result.ends_with('…'));
     }
 
     #[test]

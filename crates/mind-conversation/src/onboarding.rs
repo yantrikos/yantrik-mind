@@ -2,6 +2,29 @@
 
 use super::*;
 
+pub(crate) fn horizon_completion_notification(
+    outcome: &mind_recipes::HorizonTickOutcome,
+) -> String {
+    let receipt = outcome
+        .receipt
+        .as_ref()
+        .map(|receipt| &receipt.receipt_sha256[..12])
+        .unwrap_or("unavailable");
+    match outcome.result.as_deref() {
+        Some(result) => {
+            let result = crate::redact::redact_answer(result);
+            format!(
+                "✅ Long-horizon goal {} completed:\n{}\nReceipt {}",
+                outcome.goal_id, result, receipt
+            )
+        }
+        None => format!(
+            "✅ Long-horizon goal {} completed · receipt {}",
+            outcome.goal_id, receipt
+        ),
+    }
+}
+
 impl super::ConversationEngine {
     /// Capture the user's answer to the current onboarding question into its slot, then ADVANCE the
     /// interview in the same breath (name → purpose → first grounded follow-up) so it flows as a real
@@ -1184,15 +1207,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     outcome.goal_id
                 )),
                 mind_recipes::HorizonTickState::Completed => {
-                    let receipt = outcome
-                        .receipt
-                        .as_ref()
-                        .map(|receipt| &receipt.receipt_sha256[..12])
-                        .unwrap_or("unavailable");
-                    notifications.push(format!(
-                        "✅ Long-horizon goal {} completed · receipt {}",
-                        outcome.goal_id, receipt
-                    ));
+                    notifications.push(horizon_completion_notification(&outcome));
                 }
                 mind_recipes::HorizonTickState::Failed => notifications.push(format!(
                     "⚠️ Long-horizon goal {} stopped safely; its scheduled segment needs local review.",

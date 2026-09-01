@@ -4105,10 +4105,19 @@ async fn empty_due_tasks_horizon_completes_instead_of_failing_its_contract() {
         .await
         .unwrap();
 
-    let outcomes = recipes.resume_due_horizons(start + 60_000).await;
+    let mut outcomes = recipes.resume_due_horizons(start + 60_000).await;
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].state, mind_recipes::HorizonTickState::Completed);
     assert!(outcomes[0].receipt.as_ref().is_some_and(|r| r.verify()));
+    assert_eq!(outcomes[0].result.as_deref(), Some("0 tasks due soon"));
+    let delivered = crate::onboarding::horizon_completion_notification(&outcomes[0]);
+    assert!(delivered.contains("0 tasks due soon"), "{delivered}");
+    assert!(delivered.contains("Receipt "), "{delivered}");
+    let credential = "sk-AbCdEf1234567890Secret";
+    outcomes[0].result = Some(credential.into());
+    let masked = crate::onboarding::horizon_completion_notification(&outcomes[0]);
+    assert!(!masked.contains(credential), "{masked}");
+    assert!(masked.contains("·masked·"), "{masked}");
     assert!(store
         .load_horizon(&goal_id, start + 60_001)
         .unwrap()

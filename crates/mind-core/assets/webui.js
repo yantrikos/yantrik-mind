@@ -93,6 +93,7 @@ document.querySelectorAll(".nav-item[data-panel]").forEach((btn) => {
     if (btn.dataset.panel === "board") loadBoard();
     if (btn.dataset.panel === "files") loadFiles();
     if (btn.dataset.panel === "activity") loadActivity();
+    if (btn.dataset.panel === "dreaming") loadDreaming();
     if (btn.dataset.panel === "chat") input.focus();
   });
 });
@@ -455,6 +456,33 @@ async function loadBoard() {
     if (!cols[key].length) { const e = el("div", "bc-meta"); e.textContent = "—"; col.appendChild(e); }
     host.appendChild(col);
   }
+}
+
+async function loadDreaming() {
+  const host = $("dreaming-cards");
+  try {
+    const r = await fetch("/api/dreaming?n=80", { headers: { "X-YM-Web": "1" } });
+    if (r.status === 403) { host.replaceChildren(textP("Operator only.")); return; }
+    const data = await r.json();
+    host.replaceChildren();
+    const rows = (data.dreaming || []).slice().reverse();
+    if (!rows.length) { host.appendChild(textP("No offline-cognition activity recorded yet — the mind dreams when idle.")); return; }
+    const phaseColor = { rehearse: "running", reconcile: "ready", associate: "" };
+    for (const e of rows) {
+      const card = el("div", "card setting-row");
+      const main = el("div", "card-main");
+      const t = el("div", "card-title"); t.textContent = e.message; main.appendChild(t);
+      const meta = el("div", "setting-key");
+      meta.textContent = `${e.phase} · tick ${e.tick_no}${e.at_ms ? " · " + new Date(e.at_ms).toLocaleString() : ""}`;
+      main.appendChild(meta);
+      card.appendChild(main);
+      const side = el("div", "card-side");
+      const chip = el("span", "job-state " + (phaseColor[e.phase] || ""));
+      chip.textContent = e.phase; side.appendChild(chip);
+      card.appendChild(side);
+      host.appendChild(card);
+    }
+  } catch (_) { host.replaceChildren(textP("Could not read the dreaming log.")); }
 }
 
 async function loadActivity() {

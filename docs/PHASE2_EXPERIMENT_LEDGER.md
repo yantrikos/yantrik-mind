@@ -2119,3 +2119,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | GET /api/dreaming: `dmn_log_tail(n)` reduced to at_ms/tick_no/phase/message — content already sanitized twice by the engine (write + read boundary), so the route adds no new redaction, only shape. A "Dreaming" view renders the entries as a phase-tagged timeline (rehearse/reconcile/associate). Operator-only, read-only, no new engine state (Codex's ring is the source). |
 | Kill criteria | (1) The route returns the ring's entries with phase + message; an empty ring yields an empty feed, not an error. (2) The engine already guarantees sanitization — a guard test confirms the web route passes the entries through without re-introducing raw content (it serializes the same DmnLogEntry the engine sanitized). (3) Operator-only. (4) Workspace green. |
 | AGI feed | The clearest window yet onto the mind's self-directed cognition — the operator watches consolidation, reconciliation, and association happen between turns. This is the "visible memory formation" differentiator from E.WEB0, realized against the actual offline-cognition organ; the substrate a future metacognition review reads. |
+
+## E.WEB12 — RESULTS: the mind's dreaming, visible
+
+| Field | Value |
+| --- | --- |
+| What shipped | GET /api/dreaming serves `dmn_log_tail(n)` (Codex's ring, sanitized at write and read) as at_ms/tick_no/phase/message; a "Dreaming" panel renders the default-mode rotor (rehearse/reconcile/associate) as a phase-tagged timeline. Operator-only, read-only. The first joint feature where Codex's engine half and Claude's UI half meet on one commit rather than across a coordination gap. |
+| Kill criteria | (1) `the_dreaming_route_exposes_only_the_sanitized_entry_shape` asserts the serialized entry carries exactly the four sanitized fields, nothing raw: PASS. (2) Empty ring → empty feed. (3) Operator-only. (4) Workspace 1441/0/4: PASS. |
+| AGI feed | The "visible memory formation" differentiator from E.WEB0, realized against the ACTUAL offline-cognition organ — the operator watches consolidation/reconciliation/association between turns; the substrate a metacognition review reads. |

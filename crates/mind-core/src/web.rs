@@ -971,6 +971,34 @@ fn handle(
                 }
             }
         }
+        ("GET", "/api/dreaming") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let n: usize = target
+                    .split('?')
+                    .nth(1)
+                    .and_then(|q| q.strip_prefix("n="))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(80);
+                // The engine sanitizes DmnLogEntry at write AND read; the route only serializes.
+                let entries = conv.dmn_log_tail(n);
+                match serde_json::to_value(&entries) {
+                    Ok(v) => send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "dreaming": v }),
+                    ),
+                    Err(_) => send(
+                        &mut stream,
+                        "500 Internal Server Error",
+                        "text/plain",
+                        "",
+                        "serialize failed",
+                    ),
+                }
+            }
+        },
         ("GET", "/api/decisions") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
@@ -2049,6 +2077,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// E.WEB12: the dreaming route serializes the engine's already-sanitized DmnLogEntry and adds
+    /// no raw content of its own — it exposes exactly at_ms/tick_no/phase/message and nothing else.
+    #[test]
+    fn the_dreaming_route_exposes_only_the_sanitized_entry_shape() {
+        // Serialize a representative entry the way the route does; the shape must be the four
+        // sanitized fields — no path, no raw error object, no secret-carrying extension.
+        let entry = mind_conversation::DmnLogEntry {
+            at_ms: 1,
+            tick_no: 2,
+            phase: "reconcile".into(),
+            message: "consolidated 3 beliefs".into(),
+        };
+        let v = serde_json::to_value(vec![entry]).unwrap();
+        let obj = v[0].as_object().unwrap();
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["at_ms", "message", "phase", "tick_no"],
+            "the route must expose only the sanitized entry fields: {keys:?}"
+        );
     }
 
     #[test]

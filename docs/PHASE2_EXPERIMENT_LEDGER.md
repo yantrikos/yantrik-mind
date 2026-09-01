@@ -2110,3 +2110,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What shipped | A `[data-theme="light"]` token override block (redefining only existing :root tokens), a sidebar toggle that flips and persists the choice to localStorage in try/catch, default following the dark house look. Client-only. Locale/i18n recorded as a NON-GOAL (disproportionate for one household). |
 | Kill criteria | (1) `the_light_theme_only_overrides_existing_tokens` asserts every token in the light block is also defined on :root: PASS. (2) Toggle persists across reload; a storage exception is swallowed and the UI still renders. (3) Workspace 1407/0/4: PASS. |
 | AGI feed | None claimed — honest UX polish, recorded as such. Not every slice feeds the journey; the field is more valuable for being able to say so. |
+
+## E.WEB12 — pre-registered: the mind's dreaming, made visible
+
+| Field | Value |
+| --- | --- |
+| The gap (competitive study) | OpenClaw 2.0 surfaces a "managed dreaming cron"; the mind already runs a richer offline-cognition tick (the DMN rotor: rehearse → reconcile → associate), and Codex just landed the visibility ring (`dmn_log_tail`, sanitized at write and read). The web has no window onto it — the operator can't see the mind think between conversations. |
+| Design | GET /api/dreaming: `dmn_log_tail(n)` reduced to at_ms/tick_no/phase/message — content already sanitized twice by the engine (write + read boundary), so the route adds no new redaction, only shape. A "Dreaming" view renders the entries as a phase-tagged timeline (rehearse/reconcile/associate). Operator-only, read-only, no new engine state (Codex's ring is the source). |
+| Kill criteria | (1) The route returns the ring's entries with phase + message; an empty ring yields an empty feed, not an error. (2) The engine already guarantees sanitization — a guard test confirms the web route passes the entries through without re-introducing raw content (it serializes the same DmnLogEntry the engine sanitized). (3) Operator-only. (4) Workspace green. |
+| AGI feed | The clearest window yet onto the mind's self-directed cognition — the operator watches consolidation, reconciliation, and association happen between turns. This is the "visible memory formation" differentiator from E.WEB0, realized against the actual offline-cognition organ; the substrate a future metacognition review reads. |

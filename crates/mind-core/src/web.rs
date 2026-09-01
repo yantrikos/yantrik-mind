@@ -998,8 +998,20 @@ fn handle(
         ("GET", "/api/chains") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
+                // E.AGI-A5: an auditor may name the window — `?since=start` or `?since=<ts_ms>`.
+                // Only an alphanumeric token is forwarded; the engine parses it, and anything it
+                // cannot read yields no explicit window (the since-start block is unconditional).
+                let since = target
+                    .split('?')
+                    .nth(1)
+                    .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("since=")))
+                    .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric()));
+                let verb = match since {
+                    Some(v) => format!("chains_json since={v}"),
+                    None => "chains_json".to_string(),
+                };
                 let out = rt.block_on(
-                    conv.cli_dispatch("chains_json", &mind_types::AccessContext::operator_audit()),
+                    conv.cli_dispatch(&verb, &mind_types::AccessContext::operator_audit()),
                 );
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
@@ -2533,6 +2545,18 @@ mod tests {
                 && body.contains("no calls since start")
                 && body.contains("`all-time ${g.complete} / ${g.total}"),
             "the gate shows since-start as headline with all-time beneath"
+        );
+        // The auditor's window reaches the engine: `?since=<token>` is forwarded as the verb
+        // argument, alphanumeric only, and the engine's parser decides what it means.
+        let route = src
+            .find("(\"GET\", \"/api/chains\")")
+            .expect("chains route exists");
+        let route_body = &src[route..route + 1200];
+        assert!(
+            route_body.contains("kv.strip_prefix(\"since=\")")
+                && route_body.contains("c.is_ascii_alphanumeric()")
+                && route_body.contains("format!(\"chains_json since={v}\")"),
+            "the chains route forwards an auditor-selected window"
         );
         assert!(
             body.contains("fetch(\"/api/horizons\""),

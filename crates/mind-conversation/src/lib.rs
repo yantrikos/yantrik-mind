@@ -98,6 +98,23 @@ mod reflex;
 /// E.AGI-A5: when this process started, fixed on first use (the engine constructor touches it),
 /// so "since this binary started" means one thing for the life of the process.
 static PROCESS_STARTED_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+/// E.AGI-A5: the auditor's window argument — `start` means this process's start, a bare integer
+/// is an epoch millisecond, anything else is no window. Pure, so it is unit-tested directly.
+pub(crate) fn parse_since_arg(arg: &str, start_ms: u64) -> Option<u64> {
+    let a = arg.trim().trim_start_matches("since=").trim();
+    if a.eq_ignore_ascii_case("start") {
+        return Some(start_ms);
+    }
+    a.parse::<u64>().ok().filter(|ms| *ms > 0)
+}
+
+/// A window's name: the instant it starts, as an auditor would write it.
+pub(crate) fn window_label(since_ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since_ms as i64)
+        .map(|t| format!("since {}", t.format("%Y-%m-%d %H:%M:%SZ")))
+        .unwrap_or_else(|| format!("since {since_ms}"))
+}
+
 pub(crate) fn process_started_ms() -> u64 {
     *PROCESS_STARTED_MS.get_or_init(|| {
         std::time::SystemTime::now()
@@ -6789,6 +6806,19 @@ impl ConversationEngine {
                                     "report": w,
                                 });
                             }
+                            // The auditor's own boundary (`since=start` | `since=<ts_ms>`): the
+                            // same helper, the window named beside its number. Unreadable
+                            // arguments yield no block rather than a silent default.
+                            if let Some(explicit) = parse_since_arg(rest.trim(), since) {
+                                let wr = Self::completeness_since(&events, explicit);
+                                if let Ok(w) = serde_json::to_value(&wr) {
+                                    v["window"] = serde_json::json!({
+                                        "since_ms": explicit,
+                                        "label": window_label(explicit),
+                                        "report": w,
+                                    });
+                                }
+                            }
                             v.to_string()
                         }
                         Err(_) => serde_json::json!({ "available": false }).to_string(),
@@ -7746,17 +7776,28 @@ impl ConversationEngine {
                 }
                 // E.AGI-A5: the same gate, both windows named — all-time beside "since this
                 // binary started" — so stratigraphy from an older binary cannot hide the current one.
-                if prefix == "chains since-start" {
+                if prefix == "chains since-start" || prefix.starts_with("chains since=") {
                     return match self.recorder.read_all_verified() {
                         Ok(events) => {
-                            let since = process_started_ms();
+                            let start = process_started_ms();
+                            let arg = prefix.trim_start_matches("chains").trim();
+                            let since = if arg == "since-start" {
+                                Some(start)
+                            } else {
+                                parse_since_arg(arg, start)
+                            };
+                            let Some(since) = since else {
+                                return "Usage: `ym why chains since-start` or `ym why chains since=<epoch_ms>`.".to_string();
+                            };
                             let fresh: Vec<mind_observability::DecisionEvent> =
                                 events.iter().filter(|e| e.ts_ms >= since).cloned().collect();
-                            let when = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(since as i64)
-                                .map(|t| t.format("%Y-%m-%d %H:%M:%SZ").to_string())
-                                .unwrap_or_else(|| since.to_string());
+                            let name = if since == start {
+                                format!("since this binary started ({})", window_label(start).trim_start_matches("since "))
+                            } else {
+                                window_label(since)
+                            };
                             format!(
-                                "WINDOW: since this binary started ({when}) — {} event(s)
+                                "WINDOW: {name} — {} event(s)
 {}
 
 WINDOW: all-time, latest 200

@@ -62,3 +62,33 @@ fn the_process_start_is_fixed_for_the_life_of_the_process() {
     assert_eq!(a, b);
     assert!(a > 1_700_000_000_000, "a real epoch millisecond");
 }
+
+#[test]
+fn the_auditor_window_argument_is_start_or_an_epoch_millisecond() {
+    let start = 1_788_000_000_000;
+    assert_eq!(crate::parse_since_arg("start", start), Some(start));
+    assert_eq!(crate::parse_since_arg("since=start", start), Some(start));
+    assert_eq!(
+        crate::parse_since_arg("since=1788300439881", start),
+        Some(1_788_300_439_881)
+    );
+    assert_eq!(
+        crate::parse_since_arg("1788300439881", start),
+        Some(1_788_300_439_881)
+    );
+    for bad in [
+        "",
+        "since=",
+        "since=yesterday",
+        "since=-5",
+        "since=0",
+        "since=12e3",
+        "start; drop",
+    ] {
+        assert_eq!(crate::parse_since_arg(bad, start), None, "{bad:?}");
+    }
+    assert_eq!(
+        crate::window_label(1_788_300_439_881),
+        "since 2026-09-01 22:07:19Z"
+    );
+}

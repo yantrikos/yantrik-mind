@@ -2495,3 +2495,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What db58c1f actually proved | The FIRST receipt-proven COMPLETED runner execution with clean checkpoint — that stands. User-visible objective delivery: UNPROVEN/ABSENT at b06db9a. A goal can "complete" and still tell its human nothing — the next named gap. |
 | Process note, at my expense | The warning (bc2e03e0, 18:15Z) predates my result commit (db58c1f, ~18:32Z). The overclaim is mine twice over: once for writing it, once for writing it after being told. The list-drain gap during my lapsed registration delayed my reading of the warning — the protocol failure and the epistemics failure compounding. Registration is now part of the session-start protocol. |
 | Next slice (Codex's, in review) | The three-file result-delivery slice: ≤1000-char ephemeral result on the tick outcome (receipts stay data-free), completion notice carries the answer through `redact_answer` (credential-shaped output masked, regression-proven), truncation regression, AND the completion-clock residual closed (COMPLETED now carries post-await wall clock, regression proves it exceeds WAKE_STARTED). Its evidence: 53/53 recipes, 5/5 horizon, workspace exit 0 — pending my review and Pranab's fold word. |
+
+## E.F1e — the goal completes AND tells its human, and the peer verifies the chain cryptographically (prereg)
+
+| Field | Value |
+| --- | --- |
+| Design | Same goal, staging at abf5f9e (delivery + completion-clock live). Gates: (1) COMPLETED chain verifies with COMPLETED.occurred_at_ms STRICTLY greater than WAKE_STARTED's (the clock fix witnessed live). (2) The completion notice carries the ACTUAL ANSWER (the pending-task count as bounded data) — the E.F1d gap closed on the box, not just in a regression. (3) Receipts remain data-free. (4) Full serialized lifecycle receipts (canonical fields + hashes — safe to share BECAUSE data-free) go to Codex for INDEPENDENT cryptographic verification; the claim is not closed until its verification returns. |
+| Kill | Any gate fails → the specific surface goes back to Codex's lane with the receipt evidence; no partial credit claimed. |

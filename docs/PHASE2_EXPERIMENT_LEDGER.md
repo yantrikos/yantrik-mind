@@ -2730,3 +2730,19 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why | A flat feed hides the two questions an operator actually asks: "what is working right now?" and "what is waiting to run?". Composer-first placement also buried the running work under a form. |
 | Kill | Any change to `/api/tasks`, `/api/horizons`, `/api/orders` request or response shape; any item that appears in both views or in neither (guarded by a unit test over the classifier with every state the server emits); the composer losing any field; CSP or DOM-only markdown regressions; a screenshot on staging that does not show the split. |
 | Not in scope | Pausing/resuming agents (a product action needing its own gate); editing standing orders in place. |
+
+## E.G2 — amendment: DESIGN-INCOMPLETE, not merely blocked (Codex's objection, accepted)
+
+| Field | Value |
+| --- | --- |
+| Objection | The paired table at 1f2dc1c cannot be built from the data as recorded. The shadow row carries only a time and a sample label — no key that joins it to the knock's disposition. It is recorded BEFORE the packet search, so every no-packets / not-knockworthy / provenance / escrow-held exit leaves a shadow row with no partner. A held candidate writes only mutable escrow profile state, never a joinable event; only a SENT knock reaches the judgment ledger, under `knock:<pkt_id>`. And "spoke / held" conflates muted, daily-cap, below-band and the actual receptivity gate, so it is not the receptivity boolean the table needs. |
+| Decision | E.G2 stands as the question; it cannot run until E.G2a below is folded. |
+
+## E.G2a — knock-evaluation correlation: the instrumentation E.G2 needs (prereg)
+
+| Field | Value |
+| --- | --- |
+| Design | Each `maybe_knock` evaluation mints one opaque id `knock-eval:<opaque>`, stamped on (a) the paired shadow row's `context_fingerprint` and (b) exactly one new terminal event, kind `knock_disposition`, recorded at the evaluation's exit whichever branch it takes. That event carries `receptive: bool` — the legacy receptivity gate alone, evaluated and recorded even when an earlier exit makes it moot? No: it is recorded as `null` on exits that never reached the gate, `true`/`false` when it was consulted — and `disposition`, one of the function's actual exit points: `no_packets`, `not_knockworthy`, `provenance`, `escrow_held`, `muted`, `daily_cap`, `unreceptive`, `below_band`, `sent`. A sent knock's judgment ledger entry carries the same id beside `knock:<pkt_id>`. Held candidates have no engagement counterfactual: their engagement is N/A, never a count. |
+| Guards | One disposition event per evaluation (source + fixture test); the id appears on both rows; the disposition enum equals the exit points in the source (a guard that fails when a `return None` is added without a disposition); nothing on the decision path reads either event. Testable on the existing knock fixtures — no Telegram box needed for the instrumentation, only for the sample. |
+| Kill | Any change to what `maybe_knock` sends or holds (existing knock tests must pass unmodified); more than one disposition per evaluation; an evaluation with a shadow row and no disposition, or vice versa. |
+| AGI feed | Phase G. Reachability is not a verdict stream; it is a verdict you can join to the decision it shadowed. |

@@ -2386,6 +2386,14 @@ mod tests {
                 && board_body.contains("agent: o.name || o.id"),
             "board cards open their agent's thread; orders are typed on the board"
         );
+        // A card that acts like a button is one for the keyboard too (Codex's review).
+        assert!(
+            board_body.contains("card.addEventListener(\"click\", activate)")
+                && board_body
+                    .contains("if (ev.key === \"Enter\" || ev.key === \" \") activate(ev)")
+                && APP_CSS.contains(".board-card.opens-thread:focus-visible"),
+            "board cards activate by click and by Enter/Space, with a visible focus ring"
+        );
         // The classifier's contract names every state the server emits.
         for word in [
             "running|done|failed",

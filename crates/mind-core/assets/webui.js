@@ -638,8 +638,12 @@ async function loadBoard() {
       const t = el("div", "bc-title"); t.textContent = c.title; card.appendChild(t);
       if (c.meta) { const m = el("div", "bc-meta"); m.textContent = c.meta; card.appendChild(m); }
       if (c.agent) {
+        // A card that acts like a button must be one for the keyboard too: one activate closure
+        // for click and for Enter / Space (Codex's review), and a focus-visible ring in CSS.
         card.setAttribute("role", "button"); card.tabIndex = 0;
-        card.addEventListener("click", () => openThreadFromAnywhere(c.agent));
+        const activate = (ev) => { ev.preventDefault(); openThreadFromAnywhere(c.agent); };
+        card.addEventListener("click", activate);
+        card.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") activate(ev); });
       }
       col.appendChild(card);
     }

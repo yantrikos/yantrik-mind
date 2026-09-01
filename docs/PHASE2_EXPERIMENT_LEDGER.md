@@ -2679,3 +2679,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Design | `record_world_shadow(now)` is split out of `maybe_knock`; `maybe_knock` calls it first exactly as before (paired sample, prod). The headless tick calls it once every 10 minutes (unpaired sample, staging) — a presence verdict with no decision partner, which validates ingestion → gate → verdict live but says nothing about decision agreement. The ledger must never conflate the two samples. The knock itself is NOT run headless: it commits an engagement prediction to the judgment ledger, and a prediction about an engagement that cannot happen would pollute the thing `judgment_trend` measures. |
 | Kill | Any Telegram-path change beyond the extracted call (source-guarded); a headless tick that calls `maybe_knock`; a shadow that reads its own verdict; more than one record per cadence tick; `world_shadow` still 0 on staging 15 minutes after deploy. |
 | AGI feed | Phase G. A world model whose shadow cannot fire on the canary is not reachable; reachability is the whole of E.G1's claim. |
+
+## E.MQ5 — SEALED v3 RESULT: KILL
+
+| Field | Value |
+| --- | --- |
+| Run (Codex, independent) | Candidate `fbeae7f`, the exact `route_claim_with` seam, an owned local model (qwen3.8:27b-q4_K_M) through an isolated pool — no ConversationEngine, no live memory, no cloud, no spend. An earlier transport-only attempt against the wildcard listen address made zero model calls and is excluded. |
+| Counts | Exact-target recall 7/10 (gate ≥ 9). Negative abstention 17/20 (gate 20/20). Wrong-claim misroutes 3 (gate 0). |
+| Verdict | All three gates fail. No activation; the router stays SHADOW-never-authority and the deterministic registry + `ym claims` remain the only self-claim path. Kill discipline: no prompt-wording iteration against the number. |
+| Consequences | `YM_CLAIM_ROUTE_SHADOW` set to off on staging (effective at next restart): a killed candidate's base-rate sample is cost without a hypothesis. Codex burned the now-disclosed v3 rows and an ignored real-seam harness into `mind-conversation/src/tests.rs` as a permanent regression witness — uncommitted, reserved to Codex, awaiting Pranab's word to fold (Codex's own commit rule). The next candidate class (two-stage lexical shortlist → LLM confirm, or a per-claim example bank) is Codex's to propose and will need its own sealed set (v4). |
+| AGI feed | Phase B. Three sealed sets, three kills (lexicon 2/10, v2, v3 7/10): the self-model is truthful today only because a deterministic renderer answers the questions it can match; routing free-form questions to the right claim is still an open problem, and the ledger says so. |

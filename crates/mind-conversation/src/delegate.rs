@@ -1841,7 +1841,10 @@ impl super::ConversationEngine {
             let r = self.researcher.clone().unwrap();
             tokio::spawn(async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
-                let res = r.run(&task2).await;
+                // E.WEB16b: the date is a fact from the process clock, never the model's prior —
+                // the first live run asserted a date months wrong. The scratch note above keeps
+                // the operator's ORIGINAL brief; only the executor sees the dated form.
+                let res = r.run(&dated_task(&task2, chrono::Utc::now())).await;
                 // Findings land in SCRATCH, not memory — the promotion gate (`jobs keep`) is the
                 // only door from a job's output into the mind's real memory.
                 for u in res.sources.iter().take(10) {
@@ -2428,6 +2431,15 @@ impl super::ConversationEngine {
     }
 }
 
+/// E.WEB16b: prefix a research brief with today's date from the CLOCK, verbatim brief after it.
+pub(crate) fn dated_task(task: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "Today is {} (UTC).
+{task}",
+        now.format("%Y-%m-%d")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2820,5 +2832,25 @@ mod iterate_tests {
             "must never split a UTF-8 char"
         );
         std::fs::remove_dir_all(&wd).ok();
+    }
+    /// E.WEB16b gate (1)+(2): the executor receives the dated prefix ahead of the brief, verbatim;
+    /// nothing about the brief itself changes.
+    #[test]
+    fn research_briefs_carry_the_clock_date_verbatim() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-01T20:59:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let out = dated_task("Read-only smoke run: state today's date.", now);
+        assert!(
+            out.starts_with(
+                "Today is 2026-09-01 (UTC).
+"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("Read-only smoke run: state today's date."),
+            "{out}"
+        );
     }
 }

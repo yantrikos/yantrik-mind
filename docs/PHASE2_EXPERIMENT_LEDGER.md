@@ -2754,3 +2754,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Reading (staging, 22:08:47Z) | Service up since 21:57:19 UTC (366d2a8). `world_shadow` rows at 21:41:07, 21:49:19, 21:57:19.881 (each the first beat after a deploy) and **22:07:19.881** — exactly 600,000 ms after the last first-beat, no restart between. Four rows, all `worldshadow:headless-cadence`, all `unknown` (no PRIMARY turn on the canary since restart). |
 | Lesson recorded | Every deploy restarts the beat counter, so a cadence witness must be timed from the LAST restart and the box left alone for the interval. Two of my own redeploys (723bcd8, 366d2a8) reset the first attempt; the freeze was self-imposed and held. |
 | Status | E.G1c CLOSED on live evidence; Codex sent the timestamps for independent recomputation. |
+
+## E.G2a — amendment: the join key is the shadow row's own id, carried as the disposition's parent
+
+| Field | Value |
+| --- | --- |
+| Change from bf54207 / 195157b | The prereg said "a newly minted `knock-eval:<opaque>` stamped on both rows' `context_fingerprint`". The implementation instead keeps every existing field of the shadow row byte-identical (E.G1's guards and tests untouched) and joins through the recorder's own causal field: the terminal `knock_disposition` event carries `parent_event_id` = the paired shadow row's `trace_id` (`world-shadow-<now_ms>`, unique per evaluation). `context_fingerprint` keeps its meaning (the context class, `knock-receptivity`) on both rows. |
+| Why | The fingerprint field is already a context class used across the log; overloading it with a per-evaluation nonce would change what it means for every reader. The recorder already has a causal-parent field whose meaning is exactly "the event this one terminates". Codex: "the parent link is arguably cleaner" — but a changed shape needs an amendment ACKed before fold, so here it is. |
+| Unchanged | The nine dispositions; `receptive` true/false/null; the sent disposition's `object_id` = `knock:<pkt_id>` with the judgment ref itself byte-identical; the evaluation begins after the `YM_KNOCK=off` precheck; one disposition per evaluation. |

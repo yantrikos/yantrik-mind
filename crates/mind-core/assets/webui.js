@@ -824,7 +824,12 @@ async function loadTasks() {
     const meta = el("div", "agent-row-meta");
     const runs = a.runs.length ? `${a.runs.length} run${a.runs.length === 1 ? "" : "s"}` : "no runs yet";
     const last = a.last_ms ? ` · last ${fmtTs(a.last_ms)}` : "";
-    const sched = a.orders.length ? ` · ${a.orders.length === 1 ? "scheduled" : a.orders.length + " schedules"}${a.orders.some((o) => o.state === "paused") ? " (paused)" : ""}` : "";
+    // The next fire time: the soonest SLEEPING order (a paused one would not fire), from the
+    // server's own countdown; count and paused state ride alongside.
+    const live = a.orders.filter((o) => o.state !== "paused" && Number.isFinite(Number(o.in_seconds)));
+    const soonest = live.length ? Math.min(...live.map((o) => Number(o.in_seconds))) : null;
+    const nextIn = soonest === null ? "" : soonest <= 0 ? "due now" : soonest < 3600 ? `next in ${Math.round(soonest / 60)}m` : soonest < 172800 ? `next in ${Math.round(soonest / 3600)}h` : `next in ${Math.round(soonest / 86400)}d`;
+    const sched = a.orders.length ? ` · ${a.orders.length === 1 ? "scheduled" : a.orders.length + " schedules"}${nextIn ? " · " + nextIn : ""}${a.orders.some((o) => o.state === "paused") ? " (paused)" : ""}` : "";
     meta.textContent = `${a.running ? "working now" : "dormant"} · ${runs}${last}${sched}`;
     main.appendChild(meta);
     row.appendChild(main);

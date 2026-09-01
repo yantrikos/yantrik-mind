@@ -2297,6 +2297,30 @@ mod tests {
                 && js.contains("function orderEntry(o)"),
             "grouping and rendering are named functions"
         );
+        // The grouping is one Map keyed by ONE name rule for runs and orders alike, and each run
+        // is placed exactly once — so a run cannot sit in two threads or in none. (A Node fixture
+        // over the real source — two runs of one name + a matching order — is run by hand and
+        // its counts recorded on the ledger; cargo has no JS engine.)
+        let group = js.find("function agentThreads(jobs, orders)").unwrap();
+        let group_body = &js[group..group + js[group..].find("function agentState(a)").unwrap()];
+        assert_eq!(group_body.matches("new Map()").count(), 1, "one index");
+        assert_eq!(
+            group_body.matches("a.runs.push(j)").count(),
+            1,
+            "each run placed once"
+        );
+        assert!(
+            group_body.contains("get(j.name || j.id)")
+                && group_body.contains("get(o.name || o.id)"),
+            "runs and orders share the name rule"
+        );
+        // The list row carries the next fire time from the server's own countdown.
+        let tasks_fn = js.find("async function loadTasks()").unwrap();
+        assert!(
+            js[tasks_fn..tasks_fn + 4000].contains("Number(o.in_seconds)")
+                && js[tasks_fn..tasks_fn + 4000].contains("next in "),
+            "agent rows show when the soonest sleeping order fires"
+        );
         assert!(
             html.contains("id=\"agent-thread\"")
                 && APP_CSS.contains("#panel-tasks[data-view=\"thread\"] .view-thread"),

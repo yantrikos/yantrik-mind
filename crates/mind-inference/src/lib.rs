@@ -1831,6 +1831,71 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
     })
 }
 
+// ── E.PORT1: speak the documented protocol to providers that check it ────────────────────────
+//
+// `GenericOpenAIBackend` emits BOTH `think:false` and `reasoning_effort:"none"` whenever a call asks
+// for thinking OFF. That pairing exists for one good reason: Ollama's OpenAI-compat endpoint ignores
+// `think`, and `"none"` is the only thing that actually suppresses the preamble there (measured at
+// 10 s → 0.9 s on the owned gateway). But `"none"` is not in the OpenAI enum, which allows only
+// low / medium / high, so a provider that validates the field answers 400 to EVERY call — measured
+// live: five one-request probes, and the field is the only difference between 200 and 400.
+//
+// The backend that emits it lives in another repository. The fix here is a thin adapter: on the
+// strict path a request for thinking OFF becomes "no preference", so neither field is sent. The
+// LOCAL Ollama lane is built by `local_backend_from_env` and never wrapped, so its measured
+// behaviour is preserved exactly.
+//
+// The price, stated plainly: on a strict provider the mind can no longer suppress a reasoning
+// preamble, so such calls may be slower and spend tokens reasoning. That is what speaking the
+// documented protocol costs; the alternative is a 400 every time.
+
+/// Rewrites one field of a per-call config, then delegates everything.
+struct StrictOpenAiBackend {
+    inner: Arc<dyn LLMBackend>,
+}
+
+impl StrictOpenAiBackend {
+    /// Thinking OFF is unrepresentable in the standard protocol, so it becomes no preference.
+    /// Every other setting is passed through untouched.
+    fn adapt(config: &GenerationConfig) -> GenerationConfig {
+        let mut c = config.clone();
+        if c.think == Some(false) {
+            c.think = None;
+        }
+        c
+    }
+}
+
+impl LLMBackend for StrictOpenAiBackend {
+    fn chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<LLMResponse> {
+        self.inner.chat(messages, &Self::adapt(config), tools)
+    }
+
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+        on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<LLMResponse> {
+        self.inner
+            .chat_streaming(messages, &Self::adapt(config), tools, on_token)
+    }
+
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        self.inner.count_tokens(text)
+    }
+
+    fn backend_name(&self) -> &str {
+        self.inner.backend_name()
+    }
+}
+
 pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
     let (provider, model) = split_spec(spec);
     let (base, key_env, default_model) = provider_catalog(provider)?;
@@ -1850,12 +1915,16 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             key, base, model,
         )) as Arc<dyn LLMBackend>)
     } else {
-        Some(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider(
+        // E.PORT1: every provider reached through this table is on the STRICT path. The local
+        // Ollama lane does not come through here — `local_backend_from_env` builds it with the
+        // "ollama" preset — so wrapping here cannot change it.
+        let inner = Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider(
             "openai",
             base,
             Some(key),
             model,
-        )) as Arc<dyn LLMBackend>)
+        )) as Arc<dyn LLMBackend>;
+        Some(Arc::new(StrictOpenAiBackend { inner }) as Arc<dyn LLMBackend>)
     }
 }
 
@@ -2825,6 +2894,158 @@ mod privacy_tests {
             Ok(vec!["openai/gpt-oss-120b".to_string()])
         });
         assert_eq!(seen, "http://172.30.0.2:8080/v1");
+    }
+
+    // ── E.PORT1 ──────────────────────────────────────────────────────────────────────────────
+
+    /// Records what the backend was asked, so the adapter's rewriting can be observed rather than
+    /// assumed.
+    struct RecordingBackend {
+        seen: std::sync::Mutex<Vec<Option<bool>>>,
+    }
+
+    impl LLMBackend for RecordingBackend {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            config: &GenerationConfig,
+            _tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            self.seen.lock().unwrap().push(config.think);
+            Ok(LLMResponse {
+                thinking: String::new(),
+                text: "ok".into(),
+                prompt_tokens: 7,
+                completion_tokens: 9,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            messages: &[ChatMessage],
+            config: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+            on_token: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            let r = self.chat(messages, config, tools)?;
+            on_token(&r.text);
+            Ok(r)
+        }
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len())
+        }
+        fn backend_name(&self) -> &str {
+            "recording"
+        }
+    }
+
+    fn strict_over(inner: Arc<RecordingBackend>) -> StrictOpenAiBackend {
+        StrictOpenAiBackend {
+            inner: inner as Arc<dyn LLMBackend>,
+        }
+    }
+
+    #[test]
+    fn thinking_off_becomes_no_preference_on_the_strict_path() {
+        // The measured failure: think=Some(false) makes the backend emit reasoning_effort:"none",
+        // which is not in the OpenAI enum, and a provider that validates it answers 400 to EVERY
+        // call. Unset is the only representable way to say "no preference" in that protocol.
+        let rec = Arc::new(RecordingBackend {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let strict = strict_over(rec.clone());
+        let msg = [ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        for want in [Some(false), Some(true), None] {
+            let cfg = GenerationConfig {
+                think: want,
+                ..Default::default()
+            };
+            strict.chat(&msg, &cfg, None).expect("chat");
+        }
+        assert_eq!(
+            *rec.seen.lock().unwrap(),
+            vec![None, Some(true), None],
+            "only OFF is rewritten; ON and unset pass through"
+        );
+    }
+
+    #[test]
+    fn the_adapter_changes_nothing_else_about_the_call() {
+        // An adapter that quietly dropped tools, messages or the response would trade one silent
+        // failure for another.
+        let rec = Arc::new(RecordingBackend {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let strict = strict_over(rec.clone());
+        let msg = [ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let cfg = GenerationConfig {
+            think: Some(false),
+            max_tokens: 4321,
+            temperature: 0.42,
+            ..Default::default()
+        };
+        let r = strict.chat(&msg, &cfg, None).expect("chat");
+        assert_eq!(r.text, "ok");
+        assert_eq!((r.prompt_tokens, r.completion_tokens), (7, 9));
+        assert_eq!(
+            strict.backend_name(),
+            "recording",
+            "identity is the inner backend's"
+        );
+        assert_eq!(strict.count_tokens("abcd").unwrap(), 4);
+
+        // the caller's own config is not mutated
+        assert_eq!(cfg.think, Some(false));
+        assert_eq!(cfg.max_tokens, 4321);
+
+        // streaming takes the same path and still streams
+        let mut streamed = String::new();
+        let r = strict
+            .chat_streaming(&msg, &cfg, None, &mut |t| streamed.push_str(t))
+            .expect("stream");
+        assert_eq!(streamed, "ok");
+        assert_eq!(r.stop_reason, "stop");
+        assert_eq!(
+            *rec.seen.lock().unwrap(),
+            vec![None, None],
+            "the streaming path is adapted too"
+        );
+    }
+
+    #[test]
+    fn the_local_lane_is_not_wrapped_and_keeps_its_measured_behaviour() {
+        // The pairing exists because Ollama's compat endpoint ignores `think`. The local lane is
+        // built by local_backend_from_env with the "ollama" preset and must never come through
+        // backend_from_spec, or the fix would silently undo the 10s → 0.9s measurement.
+        // include_str! resolves next to this file, so the guard works from any working directory.
+        const SRC: &str = include_str!("lib.rs");
+        let local = SRC
+            .split("pub fn local_backend_from_env")
+            .nth(1)
+            .expect("local_backend_from_env exists");
+        let local = &local[..local.find("\n}\n").unwrap_or(local.len())];
+        assert!(
+            local.contains("for_provider(\"ollama\""),
+            "the local lane must keep the ollama preset"
+        );
+        assert!(
+            !local.contains("StrictOpenAiBackend"),
+            "the local lane must not be wrapped by the strict adapter"
+        );
     }
 
     #[test]

@@ -3580,3 +3580,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Join caveat (Codex) | Every heartbeat spend row is typed by the precomputed beat opportunity, but the byte-identical loop row exists only when the tick produced a note: under unchanged L1 semantics a model attempt that yields no note has spend rows and no acted row for that 30 s opportunity. Not a universal event join, and not claimed as one. |
 | Test outputs | mind-core 62/62; package fmt --check clean; workspace builds. |
 | Next | Deploy to staging; the next heartbeat pass and the next ask composition attribute by identity on `ym why spend`; then 24 h of rows before L4 names a number. |
+
+## L4-0 — witness addendum: the first naturally loop-attributed spend row (DMN, 14:17:40Z box clock; read 14:41Z; Codex's independent `why spend 1h` read at ts_ms 1788360062728 agrees)
+| Field | Value |
+| --- | --- |
+| The row | 14:17:40Z, process d5292da (the L4-0 build, before the L4-0b deploy at 14:27:53Z): callsite `private-grounded`, lane private, served, attempts 1, latency 18 756 ms, tokens absent, opportunity `dmn:due:<process start>:<window>` — a DMN pass that took a model-calling branch this time, attributed by identity through `run_dmn`'s opportunity. `ym why spend 1h` at 14:41Z: 2 valid rows, 0 malformed, tokens absent; the DMN loop 1 request / 1 attempt. |
+| What it witnesses | L4-0's loop attribution on a natural act: the spend row and the loop row share the opportunity id, so `why spend` names the loop without a timestamp join. It also sharpens the earlier finding: the DMN's rehearsal branch makes no call; its other branches make one — 18.8 s on the local lane. |
+| What it does not | L4-0b (the heartbeat and the ask): this row exercises the already-wrapped DMN path in the earlier process. Zero spend rows in the fa1aaac process as of 14:41:45Z; the L4-0b witness still waits for a natural heartbeat or ask composition. Distinction kept, as Codex asked. |

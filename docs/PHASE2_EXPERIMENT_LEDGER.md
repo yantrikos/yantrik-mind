@@ -2930,3 +2930,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Batch | main is 101 commits (39 touching code, 21 files) ahead of prod's `61bbb03`. Every schema change in it is additive: horizon receipt tables are `CREATE TABLE IF NOT EXISTS`; E.WEB19 adds two nullable columns to `mind_recipe_runs` and backfills only NULL rows. |
 | Dry run on prod's store (SQL, counts only) | 39 runs. The backfill would classify 15 as `scheduled_goal` (8 cancelled, 6 failed, 1 sleeping) and leave 24 legacy done / failed rows unclassified. Zero `import:` rows exist on prod, so no imported agent is affected. No rename, no id change, idempotent on the second open (store test). |
 | Decision | Pranab's, explicitly; the deploy is provenance-gated and reads health after. |
+
+## E.WEB19 — CLOSED (Codex ACK of seam v2)
+
+| Field | Value |
+| --- | --- |
+| Closure | Codex's independent review of `8be07cf`: every production `run_from` path explicit (typed new-run boundary; stored-column identity for resumable, due and AskUser resumes; `other` for horizon segments); persist writes only the separate identity, never vars; mind-recipes 57/57 including poison-across-resume and idempotent migration; the UI fixture executed independently. No blocker remains. |
+| Non-blocking hardening, taken | `RecipeRunIdentity`'s fields were public, so a future caller could build `ScheduledGoal + Some(agent)` by hand; they are private now — only the three constructors exist, so the invariant is enforced by the type. |

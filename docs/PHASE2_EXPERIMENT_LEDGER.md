@@ -3215,3 +3215,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Witness plan | Deploy to staging with the ICS override; read `why loops` at +15 min; restore the override; ledger the readout with the box log's deploy line and the readout's ts_ms. A Telegram-box readout only after the prod batch. |
 | Lane | Mine to build; Codex co-reviews this prereg, then the tree (pure-move diff, guards, fixtures) before fold. |
 | AGI feed | Phase A→B for the idle mind: the canary stops being turn-only; the offline-cognition loop runs where the evidence is read. |
+
+## L3a — correction and amendment row (docs-only, before further code; Codex 05:15Z)
+
+| Field | Value |
+| --- | --- |
+| Kill wording corrected | `724c0d6` says "DMN running with `active_turns > 0`" — that contradicts the allowed post-admission overlap. Corrected: DMN ADMISSION / START while `active_turns > 0` is the kill; a turn arriving after admission overlaps an already-running pass by contract. |
+| Ledger version | loop-ledger-v4 = v3 + `LoopHost::Process` ONLY (L3a). The L1 amendment ledgered at `8a3f385` as "v4" (`cycle:` wake ids, disabled rows for Knock and Patterns) becomes loop-ledger-v5 when L2 is built, with per-HOST wake ids `cycle:<host>:<start>:<n>` — a poll wake and a runner tick are different sequences, and reading another host's last gate would pair stale evidence. |
+| Timing gate amended | The prereg's gate compared decision sequences within [−25 s, +5 s]. That is unsatisfiable, and for a real reason: `advance` resets a timer to its actual fire time, so under a poll loop stalled 25 s in its long poll a 60 s cadence fired about every 75 s, while the runner fires it within 5 s of due. Over a day the counts and the nth-act deltas diverge. Amended gate: every runner act lands within [0, +5 s] AFTER its own due boundary (the poll loop's was [0, +26.5 s]); the increased sweep frequency and earlier expiry handling that follow are explicitly allowed and stated as the L3a behaviour change. Anything later than +5 s after due is a kill. |
+| Boot idle | `TurnExclusion` is seeded with the process's start time, not zero, so the first runner tick cannot admit DMN before the idle stretch has passed since boot — the legacy `last_activity = now_ms()` preserved. |
+| Fixtures amended | The cancelled-turn fixture polls the turn future to Pending before dropping it; the latch fixture exercises the one claim helper `spawn_loop_runner` itself uses. |

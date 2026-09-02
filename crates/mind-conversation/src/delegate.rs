@@ -1096,7 +1096,16 @@ pub(crate) async fn bounded_route<F>(
 where
     F: std::future::Future<Output = &'static str> + Send + 'static,
 {
-    let handle = tokio::spawn(routing);
+    // Task-locals are NOT inherited by a spawned task, and the spend ledger joins a row to its loop
+    // by exactly one of them. Without this the detached routing call would write a row with no
+    // opportunity — silently, and only when a loop host wraps a delegation. Carry it across.
+    let opportunity = mind_inference::current_opportunity();
+    let handle = tokio::spawn(async move {
+        match opportunity {
+            Some(id) => mind_inference::within_opportunity(id, routing).await,
+            None => routing.await,
+        }
+    });
     match tokio::time::timeout(budget, handle).await {
         Ok(Ok(kind)) => kind,
         // The routing task panicked: the floor is still a correct answer, and the panic is the
@@ -1111,6 +1120,18 @@ where
 }
 
 pub(crate) const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How many routing calls this process has abandoned to the budget. An `eprintln!` is visible to an
+/// operator reading logs and invisible to everything else, including a test that wants to assert the
+/// notice fired — review caught the ledger claiming such an assertion existed when it could not.
+/// A counter is assertable, and it is the honest basis for surfacing the number later.
+pub(crate) static ROUTE_TIMEOUTS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// The count of abandoned routing calls since this process started.
+pub fn route_timeouts() -> u64 {
+    ROUTE_TIMEOUTS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 impl super::ConversationEngine {
     /// Which executors this box can actually run right now.
@@ -1136,6 +1157,10 @@ impl super::ConversationEngine {
     /// still runs. Routing must never be the reason nothing happens.
     /// The routing decision, as an OWNED future: it borrows nothing from the engine, so it can be
     /// spawned and left to finish (and to record its own spend row) when the caller stops waiting.
+    ///
+    /// `None` when there is nothing to decide — one executor is not a choice. Note what this means
+    /// for the keyword table: it no longer merely provides a floor the model can overrule, it
+    /// decides the kind outright whenever the model is not asked or does not answer in time.
     fn route_task(
         &self,
         task: &str,
@@ -1551,6 +1576,7 @@ impl super::ConversationEngine {
             None => floor,
             Some(routing) => {
                 let refined = bounded_route(routing, floor, budget, || {
+                    ROUTE_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!(
                         "[delegate] routing exceeded {budget:?} — job {id} keeps the deterministic \
                          kind '{floor}'; the routing request was DETACHED, not cancelled, and writes \

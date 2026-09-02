@@ -239,7 +239,10 @@ tokio::task_local! {
 pub async fn within_opportunity<F: std::future::Future>(id: String, f: F) -> F::Output {
     OPPORTUNITY.scope(id, f).await
 }
-fn current_opportunity() -> Option<String> {
+/// The opportunity this task is running under, if any. Public because a caller that SPAWNS work
+/// must carry it across by hand: task-locals are not inherited, and a spend row that loses its
+/// opportunity joins no loop (E.PORT1-B, found in review).
+pub fn current_opportunity() -> Option<String> {
     OPPORTUNITY.try_with(|s| s.clone()).ok()
 }
 
@@ -1841,9 +1844,17 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 // live: five one-request probes, and the field is the only difference between 200 and 400.
 //
 // The backend that emits it lives in another repository. The fix here is a thin adapter: on the
-// strict path a request for thinking OFF becomes "no preference", so neither field is sent. The
-// LOCAL Ollama lane is built by `local_backend_from_env` and never wrapped, so its measured
-// behaviour is preserved exactly.
+// strict path a request for thinking OFF becomes "no preference", so neither field is sent.
+//
+// WHICH providers are strict is a decision, not a default. Review caught the first version getting
+// it wrong by omission: the comment said "every provider reached through this table", and the table
+// contains `ollama` and `ollama-cloud` — the very endpoints that IGNORE `think` and for which the
+// non-standard value is the only thing that suppresses the preamble. Stripping it there would have
+// silently undone the measured 10 s → 0.9 s improvement on the CLOUD Ollama lane while the ledger
+// row talked only about the local one. So the exclusion is explicit and named.
+//
+// The LOCAL Ollama lane is a separate constructor (`local_backend_from_env`, and the brain pool)
+// and is never wrapped at all.
 //
 // The price, stated plainly: on a strict provider the mind can no longer suppress a reasoning
 // preamble, so such calls may be slower and spend tokens reasoning. That is what speaking the
@@ -1864,6 +1875,13 @@ impl StrictOpenAiBackend {
         }
         c
     }
+}
+
+/// Providers whose endpoint needs the non-standard suppression field rather than rejecting it.
+/// These are Ollama-compatible: they ignore `think` on the OpenAI-compat path, so removing
+/// `reasoning_effort` would cost the measured suppression and buy nothing.
+fn provider_is_ollama_compatible(provider: &str) -> bool {
+    matches!(provider, "ollama" | "ollama-cloud")
 }
 
 impl LLMBackend for StrictOpenAiBackend {
@@ -1894,6 +1912,19 @@ impl LLMBackend for StrictOpenAiBackend {
     fn backend_name(&self) -> &str {
         self.inner.backend_name()
     }
+
+    // The trait has SIX methods and the first version implemented four, so `model_id` and
+    // `is_degraded` fell through to the trait defaults — every strict cloud backend reported its
+    // model as "unknown", and the test that claimed "identity is the inner backend's" could not see
+    // it because the test double did not override `model_id` either. An adapter must be transparent
+    // in every direction or it is a filter.
+    fn is_degraded(&self) -> bool {
+        self.inner.is_degraded()
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
+    }
 }
 
 pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
@@ -1915,16 +1946,20 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             key, base, model,
         )) as Arc<dyn LLMBackend>)
     } else {
-        // E.PORT1: every provider reached through this table is on the STRICT path. The local
-        // Ollama lane does not come through here — `local_backend_from_env` builds it with the
-        // "ollama" preset — so wrapping here cannot change it.
+        // E.PORT1: wrap only the providers that VALIDATE the OpenAI enum. The Ollama-compatible
+        // entries in this table need the non-standard value; stripping it there would undo a
+        // measured improvement on a lane that never rejects it.
         let inner = Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider(
             "openai",
             base,
             Some(key),
             model,
         )) as Arc<dyn LLMBackend>;
-        Some(Arc::new(StrictOpenAiBackend { inner }) as Arc<dyn LLMBackend>)
+        if provider_is_ollama_compatible(provider) {
+            Some(inner)
+        } else {
+            Some(Arc::new(StrictOpenAiBackend { inner }) as Arc<dyn LLMBackend>)
+        }
     }
 }
 
@@ -2939,6 +2974,15 @@ mod privacy_tests {
         fn backend_name(&self) -> &str {
             "recording"
         }
+        // The trait's defaults are "unknown" and false. A double that does not override them cannot
+        // detect an adapter that forgets to delegate them — which is exactly how the first version
+        // of the transparency test passed while `model_id` fell through to the default.
+        fn model_id(&self) -> &str {
+            "recording-model-id"
+        }
+        fn is_degraded(&self) -> bool {
+            true
+        }
     }
 
     fn strict_over(inner: Arc<RecordingBackend>) -> StrictOpenAiBackend {
@@ -3006,6 +3050,15 @@ mod privacy_tests {
             "recording",
             "identity is the inner backend's"
         );
+        assert_eq!(
+            strict.model_id(),
+            "recording-model-id",
+            "the adapter must delegate model_id; the trait default would make every strict cloud              backend misreport which model answered"
+        );
+        assert!(
+            strict.is_degraded(),
+            "the adapter must delegate is_degraded; the trait default hides a degraded backend"
+        );
         assert_eq!(strict.count_tokens("abcd").unwrap(), 4);
 
         // the caller's own config is not mutated
@@ -3046,6 +3099,38 @@ mod privacy_tests {
             !local.contains("StrictOpenAiBackend"),
             "the local lane must not be wrapped by the strict adapter"
         );
+    }
+
+    #[test]
+    fn the_endpoints_that_need_the_nonstandard_field_are_not_wrapped() {
+        // Review finding: the table this wraps contains `ollama` and `ollama-cloud`, which IGNORE
+        // `think` and for which the non-standard value is the only thing that suppresses the
+        // preamble. Wrapping them would have quietly undone a measured improvement on the CLOUD
+        // Ollama lane while the ledger row spoke only about the local one.
+        assert!(provider_is_ollama_compatible("ollama"));
+        assert!(provider_is_ollama_compatible("ollama-cloud"));
+        for strict in [
+            "nim",
+            "nvidia",
+            "groq",
+            "cerebras",
+            "openrouter",
+            "nanogpt",
+            "minimax",
+            "qwencloud",
+            "grok",
+        ] {
+            assert!(
+                !provider_is_ollama_compatible(strict),
+                "{strict} validates the enum and must stay on the strict path"
+            );
+        }
+        for name in ["ollama", "ollama-cloud", "nim", "groq"] {
+            assert!(
+                provider_catalog(name).is_some(),
+                "{name} is not in the provider table any more"
+            );
+        }
     }
 
     #[test]

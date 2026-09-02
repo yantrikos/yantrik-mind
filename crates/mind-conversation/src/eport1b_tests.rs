@@ -31,25 +31,35 @@ impl RecipeHost for NoTools {
 /// Released explicitly rather than by a long sleep: the runtime waits for spawned blocking work at
 /// shutdown, so a sleeping backend makes the whole suite wait with it.
 struct HeldBackend {
-    started: Arc<std::sync::Barrier>,
+    /// One-shot "a call has begun". A `std::sync::Barrier` was wrong here: it CYCLES, so a second
+    /// call to this backend would wait forever for a partner that never comes, on a blocking thread
+    /// the runtime joins at shutdown — a hung suite rather than a red test. Review caught it before
+    /// it fired. This signal is set once and every later call passes straight through.
+    started: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     calls: Arc<AtomicUsize>,
 }
 
-impl HeldBackend {
-    fn wait_for_release(&self) {
-        let (lock, cv) = &*self.release;
-        let mut released = lock.lock().unwrap();
-        while !*released {
-            let (g, timeout) = cv
-                .wait_timeout(released, std::time::Duration::from_secs(20))
-                .unwrap();
-            released = g;
-            if timeout.timed_out() {
-                break; // never hang a test runner, even if an assertion panicked before releasing
-            }
+/// Wait for a one-shot flag, with a ceiling so a failed assertion can never hang a test runner.
+fn wait_flag(flag: &(std::sync::Mutex<bool>, std::sync::Condvar), secs: u64) -> bool {
+    let (lock, cv) = flag;
+    let mut set = lock.lock().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while !*set {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
         }
+        let (g, _t) = cv.wait_timeout(set, left).unwrap();
+        set = g;
     }
+    true
+}
+
+fn set_flag(flag: &(std::sync::Mutex<bool>, std::sync::Condvar)) {
+    let (lock, cv) = flag;
+    *lock.lock().unwrap() = true;
+    cv.notify_all();
 }
 
 impl LLMBackend for HeldBackend {
@@ -60,8 +70,8 @@ impl LLMBackend for HeldBackend {
         _tools: Option<&[serde_json::Value]>,
     ) -> anyhow::Result<LLMResponse> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.started.wait();
-        self.wait_for_release();
+        set_flag(&self.started);
+        wait_flag(&self.release, 20);
         anyhow::bail!("this provider never answers")
     }
     fn chat_streaming(
@@ -84,23 +94,21 @@ impl LLMBackend for HeldBackend {
 struct Fixture {
     conv: ConversationEngine,
     mem: Arc<dyn MemoryFacade>,
-    started: Arc<std::sync::Barrier>,
+    started: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     calls: Arc<AtomicUsize>,
 }
 
 impl Fixture {
     fn release(&self) {
-        let (lock, cv) = &*self.release;
-        *lock.lock().unwrap() = true;
-        cv.notify_all();
+        set_flag(&self.release);
     }
 }
 
 /// `two_kinds` decides whether the ROUTER is consulted at all: with one executor there is nothing to
 /// choose between.
 fn fixture(two_kinds: bool, budget: std::time::Duration) -> Fixture {
-    let started = Arc::new(std::sync::Barrier::new(2));
+    let started = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let calls = Arc::new(AtomicUsize::new(0));
     let backend = Arc::new(HeldBackend {
@@ -161,9 +169,10 @@ async fn the_job_is_on_the_board_while_the_routing_call_is_still_blocked() {
     });
 
     // Wait until the provider has actually been called and is holding the request open.
-    tokio::task::spawn_blocking(move || started.wait())
+    let began = tokio::task::spawn_blocking(move || wait_flag(&started, 20))
         .await
-        .expect("backend started");
+        .expect("join");
+    assert!(began, "the provider was never called");
 
     // The routing model is now blocked and cannot answer. The board must ALREADY know about the job.
     let rows = board(&mem).await;
@@ -198,8 +207,6 @@ async fn the_acknowledgement_is_bounded_by_the_routing_budget() {
     // A 300 ms budget against a provider that will not answer until released: the acknowledgement
     // must come back on the budget, not on the provider.
     let f = fixture(true, std::time::Duration::from_millis(300));
-    let started = f.started.clone();
-    let waiter = tokio::task::spawn_blocking(move || started.wait());
 
     let t0 = std::time::Instant::now();
     let reply = f.conv.delegate_cmd("pagejob: build a portfolio page").await;
@@ -215,7 +222,6 @@ async fn the_acknowledgement_is_bounded_by_the_routing_budget() {
         "the production budget stays a human-scale wait, not a millisecond one"
     );
     f.release();
-    let _ = waiter.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -259,6 +265,7 @@ async fn a_timed_out_routing_task_is_detached_and_still_runs_to_completion() {
         f.fetch_add(1, Ordering::Relaxed); // stands in for record_call after the await resumes
         "code"
     };
+    let t0 = std::time::Instant::now();
     let kind = bounded_route(
         slow,
         "research",
@@ -268,8 +275,13 @@ async fn a_timed_out_routing_task_is_detached_and_still_runs_to_completion() {
         },
     )
     .await;
+    let elapsed = t0.elapsed();
 
     assert_eq!(kind, "research", "the floor stands when routing times out");
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "the caller waited {elapsed:?} for a 50 ms budget: not bounded"
+    );
     assert_eq!(
         fired.load(Ordering::Relaxed),
         1,
@@ -345,6 +357,54 @@ async fn a_single_executor_box_runs_the_job_even_when_the_classifier_names_anoth
         f.calls.load(Ordering::Relaxed),
         0,
         "and still no routing call, because there was nothing to choose between"
+    );
+    f.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_routing_future_that_never_completes_still_returns_the_floor_on_the_budget() {
+    // The ledger row claimed a test used "a future that never completes" and asserted the floor came
+    // back "within the budget". Neither was true of the test that existed; review caught the claim.
+    // This is that test.
+    let fired = Arc::new(AtomicUsize::new(0));
+    let f = fired.clone();
+    let never = async {
+        std::future::pending::<()>().await;
+        "code"
+    };
+    let t0 = std::time::Instant::now();
+    let kind = bounded_route(
+        never,
+        "research",
+        std::time::Duration::from_millis(80),
+        move || {
+            f.fetch_add(1, Ordering::Relaxed);
+        },
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert_eq!(kind, "research");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(80)
+            && elapsed < std::time::Duration::from_secs(2),
+        "returned after {elapsed:?}, which is not the budget"
+    );
+    assert_eq!(fired.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_abandoned_routing_call_is_counted_where_a_test_can_see_it() {
+    // The notice is an eprintln with no capturable seam, so the row's claim that a test asserted it
+    // was false. The count is the assertable half, and it is also the honest basis for surfacing the
+    // number to an operator later.
+    let before = crate::delegate::route_timeouts();
+    let f = fixture(true, std::time::Duration::from_millis(200));
+    let reply = f.conv.delegate_cmd("pagejob: build a portfolio page").await;
+    assert!(!reply.contains("isn't configured"), "{reply}");
+    assert_eq!(
+        crate::delegate::route_timeouts(),
+        before + 1,
+        "an abandoned routing call must be counted, not merely printed"
     );
     f.release();
 }

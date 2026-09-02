@@ -44,6 +44,17 @@ if [ -f "$CD/requests.json" ] && read -r PACC PREF PTLS PUPE <<< "$(python3 -c "
 DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")
 HASH=$(python3 "$FIX/tools/tree_hash.py" "$W")
 IMG=$(docker image inspect cb2-hermes --format '{{.Id}}')
-DQ=false; [ "$VALID" = false ] && DQ=true; [ "$CALLS" -gt $CAP ] && DQ=true; [ "$DL" -gt 0 ] && DQ=true; [ $RC -ne 0 ] && DQ=true; [ "$PPRESENT" = false ] && DQ=true; [ "$PREF" != 0 ] && DQ=true; [ "$PTLS" != True ] && DQ=true; [ "$PUPE" != 0 ] && DQ=true; SYML=$(echo "$HASH" | grep -o 'symlinks=[0-9]*' | cut -d= -f2); [ "${SYML:-0}" != 0 ] && DQ=true
-printf '{"system":"hermes","task":"%s","image":"%s","commit":"3ce1cf2bb768f39026e059f5236522dea2a4afe3","archive_sha256":"%s","started":"%s","finished":"%s","wall_s":%s,"rc":%s,"timed_out":%s,"valid_log":%s,"session":"%s","api_calls_from_log":%s,"proxy_receipt_present":%s,"proxy_accepted":%s,"proxy_refused":%s,"proxy_attempted":%s,"proxy_tls_hostname_verified":"%s","proxy_upstream_errors":%s,"tokens_in_out":"%s","download_or_install_lines":%s,"disqualified":%s,"tree":"%s"}\n' \
-  "$T" "$IMG" "$ARCHIVE_SHA" "$START" "$END" "$WALLS" "$RC" "$([ $RC -eq 124 ] && echo true || echo false)" "$VALID" "$SID" "$CALLS" "$PPRESENT" "$PACC" "$PREF" "$(( PACC + PREF ))" "$PTLS" "$PUPE" "$TOKS" "$DL" "$DQ" "$HASH" | tee "$R/hermes_$T.json"
+DQ=false; [ "$VALID" = false ] && DQ=true; [ "$CALLS" -gt $CAP ] && DQ=true; [ "$DL" -gt 0 ] && DQ=true; [ $RC -ne 0 ] && DQ=true
+# strict proxy receipt: typed non-negative integers, 1 <= accepted <= CAP, refused 0, upstream 0, TLS true, accepted == api calls in the log
+RECEIPT_OK=$(python3 -c "import json,sys
+try:
+    d=json.load(open('$CD/requests.json')); a=d['model_requests']; r=d['refused_over_cap']; u=d['upstream_errors']; t=d.get('tls_hostname_verified')
+    ok=isinstance(a,int) and isinstance(r,int) and isinstance(u,int) and 1<=a<=$CAP and r==0 and u==0 and t is True and a==int('$CALLS')
+except Exception:
+    ok=False
+print('true' if ok else 'false')")
+[ "$RECEIPT_OK" = true ] || DQ=true
+# exact tree hash: 64 hex + files/bytes/symlinks fields, zero symlinks
+echo "$HASH" | grep -Eq '^[0-9a-f]{64} files=[0-9]+ bytes=[0-9]+ symlinks=0$' || DQ=true
+printf '{"system":"hermes","task":"%s","image":"%s","commit":"3ce1cf2bb768f39026e059f5236522dea2a4afe3","archive_sha256":"%s","started":"%s","finished":"%s","wall_s":%s,"rc":%s,"timed_out":%s,"valid_log":%s,"session":"%s","api_calls_from_log":%s,"proxy_receipt_present":%s,"proxy_accepted":%s,"proxy_refused":%s,"proxy_attempted":%s,"proxy_tls_hostname_verified":"%s","proxy_upstream_errors":%s,"tokens_in_out":"%s","download_or_install_lines":%s,"proxy_receipt_ok":%s,"disqualified":%s,"tree":"%s"}\n' \
+  "$T" "$IMG" "$ARCHIVE_SHA" "$START" "$END" "$WALLS" "$RC" "$([ $RC -eq 124 ] && echo true || echo false)" "$VALID" "$SID" "$CALLS" "$PPRESENT" "$PACC" "$PREF" "$(( PACC + PREF ))" "$PTLS" "$PUPE" "$TOKS" "$DL" "$RECEIPT_OK" "$DQ" "$HASH" | tee "$R/hermes_$T.json"

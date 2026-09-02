@@ -1,7 +1,7 @@
 """E.CB2 request-counting model proxy — the ONLY path from a work container to the model.
 Forwards every request verbatim (streaming bodies included) to the pinned gateway, counts
-model requests (POSTs to completion paths only; every path is tallied in by_path), and answers 429
-from model request CAP+1 onward, so the eight-request cap
+model requests (every POST except the observed metadata probe POST /api/show; every path is
+tallied in by_path), and answers 429 from model request CAP+1 onward, so the eight-request cap
 is enforced BEFORE the ninth request reaches the model. Writes a counts-only receipt after
 every request. Env: CB2_UPSTREAM (host), CB2_CAP (int), CB2_COUNT_FILE (path)."""
 import http.client, json, os, ssl, threading, time
@@ -10,9 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 UPSTREAM = os.environ.get("CB2_UPSTREAM", "aig.mycluster.cyou")
 UPSTREAM_IP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")
 CAP = int(os.environ.get("CB2_CAP", "8"))
-# A MODEL REQUEST is a POST to a completion path; metadata POSTs (e.g. Ollama /api/show, which
-# Hermes issues when probing an endpoint) are forwarded and counted under by_path, never capped.
-MODEL_PATHS = ("/v1/chat/completions", "/chat/completions", "/v1/completions", "/completions", "/api/chat", "/api/generate", "/v1/messages", "/v1/responses")
+# EVERY POST consumes the cap except the one metadata POST observed in the Hermes probe
+# (Ollama-style /api/show, a model-info lookup); an unlisted inference path can therefore never
+# bypass the hard cap. Every path is still tallied under by_path.
+EXEMPT_POSTS = ("/api/show",)
 COUNT_FILE = os.environ.get("CB2_COUNT_FILE", "/count/requests.json")
 lock = threading.Lock()
 state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {}}
@@ -99,7 +100,7 @@ class H(BaseHTTPRequestHandler):
             conn.close()
 
     def do_POST(self):
-        self._forward(self.path.split("?")[0] in MODEL_PATHS)
+        self._forward(self.path.split("?")[0] not in EXEMPT_POSTS)
 
     def do_GET(self):
         self._forward(False)

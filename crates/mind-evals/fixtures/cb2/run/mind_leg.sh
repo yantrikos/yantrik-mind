@@ -55,7 +55,8 @@ try:
 except Exception:
     tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0
-capture_ok = len(bin_sha) == 64 and bool(prov) and tree.startswith(tuple("0123456789abcdef")) and "files=" in tree
+import re
+capture_ok = bool(re.fullmatch(r"[0-9a-f]{64}", bin_sha)) and bool(prov) and bool(re.fullmatch(r"[0-9a-f]{64} files=\d+ bytes=\d+ symlinks=\d+", tree))
 d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "proxy_accepted_parent": acc, "proxy_refused_parent": ref, "proxy_receipt_ok": receipt_ok, "capture_ok": capture_ok, "symlinks": syml})
 d["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or int(rc) != 0
 json.dump(d, open(dst, "w"), indent=1); print(json.dumps(d))

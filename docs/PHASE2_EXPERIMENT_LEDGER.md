@@ -2983,3 +2983,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill | Any change to what any loop sends or when (source guards on the send sites; a replayed-day fixture on the poll loop must produce byte-identical sends); a loop iteration that records twice or not at all (fixture per loop); any new model call; any raw content in a loop event (aggregates and reasons only). |
 | Lane | Mine to build; Codex to co-prereg L2 (the attention loop in shadow) and review L1's event shape before fold. |
 | AGI feed | Phase A for the idle mind: a loop that cannot name what it considered is a timer, not a decision. Phase D follows from it. |
+
+## L1 — amendment before code: what counts as an iteration, and staged folds
+
+| Field | Value |
+| --- | --- |
+| Iteration | A loop's iteration is its cadence coming due (or, for the heartbeat, its beat). The poll loop wakes every second or two; recording "cadence not due" for eighteen gates on every wake would be ~1.5 M rows a day of nothing. So: one `loop_tick` when a gate is due — `acted` with its outcome, or `skipped:<reason>` when due but held by `idle-gate`, `quiet-hours`, `disabled`, `budget`, or `nothing-due`. Cadence itself is never a recorded skip. |
+| Volume bound | Ticks per day ≈ Σ 86 400 / cadence_secs over the loops (≈ 2 900 for the 30 s heartbeat, the rest tens to hundreds) — well inside the recorder's rotation; the heartbeat records only when it did something or held a due delegation, not every beat. |
+| Folds | L1a: the helper, `ym why loops`, the headless beat, and the four judgement loops (DMN, knock, digest, ask). L1b: the fourteen timer gates. L1c: `/api/loops` + the cockpit *Loops* instrument. Each with its own suite and a staging witness (`ym why loops` on the canary after one hour). |

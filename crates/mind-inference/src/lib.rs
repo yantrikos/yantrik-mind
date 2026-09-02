@@ -1852,8 +1852,8 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 //
 // `GenericOpenAIBackend` emits BOTH `think:false` and `reasoning_effort:"none"` whenever a call asks
 // for thinking OFF. That pairing exists for one good reason: Ollama's OpenAI-compat endpoint ignores
-// `think`, and `"none"` is the only thing that actually suppresses the preamble there (measured at
-// 10 s → 0.9 s on the owned gateway). But `"none"` is not in the OpenAI enum, which allows only
+// `think`, so on that path the non-standard value is the only thing that suppresses the preamble.
+// But `"none"` is not in the OpenAI enum, which allows only
 // low / medium / high, so a provider that validates the field answers 400 to EVERY call — measured
 // live: five one-request probes, and the field is the only difference between 200 and 400.
 //
@@ -1868,7 +1868,9 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 // is explicit and named.
 //
 // One honesty note, because review caught the first version of this comment claiming otherwise: the
-// measured 10 s → 0.9 s improvement was taken on the LOCAL lane, which uses the native endpoint
+// measured 10 s → 0.9 s improvement — the ONLY place in this file that should mention it, because
+// review found the retraction appended here while three other comments still asserted it as fact —
+// was taken on the LOCAL lane, which uses the native endpoint
 // where `think` alone suffices. No measurement of `ollama.com/v1` exists. The exclusion rests on the
 // endpoint family's behaviour, not on evidence from that host.
 //
@@ -1898,7 +1900,7 @@ impl StrictOpenAiBackend {
 
 /// Providers whose endpoint needs the non-standard suppression field rather than rejecting it.
 /// These are Ollama-compatible: they ignore `think` on the OpenAI-compat path, so removing
-/// `reasoning_effort` would cost the measured suppression and buy nothing.
+/// `reasoning_effort` would leave nothing suppressing the preamble and buy nothing in return.
 fn provider_is_ollama_compatible(provider: &str) -> bool {
     matches!(provider, "ollama" | "ollama-cloud")
 }
@@ -1966,8 +1968,8 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         )) as Arc<dyn LLMBackend>)
     } else {
         // E.PORT1: wrap only the providers that VALIDATE the OpenAI enum. The Ollama-compatible
-        // entries in this table need the non-standard value; stripping it there would undo a
-        // measured improvement on a lane that never rejects it.
+        // entries in this table need the non-standard value; stripping it there would remove the
+        // only suppression they have, on a lane that never rejects it.
         let inner = Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider(
             "openai",
             base,
@@ -3188,8 +3190,36 @@ mod privacy_tests {
             )
             .next()
             .expect("its body");
-        for line in table.lines() {
-            let line = line.trim();
+        // Accumulate until the arrow: rustfmt wraps a long or-pattern so the names sit ABOVE the
+        // `=> (` line, and matching per-line would then see only the last name — a new provider
+        // added to a wrapped arm would land on the strict path unseen. That is the same blindness
+        // as the suffix match this replaced, one shape further out; review found both.
+        let mut pending = String::new();
+        for raw in table.lines() {
+            let line = raw.trim();
+            if line.starts_with("//") {
+                continue; // a comment containing an arrow is not a table arm
+            }
+            // Only a PATTERN fragment continues an arm: a quoted name, an or-bar, or the
+            // wildcard. Anything else (the signature, the opening brace, a body line) resets the
+            // accumulator, so the scan cannot glue unrelated text onto the next arm.
+            let fragment = line.starts_with('"') || line.starts_with('|') || line.starts_with('_');
+            if !line.contains(" => ") {
+                if fragment {
+                    pending.push_str(line);
+                } else {
+                    pending.clear();
+                }
+                continue;
+            }
+            let joined = if fragment {
+                format!("{pending}{line}")
+            } else {
+                pending.clear();
+                line.to_string()
+            };
+            pending.clear();
+            let line = joined.as_str();
             // Match the arrow ANYWHERE in the line, not a line that ENDS with it. Two of the
             // table's arms are single-line — including `"ollama-cloud" | "ollama" => (...)`, the
             // very pair this test exists to protect — so the suffix form skipped exactly the

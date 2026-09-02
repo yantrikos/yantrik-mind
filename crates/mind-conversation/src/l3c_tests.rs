@@ -401,13 +401,29 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
     // property, and it holds under both orderings above.
     conv.resolve_proactive(true).await;
     conv.resolve_proactive(true).await;
-    let rows = ledger_rows(&conv, &new_ref).await;
+    let after_first = ledger_rows(&conv, &new_ref).await;
+    assert_eq!(after_first.len(), 1, "one claim row: {after_first:?}");
     assert_eq!(
-        rows.len(),
-        1,
-        "graded exactly once, whatever the order: {rows:?}"
+        after_first[0]["outcome"].as_i64(),
+        Some(1),
+        "{after_first:?}"
     );
-    assert_eq!(rows[0]["outcome"].as_i64(), Some(1), "{rows:?}");
+    // GRADED ONCE is about the grading, not the row count: a grade mutates the row in place, so a
+    // second grading would leave the count at one and pass unseen. Review caught that conflation
+    // here — the same one this test's own history is about — so the observable is the grading
+    // timestamp, which a further pass must not move.
+    let graded_at = after_first[0]["outcome_at"].clone();
+    assert!(
+        !graded_at.is_null(),
+        "a graded row carries when: {after_first:?}"
+    );
+    conv.resolve_proactive(true).await;
+    let after_second = ledger_rows(&conv, &new_ref).await;
+    assert_eq!(after_second.len(), 1, "still one row: {after_second:?}");
+    assert_eq!(
+        after_second[0]["outcome_at"], graded_at,
+        "a second pass re-graded a beat that was already answered: {after_second:?}"
+    );
     let pend = conv
         .memory
         .profile_get("proactive_pending")

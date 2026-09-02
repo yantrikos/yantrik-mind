@@ -4824,6 +4824,10 @@ pub struct ConversationEngine {
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
     route_budget: std::time::Duration,
+    /// E.PORT1-B: routing calls THIS engine abandoned to the budget. The process-global counter is
+    /// what an operator wants; this one is what a test can assert, because the suite runs sibling
+    /// tests concurrently and a global count is satisfied by someone else's timeout.
+    route_timeouts: Arc<std::sync::atomic::AtomicU64>,
     /// How many recent raw messages to thread in (≈10 per side).
     recent_window: usize,
     /// Web fetcher — when set, a URL in a message is browsed and grounded (read-only, untrusted).
@@ -5046,6 +5050,7 @@ impl ConversationEngine {
             pending_question: Mutex::new(None),
             recipes: None,
             route_budget: crate::delegate::ROUTE_BUDGET,
+            route_timeouts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             researcher: None,
             sandbox: None,
             coder: None,
@@ -5392,6 +5397,12 @@ impl ConversationEngine {
     pub fn with_sandbox(mut self, sandbox: Arc<Sandbox>) -> Self {
         self.sandbox = Some(sandbox);
         self
+    }
+
+    /// E.PORT1-B: routing calls this engine abandoned to its budget.
+    pub fn route_timeouts(&self) -> u64 {
+        self.route_timeouts
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// E.PORT1-B: shorten the delegation router's deadline (tests drive the timeout path with it).

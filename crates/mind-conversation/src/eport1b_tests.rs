@@ -419,17 +419,24 @@ async fn an_abandoned_routing_call_is_counted_where_a_test_can_see_it() {
     // The notice is an eprintln with no capturable seam, so the row's claim that a test asserted it
     // was false. The count is the assertable half, and it is also the honest basis for surfacing the
     // number to an operator later.
-    let before = crate::delegate::route_timeouts();
+    // THIS engine's counter, not the process-global one. The global is what an operator wants and
+    // exactly what a test cannot assert: sibling tests in this file abandon their own routing calls
+    // concurrently, so an exact delta was flaky (2 in 10 full-suite runs) and a `>=` was satisfied
+    // by someone else's timeout — a check that could pass while this call counted nothing. Both
+    // versions were review findings; this one is about this call.
     let f = fixture(true, std::time::Duration::from_millis(200));
+    let before = f.conv.route_timeouts();
+    let global_before = crate::delegate::route_timeouts();
     let reply = f.conv.delegate_cmd("pagejob: build a portfolio page").await;
     assert!(!reply.contains("configured"), "{reply}");
-    // `>=`, not `==`: the counter is process-global by design (an operator wants the number for the
-    // process, not for one call), and another test in this file abandons a routing call on its own
-    // thread. An exact delta was flaky — it failed on 2 of 10 full-suite runs in review — and a
-    // flaky assertion is worse than a weaker one. Zero increments still fails, which is the claim.
+    assert_eq!(
+        f.conv.route_timeouts(),
+        before + 1,
+        "this engine abandoned exactly one routing call and must count exactly one"
+    );
     assert!(
-        crate::delegate::route_timeouts() >= before + 1,
-        "an abandoned routing call must be counted, not merely printed"
+        crate::delegate::route_timeouts() > global_before,
+        "the process-wide counter moves too, since that is what an operator reads"
     );
     f.release();
 }
@@ -469,7 +476,9 @@ async fn a_delegations_model_calls_carry_the_opportunity_that_started_it() {
     // the routing call and the job would have written spend rows with no opportunity, and a loop
     // that started a delegation would be charged for nothing it did. The observable is the ROW: the
     // pool reads the opportunity in its async frame and puts it on every terminal row it writes.
-    // Reverting either carry in delegate.rs makes this fail.
+    // Reverting the routing carry or the page-kind carry makes this fail. The other four spawns
+    // are covered structurally by the guard below, because a behavioural test for each would need a
+    // banked skill, a coder and a resume fixture to prove one line apiece.
     // A REAL opportunity identity: the spend reader parses this field, and a made-up string would
     // make every row malformed and the test green for the wrong reason.
     const OPP: &str = "dmn:bucket:7";
@@ -525,4 +534,46 @@ async fn a_delegations_model_calls_carry_the_opportunity_that_started_it() {
             "a spend row from a delegation started inside a loop must carry that loop: {r:?}"
         );
     }
+}
+
+#[test]
+fn every_spawn_in_the_delegation_path_carries_its_opportunity() {
+    // Review found the behavioural test above exercises two of six carries, and that the two ADDED
+    // by the fix were both in the untested four. A structural guard is the honest cover: every
+    // `tokio::spawn` in this file either wraps its future in `in_opportunity` or is the one inside
+    // `bounded_route`, which carries the opportunity inline a few lines above.
+    //
+    // It is a source scan, so say what it cannot do: it would not notice a spawn that passes an
+    // opportunity captured from the wrong scope, and it does not reach spawns in other files.
+    const SRC: &str = include_str!("delegate.rs");
+    let mut bare = Vec::new();
+    for (n, line) in SRC.lines().enumerate() {
+        let t = line.trim();
+        if !t.starts_with("tokio::spawn(") {
+            continue;
+        }
+        let carried = t.contains("in_opportunity(");
+        // bounded_route's own spawn re-enters the scope inside the future rather than wrapping it
+        let inline = SRC
+            .lines()
+            .skip(n)
+            .take(6)
+            .any(|l| l.contains("within_opportunity(id, routing)"));
+        if !carried && !inline {
+            bare.push(n + 1);
+        }
+    }
+    assert!(
+        bare.is_empty(),
+        "these spawns in delegate.rs lose the opportunity their delegation was created under, so a          loop that started the work is charged for none of it — lines {bare:?}"
+    );
+    // and the guard must be able to fire: there ARE spawns to find
+    let total = SRC
+        .lines()
+        .filter(|l| l.trim().starts_with("tokio::spawn("))
+        .count();
+    assert!(
+        total >= 5,
+        "expected the delegation spawns to be here, found {total}"
+    );
 }

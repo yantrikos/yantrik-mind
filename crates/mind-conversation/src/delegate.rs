@@ -254,12 +254,12 @@ pub const KINDS: &[(&str, &str)] = &[
 /// kind, a wrapped answer, or a kind whose executor is not configured gets rejected.
 pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
     let low = reply.to_lowercase();
-    // Longest name first, so "research" is not shadowed by a substring of another kind.
-    let mut names: Vec<&(&str, &str)> = KINDS.iter().collect();
-    names.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
-    // First mention wins: a model that says "page — because …" means page.
+    // FIRST MENTION WINS, by byte offset: a model that says "page — because …" means page. The
+    // ordering of the names being searched therefore cannot change the answer, and a comment here
+    // used to claim it did ("longest name first, so research is not shadowed") — review found the
+    // sort inert. The names are scanned in table order and the earliest match is taken.
     let mut best: Option<(usize, &'static str)> = None;
-    for (k, _) in names {
+    for (k, _) in KINDS.iter() {
         if let Some(at) = low.find(k) {
             let kind: &'static str = KINDS.iter().find(|(n, _)| n == k).map(|(n, _)| *n)?;
             if available.contains(&kind) && best.map(|(b, _)| at < b).unwrap_or(true) {
@@ -1605,8 +1605,10 @@ impl super::ConversationEngine {
         let kind = match self.route_task(&task) {
             None => floor,
             Some(routing) => {
+                let mine = self.route_timeouts.clone();
                 let refined = bounded_route(routing, floor, budget, || {
                     ROUTE_TIMEOUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    mine.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     eprintln!(
                         "[delegate] routing exceeded {budget:?} — job {id} keeps the deterministic \
                          kind '{floor}'; the routing request was DETACHED, not cancelled, and writes \

@@ -3900,3 +3900,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What it means for the ledger | Any claim of the form "model X did Y" that reads a route's configuration rather than a response's model id was unsound while this was invisible. The spend ledger already records the served model per row, so its rows are unaffected; the risk was in reports that quote configuration. |
 | Cost of the read | Metadata only: one catalogue fetch per distinct base URL, no model tokens, no graded run. |
 | Kill criteria, checked | No routing behaviour changed; no configuration was altered; nothing was guessed — the one route that could not have been checked would have been reported UNVERIFIED, and none were. |
+
+## E.PORT1 — CORRECTION to the live-witness row (Codex's independent check, 21:16Z; ledger corrections are new rows)
+| Field | Value |
+| --- | --- |
+| The false claim | The witness row says both feature strings are present in the running binary "one occurrence each". That is wrong for the first one. |
+| The measured truth | `strings -a` on the deployed binary matches `YM_PRIMARY_BRAIN` on **three** lines, not one: the bare variable name, the `[brain] YM_PRIMARY_BRAIN=` diagnostic prefix, and the role-plan report's "none configured" sentence that lists the variable among the others. Exactly one of the three is the bare name on its own line. `routing exceeded` is one occurrence, as stated. |
+| Why it matters even though the conclusion stands | Presence was and is proven, so the witness's conclusion is unchanged. The defect is in the evidence, not the finding: I quoted a count I had taken with an anchored pattern (`grep -c '^YM_PRIMARY_BRAIN$'`) and then described it as the count of a looser one. A number in a receipt has to mean what the receipt says it means, or the receipt is decoration. |
+| Recorded because | Codex caught it by running the unanchored form and getting a different number. That is the second time today a number of mine was right about the world and wrong about what it measured. |

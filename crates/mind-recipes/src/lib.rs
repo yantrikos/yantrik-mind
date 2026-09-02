@@ -258,10 +258,38 @@ pub enum RenderFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
 pub enum Condition {
-    VarExists { var: String },
-    VarEmpty { var: String },
-    VarContains { var: String, substring: String },
-    Not { inner: Box<Condition> },
+    VarExists {
+        var: String,
+    },
+    VarEmpty {
+        var: String,
+    },
+    VarContains {
+        var: String,
+        substring: String,
+    },
+    /// The var holds a COMPLETE HTML document — it starts as one and closes `</html>`.
+    ///
+    /// Exists because `VarContains { "</html>" }` is satisfied by prose that merely MENTIONS the
+    /// closing tag, and the step this guards (author a page) fails precisely by returning prose
+    /// about a page instead of the page (E.CB2 leg 1: 968 characters, no `<html>`, no `<body>`).
+    VarIsHtmlDocument {
+        var: String,
+    },
+    Not {
+        inner: Box<Condition>,
+    },
+}
+
+/// Is this text one complete HTML document? Deterministic and deliberately strict: it must OPEN as
+/// a document (a doctype or an `<html>` tag before any prose) and CLOSE with `</html>`. A fragment,
+/// a truncated document and a reply discussing HTML all fail. Never used to weaken a check — only
+/// to decide whether a repair round is worth one model call.
+pub fn is_html_document(s: &str) -> bool {
+    let t = s.trim();
+    let low = t.to_ascii_lowercase();
+    let opens = low.starts_with("<!doctype html") || low.starts_with("<html");
+    opens && low.trim_end().ends_with("</html>")
 }
 
 impl Condition {
@@ -277,6 +305,10 @@ impl Condition {
                 .get(var)
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| s.contains(substring.as_str())),
+            Self::VarIsHtmlDocument { var } => vars
+                .get(var)
+                .and_then(|v| v.as_str())
+                .is_some_and(is_html_document),
             Self::Not { inner } => !inner.evaluate(vars),
         }
     }
@@ -2744,6 +2776,74 @@ mod ef3_tests;
 mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;
+
+#[cfg(test)]
+mod ecb2f_document_condition {
+    use super::{is_html_document, Condition};
+    use std::collections::HashMap;
+
+    const REAL: &str = "<!doctype html>
+<html lang=\"en\"><head><title>x</title></head><body><h1>x</h1></body></html>
+";
+
+    #[test]
+    fn only_a_complete_document_passes() {
+        assert!(is_html_document(REAL), "a real page");
+        assert!(
+            is_html_document("  <html><body>hi</body></html>  "),
+            "leading/trailing space is fine"
+        );
+        // THE OBSERVED FAILURE (E.CB2 leg 1): prose where a document was asked for.
+        assert!(
+            !is_html_document("Here is the page you asked for. It has a hero and four cards."),
+            "prose"
+        );
+        assert!(
+            !is_html_document("<!doctype html><html><body><h1>x</h1>"),
+            "truncated: never closes"
+        );
+        assert!(
+            !is_html_document("<div class=\"card\">a fragment</div>"),
+            "a fragment is not a document"
+        );
+        // The reason this predicate exists rather than a substring test.
+        assert!(
+            !is_html_document("Remember to end the file with </html> when you write it."),
+            "prose that MENTIONS the closing tag"
+        );
+        assert!(
+            !is_html_document(
+                "```html
+<html><body>x</body></html>
+```"
+            ),
+            "still fenced: the caller unwraps before publishing, not here"
+        );
+        assert!(!is_html_document(""), "empty");
+    }
+
+    #[test]
+    fn the_condition_reads_the_var_and_is_false_when_absent() {
+        let mut vars = HashMap::new();
+        vars.insert("page".to_string(), serde_json::json!(REAL));
+        vars.insert(
+            "prose".to_string(),
+            serde_json::json!("a description of a page"),
+        );
+        vars.insert("number".to_string(), serde_json::json!(7));
+        let c = |v: &str| Condition::VarIsHtmlDocument { var: v.to_string() };
+        assert!(c("page").evaluate(&vars));
+        assert!(!c("prose").evaluate(&vars));
+        assert!(
+            !c("number").evaluate(&vars),
+            "a non-string var is not a document"
+        );
+        assert!(
+            !c("missing").evaluate(&vars),
+            "an absent var is not a document"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

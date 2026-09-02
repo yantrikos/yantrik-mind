@@ -92,6 +92,8 @@ pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
 #[cfg(test)]
 mod chains_window_tests;
 #[cfg(test)]
+mod ecb2f_tests;
+#[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
 mod l1d_tests;

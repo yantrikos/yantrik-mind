@@ -363,6 +363,41 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
                 // longer it reasons and the less document survives.
                 think: Some(false),
             },
+            // E.CB2-F — ONE critic + repair round, and only when it is needed.
+            //
+            // The author step above fails in a specific, observed way on a mid-size local model: it
+            // returns prose ABOUT the page, or a document that stops mid-tag. E.CB2 leg 1 measured
+            // exactly that — 968 characters with no `<html>`/`<body>` — and `publish_page` refused,
+            // correctly, leaving the chain with nothing to try and the job reported as failed after
+            // 31 seconds. The refusal stays; what changes is that a failed draft now gets one repair
+            // call before the chain gives up.
+            //
+            // The condition is deterministic (`VarIsHtmlDocument`: opens as a document, closes
+            // `</html>`), so a draft that is already a page skips the repair and the run is
+            // byte-identical to before — the extra call is spent only on runs that would have failed.
+            RecipeStep::JumpIf {
+                condition: Condition::VarIsHtmlDocument { var: "page".into() },
+                target_step: 4,
+            },
+            RecipeStep::Think {
+                prompt: format!(
+                    "Your previous attempt at this page did not come back as a document, so it cannot                      be published. Here is what you produced:
+
+{{{{page}}}}
+
+                     Return the page itself this time: ONE complete, self-contained HTML document and                      NOTHING else — no commentary before or after, no markdown fence. It must START                      with <!doctype html> and END with </html>.
+                     - If what you produced above is a description, a plan or an explanation, write the                      page it describes.
+                     - If it is a document that stops early, write the whole thing again and FINISH it;                      drop sections rather than leave the last one unclosed.
+
+                     The brief, unchanged: {task}
+
+                     Same requirements as before: a hero and at least three real sections with real                      content, 4-6 project cards with titles, one-line descriptions and 2-3 tags, a                      footer, everything inline (one <style> block), no network resources of any kind,                      a deliberate palette, responsive from 360px, light and dark via                      prefers-color-scheme with an explicit body background in both, semantic HTML and a                      real <title>."
+                ),
+                store_as: "page".into(),
+                on_error: ErrorAction::Fail,
+                max_tokens: Some(16_000usize),
+                think: Some(false),
+            },
             RecipeStep::Tool {
                 tool_name: "publish_page".into(),
                 args: serde_json::json!({ "name": name, "html": "{{page}}" }),

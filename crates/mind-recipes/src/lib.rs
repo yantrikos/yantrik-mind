@@ -368,8 +368,25 @@ pub fn opens_as_document(s: &str) -> bool {
     let t = s.trim_start();
     let low = t.to_ascii_lowercase();
     if let Some(rest) = low.strip_prefix("<!doctype") {
-        // `<!doctype html>` and its longer legacy forms; `<!doctypex ...>` and an unclosed doctype are not.
-        return rest.starts_with(char::is_whitespace) && rest.contains('>');
+        // `<!doctype html>` and its longer legacy forms. Three ways this went wrong in review, each
+        // now a regression: `<!doctypex …>` (no boundary), `<!doctype banana>` (never names html),
+        // and `<!doctype html <body>x</body>` (unclosed — the `>` found belonged to the next tag).
+        let Some(rest) = rest.strip_prefix(char::is_whitespace) else {
+            return false;
+        };
+        let rest = rest.trim_start();
+        let Some(after) = rest.strip_prefix("html") else {
+            return false;
+        };
+        if !(after.is_empty() || after.starts_with('>') || after.starts_with(char::is_whitespace)) {
+            return false;
+        }
+        // the doctype must CLOSE before the next tag opens
+        return match (rest.find('>'), rest.find('<')) {
+            (Some(close), Some(next_tag)) => close < next_tag,
+            (Some(_), None) => true,
+            _ => false,
+        };
     }
     if let Some(rest) = low.strip_prefix("<html") {
         // `<html>`, `<html lang="en">`, `<html/>` — never `<htmlish>`.
@@ -2944,6 +2961,22 @@ Hope it helps."
         assert!(
             !is_publishable_document("<!doctype html"),
             "an unclosed doctype is not a document"
+        );
+        assert!(
+            !is_publishable_document("<!doctype html <body>x</body>"),
+            "the doctype never closes: the '>' found belongs to <body>"
+        );
+        assert!(
+            !is_publishable_document("<!doctype banana><body>x</body>"),
+            "a doctype that never names html is not an HTML document"
+        );
+        assert!(
+            !is_publishable_document("<!doctypehtml><body>x</body>"),
+            "no boundary after the doctype keyword"
+        );
+        assert!(
+            !is_publishable_document("<!doctype htmlish><body>x</body>"),
+            "htmlish is not the html token"
         );
         // and the legitimate openings still pass
         for good in [

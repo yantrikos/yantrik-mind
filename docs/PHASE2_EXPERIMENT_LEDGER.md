@@ -3969,3 +3969,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Mis-counted defects | The row said "five defects and three false claims" while enumerating seven defects in its own cells. |
 | Why this matters more than the numbers | The row exists because a reader of the ledger could not otherwise tell that E.PORT1-B was ever wrong. A correction row that misattributes its own history is the same failure one level up, and it is the third time today a number of mine measured something other than what it said. |
 | The accurate history | 4d68864 introduced three defects at once. 41f7107 fixed the ordering and the accounting. 2622d5f fixed the single-executor refusal after a graded run caught it. 7165e98 fixed four more from review. b464398 fixed the two-executor case the earlier fix had missed, and gave the opportunity carry the discriminating test it shipped without. |
+
+## FINDING (not mine, not fixed): a concurrency test in the L3c suite fails about one run in four
+| Field | Value |
+| --- | --- |
+| What | `mind-conversation` `l3c_tests::two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_erase_a_commit` failed on 1 of 4 consecutive full-suite runs while I was verifying unrelated work; the other three passed, and every other test passed every time. |
+| Why it is recorded rather than shrugged at | A test that fails one run in four is a check that sometimes lies. It teaches the reader to re-run rather than to look, which is exactly how a real race gets dismissed as "flaky" — and this one guards a claim about concurrent commits and a resolver that must not erase one. If the CODE has the race, the test is doing its job intermittently; if the TEST has it, it is eroding the suite's authority. Either way it is not a thing to leave unnamed. |
+| Not diagnosed yet | It predates today's work and is unrelated to the E.PORT1 line. It is with the reviewer now; whatever it says lands as its own row, and if it is a real race it gets a preregistration before any fix. |
+| What I did NOT do | Re-run until green and move on. |

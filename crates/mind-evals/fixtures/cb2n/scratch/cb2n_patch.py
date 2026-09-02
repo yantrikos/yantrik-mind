@@ -405,6 +405,15 @@ rw("run/mind_leg.sh", [
 
 # ── mind driver: name its OWN disqualification reasons, split independent from dependent ─────
 rw("run/mind_driver.py", [
+    # The routed kind belongs in the receipt: with two executors the router may refine the floor,
+    # and a leg that produced nothing because it ran as `research` is a routing OUTCOME, not a
+    # build failure. Nothing downstream could tell those apart (review 4, finding 5).
+    ('status, result, stop = "running", "", None',
+     'status, result, stop = "running", "", None\nrouted_kind = ""'),
+    ('        status = mine[-1].get("status", "?"); result = mine[-1].get("result") or ""',
+     '        status = mine[-1].get("status", "?"); result = mine[-1].get("result") or ""\n        routed_kind = mine[-1].get("kind") or routed_kind'),
+    ('"files_added": len(added), "result_bytes": len(result.encode("utf-8")),',
+     '"files_added": len(added), "result_bytes": len(result.encode("utf-8")), "routed_kind": routed_kind,'),
     ('''           "disqualified": (not present) or bad > 0 or refused > 0 or accepted > CAP or stop is not None}''',
      '''           "proxy_client_disconnects": -1,
            # The driver's own reasons, split. INDEPENDENT: evidence the run broke a rule of its own —
@@ -451,6 +460,11 @@ rw("net/captest_client.py", [
 
 # ── MANIFEST: both profiles described without contradiction ──────────────────────────────────
 rw("MANIFEST.json", [
+    # The binary changed under this claim: a `code`-classified brief is no longer refused, it is
+    # floored onto an executor the box has. Leaving the old sentence in the manifest that accompanies
+    # a graded receipt would describe a system that no longer exists (review 4, finding 4).
+    ("\"known_limit\": \"no code executor on this binary: a brief routed to `code` reads 'not runnable as configured'\"",
+     "\"known_limit\": \"the coder needs an API key this scratch instance does not have, so the executors present are `page` and `research`. Since E.PORT1-B a brief the classifier calls `code` is NOT refused: the deterministic floor is constrained to the executors that exist, so it runs on `page`. The router may still refine the kind within its budget, so the receipt records the kind the job actually ran as, and a leg that produced no artifact because it was routed to `research` is a routing outcome rather than a build failure.\""),
     ('"proxy_start": "fail-closed: the leg aborts (receipt status proxy-not-ready, disqualified) unless the proxy started',
      '"proxy_start": "fail-closed and PRE-INVOCATION: the leg aborts with a receipt of status proxy-not-ready, void true and disqualified false (nothing was graded, and the one declared rerun applies) unless the proxy started'),
     ('  "id": "E.CB2",\n  "version": 3,\n',

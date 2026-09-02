@@ -72,6 +72,7 @@ before = snapshot()
 name = f"cb2-{T.lower()}"; t0 = time.time(); started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 st, _ = call("POST", "/api/agent", {"name": name, "task": brief}); print("submit:", st)
 status, result, stop = "running", "", None
+routed_kind = ""
 while True:
     remaining = WALL - (time.time() - t0)
     if remaining <= 0:
@@ -90,6 +91,7 @@ while True:
     mine = [j for j in jobs if isinstance(j, dict) and j.get("name") == name]
     if mine:
         status = mine[-1].get("status", "?"); result = mine[-1].get("result") or ""
+        routed_kind = mine[-1].get("kind") or routed_kind
         if status in ("done", "failed"):
             break
 if stop:
@@ -104,7 +106,7 @@ for p in added:
 req, att, bad = spend_rows(); accepted, refused, present = proxy_count()
 receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
            "stop_reason": stop or "",
-           "files_added": len(added), "result_bytes": len(result.encode("utf-8")),
+           "files_added": len(added), "result_bytes": len(result.encode("utf-8")), "routed_kind": routed_kind,
            "ledger_requests": req, "ledger_attempts": att, "ledger_malformed": bad,
            "proxy_receipt_present": present, "proxy_accepted": accepted, "proxy_refused": refused,
            "proxy_attempted": (accepted + refused) if present else -1,

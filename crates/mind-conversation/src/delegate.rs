@@ -1119,6 +1119,21 @@ where
     }
 }
 
+/// Run a spawned job inside the opportunity its delegation was created under, if there was one.
+///
+/// Task-locals do not cross `tokio::spawn`, and the spend ledger joins a row to its loop by exactly
+/// one of them. Review caught the first version carrying this into the twelve-token routing call and
+/// not into the job itself, which would have charged a loop for the hint and not for the work.
+pub(crate) async fn in_opportunity<F: std::future::Future>(
+    opportunity: Option<String>,
+    fut: F,
+) -> F::Output {
+    match opportunity {
+        Some(id) => mind_inference::within_opportunity(id, fut).await,
+        None => fut.await,
+    }
+}
+
 pub(crate) const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// How many routing calls this process has abandoned to the budget. An `eprintln!` is visible to an
@@ -1149,7 +1164,7 @@ impl super::ConversationEngine {
         v
     }
 
-    /// Pick the executor for a task — model first, keyword table only as a floor.
+    /// Pick the executor for a task, when there is more than one to pick from.
     ///
     /// The model gets the SAME list of kinds the runtime dispatches on, filtered to what is
     /// configured, so it cannot route to something that does not exist here. One short call; if it
@@ -1158,9 +1173,10 @@ impl super::ConversationEngine {
     /// The routing decision, as an OWNED future: it borrows nothing from the engine, so it can be
     /// spawned and left to finish (and to record its own spend row) when the caller stops waiting.
     ///
-    /// `None` when there is nothing to decide — one executor is not a choice. Note what this means
-    /// for the keyword table: it no longer merely provides a floor the model can overrule, it
-    /// decides the kind outright whenever the model is not asked or does not answer in time.
+    /// `None` when there is nothing to decide — one executor is not a choice, and the caller uses
+    /// it directly. When the model IS asked and does not answer in time, the caller keeps the floor
+    /// it already put on the board: the classifier's answer, constrained to the executors that
+    /// exist.
     fn route_task(
         &self,
         task: &str,
@@ -1530,14 +1546,22 @@ impl super::ConversationEngine {
         // — it produced no model request, no board row and no error, which is the same silence
         // E.PORT1-B exists to abolish, arriving through the door the fix itself opened.
         let available = self.available_kinds();
-        let floor = if available.len() == 1 {
-            available[0]
+        let classified = classify(&task);
+        // The floor is the classifier's answer WHEN THIS BOX CAN RUN IT, and otherwise the first
+        // executor that exists. Two earlier versions got this wrong in the same direction: the first
+        // checked the classifier's answer against the executors and refused, which halted a graded
+        // reading on a one-executor box; the second fixed only that case, and review caught that the
+        // DEFAULT box has two (page and research — the coder needs a key), so a `code` task would
+        // still have been refused by a box holding two executors that could have done it.
+        let floor = if available.iter().any(|k| *k == classified) {
+            classified
         } else {
-            classify(&task)
+            available.first().copied().unwrap_or(classified)
         };
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
+        // With the floor constrained to what exists, this can only fire when NOTHING exists.
         if !runnable_kind(floor) {
-            return format!("(the {floor} executor isn't configured on this box)");
+            return "(no delegation executor is configured on this box)".to_string();
         }
         if !self.try_acquire_bg(3) {
             return "(the job board is full — a few delegations are already running; `ym jobs` to see them)".to_string();
@@ -1600,10 +1624,13 @@ impl super::ConversationEngine {
             self.memory.clone(),
         );
         let (id2, name2, task2) = (id.clone(), name.clone(), task.clone());
+        // The executor's calls are the expensive ones; the job runs inside the same opportunity the
+        // delegation was created under, or inside none if there was none.
+        let opportunity = mind_inference::current_opportunity();
         if kind == "page" {
             let engine = self.recipes.clone().unwrap();
             let pack_rules = self.memory.pack_context().await.ok().flatten();
-            tokio::spawn(async move {
+            tokio::spawn(in_opportunity(opportunity.clone(), async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
                 scratch_note(
                     &mem,
@@ -1651,7 +1678,7 @@ impl super::ConversationEngine {
                 .await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
-            });
+            }));
         } else if kind == "code" {
             // ITERATE-UNTIL-GOOD (the Hermes pattern, 2026-08-06): one coder pass produces a first
             // draft; real artifacts need build → critique → improve until a bar is met. Same shape
@@ -1681,7 +1708,7 @@ impl super::ConversationEngine {
             let warm_resume = std::env::var("YM_DELEGATE_RESUME")
                 .map(|v| v.trim().eq_ignore_ascii_case("warm"))
                 .unwrap_or(false);
-            tokio::spawn(async move {
+            tokio::spawn(in_opportunity(opportunity.clone(), async move {
                 // Who is judging is part of the record: a run reviewed by the local pool and one
                 // reviewed by a peer-strength model are not the same evidence.
                 let (critic, critic_label) = match &named_critic {
@@ -2030,10 +2057,10 @@ impl super::ConversationEngine {
                 ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
-            });
+            }));
         } else {
             let r = self.researcher.clone().unwrap();
-            tokio::spawn(async move {
+            tokio::spawn(in_opportunity(opportunity.clone(), async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
                 // E.WEB16b: the date is a fact from the process clock, never the model's prior —
                 // the first live run asserted a date months wrong. The scratch note above keeps
@@ -2073,7 +2100,7 @@ impl super::ConversationEngine {
                 .await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
-            });
+            }));
         }
         format!("🧰 Delegated [{id}] \"{name}\" ({kind}). It's on the board — `ym jobs` — and the result lands in chat.")
     }

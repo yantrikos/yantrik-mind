@@ -281,6 +281,54 @@ mod tests {
         assert!(x.try_admit_dmn(900_000, IDLE).is_none());
     }
 
+    /// The machine entry is fail-closed over the exact read-only shapes emitted by the web GET
+    /// routes. Near-misses become person activity instead of silently hiding from the idle clock.
+    #[test]
+    fn the_machine_view_allowlist_is_exact() {
+        for line in [
+            "jobs json",
+            "horizons_json",
+            "horizon_history_json goal:horizon:abc-1_ok",
+            "chains_json",
+            "chains_json since=start",
+            "chains_json since=1788324090623",
+            "skills_json",
+            "claims_json",
+            "loops_json",
+            "orders",
+            "orders json",
+        ] {
+            assert!(
+                crate::ConversationEngine::is_machine_view(line),
+                "web GET view must remain a machine view: {line:?}"
+            );
+        }
+
+        for line in [
+            "",
+            "jobs",
+            "jobs json extra",
+            "horizons_json extra",
+            "horizon_history_json",
+            "horizon_history_json goal.with.dot",
+            "horizon_history_json goal:horizon:a extra",
+            "chains_json since=",
+            "chains_json since=123 extra",
+            "chains_json since=123-456",
+            "orders extra",
+            "delegate helper: do work",
+            "plugin enable finance",
+        ] {
+            assert!(
+                !crate::ConversationEngine::is_machine_view(line),
+                "near-miss or mutation must count as person activity: {line:?}"
+            );
+        }
+
+        let overlong_id = format!("horizon_history_json {}", "a".repeat(65));
+        assert!(!crate::ConversationEngine::is_machine_view(&overlong_id));
+    }
+
     /// Under concurrent registration, every guard's displaced pair is exactly one earlier
     /// registration's (stamp, surface) — attribution cannot tear into a mixture.
     #[test]

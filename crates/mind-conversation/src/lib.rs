@@ -6723,8 +6723,19 @@ impl ConversationEngine {
         match verb {
             "jobs" | "orders" => rest == "json" || (verb == "orders" && rest.is_empty()),
             "horizons_json" | "skills_json" | "claims_json" | "loops_json" => rest.is_empty(),
-            "horizon_history_json" => !rest.is_empty() && !rest.contains(char::is_whitespace),
-            "chains_json" => rest.is_empty() || rest.starts_with("since="),
+            "horizon_history_json" => {
+                !rest.is_empty()
+                    && rest.len() <= 64
+                    && rest
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == ':' || c == '-' || c == '_')
+            }
+            "chains_json" => {
+                rest.is_empty()
+                    || rest.strip_prefix("since=").is_some_and(|value| {
+                        !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric())
+                    })
+            }
             _ => false,
         }
     }

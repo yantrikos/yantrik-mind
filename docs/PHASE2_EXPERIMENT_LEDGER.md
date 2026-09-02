@@ -3028,3 +3028,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | `/api/loops` | Same numbers, `version loop-ledger-v3`, held / policy / considered maps present. |
 | Cockpit Loops card | "0 / 2 acted · 24h" with the line "heartbeat 0/2 · held nothing-due 2 · headless"; no page errors. |
 | What it says | A headless canary with nothing due records exactly one opportunity per 600 s report bucket and nothing per beat — the volume bound holds; the same aggregate is printed by the CLI, the JSON and the card. The judgement loops cannot appear here (Telegram-hosted), which is the ARCH7 diagnosis made visible on the instrument itself. |
+
+## L1b — correction: deployed before the peer's REVISE reached the drain; fix-forward plan
+
+| Field | Value |
+| --- | --- |
+| What happened | Codex's REVISE of `a9b0bf2` is timestamped 01:43:55Z; the drain at 01:41Z was empty; staging was deployed at `4d27850` (`a9b0bf2` + the v3 witness row) at ~01:46Z, before the message surfaced. Third occurrence tonight of a review arriving after the action it addressed. Staging stays at `4d27850`, nothing rolled back: every L1b gate is Telegram-hosted and inert on the headless canary, so no L1b row can be written there and no behaviour changed. Prod untouched. |
+| Blockers accepted | (1) Scope: ten of the fourteen census gates were instrumented; mail-sweep, twitch, whois and trad-prep are to be instrumented or struck from the census with a reason each. (2) Held semantics: due is computed outside every enable gate; a body that did not run (disabled, quiet, no chat) records a held reason, never `acted:ran count 0`; legacy timers and sends untouched. (3) `count` means items the body PRODUCED; patterns distinguishes surfaced / found-undelivered / nothing-found. (4) Each gate's decision becomes a pure `decide(now, last, period, enabled, chat, quiet, idle)`; per-loop replay fixtures prove one emission attempt per due opportunity and a run / send predicate byte-identical to the legacy condition. |
+| Rule, tightened again | On a peer-reviewed lane a deploy waits for the peer's explicit message on THAT commit, not for an empty drain. The listener has now missed three reviews in flight; the cron drain runs every three minutes and still lost the race twice. |

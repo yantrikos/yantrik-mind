@@ -479,6 +479,30 @@ pub(crate) async fn ledger_checkpoint(memory: &Arc<dyn MemoryFacade>, id: &str, 
         .await;
 }
 
+/// E.PORT1-B: refine the kind of a row that is already on the board. The row's identity — its id,
+/// name, task and start — never changes; only the executor it was routed to.
+pub(crate) async fn ledger_set_kind(memory: &Arc<dyn MemoryFacade>, id: &str, kind: &str) {
+    let mut rows: Vec<serde_json::Value> = memory
+        .profile_get(LEDGER_KEY)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if let Some(r) = rows
+        .iter_mut()
+        .find(|r| r.get("id").and_then(|x| x.as_str()) == Some(id))
+    {
+        r["kind"] = serde_json::json!(kind);
+        let _ = memory
+            .profile_set(
+                LEDGER_KEY,
+                &serde_json::to_string(&rows).unwrap_or_default(),
+            )
+            .await;
+    }
+}
+
 pub(crate) async fn ledger_update(
     memory: &Arc<dyn MemoryFacade>,
     id: &str,
@@ -1052,13 +1076,17 @@ fn code_resume_spec(
     })
 }
 
-/// E.PORT1-B: run a routing future under a deadline, falling back to the deterministic floor.
+/// E.PORT1-B: run a routing task under a deadline, falling back to the deterministic floor.
 ///
-/// A timed-out blocking provider call cannot be cancelled from here — it finishes in its own time.
-/// So the one thing that must not happen is silence: `on_timeout` fires exactly once when the budget
-/// is exceeded, and the caller reports that a model request may still be in flight. The abandoned
-/// request still writes its own terminal spend row when it completes, so it is accounted for even
-/// though nothing waits on it.
+/// The routing work is SPAWNED, not merely awaited under a timeout. That distinction is the whole
+/// correctness of the accounting: `tokio::time::timeout` cancels by DROPPING the inner future, and
+/// the spend ledger's terminal row is written after the blocking call's await resumes — so a dropped
+/// routing future leaves a request that ran, cost something, and was never recorded. Dropping a
+/// `JoinHandle` instead merely DETACHES the task: it runs to completion on its own and writes its
+/// own terminal row, exactly once, while nothing here waits for it.
+///
+/// `on_timeout` fires once when the budget is exceeded, so the abandonment is visible as well as
+/// accounted for.
 pub(crate) async fn bounded_route<F>(
     routing: F,
     floor: &'static str,
@@ -1066,20 +1094,22 @@ pub(crate) async fn bounded_route<F>(
     on_timeout: impl FnOnce(),
 ) -> &'static str
 where
-    F: std::future::Future<Output = &'static str>,
+    F: std::future::Future<Output = &'static str> + Send + 'static,
 {
-    match tokio::time::timeout(budget, routing).await {
-        Ok(kind) => kind,
-        Err(_) => {
+    let handle = tokio::spawn(routing);
+    match tokio::time::timeout(budget, handle).await {
+        Ok(Ok(kind)) => kind,
+        // The routing task panicked: the floor is still a correct answer, and the panic is the
+        // task's own business to report.
+        Ok(Err(_join_error)) => floor,
+        Err(_elapsed) => {
+            // The handle is dropped here, which DETACHES the task rather than cancelling it.
             on_timeout();
             floor
         }
     }
 }
 
-/// How long the router may take before the deterministic classification stands. A delegation is an
-/// interactive act: the person who typed it is owed an answer in seconds, and a one-word routing
-/// hint is never worth making them wait longer than this.
 pub(crate) const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 impl super::ConversationEngine {
@@ -1104,11 +1134,17 @@ impl super::ConversationEngine {
     /// configured, so it cannot route to something that does not exist here. One short call; if it
     /// fails, times out, or answers with something unusable, [`classify`] decides and the delegation
     /// still runs. Routing must never be the reason nothing happens.
-    async fn route(&self, task: &str) -> &'static str {
+    /// The routing decision, as an OWNED future: it borrows nothing from the engine, so it can be
+    /// spawned and left to finish (and to record its own spend row) when the caller stops waiting.
+    fn route_task(
+        &self,
+        task: &str,
+    ) -> Option<impl std::future::Future<Output = &'static str> + Send + 'static> {
         let available = self.available_kinds();
         let floor = classify(task);
         if available.len() < 2 {
-            return available.first().copied().unwrap_or(floor);
+            // A menu of one needs no model: asking would be pure latency on every delegation.
+            return None;
         }
         let menu: String = KINDS
             .iter()
@@ -1132,18 +1168,20 @@ impl super::ConversationEngine {
         // household content, so it takes the private lane first and any escalation is audited. The
         // privacy audit caught this as an unscoped call — correctly; a one-word routing answer is not
         // a reason to send someone's request to a cloud provider unrecorded.
-        let reply = match self
-            .inference
-            .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
-            .await
-        {
-            Ok(r) => r.text,
-            Err(_) => return floor,
-        };
-        match parse_route(&reply, &available) {
-            Some(k) => k,
-            None => floor,
-        }
+        let inference = self.inference.clone();
+        Some(async move {
+            let reply = match inference
+                .chat_grounded(vec![ChatMessage::user(&prompt)], cfg)
+                .await
+            {
+                Ok(r) => r.text,
+                Err(_) => return floor,
+            };
+            match parse_route(&reply, &available) {
+                Some(k) => k,
+                None => floor,
+            }
+        })
     }
 
     /// `ym delegate <name>: <task>` — ledger row + background execution + chat delivery.
@@ -1443,11 +1481,15 @@ impl super::ConversationEngine {
         // E.PORT1-B — THE BOARD FIRST, THE MODEL SECOND.
         //
         // This used to await `route(&task)` before minting an id or writing a row. `route` calls a
-        // model, and when every call to that provider was rejected the call never returned: no row
-        // was ever written, `ym jobs` and /api/tasks listed nothing, and a job that had been
-        // accepted sat invisible for thirty minutes. The delegation was not slow; it had not been
-        // born. So the deterministic classification decides what this job IS, the board learns
-        // about it immediately, and the model is only ever asked to REFINE that — under a deadline.
+        // model, and when every request to a provider was rejected that call never returned: no row
+        // was ever written, `ym jobs` and /api/tasks listed nothing, and an accepted delegation sat
+        // invisible for thirty minutes. It was not slow; it had not been born.
+        //
+        // So the ORDER is the fix, not merely a timeout: the deterministic classification decides
+        // what this job is, the slot and the id and the row all exist before any model is asked
+        // anything, and routing may only REFINE the kind afterwards, under a deadline. A first
+        // version of this change bounded the wait but still wrote the row afterwards — the comment
+        // claimed one thing and the code did another, which review caught.
         let floor = classify(&task);
         let runnable_kind = |k: &str| match k {
             "code" => self.coder.is_some(),
@@ -1458,22 +1500,6 @@ impl super::ConversationEngine {
         if !runnable_kind(floor) {
             return format!("(the {floor} executor isn't configured on this box)");
         }
-        // The budget is a field so a test can drive this timeout path in milliseconds instead of
-        // making every suite run wait out a human-scale one.
-        let budget = self.route_budget;
-        let refined = bounded_route(self.route(&task), floor, budget, || {
-            eprintln!(
-                "[delegate] routing exceeded {budget:?} — using the deterministic kind '{floor}'; \
-                 the routing model request may still be in flight and will write its own spend row"
-            );
-        })
-        .await;
-        // A refinement is only accepted when its executor exists; otherwise the floor stands.
-        let kind = if runnable_kind(refined) {
-            refined
-        } else {
-            floor
-        };
         if !self.try_acquire_bg(3) {
             return "(the job board is full — a few delegations are already running; `ym jobs` to see them)".to_string();
         }
@@ -1488,7 +1514,7 @@ impl super::ConversationEngine {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         rows.push(serde_json::json!({
-            "id": id, "name": name, "task": task, "kind": kind,
+            "id": id, "name": name, "task": task, "kind": floor,
             "status": "running", "started_ms": now,
         }));
         if rows.len() > LEDGER_CAP {
@@ -1502,6 +1528,31 @@ impl super::ConversationEngine {
                 &serde_json::to_string(&rows).unwrap_or_default(),
             )
             .await;
+
+        // Only now, with the job on the board, is the model asked to refine the kind. The budget is
+        // a field so a test can drive this path in milliseconds rather than making every suite run
+        // wait out a human-scale one.
+        let budget = self.route_budget;
+        let kind = match self.route_task(&task) {
+            None => floor,
+            Some(routing) => {
+                let refined = bounded_route(routing, floor, budget, || {
+                    eprintln!(
+                        "[delegate] routing exceeded {budget:?} — job {id} keeps the deterministic \
+                         kind '{floor}'; the routing request was DETACHED, not cancelled, and writes \
+                         its own terminal spend row when it finishes"
+                    );
+                })
+                .await;
+                // A refinement is only accepted when its executor exists; otherwise the floor stands.
+                if refined != floor && runnable_kind(refined) {
+                    ledger_set_kind(&self.memory, &id, refined).await;
+                    refined
+                } else {
+                    floor
+                }
+            }
+        };
 
         let (q, jobs, mem) = (
             self.notify_queue.clone(),

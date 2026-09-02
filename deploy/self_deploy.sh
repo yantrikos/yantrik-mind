@@ -24,15 +24,49 @@ export CARGO_TARGET_DIR="$CLONE/target"
 # systemd unit has stopped. Atomic rename lets those processes finish on the old inode while the
 # service starts from the new one; it also prevents a partial binary from ever occupying $BIN.
 replace_binary() {
-  local source=$1 target=$2 staged
+  local source=$1 target=$2 staged failed_step
   staged=$(mktemp "${target}.next.XXXXXX") || return 1
-  if install -m 0755 "$source" "$staged" \
-      && chown yantrikmind:yantrikmind "$staged" \
-      && mv -f "$staged" "$target"; then
+  if ! install -m 0755 "$source" "$staged"; then
+    failed_step=install
+  elif ! chown yantrikmind:yantrikmind "$staged"; then
+    failed_step=chown
+  elif ! mv -f "$staged" "$target"; then
+    failed_step=rename
+  else
     return 0
   fi
   rm -f "$staged"
+  echo "==> binary swap failed during $failed_step: $source -> $target" >&2
   return 1
+}
+
+# `set -e` must never strand the service after it has been stopped. Any unexpected failure in a
+# stop/swap/start window reaches this EXIT guard, which restores the previous image when the new
+# binary was already installed, attempts to start the service, and records both outcomes. The guard
+# is armed only around those narrow windows; ordinary failures elsewhere keep their existing paths.
+SWAP_GUARD_ACTIVE=0
+SWAP_GUARD_PHASE=idle
+SWAP_GUARD_ROLLBACK=0
+restart_after_failed_swap() {
+  local rc=$? rollback_status=not-needed service_status=FAILED event=ABORT-SWAP
+  trap - EXIT
+  if [ "$SWAP_GUARD_ACTIVE" -eq 1 ]; then
+    set +e
+    if [ "$SWAP_GUARD_ROLLBACK" -eq 1 ] && [ -f "$BIN.prev" ]; then
+      if replace_binary "$BIN.prev" "$BIN"; then
+        rollback_status=restored
+      else
+        rollback_status=FAILED
+      fi
+    fi
+    if systemctl start yantrik-mind; then
+      service_status=started
+    fi
+    [ "$SWAP_GUARD_PHASE" != health-rollback ] || event=ROLLBACK-FAILED
+    echo "$(date -u +%FT%TZ) | deploy | $event | $COMMIT phase=$SWAP_GUARD_PHASE rc=$rc rollback=$rollback_status service=$service_status" >> "$EVLOG" || true
+    echo "==> deploy aborted during $SWAP_GUARD_PHASE (rc=$rc); rollback=$rollback_status service=$service_status" >&2
+  fi
+  exit "$rc"
 }
 
 if [ ! -d "$CLONE/.git" ]; then
@@ -100,10 +134,20 @@ echo "==> self-deploy: binary provenance verified ($BUILT_COMMIT)"
 # Stop the managed service, preserve a rollback image, then atomically rename the new executable
 # into place. Other scratch processes may still map the previous inode; they must not strand the
 # deployment or expose a partially copied binary.
+SWAP_GUARD_ACTIVE=1
+SWAP_GUARD_PHASE=stop
+SWAP_GUARD_ROLLBACK=0
+trap restart_after_failed_swap EXIT
 systemctl stop yantrik-mind
+SWAP_GUARD_PHASE=backup
 [ ! -f "$BIN" ] || replace_binary "$BIN" "$BIN.prev"
+SWAP_GUARD_PHASE=install
 replace_binary "$CARGO_TARGET_DIR/release/mind-core" "$BIN"
+SWAP_GUARD_ROLLBACK=1
+SWAP_GUARD_PHASE=start
 systemctl start yantrik-mind
+SWAP_GUARD_ACTIVE=0
+trap - EXIT
 sleep 6
 
 # Health probe: the control endpoint must answer a trivial command with a date-shaped reply.
@@ -130,11 +174,22 @@ if printf "now" | curl -s -m 20 -H "Authorization: Bearer ${CONSOLE_TOKEN}" --da
   fi
 else
   echo "==> HEALTH PROBE FAILED — rolling back to previous binary"
-  systemctl stop yantrik-mind || true
+  SWAP_GUARD_ACTIVE=1
+  SWAP_GUARD_PHASE=health-stop
+  SWAP_GUARD_ROLLBACK=0
+  trap restart_after_failed_swap EXIT
+  systemctl stop yantrik-mind
+  SWAP_GUARD_PHASE=health-rollback
   if [ -f "$BIN.prev" ]; then
     replace_binary "$BIN.prev" "$BIN"
+  else
+    echo "==> rollback image is missing: $BIN.prev" >&2
+    exit 1
   fi
-  systemctl start yantrik-mind || true
+  SWAP_GUARD_PHASE=health-start
+  systemctl start yantrik-mind
+  SWAP_GUARD_ACTIVE=0
+  trap - EXIT
   echo "$(date -u +%FT%TZ) | deploy | ROLLED-BACK | $COMMIT health probe failed" >> "$EVLOG"
   exit 1
 fi

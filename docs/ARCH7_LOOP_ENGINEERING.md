@@ -105,8 +105,17 @@ Built the way this house builds: measure first, shadow second, activate only pas
   site decides through a `Gated` kind; one reduced record per opportunity; `ym why loops` and the
   cockpit's Loops card read it. Legacy race found and fixed on the way: the detached mail sweep
   could double-spawn (`OpportunityGate::take_act`).
-- **L2 — PREREGISTERED, no code** (`8a3f385` v6 + L1 v4 amendment, `cfbce2a` renumbers it to
-  loop-ledger-v5 with per-host wake ids). Evidence needs a Telegram box: the prod batch.
+- **L2 — PARTLY BUILT, nothing wired** (`8a3f385` v6 + L1 v4 amendment, `cfbce2a` renumbers it to
+  loop-ledger-v5 with per-host wake ids; ledger correction `35fec1d` moves the shadow's base from
+  v4 to v6 = current v5 + one label, on Codex's terms). Two pure slices exist and decide nothing:
+  **L2-A** (`1082088`, plus Codex's grid correction `1cc9ed1`) is the attention policy's arithmetic
+  — the seventeen-loop constant table, both urgency formulas, the exact integer score with its
+  corrected bound, and the total ranking rule, proven equivalent to the live float scoring path on
+  the frozen grid. **L2-B** (`09605f9`) is the wake identity: `cycle:<process_start_ms>:<wake_no>`,
+  strict in both directions, because a shadow paired against a row of unknown wake is evidence
+  about nothing. Neither is called from any loop; no row carries a cycle label yet.
+  Still ahead: the v6 writer and reader, the per-wake signal set, and the one `attention_shadow`
+  append. Evidence needs a Telegram box: the prod batch.
 - **L3a — SHIPPED** (`38f672e`, `6684e16`, Codex's `bf0e05c`; ledger 724c0d6 → 3aaeff2 → d2c647a).
   The three loops that speak to nobody — DMN, ICS refresh, lease sweep — run in a process-hosted
   runner on every box, behind an engine-owned turn exclusion taken inside all three reply

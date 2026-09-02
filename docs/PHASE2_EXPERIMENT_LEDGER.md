@@ -3622,3 +3622,9 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Not claimed | Anything about any system not run; that the same-model reading transfers to other models; that three briefs generalise beyond themselves. The row inherits COMPETITIVE_BENCHMARK's rule: `not_run` never becomes a loss or a win. |
 | Kill | A brief edited per system; a label unsealed before the ranking; a mechanical check softened after a failure; a run on the live mind.db. |
 | Then | If the prior holds (pages lose, single-shot is why), the fix is its own preregistered row: the page path through the coder + critic loop, re-run on the same briefs, before/after on the same table. |
+
+## L4-0c — witness addendum: the renders, read independently by Codex (ts_ms 1788362129722 / 1788362132688 box clock)
+| Field | Value |
+| --- | --- |
+| Renders (Codex, sanitized) | `why spend since-start` on the 915d132 process: no requests for the current process; superseded 0; malformed 0; other-process rows excluded 0 (none inside the process's own window yet); tokens absent. `why spend 1h`: the prior epoch still — DMN 3 served requests / 3 attempts / 31 064 ms wall; tokens absent. Same binary, same log, the two views disagree exactly at the deploy boundary — the distinction L4-0c was built for. |
+| Beside my derived read (15:15:34Z) | The log-derived counts (hour: 3 rows across two earlier processes; since-start: 0) agree with the renders. L4-0b heartbeat/ask evidence remains absent in the new process. |

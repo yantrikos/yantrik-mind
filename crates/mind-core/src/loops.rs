@@ -23,9 +23,11 @@
 //! now queue instead of dropping); Patterns' presence input means "a surface exists", its idle
 //! input is the engine's turn exclusion, and its `spoke` input is "a proactive line was sent in
 //! the last ten minutes" rather than the poll loop's per-tick flag.
-use crate::delivery::{Delivered, Delivery};
-use crate::telegram::{in_quiet_hours_now, now_ms};
-use mind_conversation::ConversationEngine;
+use crate::delivery::{Delivered, Delivery, EngagingRoute};
+use crate::telegram::{in_quiet_hours_now, now_ms, quiet_hours_end_at_ms};
+use mind_conversation::turn_exclusion::BackgroundPass;
+use mind_conversation::{ConversationEngine, EngagementMarker, LegacyOutcome};
+use mind_observability::{DeliveryKind, HeldReason, LoopId, LoopOutcome};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -66,6 +68,8 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
     let mut state = RunnerState {
         last_profile: process_start_ms,
         last_patterns: process_start_ms,
+        // Legacy: no proactive digest right after boot; the ask may pose its first question.
+        last_digest: process_start_ms,
         ..Default::default()
     };
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(runner_period_secs()));
@@ -83,6 +87,7 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
             run_resolve(&conv, &delivery, process_start_ms, state.last_resolve).await;
         state.last_profile =
             run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile).await;
+        run_engagement(&conv, &delivery, process_start_ms, &mut state).await;
         run_patterns(&conv, &delivery, process_start_ms, &mut state).await;
         run_dmn(&conv, process_start_ms, &mut state).await;
     }
@@ -99,6 +104,12 @@ pub(crate) struct RunnerState {
     pub(crate) last_profile: u64,
     pub(crate) last_patterns: u64,
     pub(crate) gate_patterns: mind_observability::OpportunityGate,
+    /// L3c-2: the engagement loops' own clocks and gates (knock has no cadence: a stretch gate).
+    pub(crate) last_digest: u64,
+    pub(crate) last_ask: u64,
+    pub(crate) gate_knock: mind_observability::OpportunityGate,
+    pub(crate) gate_digest: mind_observability::OpportunityGate,
+    pub(crate) gate_ask: mind_observability::OpportunityGate,
     pub(crate) last_dmn: u64,
     pub(crate) gate_dmn: mind_observability::OpportunityGate,
 }
@@ -240,6 +251,528 @@ pub(crate) async fn run_profile_refresh(
         .wall_ms(now_ms().saturating_sub(pr_t0)),
     );
     pr_gate.advance(pr_decision)
+}
+
+/// L3c-2: how long an engaging line waits for the cockpit before it expires unshown.
+const ENGAGING_SHOW_BY_MS: u64 = 10 * 60 * 1000;
+
+/// L3c-2: the engagement loops — the calibrated knock, the proactive digest, the get-to-know-you
+/// ask — moved from the Telegram poll loop with their gates, considered sets, policy lines,
+/// opportunity gates and cadence resets. What changed is stated: `chat_present` is
+/// `has_presence()` (a pinned chat or an open cockpit); the idle input is the engine's turn
+/// exclusion; `spoke` is "a proactive line was sent in the last ten minutes", set by this beat's
+/// knock too; every line goes through the engaging door, so a Telegram send commits after the
+/// API accepted it, a console line commits at `shown`, and no presence means nothing queued.
+/// The knock's paired world-shadow sample records at its decision moment on EVERY box now.
+pub(crate) async fn run_engagement(
+    conv: &ConversationEngine,
+    delivery: &Delivery,
+    process_start_ms: u64,
+    st: &mut RunnerState,
+) {
+    let proactive_on = std::env::var("YM_PROACTIVE")
+        .map(|v| v != "off")
+        .unwrap_or(true);
+    let pd_secs: u64 = std::env::var("YM_PROACTIVE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(86_400);
+    let ask_secs: u64 = std::env::var("YM_ASK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7_200);
+    let now = now_ms();
+    if !proactive_on {
+        // L1 v3: disabled loops are observable — one held:disabled per due window.
+        if now.saturating_sub(st.last_digest) >= pd_secs * 1000 {
+            if let Some(window) =
+                st.gate_digest
+                    .take_window(LoopId::Digest, process_start_ms, st.last_digest)
+            {
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::held(
+                        window,
+                        mind_observability::LoopHost::Process,
+                        HeldReason::Disabled,
+                    )
+                    .considered(&[
+                        mind_observability::ConsideredSignal::Urges,
+                        mind_observability::ConsideredSignal::Receptivity,
+                    ])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(pd_secs)]),
+                );
+            }
+        }
+        if now.saturating_sub(st.last_ask) >= ask_secs * 1000 {
+            if let Some(window) =
+                st.gate_ask
+                    .take_window(LoopId::Ask, process_start_ms, st.last_ask)
+            {
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::held(
+                        window,
+                        mind_observability::LoopHost::Process,
+                        HeldReason::Disabled,
+                    )
+                    .considered(&[
+                        mind_observability::ConsideredSignal::Name,
+                        mind_observability::ConsideredSignal::Purpose,
+                    ])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(ask_secs)]),
+                );
+            }
+        }
+        return;
+    }
+    let idle_secs: u64 = std::env::var("YM_DMN_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    // ONE reading of the user's clock per beat, used by the gates below AND handed to the
+    // engine, so the Executive pane cannot show a different night from the one the arbiter
+    // was given.
+    let quiet_now = in_quiet_hours_now();
+    conv.note_observed_quiet(quiet_now, quiet_hours_end_at_ms());
+    let last_activity = conv.turns().last_user_activity_ms();
+    let idle_stretch = now.saturating_sub(last_activity) >= idle_secs * 1000;
+    let present = delivery.has_presence();
+    let idle_ok = present && !quiet_now && idle_stretch;
+    let mut spoke = conv.spoke_recently(SPOKE_WINDOW_MS).await;
+    // The route is decided ONCE for this beat: every band, probability and marker below belongs
+    // to the surface that will show the line; the door never falls back from a rejected send.
+    let route = delivery.engaging_route(quiet_now);
+    let telegram_now = route == EngagingRoute::Telegram;
+
+    // THE CALIBRATED KNOCK goes FIRST — the highest-value thing the mind can say unprompted, and
+    // capped at one per day inside its own evaluation. If it is delivered, nothing else speaks
+    // this beat. Its opportunity is ONE IDLE STRETCH (keyed by the activity that opened it).
+    let digest_considered = [
+        mind_observability::ConsideredSignal::Urges,
+        mind_observability::ConsideredSignal::Receptivity,
+        mind_observability::ConsideredSignal::ExecutiveShadow,
+    ];
+    let digest_policy = [
+        mind_observability::LoopPolicy::Cadence(pd_secs),
+        mind_observability::LoopPolicy::Idle(idle_secs),
+        mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::ReceptivityGate),
+    ];
+    // Atomic admission (the DMN/Patterns contract): the stateful work — a knock's evaluation,
+    // the digest's generation, their deliveries — runs only when no turn is active, decided
+    // under the exclusion's lock; a refusal is one held opportunity and moves no cadence.
+    let permit = if idle_ok {
+        conv.turns()
+            .try_admit_background(now, idle_secs * 1000, BackgroundPass::Engagement)
+    } else {
+        None
+    };
+    let admitted = permit.is_some();
+    if idle_ok && !admitted {
+        if let Some(window) = st.gate_knock.take_stretch(LoopId::Knock, last_activity) {
+            conv.record_loop_tick(
+                mind_observability::LoopTick::held(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    HeldReason::IdleGate,
+                )
+                .considered(&[
+                    mind_observability::ConsideredSignal::Packets,
+                    mind_observability::ConsideredSignal::Receptivity,
+                    mind_observability::ConsideredSignal::DailyCap,
+                ])
+                .policy(&[mind_observability::LoopPolicy::Idle(idle_secs)]),
+            );
+        }
+    }
+    if admitted {
+        let t0 = now_ms();
+        let mut knocked = false;
+        let mut knock_held_no_presence = false;
+        if let Some(candidate) = conv.prepare_knock().await {
+            // The line is banded by the surface that will show it: Telegram's calibration when
+            // a chat is reachable now, else the console's own (which may hold it below band).
+            let ready = if telegram_now {
+                Some((candidate.render(), candidate.clone()))
+            } else {
+                let console_p = conv.console_engagement_p().await;
+                candidate.for_console(console_p).map(|c| (c.render(), c))
+            };
+            if let Some((text, banded)) = ready {
+                if let Some(marker) = EngagementMarker::knock(
+                    &banded.pkt_id,
+                    mind_conversation::p_units(banded.p),
+                    banded.band,
+                    &banded.eval_id,
+                ) {
+                    match delivery
+                        .deliver_engaging(
+                            route,
+                            DeliveryKind::Knock,
+                            &text,
+                            &marker,
+                            now + ENGAGING_SHOW_BY_MS,
+                            now_ms(),
+                        )
+                        .await
+                    {
+                        Delivered::TelegramAccepted { chars } => {
+                            eprintln!("[knock] calibrated knock delivered ({chars} chars)");
+                            conv.commit_knock(
+                                &banded,
+                                i64::try_from(now_ms()).unwrap_or(i64::MAX),
+                                "telegram",
+                            )
+                            .await;
+                            spoke = true;
+                            knocked = true;
+                        }
+                        // Queued for the cockpit: it commits at `shown`, and marks nothing spoken.
+                        Delivered::ConsoleQueued { .. } => knocked = true,
+                        // The surface went stale between the gate and the door: the same
+                        // opportunity is rendered held, never as an act.
+                        Delivered::HeldNoPresence => knock_held_no_presence = true,
+                        Delivered::Undelivered => {}
+                    }
+                }
+            }
+        }
+        if knock_held_no_presence {
+            if let Some(window) = st.gate_knock.take_stretch(LoopId::Knock, last_activity) {
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::held(
+                        window,
+                        mind_observability::LoopHost::Process,
+                        HeldReason::NoPresence,
+                    )
+                    .considered(&[
+                        mind_observability::ConsideredSignal::Packets,
+                        mind_observability::ConsideredSignal::Receptivity,
+                        mind_observability::ConsideredSignal::DailyCap,
+                    ])
+                    .policy(&[mind_observability::LoopPolicy::Idle(idle_secs)]),
+                );
+            }
+        }
+        let first = !knock_held_no_presence
+            && st
+                .gate_knock
+                .take_stretch(LoopId::Knock, last_activity)
+                .is_some();
+        if knocked || first {
+            conv.record_loop_tick(
+                mind_observability::LoopTick::acted(
+                    mind_observability::LoopOpportunity::Stretch {
+                        loop_id: LoopId::Knock,
+                        start_ms: last_activity,
+                    },
+                    mind_observability::LoopHost::Process,
+                    if knocked {
+                        LoopOutcome::Knocked
+                    } else {
+                        LoopOutcome::Evaluated
+                    },
+                )
+                .considered(&[
+                    mind_observability::ConsideredSignal::Packets,
+                    mind_observability::ConsideredSignal::Receptivity,
+                    mind_observability::ConsideredSignal::DailyCap,
+                ])
+                .policy(&[
+                    mind_observability::LoopPolicy::Idle(idle_secs),
+                    mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OnePerDay),
+                ])
+                .wall_ms(now_ms().saturating_sub(t0)),
+            );
+        }
+    }
+
+    // The proactive digest: its opportunity is its due window (keyed by the legacy timer).
+    let digest_due = now.saturating_sub(st.last_digest) >= pd_secs * 1000;
+    if digest_due && (spoke || !idle_ok || !admitted) {
+        if let Some(window) =
+            st.gate_digest
+                .take_window(LoopId::Digest, process_start_ms, st.last_digest)
+        {
+            conv.record_loop_tick(
+                mind_observability::LoopTick::held(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    if spoke {
+                        HeldReason::SpokeAlready
+                    } else if !present {
+                        HeldReason::NoPresence
+                    } else if quiet_now {
+                        HeldReason::QuietHours
+                    } else {
+                        HeldReason::IdleGate
+                    },
+                )
+                .considered(&digest_considered)
+                .policy(&digest_policy),
+            );
+        }
+    }
+    if !spoke && idle_ok && admitted && digest_due {
+        let t0 = now_ms();
+        let digest_window = st.last_digest;
+        // SHADOW ONLY. The return value must never reach control flow: the legacy gate below
+        // stays authoritative for every send. Keyed on the window so re-evaluations collapse.
+        let _shadow = conv
+            .ex4_shadow_decide(digest_window as i64, quiet_now, quiet_hours_end_at_ms())
+            .await;
+        if conv.proactive_receptivity_ok().await {
+            let mut outcome = LoopOutcome::NothingToSay;
+            let mut digest_held_no_presence = false;
+            if let Some(msg) = conv.proactive_digest().await {
+                // The marker's probability is the console domain's; it is read only when the line is
+                // queued for the cockpit (a Telegram send commits under its own domain).
+                let p = conv.console_engagement_p().await;
+                // The ref is this opportunity's: the text AND the window it was due in.
+                let r#ref = mind_conversation::digest_ref_for(&msg, digest_window);
+                let marker = EngagementMarker::digest_line(
+                    r#ref.strip_prefix("digest:").unwrap_or(""),
+                    mind_conversation::p_units(p),
+                )
+                .expect("a digest marker from a bounded ref");
+                match delivery
+                    .deliver_engaging(
+                        route,
+                        DeliveryKind::Digest,
+                        &msg,
+                        &marker,
+                        now + ENGAGING_SHOW_BY_MS,
+                        now_ms(),
+                    )
+                    .await
+                {
+                    Delivered::TelegramAccepted { chars } => {
+                        eprintln!("[proactive] surfaced a digest ({chars} chars)");
+                        let claim = conv.note_proactive_sent().await;
+                        conv.ex4_shadow_note_legacy(
+                            digest_window as i64,
+                            LegacyOutcome::Sent,
+                            Some(claim),
+                        )
+                        .await;
+                        spoke = true;
+                        outcome = LoopOutcome::DigestSent;
+                    }
+                    Delivered::ConsoleQueued { .. } => {
+                        // Queued: the claim exists only once shown; the shadow's join key is the
+                        // marker's ref, which the shown commit logs under.
+                        conv.ex4_shadow_note_legacy(
+                            digest_window as i64,
+                            LegacyOutcome::Sent,
+                            Some(marker.r#ref.clone()),
+                        )
+                        .await;
+                        outcome = LoopOutcome::FoundQueued;
+                    }
+                    Delivered::HeldNoPresence => {
+                        // Presence went stale between the gate and the door: the line is lost
+                        // (the digest discharges what it renders) and the shadow cannot be
+                        // compared against a display that never happened. The opportunity is
+                        // rendered HELD, not acted; the cadence still resets (never hammer).
+                        conv.ex4_shadow_note_legacy(
+                            digest_window as i64,
+                            LegacyOutcome::Undetermined,
+                            None,
+                        )
+                        .await;
+                        digest_held_no_presence = true;
+                    }
+                    Delivered::Undelivered => {
+                        conv.ex4_shadow_note_legacy(
+                            digest_window as i64,
+                            LegacyOutcome::Undetermined,
+                            None,
+                        )
+                        .await;
+                        outcome = LoopOutcome::FoundUndelivered;
+                    }
+                }
+            } else {
+                // Gate passed and there was nothing to say — a real third case.
+                conv.ex4_shadow_note_legacy(
+                    digest_window as i64,
+                    LegacyOutcome::NothingToSay,
+                    None,
+                )
+                .await;
+            }
+            st.last_digest = now; // reset cadence whether or not we spoke (never hammer)
+            st.gate_digest.mark(digest_window);
+            let window = mind_observability::LoopOpportunity::Window {
+                loop_id: LoopId::Digest,
+                process_start_ms,
+                key: digest_window,
+            };
+            conv.record_loop_tick(if digest_held_no_presence {
+                mind_observability::LoopTick::held(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    HeldReason::NoPresence,
+                )
+                .considered(&digest_considered)
+                .policy(&digest_policy)
+                .wall_ms(now_ms().saturating_sub(t0))
+            } else {
+                mind_observability::LoopTick::acted(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    outcome,
+                )
+                .considered(&digest_considered)
+                .policy(&digest_policy)
+                .wall_ms(now_ms().saturating_sub(t0))
+            });
+        } else {
+            // Declined. `proactive_digest()` never ran, so whether there was anything to say is
+            // unknown by construction. Outcome stays CENSORED.
+            conv.ex4_shadow_note_legacy(
+                digest_window as i64,
+                LegacyOutcome::DeclinedByReceptivity,
+                None,
+            )
+            .await;
+            if let Some(window) =
+                st.gate_digest
+                    .take_window(LoopId::Digest, process_start_ms, digest_window)
+            {
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::held(
+                        window,
+                        mind_observability::LoopHost::Process,
+                        HeldReason::Receptivity,
+                    )
+                    .considered(&digest_considered)
+                    .policy(&digest_policy)
+                    .wall_ms(now_ms().saturating_sub(t0)),
+                );
+            }
+        }
+    }
+
+    drop(permit);
+
+    // The ask-drive: one get-to-know-you question per cadence while idle and receptive.
+    let ask_idle: u64 = std::env::var("YM_ASK_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    let ask_ok = present && !quiet_now && now.saturating_sub(last_activity) >= ask_idle * 1000;
+    let ask_on = std::env::var("YM_ASK").map(|v| v != "off").unwrap_or(true);
+    let ask_due = now.saturating_sub(st.last_ask) >= ask_secs * 1000;
+    let ask_considered = [
+        mind_observability::ConsideredSignal::Name,
+        mind_observability::ConsideredSignal::Purpose,
+        mind_observability::ConsideredSignal::FollowUps,
+        mind_observability::ConsideredSignal::Receptivity,
+    ];
+    let ask_policy = [
+        mind_observability::LoopPolicy::Cadence(ask_secs),
+        mind_observability::LoopPolicy::Idle(ask_idle),
+        mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::ReceptivityGate),
+        mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OneOutstanding),
+    ];
+    // The ask admits on its own, under its own idle bound (the knock/digest permit is gone).
+    let ask_permit = if !spoke && ask_on && ask_ok && ask_due {
+        conv.turns()
+            .try_admit_background(now, ask_idle * 1000, BackgroundPass::Engagement)
+    } else {
+        None
+    };
+    let ask_admitted = ask_permit.is_some();
+    if ask_admitted && conv.proactive_receptivity_ok().await {
+        let t0 = now_ms();
+        let ask_window = st.last_ask;
+        let mut outcome = LoopOutcome::NothingToAsk;
+        let mut ask_held_no_presence = false;
+        if let Some(candidate) = conv.prepare_ask().await {
+            // The marker's probability is the console domain's; it is read only when the line is
+            // queued for the cockpit (a Telegram send commits under its own domain).
+            let p = conv.console_engagement_p().await;
+            // The ref is this opportunity's: the slot (or `open`) and the window it was due in.
+            let r#ref = mind_conversation::ask_ref_for(candidate.slot.as_deref(), ask_window);
+            if let Some(marker) = EngagementMarker::ask(
+                r#ref.strip_prefix("ask:").unwrap_or(""),
+                mind_conversation::p_units(p),
+            ) {
+                match delivery
+                    .deliver_engaging(
+                        route,
+                        DeliveryKind::Ask,
+                        &candidate.text,
+                        &marker,
+                        now + ENGAGING_SHOW_BY_MS,
+                        now_ms(),
+                    )
+                    .await
+                {
+                    Delivered::TelegramAccepted { .. } => {
+                        eprintln!("[ask] posed a get-to-know-you question");
+                        // The question is armed only after the send was accepted.
+                        conv.commit_ask(&candidate).await;
+                        conv.note_proactive_sent().await;
+                        outcome = LoopOutcome::Asked;
+                    }
+                    Delivered::ConsoleQueued { .. } => outcome = LoopOutcome::FoundQueued,
+                    Delivered::HeldNoPresence => ask_held_no_presence = true,
+                    Delivered::Undelivered => outcome = LoopOutcome::FoundUndelivered,
+                }
+            }
+        }
+        st.last_ask = now; // reset cadence whether or not it asked
+        st.gate_ask.mark(ask_window);
+        let window = mind_observability::LoopOpportunity::Window {
+            loop_id: LoopId::Ask,
+            process_start_ms,
+            key: ask_window,
+        };
+        conv.record_loop_tick(if ask_held_no_presence {
+            mind_observability::LoopTick::held(
+                window,
+                mind_observability::LoopHost::Process,
+                HeldReason::NoPresence,
+            )
+            .considered(&ask_considered)
+            .policy(&ask_policy)
+            .wall_ms(now_ms().saturating_sub(t0))
+        } else {
+            mind_observability::LoopTick::acted(
+                window,
+                mind_observability::LoopHost::Process,
+                outcome,
+            )
+            .considered(&ask_considered)
+            .policy(&ask_policy)
+            .wall_ms(now_ms().saturating_sub(t0))
+        });
+    } else if ask_due {
+        if let Some(window) = st
+            .gate_ask
+            .take_window(LoopId::Ask, process_start_ms, st.last_ask)
+        {
+            conv.record_loop_tick(
+                mind_observability::LoopTick::held(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    if !ask_on {
+                        HeldReason::Disabled
+                    } else if spoke {
+                        HeldReason::SpokeAlready
+                    } else if !present {
+                        HeldReason::NoPresence
+                    } else if !ask_ok || !ask_admitted {
+                        HeldReason::IdleGate
+                    } else {
+                        HeldReason::Receptivity
+                    },
+                )
+                .considered(&ask_considered)
+                .policy(&ask_policy),
+            );
+        }
+    }
 }
 
 /// Pattern-finder surface — the "learn from memory" loop turned outward. On its own slow cadence
@@ -584,9 +1117,10 @@ mod tests {
         let l = body.find("run_lease_sweep(").unwrap();
         let r = body.find("run_resolve(").unwrap();
         let p = body.find("run_profile_refresh(").unwrap();
+        let e = body.find("run_engagement(").unwrap();
         let pt = body.find("run_patterns(").unwrap();
         let d = body.find("run_dmn(").unwrap();
-        assert!(i < l && l < r && r < p && p < pt && pt < d);
+        assert!(i < l && l < r && r < p && p < e && e < pt && pt < d);
         // Each body records under the process host with its legacy kind and lines.
         for needle in [
             "mind_observability::Gated::timer(",
@@ -615,7 +1149,7 @@ mod tests {
         assert_eq!(
             body.matches("mind_observability::LoopHost::Process")
                 .count(),
-            8
+            20
         );
         // L3b: the model-call kill is exactly the four passes' own calls, each once; every
         // outward line is a `deliver`, and only a Telegram acceptance marks anything spoken.
@@ -624,24 +1158,87 @@ mod tests {
             "conv.refresh_profile(",
             "conv.find_patterns(",
             "conv.dmn_tick(",
+            "conv.prepare_knock(",
+            "conv.proactive_digest(",
+            "conv.prepare_ask(",
         ] {
             assert_eq!(body.matches(call).count(), 1, "{call}");
         }
         assert_eq!(
             body.matches(".deliver(").count(),
             3,
-            "three sends, all through the seam"
+            "three plain sends, all through the seam"
         );
         assert_eq!(
-            body.matches("note_proactive_sent").count(),
-            1,
-            "spoken is marked once, on Telegram acceptance"
+            body.matches(".deliver_engaging(").count(),
+            3,
+            "three engaging sends, all through the engaging door"
         );
-        let mark = body.find("note_proactive_sent").unwrap();
+        // Every "spoken" mark sits inside a TelegramAccepted arm: patterns, digest, ask.
+        let mut marks = 0;
+        let mut from = 0;
+        while let Some(i) = body[from..].find("note_proactive_sent") {
+            let at = from + i;
+            assert!(
+                body[at.saturating_sub(700)..at].contains("Delivered::TelegramAccepted"),
+                "a spoken mark outside a TelegramAccepted arm at {at}"
+            );
+            marks += 1;
+            from = at + 1;
+        }
+        assert_eq!(marks, 3, "patterns, digest, ask");
         assert!(
-            body[..mark].ends_with("Delivered::TelegramAccepted { chars } => {\n                    eprintln!(\"[patterns] surfaced a learned pattern ({chars} chars)\");\n                    conv."),
-            "the mark sits inside the TelegramAccepted arm alone"
+            !body.contains("commit_knock(&candidate") && body.contains("commit_knock(\n"),
+            "the knock commits only from its accepted arm"
         );
+        // L3c-2 (Codex's amend): the engagement loops admit atomically — the knock/digest work
+        // and the ask each behind `try_admit_background(.., BackgroundPass::Engagement)` — the
+        // route is decided once per beat, and the digest's and ask's refs carry their window.
+        let eng = &body[body.find("pub(crate) async fn run_engagement(").unwrap()
+            ..body.find("/// Pattern-finder surface").unwrap()];
+        assert_eq!(eng.matches("BackgroundPass::Engagement").count(), 2);
+        let admit1 = eng.find("BackgroundPass::Engagement").unwrap();
+        let knock_call = eng.find("conv.prepare_knock(").unwrap();
+        let digest_call = eng.find("conv.proactive_digest(").unwrap();
+        assert!(admit1 < knock_call && knock_call < digest_call);
+        let admit2 = eng.rfind("BackgroundPass::Engagement").unwrap();
+        let ask_call = eng.find("conv.prepare_ask(").unwrap();
+        assert!(digest_call < admit2 && admit2 < ask_call);
+        assert!(
+            eng.contains("drop(permit);"),
+            "the first permit is released before the ask"
+        );
+        assert_eq!(
+            eng.matches("delivery.engaging_route(").count(),
+            1,
+            "one route per beat"
+        );
+        assert!(
+            !eng.contains("telegram_reachable()"),
+            "the route, not the raw fact, decides"
+        );
+        assert!(eng.contains("digest_ref_for(&msg, digest_window)"));
+        assert!(eng.contains("ask_ref_for(candidate.slot.as_deref(), ask_window)"));
+        // Codex's addendum D: a surface gone stale at the door is ONE held:no-presence opportunity
+        // for each of the three, never an act; `Undelivered` stays an act with its own outcome.
+        for flag in [
+            "knock_held_no_presence = true",
+            "digest_held_no_presence = true",
+            "ask_held_no_presence = true",
+        ] {
+            assert_eq!(eng.matches(flag).count(), 1, "{flag}");
+        }
+        assert_eq!(
+            eng.matches("HeldReason::NoPresence").count(),
+            5,
+            "knock/digest/ask stale + the two gate holds"
+        );
+        assert!(!eng.contains("Delivered::Undelivered | Delivered::HeldNoPresence"));
+        assert!(!eng.contains("Delivered::HeldNoPresence => {}"));
+        // A refused admission holds and moves no cadence: the resets sit inside the admitted arms.
+        let held_knock = &eng
+            [eng.find("if idle_ok && !admitted {").unwrap()..eng.find("if admitted {").unwrap()];
+        assert!(held_knock.contains("HeldReason::IdleGate") && !held_knock.contains("st.last_"));
         assert!(body.contains("chat_present: delivery.has_surface()"));
         // L3c: the stale resolvers have exactly one owner and it is timer-bound to a minute.
         assert_eq!(body.matches("conv.resolve_proactive(false)").count(), 1);

@@ -252,7 +252,7 @@ async fn the_shown_receipt_is_an_outbox_the_reconciler_drains_once_without_movin
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shown_ask_arms_its_slot_and_the_console_domain_cold_starts_from_the_global_rate() {
     let (conv, _store) = harness();
-    let marker = EngagementMarker::ask("name", 400).unwrap();
+    let marker = EngagementMarker::ask("name-0011aabb", 400).unwrap();
     let now = ConversationEngine::now_ms();
     let q = conv
         .queue_engaging_notice(
@@ -558,4 +558,262 @@ async fn future_and_extreme_send_stamps_stay_pending_and_never_count_as_spoken()
     ] {
         assert!(pend.contains(r), "{r} stays pending: {pend}");
     }
+}
+
+/// Codex's L3c-2 amend (1): the knock's and the ask's side effects converge past the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn knock_and_ask_side_effects_converge_after_a_crash_past_the_row_and_never_re_arm_a_graded_claim(
+) {
+    let (conv, store) = harness();
+    // A knock whose judgment row exists (written before a crash) but whose cap, slot and
+    // disposition were never written.
+    let now = chrono::Utc::now().timestamp_millis();
+    conv.commit_engagement(
+        "knock",
+        "knock:pkt7",
+        "console",
+        now,
+        0.61,
+        "recipient engages with the 75% knock within 90m",
+    )
+    .await;
+    assert!(conv
+        .memory
+        .profile_get("knock_pending")
+        .await
+        .unwrap()
+        .is_none());
+    let c = KnockCandidate {
+        pkt_id: "pkt7".into(),
+        band: 75,
+        p: 0.61,
+        eval_id: "eval:7".into(),
+        trigger: String::new(),
+        title: String::new(),
+        receptive: None,
+    };
+    assert!(
+        !conv.commit_knock(&c, now, "console").await,
+        "the row already existed"
+    );
+    assert_eq!(
+        conv.memory
+            .profile_get("knock_pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("pkt7")
+    );
+    assert!(conv
+        .memory
+        .profile_get("knock_last_date")
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(funnel_sent(&conv).await, 1, "the funnel stage bumped once");
+    assert_eq!(ledger_rows(&conv, "knock:pkt7").await.len(), 1);
+    // A second pass changes nothing.
+    let date = conv.memory.profile_get("knock_last_date").await.unwrap();
+    assert!(!conv.commit_knock(&c, now + 5, "console").await);
+    assert_eq!(
+        conv.memory.profile_get("knock_last_date").await.unwrap(),
+        date
+    );
+    // Once the claim is graded (the reply), a late reconcile never re-arms the knock.
+    assert!(conv.knock_reply("later").await.is_some());
+    assert_eq!(
+        conv.memory
+            .profile_get("knock_pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    assert!(!conv.commit_knock(&c, now + 6, "console").await);
+    assert_eq!(
+        conv.memory
+            .profile_get("knock_pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    // The ask: shown outbox with a preexisting ungraded row arms the slot once; graded → never.
+    let marker = EngagementMarker::ask("purpose-0011aabb", 400).unwrap();
+    let q = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Ask,
+            "what would you like help with?",
+            &marker,
+            ConversationEngine::now_ms() + 600_000,
+        )
+        .unwrap();
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    let ack = conv
+        .ack_notice_shown(&q.notice_id, &leased[0].lease_id)
+        .unwrap();
+    conv.commit_engagement(
+        "proactive",
+        &marker.r#ref,
+        "console",
+        ack.shown_ms as i64,
+        0.4,
+        "recipient engages within 90m",
+    )
+    .await;
+    assert!(
+        !conv.has_pending_slot().await,
+        "row exists, crash before arming"
+    );
+    assert_eq!(conv.reconcile_shown_engagements().await, 0, "no second row");
+    assert!(conv.has_pending_slot().await, "the slot converged");
+    assert!(
+        store.shown_engagements("primary").unwrap().is_empty(),
+        "completed"
+    );
+    conv.resolve_proactive(true).await; // graded
+    conv.set_pending_slot(None).await;
+    assert!(
+        !conv
+            .commit_shown_engagement(&q.notice_id, &marker, ack.shown_ms)
+            .await
+    );
+    assert!(
+        !conv.has_pending_slot().await,
+        "a graded ask is never re-armed"
+    );
+}
+
+/// Codex's L3c-2 amend (3): refs are opportunity-unique with bounded canonical shapes.
+#[test]
+fn digest_and_ask_refs_are_unique_per_opportunity_and_still_canonical() {
+    let a = mind_conversation_digest_ref("the same line", 1);
+    let b = mind_conversation_digest_ref("the same line", 2);
+    assert_ne!(a, b);
+    assert_eq!(
+        mind_conversation_digest_ref("the same line", 1),
+        a,
+        "deterministic"
+    );
+    assert!(EngagementMarker::digest_line(a.strip_prefix("digest:").unwrap(), 300).is_some());
+    let open1 = crate::ask_ref_for(None, 10);
+    let open2 = crate::ask_ref_for(None, 11);
+    assert_ne!(open1, open2);
+    assert!(open1.starts_with("ask:open-"));
+    assert!(EngagementMarker::ask(open1.strip_prefix("ask:").unwrap(), 300).is_some());
+    let slotted = crate::ask_ref_for(Some("interest:companies"), 10);
+    assert!(EngagementMarker::ask(slotted.strip_prefix("ask:").unwrap(), 300).is_some());
+}
+
+fn mind_conversation_digest_ref(text: &str, window: u64) -> String {
+    crate::digest_ref_for(text, window)
+}
+
+async fn funnel_sent(conv: &ConversationEngine) -> u64 {
+    let counters: serde_json::Value = conv
+        .memory
+        .profile_get("funnel_counters")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}));
+    counters
+        .as_object()
+        .map(|days| {
+            days.values()
+                .filter_map(|d| d.get("knock:sent").and_then(|n| n.as_u64()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Codex's L3c-2 addendum (B): the knock's side effects are once by ref across two refs and
+/// across the crash boundary between the durable flag and the bump.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn knock_side_effects_are_once_by_ref_across_two_refs_and_the_flag_bump_boundary() {
+    let (conv, _store) = harness();
+    let now = chrono::Utc::now().timestamp_millis();
+    let c1 = KnockCandidate {
+        pkt_id: "pkt1".into(),
+        band: 75,
+        p: 0.6,
+        eval_id: "e1".into(),
+        trigger: String::new(),
+        title: String::new(),
+        receptive: None,
+    };
+    let c2 = KnockCandidate {
+        pkt_id: "pkt2".into(),
+        band: 60,
+        p: 0.5,
+        eval_id: "e2".into(),
+        trigger: String::new(),
+        title: String::new(),
+        receptive: None,
+    };
+    assert!(conv.commit_knock(&c1, now, "console").await);
+    assert!(conv.commit_knock(&c2, now + 1, "console").await);
+    assert_eq!(funnel_sent(&conv).await, 2);
+    // Retries in any order — an older outbox reconciled after a newer knock — bump nothing.
+    assert!(!conv.commit_knock(&c1, now + 2, "console").await);
+    assert!(!conv.commit_knock(&c2, now + 3, "console").await);
+    assert!(!conv.commit_knock(&c1, now + 4, "console").await);
+    assert_eq!(funnel_sent(&conv).await, 2);
+    assert_eq!(ledger_rows(&conv, "knock:pkt1").await.len(), 1);
+    assert_eq!(ledger_rows(&conv, "knock:pkt2").await.len(), 1);
+    // The crash boundary: the flag was written, the bump was not — a retry bumps nothing more
+    // (at most once, never twice).
+    let c3 = KnockCandidate {
+        pkt_id: "pkt3".into(),
+        band: 90,
+        p: 0.9,
+        eval_id: "e3".into(),
+        trigger: String::new(),
+        title: String::new(),
+        receptive: None,
+    };
+    conv.commit_engagement(
+        "knock",
+        "knock:pkt3",
+        "console",
+        now,
+        0.9,
+        "recipient engages with the 90% knock within 90m",
+    )
+    .await;
+    // Simulate: flag set before the crash.
+    let mut led: Vec<serde_json::Value> = serde_json::from_str(
+        &conv
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    for r in led.iter_mut() {
+        if r["ref"].as_str() == Some("knock:pkt3") {
+            r["funnel_sent"] = serde_json::json!(true);
+        }
+    }
+    conv.memory
+        .profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap())
+        .await
+        .unwrap();
+    assert!(!conv.commit_knock(&c3, now + 5, "console").await);
+    assert_eq!(
+        funnel_sent(&conv).await,
+        2,
+        "the flagged ref is not bumped again"
+    );
+    assert_eq!(
+        conv.memory
+            .profile_get("knock_pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("pkt3"),
+        "the other artifacts still converge"
+    );
 }

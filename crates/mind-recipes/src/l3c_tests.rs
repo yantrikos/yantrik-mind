@@ -404,3 +404,140 @@ fn the_outbox_returns_only_uncompleted_items_and_completed_ones_never_replay() {
         .mark_engagement_committed(&plain.notice_id, 8_000_006)
         .is_err());
 }
+
+/// Codex's L3c-2 amend (3): dedupe is per opportunity — an outstanding line is one row; an
+/// expired one is history and the same key queues a fresh attempt.
+#[test]
+fn an_expired_engaging_line_can_queue_again_while_an_outstanding_one_dedupes() {
+    let store = RecipeStore::open(":memory:").unwrap();
+    let m = EngagementMarker::ask("name-0011aabb", 300).unwrap();
+    let first = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "what should I call you?",
+            "ask:name-0011aabb",
+            &m,
+            31_000,
+            1_000,
+        )
+        .unwrap();
+    assert!(first.fresh);
+    // Outstanding: the same key names the same row and writes nothing.
+    let same = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "what should I call you?",
+            "ask:name-0011aabb",
+            &m,
+            40_000,
+            2_000,
+        )
+        .unwrap();
+    assert!(!same.fresh);
+    assert_eq!(same.notice_id, first.notice_id);
+    // Expired: history. The same key now inserts a fresh attempt with its own identity.
+    assert_eq!(store.sweep_engaging_expiry("primary", 31_001).unwrap(), 1);
+    let again = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "what should I call you?",
+            "ask:name-0011aabb",
+            &m,
+            90_000,
+            32_000,
+        )
+        .unwrap();
+    assert!(again.fresh);
+    assert_ne!(again.notice_id, first.notice_id);
+    assert_eq!(store.notice_history("primary", 10).unwrap().len(), 2);
+    // A shown-and-completed line is history too.
+    let lease = store
+        .lease_notices("primary", 33_000, 10_000, 5)
+        .unwrap()
+        .remove(0);
+    store
+        .ack_notice_shown(&again.notice_id, &lease.lease_id, 34_000)
+        .unwrap();
+    store
+        .mark_engagement_committed(&again.notice_id, 34_001)
+        .unwrap();
+    let third = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "what should I call you?",
+            "ask:name-0011aabb",
+            &m,
+            200_000,
+            100_000,
+        )
+        .unwrap();
+    assert!(third.fresh);
+    assert_eq!(store.notice_history("primary", 10).unwrap().len(), 3);
+}
+
+/// Codex's L3c-2 addendum (C): `_` in a key is a character, not a wildcard — attempts of one
+/// key never capture another's rows.
+#[test]
+fn dedupe_attempt_matching_is_exact_and_underscore_is_not_a_wildcard() {
+    let store = RecipeStore::open(":memory:").unwrap();
+    let m1 = EngagementMarker::ask("a_b-00000000", 300).unwrap();
+    let m2 = EngagementMarker::ask("axb-00000000", 300).unwrap();
+    let first = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "q1",
+            "ask:a_b-00000000",
+            &m1,
+            31_000,
+            1_000,
+        )
+        .unwrap();
+    assert_eq!(store.sweep_engaging_expiry("primary", 31_001).unwrap(), 1);
+    // A key that a LIKE wildcard would confuse with the first: its own row, attempt zero.
+    let other = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "q2",
+            "ask:axb-00000000",
+            &m2,
+            90_000,
+            32_000,
+        )
+        .unwrap();
+    assert!(other.fresh);
+    assert_ne!(other.notice_id, first.notice_id);
+    // The first key again: a fresh attempt of ITS OWN lineage, not the other's outstanding row.
+    let again = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "q1",
+            "ask:a_b-00000000",
+            &m1,
+            90_000,
+            33_000,
+        )
+        .unwrap();
+    assert!(again.fresh);
+    assert_ne!(again.notice_id, other.notice_id);
+    // And the other key still dedupes to its outstanding row.
+    let same = store
+        .queue_engaging_notice(
+            "primary",
+            NoticeKind::Ask,
+            "q2",
+            "ask:axb-00000000",
+            &m2,
+            90_000,
+            34_000,
+        )
+        .unwrap();
+    assert!(!same.fresh);
+    assert_eq!(same.notice_id, other.notice_id);
+}

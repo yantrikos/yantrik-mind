@@ -2759,29 +2759,54 @@ impl RecipeStore {
         let text_sha256 = sha256_hex(text.as_bytes());
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let duplicate: Option<NoticeRow> = tx
-            .query_row(
-                &format!(
-                    "SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE dedupe_key=?1 AND operator_id=?2"
-                ),
-                rusqlite::params![dedupe_key, operator_id],
-                notice_row_from,
-            )
-            .optional()?;
-        if let Some(row) = duplicate {
+        // Dedupe is per OPPORTUNITY, not forever: an existing row for this key is returned only
+        // while its chain is non-terminal (queued or leased). An expired, shown or completed row
+        // is history, and a fresh attempt is inserted under an attempt-suffixed key, so a line
+        // that expired unshown can queue again on its next opportunity.
+        // Attempts of this key: the exact base, or the base plus ":" and a numeric attempt —
+        // matched in Rust, never with LIKE (`_` is a valid ref character and a LIKE wildcard).
+        let prior: Vec<NoticeRow> = Self::load_notice_rows(&tx, operator_id, false, None)?
+            .into_iter()
+            .filter(|row| {
+                row.dedupe_key == dedupe_key
+                    || row
+                        .dedupe_key
+                        .strip_prefix(dedupe_key)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            })
+            .collect();
+        let mut attempts = 0usize;
+        for row in prior {
             let verified = verify_notice_row(&row, operator_id)?;
-            return Ok(QueuedNotice {
-                fresh: false,
-                notice_id: row.notice_id,
-                operator_id: operator_id.to_string(),
-                kind: verified.kind,
-                created_ms: verified.created_ms,
-                chars: row.text.chars().count(),
-                text_sha256: row.text_sha256,
-                marker: verified.marker,
-                show_by_ms: verified.show_by_ms,
+            let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;
+            let terminal = receipts.last().is_some_and(|r| {
+                matches!(
+                    r.event,
+                    NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                )
             });
+            if !terminal {
+                return Ok(QueuedNotice {
+                    fresh: false,
+                    notice_id: row.notice_id,
+                    operator_id: operator_id.to_string(),
+                    kind: verified.kind,
+                    created_ms: verified.created_ms,
+                    chars: row.text.chars().count(),
+                    text_sha256: row.text_sha256,
+                    marker: verified.marker,
+                    show_by_ms: verified.show_by_ms,
+                });
+            }
+            attempts += 1;
         }
+        let dedupe_key = if attempts == 0 {
+            dedupe_key.to_string()
+        } else {
+            format!("{dedupe_key}:{attempts}")
+        };
+        let dedupe_key = dedupe_key.as_str();
         if kind == NoticeKind::Knock {
             let day = now_ms / 86_400_000;
             for row in Self::load_notice_rows(&tx, operator_id, false, None)? {

@@ -99,7 +99,7 @@ mod knock_disposition_tests {
         assert_eq!(exits, 3, "no_packets, candidate-none, blocked");
         assert!(
             after.contains(
-                "record_knock_disposition(&c.eval_id, sent_ms, \"sent\", c.receptive, Some(sref))"
+                "record_knock_disposition_once(&c.eval_id, sent_ms, \"sent\", c.receptive, &sref)"
             ),
             "the sent branch records with the packet ref"
         );
@@ -286,6 +286,73 @@ impl KnockCandidate {
     pub fn render(&self) -> String {
         crate::knock::render(self.band, &self.trigger, &self.title)
     }
+    /// L3c: the same line under another surface's band (the console's own calibration).
+    pub fn render_with_band(&self, band: u8) -> String {
+        crate::knock::render(band, &self.trigger, &self.title)
+    }
+    /// L3c: the candidate re-banded for the console: the console domain's probability decides
+    /// the spoken band, or `None` when that probability is below the lowest speakable band.
+    pub fn for_console(&self, console_p: f64) -> Option<KnockCandidate> {
+        let band = crate::knock::band_for(console_p)?;
+        Some(KnockCandidate {
+            band,
+            p: console_p,
+            ..self.clone()
+        })
+    }
+}
+
+/// L3c: sixteen hex of a line's digest — the digest kind's marker ref.
+pub fn text_digest16(text: &str) -> String {
+    mind_spec::sha256_hex(text.as_bytes())[..16].to_string()
+}
+
+/// L3c-2: the digest's marker ref for ONE opportunity — the text and the window it was due in.
+/// Equal text in another window is another displayed line and another claim.
+pub fn digest_ref_for(text: &str, window_key: u64) -> String {
+    format!(
+        "digest:{}",
+        &mind_spec::sha256_hex(format!("{text}\n{window_key}").as_bytes())[..16]
+    )
+}
+
+/// L3c-2: the ask's marker ref for ONE opportunity — the slot (or `open`) and the window.
+pub fn ask_ref_for(slot: Option<&str>, window_key: u64) -> String {
+    format!(
+        "ask:{}-{}",
+        slot.unwrap_or("open"),
+        &mind_spec::sha256_hex(format!("ask\n{window_key}").as_bytes())[..8]
+    )
+}
+
+/// The slot an ask ref arms: the ref without the window suffix, or `None` for an open follow-up.
+fn ask_slot_of(r#ref: &str) -> Option<String> {
+    let body = r#ref.strip_prefix("ask:")?;
+    let (slot, _window) = body.rsplit_once('-')?;
+    (slot != "open").then(|| slot.to_string())
+}
+
+/// The mind's local calendar day of an instant (the knock's daily cap is a local-day cap).
+fn local_day_of(ms: i64) -> String {
+    let utc =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms).unwrap_or_else(chrono::Utc::now);
+    if let Ok(name) = std::env::var("YM_TZ") {
+        if let Ok(tz) = name.trim().parse::<chrono_tz::Tz>() {
+            return utc.with_timezone(&tz).format("%Y-%m-%d").to_string();
+        }
+    }
+    let off = std::env::var("YM_TZ_OFFSET_MINUTES")
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0);
+    let fo = chrono::FixedOffset::east_opt(off * 60)
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+    utc.with_timezone(&fo).format("%Y-%m-%d").to_string()
+}
+
+/// L3c: a probability as the marker's integer units (0..=1000).
+pub fn p_units(p: f64) -> u16 {
+    (p.clamp(0.0, 1.0) * 1000.0).round() as u16
 }
 
 /// L3c: a question prepared but not yet armed.
@@ -1078,9 +1145,14 @@ impl super::ConversationEngine {
         self.commit_knock_locked(c, sent_ms, surface).await
     }
 
+    /// CONVERGENT: every artifact is inspected and repaired on its own, so a crash after any one
+    /// of them is finished by the next call without doubling anything. The row once by ref; the
+    /// day's cap set to the SENT instant's local day iff it differs; the reply slot armed iff the
+    /// claim is still ungraded (a replied knock is never re-armed) and the value differs; the
+    /// `sent` disposition and the funnel stage recorded once, under a durable single-key marker.
     async fn commit_knock_locked(&self, c: &KnockCandidate, sent_ms: i64, surface: &str) -> bool {
         let sref = format!("knock:{}", c.pkt_id);
-        let committed = self
+        let wrote = self
             .commit_engagement_locked(
                 "knock",
                 &sref,
@@ -1090,15 +1162,47 @@ impl super::ConversationEngine {
                 &format!("recipient engages with the {}% knock within 90m", c.band),
             )
             .await;
-        if !committed {
-            return false;
+        let graded = self
+            .judgment_row_for_ref(&sref)
+            .await
+            .is_some_and(|row| row.get("outcome").is_some_and(|o| !o.is_null()));
+        let day = local_day_of(sent_ms);
+        if self
+            .memory
+            .profile_get("knock_last_date")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(&day)
+        {
+            let _ = self.memory.profile_set("knock_last_date", &day).await;
         }
-        self.funnel_bump("knock:sent").await;
-        let today = local_now().format("%Y-%m-%d").to_string();
-        let _ = self.memory.profile_set("knock_last_date", &today).await;
-        let _ = self.memory.profile_set("knock_pending", &c.pkt_id).await;
-        self.record_knock_disposition(&c.eval_id, sent_ms, "sent", c.receptive, Some(sref));
-        true
+        if !graded
+            && self
+                .memory
+                .profile_get("knock_pending")
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(c.pkt_id.as_str())
+        {
+            let _ = self.memory.profile_set("knock_pending", &c.pkt_id).await;
+        }
+        // The funnel stage at most once by a durable per-ref flag on the judgment row — the flag
+        // FIRST, then the bump, so a crash between them under-counts once and never doubles.
+        if !self.judgment_row_flag(&sref, "funnel_sent").await
+            && self.set_judgment_row_flag(&sref, "funnel_sent").await
+        {
+            // Only a PERSISTED flag earns the bump: a failed durable write bumps nothing, so a
+            // retry after a write error cannot double-count either.
+            self.funnel_bump("knock:sent").await;
+        }
+        // The `sent` disposition exactly once: a deterministic event id, deduplicated by the
+        // recorder itself (`record_once`), so a retry after any crash cannot write it twice.
+        self.record_knock_disposition_once(&c.eval_id, sent_ms, "sent", c.receptive, &sref);
+        wrote
     }
 
     /// Handle a reply to an outstanding knock: deliver the work, defer, or close the class. Grades
@@ -1461,6 +1565,80 @@ impl super::ConversationEngine {
         true
     }
 
+    /// A durable per-ref flag on the judgment row (a side effect's own idempotence marker).
+    async fn judgment_row_flag(&self, r#ref: &str, flag: &str) -> bool {
+        self.judgment_row_for_ref(r#ref)
+            .await
+            .is_some_and(|row| row.get(flag).and_then(|v| v.as_bool()) == Some(true))
+    }
+
+    /// Returns whether the flag was durably written (a missing row or a failed write is false).
+    async fn set_judgment_row_flag(&self, r#ref: &str, flag: &str) -> bool {
+        let mut led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut changed = false;
+        for row in led.iter_mut() {
+            if row.get("ref").and_then(|x| x.as_str()) == Some(r#ref) {
+                row[flag] = serde_json::json!(true);
+                changed = true;
+            }
+        }
+        if !changed {
+            return false;
+        }
+        self.memory
+            .profile_set(
+                "judgment_ledger",
+                &serde_json::to_string(&led).unwrap_or_default(),
+            )
+            .await
+            .is_ok()
+    }
+
+    /// The knock's `sent` disposition under a deterministic event id (`knock-disposition:<ref>`)
+    /// through the recorder's once-by-id write.
+    pub fn record_knock_disposition_once(
+        &self,
+        eval_id: &str,
+        now_ms: i64,
+        disposition: &str,
+        receptive: Option<bool>,
+        sref: &str,
+    ) {
+        let mut ev = mind_observability::DecisionEvent::new(
+            &format!("knock-disposition-{now_ms}"),
+            "knock_disposition",
+        );
+        ev.event_id = Some(format!("knock-disposition:{sref}"));
+        ev.actor = Some("proactive".into());
+        ev.lane = Some("primary".into());
+        ev.goal_id = Some("knock:evaluation".into());
+        ev.parent_event_id = Some(eval_id.to_string());
+        ev.context_fingerprint = Some(mind_observability::opaque_id(
+            "context",
+            "knock-receptivity",
+        ));
+        ev.chosen = Some(disposition.to_string());
+        ev.verdict = Some(
+            match receptive {
+                Some(true) => "receptive",
+                Some(false) => "unreceptive",
+                None => "before-gate",
+            }
+            .into(),
+        );
+        ev.semantic_success = receptive;
+        ev.object_id = Some(sref.to_string());
+        ev.evaluator_id = Some("knock-disposition-v1".into());
+        let _ = self.recorder.record_once(ev);
+    }
+
     /// The judgment row logged under `ref`, if any — the once-by-ref authority.
     async fn judgment_row_for_ref(&self, r#ref: &str) -> Option<serde_json::Value> {
         let led: Vec<serde_json::Value> = self
@@ -1543,11 +1721,20 @@ impl super::ConversationEngine {
                         "recipient engages within 90m",
                     )
                     .await;
-                if wrote {
-                    // The question is armed only now — a queued, leased or expired ask never
-                    // swallows an ordinary turn as its answer.
-                    let slot = marker.r#ref.strip_prefix("ask:").unwrap_or("");
-                    self.set_pending_slot(Some(slot)).await;
+                // The question is armed only now — a queued, leased or expired ask never
+                // swallows an ordinary turn as its answer; an open follow-up arms nothing, as
+                // its Telegram twin. CONVERGENT: armed iff the claim is still ungraded (an
+                // answered ask is never re-armed) and the slot is not already this one.
+                let graded = self
+                    .judgment_row_for_ref(&marker.r#ref)
+                    .await
+                    .is_some_and(|row| row.get("outcome").is_some_and(|o| !o.is_null()));
+                if !graded {
+                    if let Some(slot) = ask_slot_of(&marker.r#ref) {
+                        if self.pending_slot().await.as_deref() != Some(slot.as_str()) {
+                            self.set_pending_slot(Some(&slot)).await;
+                        }
+                    }
                 }
                 wrote
             }

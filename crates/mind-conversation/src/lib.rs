@@ -103,6 +103,9 @@ mod reflex;
 pub mod turn_exclusion;
 /// L3c: the engagement marker, re-exported so the delivery seam can carry it.
 pub use mind_spec::EngagementMarker;
+pub use proactive::{
+    ask_ref_for, digest_ref_for, p_units, text_digest16, AskCandidate, KnockCandidate,
+};
 
 /// E.AGI-A5: when this process started, fixed on first use (the engine constructor touches it),
 /// so "since this binary started" means one thing for the life of the process.
@@ -5542,7 +5545,18 @@ impl ConversationEngine {
             mind_observability::DeliveryKind::Ask => mind_spec::NoticeKind::Ask,
             _ => anyhow::bail!("only knock, digest and ask are engaging"),
         };
-        let key = format!("{}:{}", notice_kind.as_str(), marker.r#ref);
+        // The knock's ref is its claim id (the reply rebuilds it), so its dedupe key carries
+        // the day; the digest's and the ask's refs are opportunity-unique by construction.
+        let key = if notice_kind == mind_spec::NoticeKind::Knock {
+            format!(
+                "{}:{}:{}",
+                notice_kind.as_str(),
+                marker.r#ref,
+                now / 86_400_000
+            )
+        } else {
+            format!("{}:{}", notice_kind.as_str(), marker.r#ref)
+        };
         self.notice_engine()?.queue_engaging_notice(
             Self::NOTICE_OPERATOR,
             notice_kind,

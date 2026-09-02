@@ -23,6 +23,8 @@ pub use store::{
 
 const HORIZON_RECIPE_RUN_PREFIX: &str = "horizon-segment:";
 
+/// Re-exported so a host implementation outside this crate needs no manifest change.
+pub use ::async_trait as async_trait_rt;
 use async_trait::async_trait;
 use mind_inference::InferencePool;
 use mind_spec::{

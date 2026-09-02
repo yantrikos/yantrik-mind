@@ -68,6 +68,8 @@ pub enum BackgroundPass {
     Dmn,
     /// The pattern-finder pass (L3b).
     Patterns,
+    /// The engagement loops' pass — knock, digest, ask (L3c-2).
+    Engagement,
 }
 
 impl BackgroundPass {
@@ -75,12 +77,14 @@ impl BackgroundPass {
         match self {
             Self::Dmn => 1,
             Self::Patterns => 2,
+            Self::Engagement => 3,
         }
     }
     fn from_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Dmn),
             2 => Some(Self::Patterns),
+            3 => Some(Self::Engagement),
             _ => None,
         }
     }
@@ -88,6 +92,7 @@ impl BackgroundPass {
         match self {
             Self::Dmn => "dmn",
             Self::Patterns => "patterns",
+            Self::Engagement => "engagement",
         }
     }
 }
@@ -625,6 +630,21 @@ mod tests {
         assert!(x
             .try_admit_background(later, IDLE, BackgroundPass::Patterns)
             .is_some());
+        // L3c-2: the engagement pass shares the seam — refused during a view or a person's
+        // turn, excluded by a running pass, released on drop.
+        {
+            let _view = x.begin_view_on("cli:loops_json", later + 1);
+            assert!(x
+                .try_admit_background(later + 2, IDLE, BackgroundPass::Engagement)
+                .is_none());
+        }
+        let engagement = x
+            .try_admit_background(later, IDLE, BackgroundPass::Engagement)
+            .expect("admitted once the view is gone");
+        assert_eq!(x.background_pass(), Some(BackgroundPass::Engagement));
+        assert!(x.try_admit_dmn(later, IDLE).is_none());
+        drop(engagement);
+        assert_eq!(x.background_pass(), None);
     }
 
     /// L3c: presence is the cockpit's own polling, nothing else. A machine view stamps it; a

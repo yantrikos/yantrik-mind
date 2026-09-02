@@ -3276,3 +3276,10 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Override restored | `YM_ICS_SECS=600` removed from the staging env at 07:16:31Z and the service restarted (one restart outside a deploy, stated); active. ICS returns to its 6 h default. |
 | Gates | (1) pure-move diff reviewed by Codex; (2) per-act timing fixture; (3) canary runs the three loops under the process host — MET, with DMN's act now witnessed; (4) one runner per host — met (latch fixture + journal). |
 | Honest notes | The prereg's "canary witness within 15 minutes" was met for ICS and the lease sweep at +2.5 min and for DMN only after the cockpit-polling finding was fixed, 94 minutes after the first deploy. `46ce458` shipped a red fixture (needle mismatch) fixed in `b286564`; production code was unaffected. |
+
+## L3a — addendum row: staging carries the fail-closed allowlist (box log `2026-09-02T07:23:18Z | deploy | DEPLOYED | 3aaeff2 health-ok`)
+
+| Field | Value |
+| --- | --- |
+| What | Codex's `bf0e05c` (strict parameter shapes for the machine-view entry; an exhaustive allow/deny regression where near-misses and mutations fall back to person activity) landed on main after my 07:16 restart; main at `3aaeff2` deployed to staging at 07:23:18Z, service active, override absent. turn-exclusion 11/11, mind-core callsite guard 1/1 (Codex's run). |
+| Note | One more restart outside a deploy is NOT implied: this was a deploy. The idle window restarts from this boot. |

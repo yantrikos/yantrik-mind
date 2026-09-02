@@ -73,7 +73,9 @@ Built the way this house builds: measure first, shadow second, activate only pas
   seven axes plus the Phase D utility, and records what it *would* have chosen — beside what the
   timers actually did (L1). Shadow only, E.PK3 discipline: it ranks, it does not choose. Gate: ≥ 14
   days of paired records, agreement and disagreement counted, the disagreements read one by one.
-- **L3 — hosting moves.** DMN, knock, digest, ask and the watches are evaluated by the attention
+- **L3 — hosting moves** (split in practice into L3a: the loops that speak to nobody; L3b: a
+  delivery contract, then the informational speakers; L3c: the engagement loops once the console
+  surface has receptivity and reply grading — see §4a). DMN, knock, digest, ask and the watches are evaluated by the attention
   loop on every box; delivery routes to Telegram, the console notice, or the journal. The poll loop
   keeps only what is Telegram: reading updates and sending. Gate: byte-identical sends on a Telegram
   box over a replayed day (fixture), and the canary running every judgement loop it never ran.

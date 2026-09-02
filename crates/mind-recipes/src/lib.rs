@@ -356,12 +356,36 @@ pub fn extract_document(s: &str) -> &str {
     }
 }
 
-/// EXACTLY what `publish_page` will accept: the same extraction, then the same two checks, in the
-/// same order. True means "publishing this raw draft would succeed"; false means it would be
-/// refused. The guard in the page recipe is this function and nothing else.
+/// Does this text OPEN as an HTML document, on a tag boundary?
+///
+/// `looks_like_html` answers a looser question — "is there markup in here at all" — because the chat
+/// path uses it to notice a model that dumped a page instead of publishing it. As the opening half
+/// of the publish check it was too loose in a way review caught: `contains("<html")` is satisfied by
+/// `<htmlish>not a document</html>`, which then passed both halves and would have been hosted as a
+/// page. So the publish path asks this instead: a doctype that is actually closed, or an `<html` tag
+/// that ends where a tag ends.
+pub fn opens_as_document(s: &str) -> bool {
+    let t = s.trim_start();
+    let low = t.to_ascii_lowercase();
+    if let Some(rest) = low.strip_prefix("<!doctype") {
+        // `<!doctype html>` and its longer legacy forms; `<!doctypex ...>` and an unclosed doctype are not.
+        return rest.starts_with(char::is_whitespace) && rest.contains('>');
+    }
+    if let Some(rest) = low.strip_prefix("<html") {
+        // `<html>`, `<html lang="en">`, `<html/>` — never `<htmlish>`.
+        return rest.starts_with('>')
+            || rest.starts_with('/')
+            || rest.starts_with(char::is_whitespace);
+    }
+    false
+}
+
+/// EXACTLY what `publish_page` will accept — the tool calls this function, so there is nothing for
+/// the guard and the tool to disagree about. Extract the document out of whatever the model sent,
+/// then require that it both OPENS as a document and CLOSES like a finished one.
 pub fn is_publishable_document(raw: &str) -> bool {
     let doc = extract_document(raw);
-    looks_like_html(doc) && is_complete_html(doc)
+    opens_as_document(doc) && is_complete_html(doc)
 }
 
 impl Condition {
@@ -2897,6 +2921,41 @@ Hope it helps."
             "truncated: opens but never closes"
         );
         assert!(!is_publishable_document(""), "empty");
+
+        // Boundary cases (review, 18:49Z): `contains("<html")` used to accept a tag that merely
+        // STARTS with those letters, so a blob of non-document markup passed both halves and would
+        // have been hosted as a page. The opening test is now a tag boundary.
+        assert!(
+            !is_publishable_document("<htmlish>not a document</html>"),
+            "<htmlish> is not an <html> tag"
+        );
+        assert!(
+            !is_publishable_document("<htmlfoo bar>x</html>"),
+            "nor is <htmlfoo>"
+        );
+        assert!(
+            !is_publishable_document(
+                "<!doctypex html><html><body>x</body></html>"
+                    .replace("<html>", "<htmlx>")
+                    .as_str()
+            ),
+            "a malformed doctype prefix does not open a document"
+        );
+        assert!(
+            !is_publishable_document("<!doctype html"),
+            "an unclosed doctype is not a document"
+        );
+        // and the legitimate openings still pass
+        for good in [
+            "<html>x</html>",
+            "<html lang=\"en\">x</html>",
+            "<HTML >x</html>",
+            "<html/>x</html>",
+            "<!DOCTYPE html><body>x</body>",
+            "<!doctype html PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><body>x</body>",
+        ] {
+            assert!(is_publishable_document(good), "should publish: {good}");
+        }
     }
 
     #[test]

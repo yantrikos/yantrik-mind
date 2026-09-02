@@ -14399,7 +14399,12 @@ impl RecipeHost for MindRecipeHost {
                 // time. Refusing that would fail the chain on a formatting habit, so unwrap it here —
                 // the alternative is a prompt that has to win every time.
                 let html = extract_document(raw);
-                if !looks_like_html(html) {
+                // ONE gate, shared with the page recipe's repair guard (E.CB2-F): when this refuses,
+                // the guard refused too and the chain already spent its repair round. The component
+                // checks below only decide WHICH refusal to report — "not a document" and
+                // "truncated" send the author to different fixes.
+                let publishable = mind_recipes::is_publishable_document(raw);
+                if !publishable && !mind_recipes::opens_as_document(html) {
                     anyhow::bail!(
                         "publish_page needs a real HTML document in 'html' (got {} chars, no <html>/<body>)",
                         html.len()
@@ -14410,7 +14415,7 @@ impl RecipeHost for MindRecipeHost {
                 // that is a hero followed by nothing. `looks_like_html` cannot catch this — it only
                 // asks whether the text STARTS like HTML. Refusing here turns a silent broken page
                 // into a visible step failure the chain reports.
-                if !is_complete_html(html) {
+                if !publishable {
                     anyhow::bail!(
                         "the document is truncated ({} chars, no closing </html>) — it was cut off mid-generation, \
                          so there is nothing worth publishing",

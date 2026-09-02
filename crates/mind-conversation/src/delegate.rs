@@ -372,9 +372,11 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
             // 31 seconds. The refusal stays; what changes is that a failed draft now gets one repair
             // call before the chain gives up.
             //
-            // The condition is deterministic (`VarIsHtmlDocument`: opens as a document, closes
-            // `</html>`), so a draft that is already a page skips the repair and the run is
-            // byte-identical to before — the extra call is spent only on runs that would have failed.
+            // The condition is deterministic and is the PUBLISH predicate itself
+            // (`VarIsPublishableDocument` → `mind_recipes::is_publishable_document`, the same
+            // function `publish_page` calls), so a draft the tool would accept skips the repair and
+            // that run is byte-identical to before: the extra call is spent only where the publish
+            // would have failed, which is the whole cost argument.
             RecipeStep::JumpIf {
                 condition: Condition::VarIsPublishableDocument { var: "page".into() },
                 target_step: 4,

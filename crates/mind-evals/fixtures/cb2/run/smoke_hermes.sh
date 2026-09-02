@@ -16,6 +16,6 @@ CALLS=$(grep -c "\[$SID\] agent.conversation_loop: API call #" "$OUT/home/logs/a
 python3 - "$OUT/count/requests.json" "$RC" "$READY" "$CALLS" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1])); rc, ready, calls = sys.argv[2:]
-print(f"hermes smoke: rc {rc} / READY-line {ready} / log api_calls {calls} / proxy model_requests {d['model_requests']} / refused {d['refused_over_cap']} / upstream_errors {d['upstream_errors']} / tls {d.get('tls_hostname_verified')}")
+print(f"hermes smoke: rc {rc} / READY-line {ready} / log api_calls {calls} / proxy model_requests {d['model_requests']} / by_path {d.get('by_path')} / refused {d['refused_over_cap']} / upstream_errors {d['upstream_errors']} / tls {d.get('tls_hostname_verified')}")
 sys.exit(0 if (rc, ready, d["refused_over_cap"], d["upstream_errors"], d.get("tls_hostname_verified")) == ("0", "1", 0, 0, True) and int(calls) == d["model_requests"] >= 1 else 1)
 EOF

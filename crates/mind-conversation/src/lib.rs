@@ -6704,10 +6704,13 @@ impl ConversationEngine {
             return "(the ym console requires operator authorization)".to_string();
         }
         // L3a: an operator turn is a turn on a surface; held for the dispatch's whole life.
-        let turn = self.turns.begin_turn(Self::now_ms());
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
+        // The label is the bounded verb, never the line.
+        let turn = self
+            .turns
+            .begin_turn_on(Self::cli_surface_label(&cmd), Self::now_ms());
         let rest = it.next().unwrap_or("").trim().to_string();
         // Capability dispatch — a command owned by a plugin with a registered handler routes
         // through the registry, so enable/disable actually governs the COMMAND surface too (a
@@ -7848,6 +7851,14 @@ impl ConversationEngine {
                         self.turns.active_turns(),
                         now.saturating_sub(before) / 1000,
                         self.turns.dmn_running()
+                    );
+                }
+                if prefix == "idle surface" {
+                    // This readout registered as `cli:why`; its guard carries the label it
+                    // displaced, which is the caller that registered before it.
+                    return format!(
+                        "TURN EXCLUSION — surface that registered before this readout: {}",
+                        turn.previous_surface()
                     );
                 }
                 if prefix == "chains since-start" || prefix.starts_with("chains since=") {
@@ -9278,6 +9289,26 @@ WINDOW: all-time, latest 200
         ]
         .iter()
         .any(|p| l.contains(p))
+    }
+
+    /// The bounded static label for a console verb (L3a diagnostics). Only known verbs get a
+    /// label of their own; anything else is `cli:other`, so no content rides on the label.
+    fn cli_surface_label(cmd: &str) -> &'static str {
+        match cmd {
+            "why" => "cli:why",
+            "jobs" => "cli:jobs",
+            "orders" => "cli:orders",
+            "horizons" | "horizon" => "cli:horizon",
+            "loops_json" => "cli:loops_json",
+            "horizons_json" | "horizon_history_json" => "cli:horizons_json",
+            "skills_json" => "cli:skills_json",
+            "claims_json" => "cli:claims_json",
+            "surfaces" => "cli:surfaces",
+            "consolidate" => "cli:consolidate",
+            "status" => "cli:status",
+            "help" => "cli:help",
+            _ => "cli:other",
+        }
     }
 
     fn now_ms() -> u64 {
@@ -12621,7 +12652,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
     /// no markdown. Falls back to a graceful line rather than erroring mid-conversation.
     pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         // L3a: the voice fast path is a production reply surface; it registers like every turn.
-        let _turn = self.turns.begin_turn(Self::now_ms());
+        let _turn = self.turns.begin_turn_on("fast_reply", Self::now_ms());
         // ── TIER 0: arithmetic, before any model call. ──────────────────────────────────────────
         //
         // Found live on 2026-08-11: asked "what is 17 times 23?" over the fast path, the mind

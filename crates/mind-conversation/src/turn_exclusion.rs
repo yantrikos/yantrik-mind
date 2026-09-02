@@ -16,6 +16,9 @@ pub struct TurnExclusion {
     active_turns: AtomicUsize,
     /// Monotone: the latest user activity on any surface, in ms.
     last_user_activity_ms: AtomicU64,
+    /// The bounded static label of the surface that registered most recently (`turn`,
+    /// `fast_reply`, `cli:<verb>`), so a readout can name a caller that is not a person.
+    last_surface: std::sync::Mutex<&'static str>,
     dmn_running: AtomicBool,
 }
 
@@ -25,11 +28,17 @@ pub struct TurnGuard<'a> {
     /// The activity stamp observed atomically when THIS turn registered. Keeping it on the guard
     /// prevents a concurrent turn from overwriting a diagnostic turn's evidence.
     previous_activity_ms: u64,
+    /// The surface label this registration displaced — the caller that registered before us.
+    previous_surface: &'static str,
 }
 
 impl TurnGuard<'_> {
     pub fn previous_activity_ms(&self) -> u64 {
         self.previous_activity_ms
+    }
+    /// The bounded label of the surface that registered before this turn.
+    pub fn previous_surface(&self) -> &'static str {
+        self.previous_surface
     }
 }
 
@@ -58,6 +67,7 @@ impl TurnExclusion {
             admission: RwLock::new(()),
             active_turns: AtomicUsize::new(0),
             last_user_activity_ms: AtomicU64::new(now_ms),
+            last_surface: std::sync::Mutex::new("boot"),
             dmn_running: AtomicBool::new(false),
         }
     }
@@ -65,15 +75,30 @@ impl TurnExclusion {
     /// Register a turn. Shared admission: never blocked by another turn, never blocked by a
     /// running pass — only by the microseconds of a DMN admission check in progress.
     pub fn begin_turn(&self, now_ms: u64) -> TurnGuard<'_> {
+        self.begin_turn_on("turn", now_ms)
+    }
+
+    /// Register a turn and name its surface with a bounded static label (never content).
+    pub fn begin_turn_on(&self, surface: &'static str, now_ms: u64) -> TurnGuard<'_> {
         let _shared = self.admission.read().unwrap_or_else(|p| p.into_inner());
         self.active_turns.fetch_add(1, Ordering::AcqRel);
         let before = self
             .last_user_activity_ms
             .fetch_max(now_ms, Ordering::AcqRel);
+        let previous_surface = std::mem::replace(
+            &mut *self.last_surface.lock().unwrap_or_else(|p| p.into_inner()),
+            surface,
+        );
         TurnGuard {
             owner: self,
             previous_activity_ms: before,
+            previous_surface,
         }
+    }
+
+    /// The bounded label of the surface that registered most recently.
+    pub fn last_surface(&self) -> &'static str {
+        *self.last_surface.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Admit the offline-cognition pass iff no turn is active, the idle stretch is met, and no
@@ -147,7 +172,7 @@ mod tests {
             ),
         ] {
             assert!(
-                body_after(src, signature).contains("self.turns.begin_turn("),
+                body_after(src, signature).contains("self.turns.begin_turn"),
                 "{signature} must register a turn"
             );
         }
@@ -156,7 +181,7 @@ mod tests {
             "pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity)",
         ] {
             assert!(
-                !body_after(lib, signature).contains("begin_turn("),
+                !body_after(lib, signature).contains("begin_turn"),
                 "{signature} is reached through a registering entry; it must not double-count"
             );
         }
@@ -164,6 +189,31 @@ mod tests {
 
     /// Boot is activity: the first runner tick after start cannot admit DMN until the idle
     /// stretch has passed since the process started (legacy `last_activity = now_ms()`).
+    /// Each registration names its surface with a bounded static label, so a readout can say
+    /// who registered before it; the default `begin_turn` is the agentic `turn`.
+    #[test]
+    fn a_registration_names_its_surface_with_a_bounded_label() {
+        let x = TurnExclusion::starting_at(0);
+        assert_eq!(x.last_surface(), "boot");
+        let a = x.begin_turn_on("cli:why", 10);
+        assert_eq!(
+            a.previous_surface(),
+            "boot",
+            "the diagnostic sees who came before it"
+        );
+        assert_eq!(x.last_surface(), "cli:why");
+        let b = x.begin_turn(20);
+        assert_eq!(b.previous_surface(), "cli:why");
+        assert_eq!(x.last_surface(), "turn");
+        drop(a);
+        drop(b);
+        assert_eq!(
+            x.last_surface(),
+            "turn",
+            "the label is who registered last, not who is active"
+        );
+    }
+
     #[test]
     fn nothing_is_admitted_before_the_idle_stretch_has_passed_since_boot() {
         let boot = 5_000_000;

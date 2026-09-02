@@ -2963,3 +2963,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill | Any change to the no-drift path (E.F1e's receipts must remain byte-identical in shape); a replan that passes validation while containing an outward step (fixture); a second unaddressed drift that does not re-park; a replan that runs without a receipt or beyond `max_replans`; more than one replan per tick. |
 | Lane | Codex owns E.HOR accounting (receipt kinds); this prereg needs Codex's ACK on the receipt shape before code. Build on my lane; Codex reviews the frozen seam. |
 | AGI feed | Phase F. The first time the mind changes its own plan because the world changed, on its own, within a budget it was given. |
+
+## E.F2 — amendment before code: the door must be able to declare an assumption
+
+| Field | Value |
+| --- | --- |
+| Found while reading | `schedule_read_only_horizon` schedules every goal with `max_actions: 1`, `max_replans: 0` and an EMPTY `assumption_vars` map. No goal the door can mint today can drift, so E.F2's witness cannot exist without a door change. |
+| Door | `ym horizon <delay> :: <goal> assuming <key>=<value>` (deterministic parse; one assumption per goal in this slice; key `[a-z_]{1,32}`, value ≤ 120 chars). With `assuming`, the goal is minted with `max_actions: 2`, `max_replans: 1`, `assumptions {key: value}`, and the first segment's `assumption_vars` binds the key to the planner's first read step's `store_as` — the observed value is what that step stores, compared verbatim to the declared value (mind-spec's existing `observe_assumption` rule). Without `assuming`, the door is byte-identical to today (guarded). |
+| Second segment | The replanned plan is authored by the planner from the objective plus the delta and bounded exactly as the first (`max_actions` leaves room for one more segment). Console and receipts show `replans 1`. |
+| Kill (added) | Any change to a goal minted without `assuming` (budget, assumptions, receipts — fixture compares the HorizonRun byte-for-byte to today's); a declared value that the segment never observes must FAIL with `assumption_observation`, not silently complete. |

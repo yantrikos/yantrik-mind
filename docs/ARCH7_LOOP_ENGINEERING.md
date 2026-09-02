@@ -83,6 +83,31 @@ Built the way this house builds: measure first, shadow second, activate only pas
   Gate: same answers on the turn corpus with fewer steps; idle spend within budget on both boxes.
 - **L5 — activation.** The attention loop chooses. Only after L2's gate, with rollback.
 
+## 4a. Status (2026-09-02 07:25Z; every item cites its ledger row)
+
+- **L1 — FOLDED** (`3096637`, v3 schema; `95be2ae` L1b-v3 typed gates). Every timer and cadence
+  site decides through a `Gated` kind; one reduced record per opportunity; `ym why loops` and the
+  cockpit's Loops card read it. Legacy race found and fixed on the way: the detached mail sweep
+  could double-spawn (`OpportunityGate::take_act`).
+- **L2 — PREREGISTERED, no code** (`8a3f385` v6 + L1 v4 amendment, `cfbce2a` renumbers it to
+  loop-ledger-v5 with per-host wake ids). Evidence needs a Telegram box: the prod batch.
+- **L3a — SHIPPED** (`38f672e`, `6684e16`, Codex's `bf0e05c`; ledger 724c0d6 → 3aaeff2 → d2c647a).
+  The three loops that speak to nobody — DMN, ICS refresh, lease sweep — run in a process-hosted
+  runner on every box, behind an engine-owned turn exclusion taken inside all three reply
+  surfaces. Witnessed: the offline-cognition pass ran on the canary for the first time
+  (`[dmn] rehearsed 8 memories`, 07:16:19Z). The lesson that cost ninety minutes: the cockpit's
+  automatic JSON refreshes are turns, not people — origin is now explicit at the entry seam
+  (`cli_dispatch_view`, nine polled routes, fail-closed allowlist). loop-ledger-v4 = v3 + the
+  `process` host.
+- **L3b — IN CO-PREREG** (draft with Codex): a delivery contract before any speaking loop moves —
+  one `Delivery` seam (Telegram, a durable console notice queue, journal); journal-only is
+  `undelivered` and may mark nothing as spoken (E.G1c's wall made structural); Resolve,
+  ProfileRefresh and Patterns move with explicit one-call budgets; the engagement loops wait for
+  L3c (receptivity and reply grading on the console surface).
+- **E.F3 — IN CO-PREREG** (found sitting in the mind's seat): an expired commitment becomes a
+  receipt and a notice; today it is a silent corpse in the goal list.
+- **L4, L5 — not started.**
+
 ## 5. What this is not
 
 Not a rewrite of the recipes engine or the horizon scheduler — those already have budgets, receipts

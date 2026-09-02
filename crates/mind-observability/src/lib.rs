@@ -4925,6 +4925,7 @@ bounded_enum! {
         HomeWatch => "home-watch", Resolve => "resolve", ProfileRefresh => "profile-refresh",
         Family => "family", FollowUp => "follow-up", PriceWatch => "price-watch",
         MemberBeat => "member-beat", Ics => "ics", LeaseSweep => "lease-sweep",
+        MailSweep => "mail-sweep", Whois => "whois", TraditionPrep => "tradition-prep",
         Heartbeat => "heartbeat", WorldShadow => "world-shadow",
     }
 }
@@ -4938,7 +4939,8 @@ bounded_enum! {
         Dreamed => "dreamed", Knocked => "knocked", Evaluated => "evaluated",
         DigestSent => "digest-sent", NothingToSay => "nothing-to-say", Asked => "asked",
         NothingToAsk => "nothing-to-ask", Ran => "ran", Delegations => "delegations",
-        Surfaced => "surfaced", NothingFound => "nothing-found",
+        Surfaced => "surfaced", FoundUndelivered => "found-undelivered",
+        NothingFound => "nothing-found",
     }
 }
 bounded_enum! {
@@ -5017,6 +5019,9 @@ pub enum LoopOpportunity {
     Stretch { loop_id: LoopId, start_ms: u64 },
     /// A wall-clock bucket (may repeat across a restart — the aggregate dedupes and reports).
     Bucket { loop_id: LoopId, n: u64 },
+    /// An operator-forced whois (`ym whois`): its own opportunity, keyed by its instant. The
+    /// loop is fixed by the variant — no other loop can be forced.
+    Forced { at_ms: u64 },
 }
 impl LoopOpportunity {
     pub fn loop_id(self) -> LoopId {
@@ -5024,6 +5029,7 @@ impl LoopOpportunity {
             LoopOpportunity::Window { loop_id, .. }
             | LoopOpportunity::Stretch { loop_id, .. }
             | LoopOpportunity::Bucket { loop_id, .. } => loop_id,
+            LoopOpportunity::Forced { .. } => LoopId::Whois,
         }
     }
     pub fn id(self) -> String {
@@ -5039,6 +5045,7 @@ impl LoopOpportunity {
                 format!("{}:idle:{start_ms}", loop_id.as_str())
             }
             LoopOpportunity::Bucket { loop_id, n } => format!("{}:bucket:{n}", loop_id.as_str()),
+            LoopOpportunity::Forced { at_ms } => format!("whois:forced:{at_ms}"),
         }
     }
     /// The inverse of `id`, strict: anything that is not exactly one of the three shapes fails.
@@ -5058,6 +5065,9 @@ impl LoopOpportunity {
                 start_ms: a,
             }),
             ("bucket", None, None) => Some(LoopOpportunity::Bucket { loop_id, n: a }),
+            ("forced", None, None) if loop_id == LoopId::Whois => {
+                Some(LoopOpportunity::Forced { at_ms: a })
+            }
             _ => None,
         }
     }
@@ -5413,7 +5423,12 @@ pub fn render_loop_ledger(events: &[DecisionEvent]) -> String {
 /// later wake from adding a held record after it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OpportunityGate {
+    /// The last key a record (act or hold) was emitted under.
     last_key: Option<u64>,
+    /// The last key an ACT was claimed under. Kept apart from `last_key` so a hold recorded
+    /// under a key does not starve the act that follows when conditions clear, while a second
+    /// act under the same key (a detached body that has not yet moved its stamp) is refused.
+    last_acted_key: Option<u64>,
 }
 impl OpportunityGate {
     pub fn bucket(now_ms: u64, period_secs: u64) -> u64 {
@@ -5447,6 +5462,17 @@ impl OpportunityGate {
     }
     pub fn mark(&mut self, key: u64) {
         self.last_key = Some(key);
+        self.last_acted_key = Some(key);
+    }
+    /// Claim the act for this opportunity: allowed once per key, even after a hold was
+    /// recorded under it (Hold* → one Act); refused for a second act under the same key.
+    /// After the claim no hold can be recorded under the key either.
+    pub fn take_act(&mut self, key: u64) -> bool {
+        if self.last_acted_key == Some(key) {
+            return false;
+        }
+        self.mark(key);
+        true
     }
     fn take_key(&mut self, key: u64) -> bool {
         if self.last_key == Some(key) {
@@ -5738,5 +5764,729 @@ mod loop_ledger_tests {
             k.take_stretch(LoopId::Knock, 5).is_some()
                 && k.take_stretch(LoopId::Knock, 5).is_none()
         );
+    }
+}
+
+// ───────────────────────────── L1 (ARCH7): the gate decision ─────────────────────────────
+// What one wake decides for one gate. The decision itself is made by `Gated` below, per kind,
+// in the legacy blocker order; nothing else decides.
+
+/// What one wake decides for one gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Not due: nothing runs, nothing is recorded (cadence itself is never a recorded skip).
+    NotDue,
+    /// Due and clear: the body runs; the act records under this window.
+    Act,
+    /// Due but held: the body does not run; the hold records once per window.
+    Hold(HeldReason),
+}
+
+// ───────────────────────────── L1 (ARCH7): the legacy gate kinds ─────────────────────────────
+// Each background loop's run predicate is one `LegacyGate` kind. A site never assembles the
+// gate's state by hand: it calls the constructor of its kind, which takes ONLY the inputs that
+// kind reads, as named fields — a kind cannot be handed a signal it does not consult, and two
+// booleans cannot be swapped positionally. The fixture below replays a day of states through a
+// test-local transcription of every legacy predicate (never through this code) and requires the
+// seam to agree on every wake: due-ness, run/hold, the first blocker's name, and the SET of
+// opportunity ids emitted against the due occurrences the transcription enumerates.
+
+/// A legacy timer or persisted cadence: where it is, when it last ran, how often it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timer {
+    pub now_ms: u64,
+    /// The legacy timer's last-run stamp, or a persisted cadence's last-run stamp.
+    pub last_ms: u64,
+    /// The effective period in ms (a persisted cadence's may be domain-paced).
+    pub period_ms: u64,
+}
+
+impl Timer {
+    /// Due-ness as every legacy timer computes it. The one place the arithmetic lives.
+    pub fn due(&self) -> bool {
+        self.now_ms.saturating_sub(self.last_ms) >= self.period_ms
+    }
+}
+
+/// Whether a chat exists to speak into, and whether quiet hours block speaking now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presence {
+    pub chat_present: bool,
+    pub quiet: bool,
+}
+
+/// What the idle-gated loop reads besides its timer and presence, by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleInputs {
+    /// The loop's own switch.
+    pub enabled: bool,
+    /// Another loop already spoke this wake; this one yields.
+    pub spoke: bool,
+    /// The user has been idle for the required stretch.
+    pub idle: bool,
+}
+
+/// Everything a gate can read on one wake. Constructed only through `Gated`'s per-kind
+/// constructors; fields a kind does not consult are left at their neutral value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateState {
+    pub now_ms: u64,
+    pub last_ms: u64,
+    pub period_ms: u64,
+    pub enabled: bool,
+    pub chat_present: bool,
+    pub quiet: bool,
+    pub idle: bool,
+    pub spoke: bool,
+    pub receptive: bool,
+    pub forced: bool,
+}
+
+impl GateState {
+    fn neutral(timer: Timer) -> Self {
+        GateState {
+            now_ms: timer.now_ms,
+            last_ms: timer.last_ms,
+            period_ms: timer.period_ms,
+            enabled: true,
+            chat_present: true,
+            quiet: false,
+            idle: true,
+            spoke: false,
+            receptive: true,
+            forced: false,
+        }
+    }
+}
+
+/// The distinct run predicates the poll loop contains, each with its legacy blocker order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyGate {
+    /// `enabled && due && chat && !quiet` — home-watch, family, follow-up, price-watch.
+    TimerChatQuiet,
+    /// `due` — resolve, profile-refresh, ICS, lease-sweep.
+    TimerUnconditional,
+    /// `due && !quiet` — member-beat.
+    TimerQuiet,
+    /// `!spoke && enabled && chat && !quiet && idle && due` — patterns.
+    IdleGated,
+    /// `chat && !quiet && due && receptive` — tradition-prep; whois when not forced.
+    PersistedReceptive,
+    /// `!quiet && due && chat` — mail-sweep (quiet is checked before due; chat before run).
+    PersistedChatQuiet,
+    /// `chat && forced` — a forced whois runs regardless of quiet, due or receptivity.
+    Forced,
+}
+
+/// One wake of one gate: the kind and exactly the state that kind reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Gated {
+    kind: LegacyGate,
+    state: GateState,
+}
+
+impl Gated {
+    /// Home-watch, family, follow-up, price-watch: a chat-facing timer with an on/off switch.
+    pub fn timer_chat_quiet(timer: Timer, presence: Presence, enabled: bool) -> Self {
+        Gated {
+            kind: LegacyGate::TimerChatQuiet,
+            state: GateState {
+                enabled,
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                ..GateState::neutral(timer)
+            },
+        }
+    }
+    /// Resolve, profile-refresh, ICS, lease-sweep: runs whenever due, speaks to nobody.
+    pub fn timer(timer: Timer) -> Self {
+        Gated {
+            kind: LegacyGate::TimerUnconditional,
+            state: GateState::neutral(timer),
+        }
+    }
+    /// Member-beat: due and not quiet; no chat needed.
+    pub fn timer_quiet(timer: Timer, quiet: bool) -> Self {
+        Gated {
+            kind: LegacyGate::TimerQuiet,
+            state: GateState {
+                quiet,
+                ..GateState::neutral(timer)
+            },
+        }
+    }
+    /// Patterns: yields to a loop that already spoke, then its switch, then the chat, quiet
+    /// hours and the idle stretch (the legacy `idle_ok`, split into its three reasons).
+    pub fn idle_gated(timer: Timer, presence: Presence, idle: IdleInputs) -> Self {
+        Gated {
+            kind: LegacyGate::IdleGated,
+            state: GateState {
+                enabled: idle.enabled,
+                spoke: idle.spoke,
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                idle: idle.idle,
+                ..GateState::neutral(timer)
+            },
+        }
+    }
+    /// Tradition-prep and an unforced whois: a persisted daily cadence behind receptivity.
+    pub fn persisted_receptive(timer: Timer, presence: Presence, receptive: bool) -> Self {
+        Gated {
+            kind: LegacyGate::PersistedReceptive,
+            state: GateState {
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                receptive,
+                ..GateState::neutral(timer)
+            },
+        }
+    }
+    /// Mail-sweep: a persisted daily cadence that checks quiet first and needs a chat to run.
+    pub fn persisted_chat_quiet(timer: Timer, presence: Presence) -> Self {
+        Gated {
+            kind: LegacyGate::PersistedChatQuiet,
+            state: GateState {
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                ..GateState::neutral(timer)
+            },
+        }
+    }
+    /// A forced whois: its own occurrence at this instant, needing only a chat.
+    pub fn forced(now_ms: u64, chat_present: bool) -> Self {
+        Gated {
+            kind: LegacyGate::Forced,
+            state: GateState {
+                chat_present,
+                forced: true,
+                ..GateState::neutral(Timer {
+                    now_ms,
+                    last_ms: 0,
+                    period_ms: 0,
+                })
+            },
+        }
+    }
+
+    pub fn kind(&self) -> LegacyGate {
+        self.kind
+    }
+    pub fn state(&self) -> &GateState {
+        &self.state
+    }
+    /// Due-ness as the legacy code computes it for this kind.
+    pub fn due(&self) -> bool {
+        match self.kind {
+            // A forced ask is only evaluated when a chat exists (legacy nests it under
+            // `chat != 0`); without one it is not an opportunity at all.
+            LegacyGate::Forced => self.state.forced && self.state.chat_present,
+            _ => Timer {
+                now_ms: self.state.now_ms,
+                last_ms: self.state.last_ms,
+                period_ms: self.state.period_ms,
+            }
+            .due(),
+        }
+    }
+    /// The legacy timer's next last-run stamp after this wake's decision — the reset rule per
+    /// kind, transcribed from the poll loop: a chat-facing timer resets whenever it is due and
+    /// its switch is on (whether or not it ran); an unconditional timer resets when it runs;
+    /// member-beat and patterns reset only when they run; a persisted cadence's stamp is
+    /// written by the run itself, so the site's value never moves here; a forced occurrence has
+    /// no timer.
+    pub fn advance(&self, decision: GateDecision) -> u64 {
+        let st = &self.state;
+        match (self.kind, decision) {
+            (_, GateDecision::NotDue) => st.last_ms,
+            (LegacyGate::TimerChatQuiet, GateDecision::Hold(HeldReason::Disabled)) => st.last_ms,
+            (LegacyGate::TimerChatQuiet, _) => st.now_ms,
+            (LegacyGate::TimerUnconditional, _) => st.now_ms,
+            (LegacyGate::TimerQuiet | LegacyGate::IdleGated, GateDecision::Act) => st.now_ms,
+            (LegacyGate::TimerQuiet | LegacyGate::IdleGated, GateDecision::Hold(_)) => st.last_ms,
+            (
+                LegacyGate::PersistedReceptive
+                | LegacyGate::PersistedChatQuiet
+                | LegacyGate::Forced,
+                _,
+            ) => st.last_ms,
+        }
+    }
+    /// The decision, with each kind's blockers checked in the order the legacy code checked
+    /// them, so a hold names the FIRST legacy blocker, not the seam's generic precedence.
+    pub fn decide(&self) -> GateDecision {
+        if !self.due() {
+            return GateDecision::NotDue;
+        }
+        let st = &self.state;
+        let hold = |r: HeldReason| GateDecision::Hold(r);
+        match self.kind {
+            LegacyGate::TimerChatQuiet => {
+                if !st.enabled {
+                    hold(HeldReason::Disabled)
+                } else if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::TimerUnconditional => GateDecision::Act,
+            LegacyGate::TimerQuiet => {
+                if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::IdleGated => {
+                if st.spoke {
+                    hold(HeldReason::SpokeAlready)
+                } else if !st.enabled {
+                    hold(HeldReason::Disabled)
+                } else if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else if !st.idle {
+                    hold(HeldReason::IdleGate)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::PersistedReceptive => {
+                if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else if !st.receptive {
+                    hold(HeldReason::Receptivity)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::PersistedChatQuiet => {
+                if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::Forced => GateDecision::Act,
+        }
+    }
+}
+
+#[cfg(test)]
+mod legacy_gate_tests {
+    use super::*;
+
+    // ── The oracle: every legacy predicate transcribed HERE, from the poll loop as it was
+    // before L1b, calling nothing in the production gate. A bug in `Timer::due`, in a
+    // constructor's wiring, or in `Gated::decide` must fail against this, not agree with it.
+
+    fn oracle_due(kind: LegacyGate, st: &GateState) -> bool {
+        match kind {
+            LegacyGate::Forced => st.forced && st.chat_present,
+            _ => st.now_ms >= st.last_ms && st.now_ms - st.last_ms >= st.period_ms,
+        }
+    }
+
+    fn oracle_runs(kind: LegacyGate, st: &GateState) -> bool {
+        let due = oracle_due(kind, st);
+        match kind {
+            LegacyGate::TimerChatQuiet => st.enabled && due && st.chat_present && !st.quiet,
+            LegacyGate::TimerUnconditional => due,
+            LegacyGate::TimerQuiet => due && !st.quiet,
+            LegacyGate::IdleGated => {
+                !st.spoke && st.enabled && st.chat_present && !st.quiet && st.idle && due
+            }
+            LegacyGate::PersistedReceptive => st.chat_present && !st.quiet && due && st.receptive,
+            LegacyGate::PersistedChatQuiet => !st.quiet && due && st.chat_present,
+            LegacyGate::Forced => st.chat_present && st.forced,
+        }
+    }
+
+    /// The first condition the legacy `if` chain fails on, for a due wake that does not run.
+    fn oracle_first_blocker(kind: LegacyGate, st: &GateState) -> Option<HeldReason> {
+        let checks: &[(bool, HeldReason)] = match kind {
+            LegacyGate::TimerChatQuiet => &[
+                (!st.enabled, HeldReason::Disabled),
+                (!st.chat_present, HeldReason::NoChat),
+                (st.quiet, HeldReason::QuietHours),
+            ],
+            LegacyGate::TimerUnconditional | LegacyGate::Forced => &[],
+            LegacyGate::TimerQuiet => &[(st.quiet, HeldReason::QuietHours)],
+            LegacyGate::IdleGated => &[
+                (st.spoke, HeldReason::SpokeAlready),
+                (!st.enabled, HeldReason::Disabled),
+                (!st.chat_present, HeldReason::NoChat),
+                (st.quiet, HeldReason::QuietHours),
+                (!st.idle, HeldReason::IdleGate),
+            ],
+            LegacyGate::PersistedReceptive => &[
+                (!st.chat_present, HeldReason::NoChat),
+                (st.quiet, HeldReason::QuietHours),
+                (!st.receptive, HeldReason::Receptivity),
+            ],
+            LegacyGate::PersistedChatQuiet => &[
+                (st.quiet, HeldReason::QuietHours),
+                (!st.chat_present, HeldReason::NoChat),
+            ],
+        };
+        checks.iter().find(|(blocks, _)| *blocks).map(|(_, r)| *r)
+    }
+
+    /// The legacy reset rule, transcribed from where each `last_x = now` sits in the poll loop.
+    fn oracle_next_last(kind: LegacyGate, st: &GateState) -> u64 {
+        let due = oracle_due(kind, st);
+        let runs = oracle_runs(kind, st);
+        match kind {
+            // `if enabled { if due { last = now; if chat && !quiet { run } } }`
+            LegacyGate::TimerChatQuiet => {
+                if st.enabled && due {
+                    st.now_ms
+                } else {
+                    st.last_ms
+                }
+            }
+            // `if due { run; last = now }`
+            LegacyGate::TimerUnconditional => {
+                if due {
+                    st.now_ms
+                } else {
+                    st.last_ms
+                }
+            }
+            // `if due && !quiet { run; last = now }` / `if !spoke && on && idle_ok && due { run; last = now }`
+            LegacyGate::TimerQuiet | LegacyGate::IdleGated => {
+                if runs {
+                    st.now_ms
+                } else {
+                    st.last_ms
+                }
+            }
+            LegacyGate::PersistedReceptive
+            | LegacyGate::PersistedChatQuiet
+            | LegacyGate::Forced => st.last_ms,
+        }
+    }
+
+    /// The constructor a site of this kind calls, driven from the raw signals of the wake —
+    /// so the fixture exercises the same wiring the sites use.
+    fn gated_for(kind: LegacyGate, st: &GateState) -> Gated {
+        let timer = Timer {
+            now_ms: st.now_ms,
+            last_ms: st.last_ms,
+            period_ms: st.period_ms,
+        };
+        let presence = Presence {
+            chat_present: st.chat_present,
+            quiet: st.quiet,
+        };
+        match kind {
+            LegacyGate::TimerChatQuiet => Gated::timer_chat_quiet(timer, presence, st.enabled),
+            LegacyGate::TimerUnconditional => Gated::timer(timer),
+            LegacyGate::TimerQuiet => Gated::timer_quiet(timer, st.quiet),
+            LegacyGate::IdleGated => Gated::idle_gated(
+                timer,
+                presence,
+                IdleInputs {
+                    enabled: st.enabled,
+                    spoke: st.spoke,
+                    idle: st.idle,
+                },
+            ),
+            LegacyGate::PersistedReceptive => {
+                Gated::persisted_receptive(timer, presence, st.receptive)
+            }
+            LegacyGate::PersistedChatQuiet => Gated::persisted_chat_quiet(timer, presence),
+            LegacyGate::Forced => Gated::forced(st.now_ms, st.chat_present),
+        }
+    }
+
+    /// A deterministic day of wakes with the state changing on a fixed schedule; every kind
+    /// must agree with the oracle on every wake, and the set of opportunity ids emitted must
+    /// equal the set of due occurrences the oracle enumerates.
+    fn day(kind: LegacyGate, period_ms: u64) -> (usize, usize, usize, usize) {
+        let start = 1_788_300_000_000u64;
+        let mut t = start;
+        let end = start + 24 * 60 * 60 * 1000;
+        let mut last = 0u64;
+        let mut acts = 0usize;
+        let mut holds = 0usize;
+        let mut due_occurrences = std::collections::BTreeSet::new();
+        let mut emitted = std::collections::BTreeSet::new();
+        // Raw attempts per opportunity key, in order (true = act, false = hold), so repeated
+        // acts under one key cannot hide inside the emitted SET.
+        let mut attempts: std::collections::BTreeMap<u64, Vec<bool>> = Default::default();
+        let mut gate = OpportunityGate::default();
+        let mut wake_no = 0u64;
+        while t < end {
+            let hour = (t - start) / 3_600_000;
+            let st = GateState {
+                now_ms: t,
+                last_ms: last,
+                period_ms,
+                enabled: hour != 5,
+                chat_present: hour >= 1,
+                quiet: hour < 8 || (hour == 5),
+                idle: (wake_no / 40) % 3 != 0,
+                spoke: wake_no % 97 == 0,
+                receptive: (wake_no / 7) % 4 != 0,
+                forced: wake_no % 1_000 == 0,
+            };
+            if kind == LegacyGate::Forced && !st.forced {
+                // The site constructs a forced gate only on a forced wake; on any other wake
+                // there is no forced opportunity to decide on.
+                t += 1_500;
+                wake_no += 1;
+                continue;
+            }
+            let gated = gated_for(kind, &st);
+            assert_eq!(gated.kind(), kind);
+            let due = oracle_due(kind, &st);
+            assert_eq!(
+                gated.due(),
+                due,
+                "{kind:?}: due-ness disagrees with the oracle at {t}"
+            );
+            let legacy = oracle_runs(kind, &st);
+            let decision = gated.decide();
+            match decision {
+                GateDecision::NotDue => assert!(!due, "{kind:?}: NotDue while the oracle is due"),
+                GateDecision::Act => {
+                    assert!(legacy, "{kind:?}: seam acts where legacy would not run");
+                    acts += 1;
+                }
+                GateDecision::Hold(reason) => {
+                    assert!(
+                        due && !legacy,
+                        "{kind:?}: seam holds where legacy would run"
+                    );
+                    assert_eq!(
+                        Some(reason),
+                        oracle_first_blocker(kind, &st),
+                        "{kind:?}: hold does not name the first legacy blocker at {t}"
+                    );
+                    holds += 1;
+                }
+            }
+            if legacy {
+                assert_eq!(
+                    decision,
+                    GateDecision::Act,
+                    "{kind:?}: legacy runs but seam does not act"
+                );
+            }
+            // The oracle enumerates due occurrences (one per distinct last-run window while
+            // due; one per instant when forced) and the ids the site would emit for them.
+            if due {
+                let key = if kind == LegacyGate::Forced { t } else { last };
+                due_occurrences.insert(key);
+                match decision {
+                    GateDecision::Act => {
+                        let opp = if kind == LegacyGate::Forced {
+                            LoopOpportunity::Forced { at_ms: t }
+                        } else {
+                            LoopOpportunity::Window {
+                                loop_id: LoopId::HomeWatch,
+                                process_start_ms: start,
+                                key: last,
+                            }
+                        };
+                        gate.mark(key);
+                        emitted.insert(opp.id());
+                        attempts.entry(key).or_default().push(true);
+                    }
+                    GateDecision::Hold(_) => {
+                        if let Some(opp) = gate.take_window(LoopId::HomeWatch, start, last) {
+                            emitted.insert(opp.id());
+                        }
+                        attempts.entry(key).or_default().push(false);
+                    }
+                    GateDecision::NotDue => {}
+                }
+            }
+            // The site's timer moves exactly as the legacy reset rule says, on every wake.
+            let next = gated.advance(decision);
+            assert_eq!(
+                next,
+                oracle_next_last(kind, &st),
+                "{kind:?}: timer transition differs at {t}"
+            );
+            last = next;
+            // A persisted cadence's stamp is written by the run itself, outside the site:
+            // model that external write so the next wake opens a new window.
+            if matches!(
+                kind,
+                LegacyGate::PersistedReceptive | LegacyGate::PersistedChatQuiet
+            ) && decision == GateDecision::Act
+            {
+                last = t;
+            }
+            t += 1_500;
+            wake_no += 1;
+        }
+        // One act per opportunity at most, and never anything after it: a key may hold
+        // (repeatedly, where the timer does not reset on a hold) and then act, but an act
+        // closes the opportunity.
+        for (key, seq) in &attempts {
+            let acts_here = seq.iter().filter(|a| **a).count();
+            assert!(acts_here <= 1, "{kind:?}: {acts_here} acts under key {key}");
+            if let Some(pos) = seq.iter().position(|a| *a) {
+                assert_eq!(
+                    pos + 1,
+                    seq.len(),
+                    "{kind:?}: an attempt follows the act under key {key}"
+                );
+            }
+        }
+        (acts, holds, due_occurrences.len(), emitted.len())
+    }
+
+    /// The detached mail sweep's sequence at the gate: a hold recorded under a window must
+    /// not starve the act that follows when conditions clear, and a wake that arrives before
+    /// the body has moved the persisted stamp must not spawn the same sweep again.
+    #[test]
+    fn a_detached_act_runs_once_per_window_and_is_never_starved_by_an_earlier_hold() {
+        let mut g = OpportunityGate::default();
+        // Hold(quiet) then Act: the hold records once, the act spawns once.
+        assert!(g.take_window(LoopId::MailSweep, 1, 100).is_some());
+        assert!(g.take_window(LoopId::MailSweep, 1, 100).is_none());
+        assert!(g.take_act(100), "an earlier hold must not starve the act");
+        assert!(
+            !g.take_act(100),
+            "a second wake before the stamp moved must not spawn again"
+        );
+        assert!(
+            g.take_window(LoopId::MailSweep, 1, 100).is_none(),
+            "no hold after the act"
+        );
+        // Act then Act under the next window: spawns once.
+        assert!(g.take_act(200));
+        assert!(!g.take_act(200));
+        // The stamp moved: a fresh window, a fresh act.
+        assert!(g.take_act(300));
+    }
+
+    #[test]
+    fn every_kind_agrees_with_the_test_local_oracle_over_a_replayed_day() {
+        for (kind, period_ms) in [
+            (LegacyGate::TimerChatQuiet, 120_000),
+            (LegacyGate::TimerUnconditional, 3_600_000),
+            (LegacyGate::TimerQuiet, 120_000),
+            (LegacyGate::IdleGated, 600_000),
+            (LegacyGate::PersistedReceptive, 86_400_000 / 4),
+            (LegacyGate::PersistedChatQuiet, 86_400_000 / 4),
+        ] {
+            let (acts, holds, due, emitted) = day(kind, period_ms);
+            assert!(acts > 0, "{kind:?} never acted");
+            if kind != LegacyGate::TimerUnconditional {
+                assert!(holds > 0, "{kind:?} never held");
+            }
+            assert_eq!(emitted, due, "{kind:?}: emitted ids != due occurrences");
+        }
+        let (acts, _holds, due, emitted) = day(LegacyGate::Forced, 0);
+        assert!(acts > 0);
+        assert_eq!(emitted, due);
+    }
+
+    /// A due wake with several blockers at once names the one the legacy chain hit first.
+    #[test]
+    fn a_hold_names_the_first_legacy_blocker_not_the_generic_precedence() {
+        let timer = Timer {
+            now_ms: 10_000_000,
+            last_ms: 0,
+            period_ms: 1_000,
+        };
+        let dark_and_alone = Presence {
+            chat_present: false,
+            quiet: true,
+        };
+        // Mail-sweep checked quiet before the chat.
+        assert_eq!(
+            Gated::persisted_chat_quiet(timer, dark_and_alone).decide(),
+            GateDecision::Hold(HeldReason::QuietHours)
+        );
+        // Home-watch checked the chat before quiet, and its switch before both.
+        assert_eq!(
+            Gated::timer_chat_quiet(timer, dark_and_alone, true).decide(),
+            GateDecision::Hold(HeldReason::NoChat)
+        );
+        assert_eq!(
+            Gated::timer_chat_quiet(timer, dark_and_alone, false).decide(),
+            GateDecision::Hold(HeldReason::Disabled)
+        );
+        // Patterns yielded to a loop that already spoke before consulting its own switch.
+        assert_eq!(
+            Gated::idle_gated(
+                timer,
+                dark_and_alone,
+                IdleInputs {
+                    enabled: false,
+                    spoke: true,
+                    idle: false
+                }
+            )
+            .decide(),
+            GateDecision::Hold(HeldReason::SpokeAlready)
+        );
+        assert_eq!(
+            Gated::idle_gated(
+                timer,
+                dark_and_alone,
+                IdleInputs {
+                    enabled: false,
+                    spoke: false,
+                    idle: false
+                }
+            )
+            .decide(),
+            GateDecision::Hold(HeldReason::Disabled)
+        );
+        assert_eq!(
+            Gated::idle_gated(
+                timer,
+                dark_and_alone,
+                IdleInputs {
+                    enabled: true,
+                    spoke: false,
+                    idle: false
+                }
+            )
+            .decide(),
+            GateDecision::Hold(HeldReason::NoChat)
+        );
+        // Tradition-prep consulted receptivity only past the chat and quiet.
+        assert_eq!(
+            Gated::persisted_receptive(timer, dark_and_alone, false).decide(),
+            GateDecision::Hold(HeldReason::NoChat)
+        );
+        // A forced ask without a chat is not an opportunity at all.
+        assert_eq!(Gated::forced(5, false).decide(), GateDecision::NotDue);
+        assert_eq!(Gated::forced(5, true).decide(), GateDecision::Act);
+    }
+
+    #[test]
+    fn a_forced_occurrence_and_a_persisted_window_are_distinct_ids() {
+        let a = LoopOpportunity::Forced { at_ms: 5 };
+        let b = LoopOpportunity::Window {
+            loop_id: LoopId::Whois,
+            process_start_ms: 1,
+            key: 5,
+        };
+        assert_ne!(a.id(), b.id());
+        assert_eq!(LoopOpportunity::parse(&a.id()), Some(a));
+        assert_eq!(LoopOpportunity::parse("whois:forced:x"), None);
+        // Only whois can be forced: the variant carries no loop, and the parser refuses any
+        // other loop's forced label.
+        assert_eq!(a.loop_id(), LoopId::Whois);
+        assert_eq!(a.id(), "whois:forced:5");
+        assert_eq!(LoopOpportunity::parse("home-watch:forced:5"), None);
+        assert_eq!(LoopOpportunity::parse("dmn:forced:5"), None);
     }
 }

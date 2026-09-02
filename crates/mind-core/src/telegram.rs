@@ -1986,6 +1986,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut gate_ask = mind_observability::OpportunityGate::default();
     let mut gate_patterns = mind_observability::OpportunityGate::default();
     let mut gate_member_beat = mind_observability::OpportunityGate::default();
+    let mut gate_home_watch = mind_observability::OpportunityGate::default();
+    let mut gate_family = mind_observability::OpportunityGate::default();
+    let mut gate_followup = mind_observability::OpportunityGate::default();
+    let mut gate_pricewatch = mind_observability::OpportunityGate::default();
+    let mut gate_mail_sweep = mind_observability::OpportunityGate::default();
+    let mut gate_whois = mind_observability::OpportunityGate::default();
+    let mut gate_tradprep = mind_observability::OpportunityGate::default();
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
@@ -2256,22 +2263,56 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Proactive HOME WATCH — the moat in action: flag grounded home anomalies (TV on while away,
         // internet down, door unlocked, low ink) UNPROMPTED. Deduped (fires once per condition until it
         // clears), paced (YM_HOME_WATCH_SECS, default 120s), quiet-hours-gated. YM_HOME_WATCH=off disables.
-        if std::env::var("YM_HOME_WATCH")
-            .map(|v| v != "off")
-            .unwrap_or(true)
         {
+            let home_watch_on = std::env::var("YM_HOME_WATCH")
+                .map(|v| v != "off")
+                .unwrap_or(true);
             let period: u64 = std::env::var("YM_HOME_WATCH_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(120);
             let now = now_ms();
-            if now.saturating_sub(last_home_watch) >= period * 1000 {
+            let chat = active_chat.load(Ordering::Relaxed);
+            let hw_gate = mind_observability::Gated::timer_chat_quiet(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_home_watch,
+                    period_ms: period * 1000,
+                },
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+                home_watch_on,
+            );
+            let hw_decision = hw_gate.decide();
+            if let mind_observability::GateDecision::Hold(reason) = hw_decision {
+                // Legacy: the timer resets when due whether or not the body ran (only when the
+                // loop is on); the ledger records the hold once per window.
+                if let Some(window) = gate_home_watch.take_window(
+                    mind_observability::LoopId::HomeWatch,
+                    process_start_ms,
+                    last_home_watch,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            reason,
+                        )
+                        .considered(&[mind_observability::ConsideredSignal::DueDelegations])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(period)]),
+                    );
+                }
+                last_home_watch = hw_gate.advance(hw_decision);
+            }
+            if hw_decision == mind_observability::GateDecision::Act {
                 let hw_window = last_home_watch;
                 let hw_t0 = now_ms();
                 let mut hw_items: u32 = 0;
-                last_home_watch = now;
-                let chat = active_chat.load(Ordering::Relaxed);
-                if chat != 0 && !in_quiet_hours_now() {
+                last_home_watch = hw_gate.advance(hw_decision);
+                gate_home_watch.mark(hw_window);
+                {
                     for alert in conv.home_watch().await {
                         hw_items += 1;
                         let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
@@ -2286,6 +2327,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     // situation brief (news × live oil/markets × the user's portfolio) and send it. The
                     // ~15s brief runs detached so it never stalls the poll loop.
                     for topic in conv.news_digests_due().await {
+                        hw_items += 1;
                         let (c, api2) = (conv.clone(), api.clone());
                         tokio::spawn(async move {
                             // Learn-by-comparing: recall the held understanding, fetch fresh, and surface
@@ -2325,7 +2367,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(3600);
             let now = now_ms();
-            if now.saturating_sub(last_resolve) >= period * 1000 {
+            let rs_gate = mind_observability::Gated::timer(mind_observability::Timer {
+                now_ms: now,
+                last_ms: last_resolve,
+                period_ms: period * 1000,
+            });
+            let rs_decision = rs_gate.decide();
+            if rs_decision == mind_observability::GateDecision::Act {
                 let rs_t0 = now_ms();
                 let chat = active_chat.load(Ordering::Relaxed);
                 let mut verdicts: u32 = 0;
@@ -2350,7 +2398,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(verdicts)
                     .wall_ms(now_ms().saturating_sub(rs_t0)),
                 );
-                last_resolve = now;
+                last_resolve = rs_gate.advance(rs_decision);
             }
         }
 
@@ -2364,7 +2412,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(259_200);
             let now = now_ms();
-            if now.saturating_sub(last_profile) >= period * 1000 {
+            let pr_gate = mind_observability::Gated::timer(mind_observability::Timer {
+                now_ms: now,
+                last_ms: last_profile,
+                period_ms: period * 1000,
+            });
+            let pr_decision = pr_gate.decide();
+            if pr_decision == mind_observability::GateDecision::Act {
                 let pr_t0 = now_ms();
                 let mut refreshed: u32 = 0;
                 if let Some(update) = conv.refresh_profile().await {
@@ -2395,7 +2449,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(refreshed)
                     .wall_ms(now_ms().saturating_sub(pr_t0)),
                 );
-                last_profile = now;
+                last_profile = pr_gate.advance(pr_decision);
             }
         }
 
@@ -2408,11 +2462,44 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(43_200);
             let now = now_ms();
-            if now.saturating_sub(last_family) >= period * 1000 {
+            let chat = active_chat.load(Ordering::Relaxed);
+            let fm_gate = mind_observability::Gated::timer_chat_quiet(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_family,
+                    period_ms: period * 1000,
+                },
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+                true,
+            );
+            let fm_decision = fm_gate.decide();
+            if let mind_observability::GateDecision::Hold(reason) = fm_decision {
+                if let Some(window) = gate_family.take_window(
+                    mind_observability::LoopId::Family,
+                    process_start_ms,
+                    last_family,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            reason,
+                        )
+                        .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(period)]),
+                    );
+                }
+                last_family = fm_gate.advance(fm_decision);
+            }
+            if fm_decision == mind_observability::GateDecision::Act {
+                let fm_window = last_family;
+                gate_family.mark(fm_window);
                 let fm_t0 = now_ms();
                 let mut nudges: u32 = 0;
-                let chat = active_chat.load(Ordering::Relaxed);
-                if chat != 0 && !in_quiet_hours_now() {
+                {
                     // Birthdays deserve LEAD TIME to plan/shop — a 21-day window was too conservative
                     // (it read as "not doing anything" until the last minute). Default 28 days, tunable.
                     let window: i64 = std::env::var("YM_FAMILY_WINDOW")
@@ -2431,7 +2518,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         mind_observability::LoopOpportunity::Window {
                             loop_id: mind_observability::LoopId::Family,
                             process_start_ms,
-                            key: last_family,
+                            key: fm_window,
                         },
                         mind_observability::LoopHost::Telegram,
                         mind_observability::LoopOutcome::Ran,
@@ -2441,7 +2528,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(nudges)
                     .wall_ms(now_ms().saturating_sub(fm_t0)),
                 );
-                last_family = now;
+                last_family = fm_gate.advance(fm_decision);
             }
         }
 
@@ -2511,11 +2598,44 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(21_600);
             let now = now_ms();
-            if now.saturating_sub(last_followup) >= period * 1000 {
+            let chat = active_chat.load(Ordering::Relaxed);
+            let fu_gate = mind_observability::Gated::timer_chat_quiet(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_followup,
+                    period_ms: period * 1000,
+                },
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+                true,
+            );
+            let fu_decision = fu_gate.decide();
+            if let mind_observability::GateDecision::Hold(reason) = fu_decision {
+                if let Some(window) = gate_followup.take_window(
+                    mind_observability::LoopId::FollowUp,
+                    process_start_ms,
+                    last_followup,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            reason,
+                        )
+                        .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(period)]),
+                    );
+                }
+                last_followup = fu_gate.advance(fu_decision);
+            }
+            if fu_decision == mind_observability::GateDecision::Act {
+                let fu_window = last_followup;
+                gate_followup.mark(fu_window);
                 let fu_t0 = now_ms();
                 let mut followups: u32 = 0;
-                let chat = active_chat.load(Ordering::Relaxed);
-                if chat != 0 && !in_quiet_hours_now() {
+                {
                     for nudge in conv.deadline_followups().await {
                         followups += 1;
                         if tg_send_mirrored(&conv, &api, chat, &nudge).await.is_ok() {
@@ -2528,6 +2648,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     // silently — announcing the closure would be a second interruption about something
                     // the user has already shown they do not care about.
                     for ask in conv.close_stale_threads().await {
+                        followups += 1;
                         if tg_send_mirrored(&conv, &api, chat, &ask).await.is_ok() {
                             conv.note_proactive_sent().await;
                         }
@@ -2538,7 +2659,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         mind_observability::LoopOpportunity::Window {
                             loop_id: mind_observability::LoopId::FollowUp,
                             process_start_ms,
-                            key: last_followup,
+                            key: fu_window,
                         },
                         mind_observability::LoopHost::Telegram,
                         mind_observability::LoopOutcome::Ran,
@@ -2548,7 +2669,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(followups)
                     .wall_ms(now_ms().saturating_sub(fu_t0)),
                 );
-                last_followup = now;
+                last_followup = fu_gate.advance(fu_decision);
             }
         }
 
@@ -2581,11 +2702,44 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(43_200);
             let now = now_ms();
-            if now.saturating_sub(last_pricewatch) >= period * 1000 {
+            let chat = active_chat.load(Ordering::Relaxed);
+            let pw_gate = mind_observability::Gated::timer_chat_quiet(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_pricewatch,
+                    period_ms: period * 1000,
+                },
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+                true,
+            );
+            let pw_decision = pw_gate.decide();
+            if let mind_observability::GateDecision::Hold(reason) = pw_decision {
+                if let Some(window) = gate_pricewatch.take_window(
+                    mind_observability::LoopId::PriceWatch,
+                    process_start_ms,
+                    last_pricewatch,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            reason,
+                        )
+                        .considered(&[mind_observability::ConsideredSignal::Beliefs])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(period)]),
+                    );
+                }
+                last_pricewatch = pw_gate.advance(pw_decision);
+            }
+            if pw_decision == mind_observability::GateDecision::Act {
+                let pw_window = last_pricewatch;
+                gate_pricewatch.mark(pw_window);
                 let pw_t0 = now_ms();
                 let mut alerts: u32 = 0;
-                let chat = active_chat.load(Ordering::Relaxed);
-                if chat != 0 && !in_quiet_hours_now() {
+                {
                     for alert in conv.check_price_watches().await {
                         alerts += 1;
                         let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
@@ -2596,7 +2750,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         mind_observability::LoopOpportunity::Window {
                             loop_id: mind_observability::LoopId::PriceWatch,
                             process_start_ms,
-                            key: last_pricewatch,
+                            key: pw_window,
                         },
                         mind_observability::LoopHost::Telegram,
                         mind_observability::LoopOutcome::Ran,
@@ -2606,7 +2760,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(alerts)
                     .wall_ms(now_ms().saturating_sub(pw_t0)),
                 );
-                last_pricewatch = now;
+                last_pricewatch = pw_gate.advance(pw_decision);
             }
         }
 
@@ -2842,17 +2996,82 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // (the Mahalaya photoshoot) once the festival is inside forecast range.
         {
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.tradition_prep_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                if let Some(msg) = conv.tradition_prep_run().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        conv.note_proactive_sent().await;
-                        eprintln!("[tradition] weather-planned days sent");
+            let tp_now = now_ms();
+            let tp_quiet = in_quiet_hours_now();
+            let (tp_last, tp_period_ms) = conv.tradition_prep_state().await;
+            let tp_timer = mind_observability::Timer {
+                now_ms: tp_now,
+                last_ms: tp_last,
+                period_ms: tp_period_ms,
+            };
+            // Receptivity is consulted only past due, chat and quiet (legacy order); a due,
+            // clear, unreceptive wake is a hold. Due-ness is the timer's, never recomputed here.
+            let tp_receptive =
+                tp_timer.due() && chat != 0 && !tp_quiet && conv.proactive_receptivity_ok().await;
+            let tp_gate = mind_observability::Gated::persisted_receptive(
+                tp_timer,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: tp_quiet,
+                },
+                tp_receptive,
+            );
+            let tp_considered = [
+                mind_observability::ConsideredSignal::FollowUps,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let tp_policy = [
+                mind_observability::LoopPolicy::Cadence(tp_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+            ];
+            match tp_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let tp_t0 = now_ms();
+                    gate_tradprep.mark(tp_last);
+                    let mut produced: u32 = 0;
+                    if let Some(msg) = conv.tradition_prep_run().await {
+                        produced = 1;
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                            eprintln!("[tradition] weather-planned days sent");
+                        }
+                    }
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::TraditionPrep,
+                                process_start_ms,
+                                key: tp_last,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Ran,
+                        )
+                        .considered(&tp_considered)
+                        .policy(&tp_policy)
+                        .count(produced)
+                        .wall_ms(now_ms().saturating_sub(tp_t0)),
+                    );
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_tradprep.take_window(
+                        mind_observability::LoopId::TraditionPrep,
+                        process_start_ms,
+                        tp_last,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&tp_considered)
+                            .policy(&tp_policy),
+                        );
                     }
                 }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2922,19 +3141,106 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // and becomes people-layer knowledge + a local face-name mapping.
         {
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 {
-                let forced = conv.whois_forced().await;
-                if forced
-                    || (!in_quiet_hours_now()
-                        && conv.whois_due().await
-                        && conv.proactive_receptivity_ok().await)
-                {
-                    if let Some((caption, jpeg, slot)) = conv.whois_next().await {
-                        if tg_send_photo(&api, chat, jpeg, &caption).await {
-                            conv.whois_arm(&slot).await;
-                            eprintln!("[whois] asked about face {slot}");
+            let wh_now = now_ms();
+            let wh_quiet = in_quiet_hours_now();
+            let forced = chat != 0 && conv.whois_forced().await;
+            let wh_considered = [
+                mind_observability::ConsideredSignal::Name,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            // Two occurrence kinds: a forced ask is its own opportunity and runs regardless of
+            // quiet, due or receptivity; otherwise the persisted daily cadence decides.
+            let wh_state_opt = if forced {
+                Some((0u64, 0u64))
+            } else {
+                conv.whois_state().await
+            };
+            if let Some((wh_last, wh_period_ms)) = wh_state_opt {
+                let wh_gate = if forced {
+                    mind_observability::Gated::forced(wh_now, chat != 0)
+                } else {
+                    let wh_timer = mind_observability::Timer {
+                        now_ms: wh_now,
+                        last_ms: wh_last,
+                        period_ms: wh_period_ms,
+                    };
+                    // Receptivity only past due, chat and quiet (legacy order); due-ness is the
+                    // timer's, never recomputed here.
+                    let wh_receptive = wh_timer.due()
+                        && chat != 0
+                        && !wh_quiet
+                        && conv.proactive_receptivity_ok().await;
+                    mind_observability::Gated::persisted_receptive(
+                        wh_timer,
+                        mind_observability::Presence {
+                            chat_present: chat != 0,
+                            quiet: wh_quiet,
+                        },
+                        wh_receptive,
+                    )
+                };
+                let wh_opportunity = if forced {
+                    mind_observability::LoopOpportunity::Forced { at_ms: wh_now }
+                } else {
+                    mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::Whois,
+                        process_start_ms,
+                        key: wh_last,
+                    }
+                };
+                let wh_policy = [
+                    mind_observability::LoopPolicy::Cadence(wh_period_ms / 1000),
+                    mind_observability::LoopPolicy::Budget(
+                        mind_observability::BudgetKind::ReceptivityGate,
+                    ),
+                    mind_observability::LoopPolicy::Cap(
+                        mind_observability::CapKind::OneOutstanding,
+                    ),
+                ];
+                match wh_gate.decide() {
+                    mind_observability::GateDecision::Act => {
+                        let wh_t0 = now_ms();
+                        if !forced {
+                            gate_whois.mark(wh_last);
+                        }
+                        let mut produced: u32 = 0;
+                        if let Some((caption, jpeg, slot)) = conv.whois_next().await {
+                            produced = 1;
+                            if tg_send_photo(&api, chat, jpeg, &caption).await {
+                                conv.whois_arm(&slot).await;
+                                eprintln!("[whois] asked about face {slot}");
+                            }
+                        }
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                wh_opportunity,
+                                mind_observability::LoopHost::Telegram,
+                                mind_observability::LoopOutcome::Ran,
+                            )
+                            .considered(&wh_considered)
+                            .policy(&wh_policy)
+                            .count(produced)
+                            .wall_ms(now_ms().saturating_sub(wh_t0)),
+                        );
+                    }
+                    mind_observability::GateDecision::Hold(reason) => {
+                        if let Some(window) = gate_whois.take_window(
+                            mind_observability::LoopId::Whois,
+                            process_start_ms,
+                            wh_last,
+                        ) {
+                            conv.record_loop_tick(
+                                mind_observability::LoopTick::held(
+                                    window,
+                                    mind_observability::LoopHost::Telegram,
+                                    reason,
+                                )
+                                .considered(&wh_considered)
+                                .policy(&wh_policy),
+                            );
                         }
                     }
+                    mind_observability::GateDecision::NotDue => {}
                 }
             }
         }
@@ -2943,13 +3249,22 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // delivered to THEIR own chat (owner-keyed end to end). Quiet-hours respected.
         {
             let now = now_ms();
-            let mb_due = now.saturating_sub(last_member_beat) >= 120_000;
-            if mb_due && !in_quiet_hours_now() {
+            let mb_gate = mind_observability::Gated::timer_quiet(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_member_beat,
+                    period_ms: 120 * 1000,
+                },
+                in_quiet_hours_now(),
+            );
+            let mb_decision = mb_gate.decide();
+            let mb_due = mb_decision != mind_observability::GateDecision::NotDue;
+            if mb_decision == mind_observability::GateDecision::Act {
                 let mb_t0 = now_ms();
                 let mut beats_sent: u32 = 0;
                 for (chat, text) in conv.member_beats().await {
+                    beats_sent += 1; // produced, whether or not delivery succeeds
                     if tg_send_mirrored(&conv, &api, chat, &text).await.is_ok() {
-                        beats_sent += 1;
                         eprintln!("[member] beat delivered to {chat}");
                     }
                 }
@@ -2969,7 +3284,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(beats_sent)
                     .wall_ms(now_ms().saturating_sub(mb_t0)),
                 );
-                last_member_beat = now;
+                last_member_beat = mb_gate.advance(mb_decision);
             } else if mb_due {
                 if let Some(window) = gate_member_beat.take_window(
                     mind_observability::LoopId::MemberBeat,
@@ -2992,18 +3307,86 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Daily mail sweep: cross-account analytics with body-peek verification; the user hears
         // about it ONLY when something needs action (silence-biased). Detached — two LLM passes
         // plus IMAP round-trips must never stall the poll loop.
-        if !in_quiet_hours_now() && conv.mail_sweep_due().await {
-            let c = conv.clone();
-            let api2 = api.clone();
+        {
+            // L1b v3: a persisted daily cadence. Its state (last run, domain-paced period) is read
+            // once, side-effect free; only an actually due sweep may act or hold; the opportunity
+            // is the window the persisted stamp opens; the act is recorded AFTER the detached body
+            // completes, with what it produced.
+            let ms_now = now_ms();
+            let ms_quiet = in_quiet_hours_now();
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 {
-                tokio::spawn(async move {
-                    if let Some(msg) = c.mail_sweep_run().await {
-                        if tg_send(&api2, chat, &msg).await.is_ok() {
-                            c.note_proactive_sent().await;
+            if let Some((ms_last, ms_period_ms)) = conv.mail_sweep_state().await {
+                let ms_gate = mind_observability::Gated::persisted_chat_quiet(
+                    mind_observability::Timer {
+                        now_ms: ms_now,
+                        last_ms: ms_last,
+                        period_ms: ms_period_ms,
+                    },
+                    mind_observability::Presence {
+                        chat_present: chat != 0,
+                        quiet: ms_quiet,
+                    },
+                );
+                match ms_gate.decide() {
+                    mind_observability::GateDecision::Act => {
+                        // One spawn per window: the persisted stamp is written by the body
+                        // later, so a wake that arrives before that write must not spawn the
+                        // same sweep again; an earlier hold under this window must not starve
+                        // it either. `take_act` keeps its own acted key for exactly that.
+                        if gate_mail_sweep.take_act(ms_last) {
+                            let ms_window = mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::MailSweep,
+                                process_start_ms,
+                                key: ms_last,
+                            };
+                            let c = conv.clone();
+                            let api2 = api.clone();
+                            tokio::spawn(async move {
+                                let t0 = now_ms();
+                                let digest = c.mail_sweep_run().await;
+                                let produced = u32::from(digest.is_some());
+                                if let Some(msg) = digest {
+                                    if tg_send(&api2, chat, &msg).await.is_ok() {
+                                        c.note_proactive_sent().await;
+                                    }
+                                }
+                                c.record_loop_tick(
+                                    mind_observability::LoopTick::acted(
+                                        ms_window,
+                                        mind_observability::LoopHost::Telegram,
+                                        mind_observability::LoopOutcome::Ran,
+                                    )
+                                    .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                                    .policy(&[mind_observability::LoopPolicy::Cadence(
+                                        ms_period_ms / 1000,
+                                    )])
+                                    .count(produced)
+                                    .wall_ms(now_ms().saturating_sub(t0)),
+                                );
+                            });
                         }
                     }
-                });
+                    mind_observability::GateDecision::Hold(reason) => {
+                        if let Some(window) = gate_mail_sweep.take_window(
+                            mind_observability::LoopId::MailSweep,
+                            process_start_ms,
+                            ms_last,
+                        ) {
+                            conv.record_loop_tick(
+                                mind_observability::LoopTick::held(
+                                    window,
+                                    mind_observability::LoopHost::Telegram,
+                                    reason,
+                                )
+                                .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                                .policy(&[
+                                    mind_observability::LoopPolicy::Cadence(ms_period_ms / 1000),
+                                ]),
+                            );
+                        }
+                    }
+                    mind_observability::GateDecision::NotDue => {}
+                }
             }
         }
 
@@ -3058,7 +3441,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(21_600);
             let now = now_ms();
-            if now.saturating_sub(last_ics) >= period * 1000 {
+            let ics_gate = mind_observability::Gated::timer(mind_observability::Timer {
+                now_ms: now,
+                last_ms: last_ics,
+                period_ms: period * 1000,
+            });
+            let ics_decision = ics_gate.decide();
+            if ics_decision == mind_observability::GateDecision::Act {
                 let ics_t0 = now_ms();
                 let n = conv.refresh_ics().await;
                 if n > 0 {
@@ -3079,7 +3468,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(n as u32)
                     .wall_ms(now_ms().saturating_sub(ics_t0)),
                 );
-                last_ics = now;
+                last_ics = ics_gate.advance(ics_decision);
             }
         }
 
@@ -3091,7 +3480,13 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(60);
             let now = now_ms();
-            if now.saturating_sub(last_lease_sweep) >= period * 1000 {
+            let ls_gate = mind_observability::Gated::timer(mind_observability::Timer {
+                now_ms: now,
+                last_ms: last_lease_sweep,
+                period_ms: period * 1000,
+            });
+            let ls_decision = ls_gate.decide();
+            if ls_decision == mind_observability::GateDecision::Act {
                 let ls_t0 = now_ms();
                 let mut swept: u32 = 0;
                 for line in conv.sweep_leases().await {
@@ -3113,7 +3508,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(swept)
                     .wall_ms(now_ms().saturating_sub(ls_t0)),
                 );
-                last_lease_sweep = now;
+                last_lease_sweep = ls_gate.advance(ls_decision);
             }
         }
 
@@ -3272,8 +3667,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // was given. Quiet hours live here because this frontend owns the clock and the tz.
             let quiet_now = in_quiet_hours_now();
             conv.note_observed_quiet(quiet_now, quiet_hours_end_at_ms());
-            let idle_ok =
-                chat != 0 && !quiet_now && now.saturating_sub(last_activity) >= idle_secs * 1000;
+            let idle_stretch = now.saturating_sub(last_activity) >= idle_secs * 1000;
+            let idle_ok = chat != 0 && !quiet_now && idle_stretch;
             let mut spoke = false;
             // THE CALIBRATED KNOCK goes FIRST — it is the highest-value thing the mind can say
             // unprompted (prepared work + observed/told authority + a committed prediction), and it
@@ -3546,7 +3941,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             let patterns_on = std::env::var("YM_PATTERNS")
                 .map(|v| v != "off")
                 .unwrap_or(true);
-            let patterns_due = now.saturating_sub(last_patterns) >= pat_secs * 1000;
+            let pat_gate = mind_observability::Gated::idle_gated(
+                mind_observability::Timer {
+                    now_ms: now,
+                    last_ms: last_patterns,
+                    period_ms: pat_secs * 1000,
+                },
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: quiet_now,
+                },
+                mind_observability::IdleInputs {
+                    enabled: patterns_on,
+                    spoke,
+                    idle: idle_stretch,
+                },
+            );
+            let pat_decision = pat_gate.decide();
             let pat_considered = [
                 mind_observability::ConsideredSignal::Beliefs,
                 mind_observability::ConsideredSignal::Receptivity,
@@ -3555,22 +3966,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 mind_observability::LoopPolicy::Cadence(pat_secs),
                 mind_observability::LoopPolicy::Idle(idle_secs),
             ];
-            if !spoke && patterns_on && idle_ok && patterns_due {
+            if pat_decision == mind_observability::GateDecision::Act {
                 let pat_t0 = now_ms();
                 let pat_window = last_patterns;
                 let msg = conv.find_patterns().await;
-                let mut surfaced = false;
-                if msg.starts_with('\u{1f4a1}')
-                    && tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok()
-                {
+                let found = msg.starts_with('\u{1f4a1}');
+                let mut delivered = false;
+                if found && tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                     eprintln!(
                         "[patterns] surfaced a learned pattern ({} chars)",
                         msg.len()
                     );
                     conv.note_proactive_sent().await;
-                    surfaced = true;
+                    delivered = true;
                 }
-                last_patterns = now; // reset cadence whether or not it found one
+                last_patterns = pat_gate.advance(pat_decision);
                 gate_patterns.mark(pat_window);
                 conv.record_loop_tick(
                     mind_observability::LoopTick::acted(
@@ -3580,17 +3990,20 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                             key: pat_window,
                         },
                         mind_observability::LoopHost::Telegram,
-                        if surfaced {
+                        if found && delivered {
                             mind_observability::LoopOutcome::Surfaced
+                        } else if found {
+                            mind_observability::LoopOutcome::FoundUndelivered
                         } else {
                             mind_observability::LoopOutcome::NothingFound
                         },
                     )
                     .considered(&pat_considered)
                     .policy(&pat_policy)
+                    .count(u32::from(found))
                     .wall_ms(now_ms().saturating_sub(pat_t0)),
                 );
-            } else if patterns_due {
+            } else if let mind_observability::GateDecision::Hold(pat_reason) = pat_decision {
                 if let Some(window) = gate_patterns.take_window(
                     mind_observability::LoopId::Patterns,
                     process_start_ms,
@@ -3600,17 +4013,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         mind_observability::LoopTick::held(
                             window,
                             mind_observability::LoopHost::Telegram,
-                            if !patterns_on {
-                                mind_observability::HeldReason::Disabled
-                            } else if spoke {
-                                mind_observability::HeldReason::SpokeAlready
-                            } else if chat == 0 {
-                                mind_observability::HeldReason::NoChat
-                            } else if quiet_now {
-                                mind_observability::HeldReason::QuietHours
-                            } else {
-                                mind_observability::HeldReason::IdleGate
-                            },
+                            pat_reason,
                         )
                         .considered(&pat_considered)
                         .policy(&pat_policy),
@@ -3723,6 +4126,9 @@ mod tests {
             "LoopId::MemberBeat",
             "LoopId::Ics",
             "LoopId::LeaseSweep",
+            "LoopId::MailSweep",
+            "LoopId::Whois",
+            "LoopId::TraditionPrep",
         ] {
             assert!(
                 poll.contains(&format!("loop_id: mind_observability::{id},")),
@@ -3755,6 +4161,98 @@ mod tests {
         assert!(
             headless.contains("OpportunityGate::bucket(hb_now, 30)"),
             "acts are per beat"
+        );
+        // Every timer / cadence site calls the constructor of its kind — a kind can only be
+        // handed the inputs it reads — and decides through it; no site assembles gate state
+        // or computes due-ness by hand.
+        for (name, ctor) in [
+            ("hw", "timer_chat_quiet"),
+            ("rs", "timer"),
+            ("pr", "timer"),
+            ("fm", "timer_chat_quiet"),
+            ("fu", "timer_chat_quiet"),
+            ("pw", "timer_chat_quiet"),
+            ("ics", "timer"),
+            ("ls", "timer"),
+            ("mb", "timer_quiet"),
+            ("ms", "persisted_chat_quiet"),
+            ("tp", "persisted_receptive"),
+            ("pat", "idle_gated"),
+        ] {
+            assert!(
+                poll.contains(&format!(
+                    "let {name}_gate = mind_observability::Gated::{ctor}("
+                )),
+                "{name} calls the constructor of its kind"
+            );
+            assert!(
+                poll.contains(&format!("{name}_gate.decide()")),
+                "{name} decides through its gate"
+            );
+        }
+        assert!(
+            poll.contains("mind_observability::Gated::forced(wh_now, chat != 0)")
+                && poll
+                    .matches("mind_observability::Gated::persisted_receptive(")
+                    .count()
+                    == 2
+                && poll.contains("wh_timer,")
+                && poll.contains("wh_gate.decide()")
+                && poll.contains("LoopOpportunity::Forced {")
+        );
+        assert!(
+            !poll.contains(concat!("Gate", "State {")),
+            "no site assembles gate state by hand"
+        );
+        // Every legacy timer moves through its gate's typed transition, never by hand.
+        for (name, var) in [
+            ("hw", "last_home_watch"),
+            ("rs", "last_resolve"),
+            ("pr", "last_profile"),
+            ("fm", "last_family"),
+            ("fu", "last_followup"),
+            ("pw", "last_pricewatch"),
+            ("ics", "last_ics"),
+            ("ls", "last_lease_sweep"),
+            ("mb", "last_member_beat"),
+            ("pat", "last_patterns"),
+        ] {
+            assert!(
+                poll.contains(&format!("{var} = {name}_gate.advance({name}_decision);")),
+                "{name} advances its timer through the gate"
+            );
+            assert!(
+                !poll.contains(&format!("{var} = now;")),
+                "{name} resets its timer by hand"
+            );
+        }
+        assert!(poll.contains("mind_observability::IdleInputs {"));
+        // The detached mail sweep claims its act through the gate's acted key (once per
+        // window, never starved by an earlier hold) and records its hold through take_window.
+        assert!(poll.contains("if gate_mail_sweep.take_act(ms_last) {"));
+        assert_eq!(poll.matches("gate_mail_sweep.take_window(").count(), 1);
+        assert!(!poll.contains("gate_mail_sweep.mark("));
+        assert!(
+            !poll.contains("decide_given("),
+            "no site fabricates due-ness"
+        );
+        assert!(
+            !poll.contains(concat!("_last) >= ", ""))
+                && !poll.contains(concat!("last_patterns) >= ", "")),
+            "due-ness is computed by the timer, never by hand at a site"
+        );
+        // The two receptivity short-circuits read due-ness from their timer, nowhere else.
+        assert_eq!(poll.matches("_timer.due()").count(), 2);
+        // Persisted cadences read their state side-effect free, never `_due()` from the site.
+        assert!(
+            poll.contains("conv.mail_sweep_state().await")
+                && poll.contains("conv.whois_state()")
+                && poll.contains("conv.tradition_prep_state().await")
+        );
+        assert!(
+            !poll.contains("mail_sweep_due()")
+                && !poll.contains("whois_due()")
+                && !poll.contains("tradition_prep_due()")
         );
         // Windows carry the process start, so a restart cannot collide with an earlier window.
         assert!(poll.matches("process_start_ms,").count() >= 6);

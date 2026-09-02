@@ -1220,6 +1220,35 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
 
     /// Cadence gate for the poll loop: a people-knowing source exists, no interview question is
     /// already pending, and YM_WHOIS_SECS (default daily) has elapsed.
+    /// L1b (ARCH7): whois's persisted cadence state — (last run ms, effective period ms) — or
+    /// `None` when structurally off (no people-knowing photo source, or a slot already pending).
+    pub async fn whois_state(&self) -> Option<(u64, u64)> {
+        if !mind_tools::PhotoSource::all_from_env()
+            .iter()
+            .any(|s| s.knows_people())
+        {
+            return None;
+        }
+        if self.pending_slot().await.is_some() {
+            return None;
+        }
+        let period_ms: i64 = std::env::var("YM_WHOIS_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("whois").await) as i64;
+        let last: i64 = self
+            .memory
+            .profile_get("whois_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Some((last.max(0) as u64, period_ms.max(0) as u64))
+    }
+
     pub async fn whois_due(&self) -> bool {
         if !mind_tools::PhotoSource::all_from_env()
             .iter()

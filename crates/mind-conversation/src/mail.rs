@@ -546,6 +546,29 @@ impl super::ConversationEngine {
 
     /// Daily mail-sweep gate (YM_MAILSWEEP_SECS, default daily) — data check runs quietly; the
     /// user only hears about it when something actually needs them.
+    /// L1b (ARCH7): the sweep's persisted cadence state — (last run ms, effective period ms) —
+    /// or `None` when the loop is structurally off (no inboxes). One profile read, no writes.
+    pub async fn mail_sweep_state(&self) -> Option<(u64, u64)> {
+        if self.scan_inboxes().is_empty() {
+            return None;
+        }
+        let period_ms: i64 = std::env::var("YM_MAILSWEEP_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
+        let period_ms = (period_ms as f64 * self.domain_pace("mail").await) as i64;
+        let last: i64 = self
+            .memory
+            .profile_get("mail_sweep_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Some((last.max(0) as u64, period_ms.max(0) as u64))
+    }
+
     pub async fn mail_sweep_due(&self) -> bool {
         if self.scan_inboxes().is_empty() {
             return false;

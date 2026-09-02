@@ -638,6 +638,24 @@ impl super::ConversationEngine {
     }
 
     /// Daily gate for tradition prep.
+    /// L1b (ARCH7): tradition prep's persisted cadence state — (last run ms, period ms).
+    pub async fn tradition_prep_state(&self) -> (u64, u64) {
+        let period_ms: i64 = std::env::var("YM_TRADPREP_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(86_400)
+            * 1000;
+        let last: i64 = self
+            .memory
+            .profile_get("tradprep_last")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (last.max(0) as u64, period_ms.max(0) as u64)
+    }
+
     pub async fn tradition_prep_due(&self) -> bool {
         let period_ms: i64 = std::env::var("YM_TRADPREP_SECS")
             .ok()

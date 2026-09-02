@@ -8013,6 +8013,16 @@ impl ConversationEngine {
                 if prefix == "loops" {
                     return verified_report(mind_observability::render_loop_ledger);
                 }
+                // E.CFG1: what each configured function would actually call. The plain read makes no
+                // network call and says so; `roles verify` asks each distinct provider whether it
+                // serves the model the route names — the question the router never asks, and the one
+                // that would have caught a live role pointing at a model its provider does not carry.
+                if prefix == "roles" {
+                    return mind_inference::render_roles_from_env();
+                }
+                if prefix == "roles verify" {
+                    return mind_inference::render_roles_verified_from_env();
+                }
                 // L4-0: what the mind spent on inference — logical requests and backend
                 // attempts per callsite, per loop, per hour; tokens absent until reported.
                 if prefix == "spend" || prefix == "spend 24h" {

@@ -1753,12 +1753,23 @@ fn configured_api_key(key_env: &str) -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
-pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
-    let (provider, model) = match spec.split_once(':') {
+/// Split a `provider:model` spec into its halves, trimmed. A spec with no colon is a provider with
+/// no model, which means "the provider's default".
+pub fn split_spec(spec: &str) -> (&str, &str) {
+    match spec.split_once(':') {
         Some((p, m)) => (p.trim(), m.trim()),
         None => (spec.trim(), ""),
-    };
-    let (base, key_env, default_model) = match provider {
+    }
+}
+
+/// The provider table: `(base_url, key_env, default_model)` for a known provider, `None` otherwise.
+///
+/// This is the ONE place that knows provider endpoints. It was inline in `backend_from_spec`, which
+/// meant a diagnostic that wanted to ask "what would this spec actually call" had to either copy the
+/// table or build a backend it did not want. E.CFG1 needed exactly that question, so the table is
+/// public and `backend_from_spec` reads it like everyone else.
+pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    Some(match provider {
         "nanogpt" => (
             "https://nano-gpt.com/api/v1",
             "NANOGPT_KEY",
@@ -1817,7 +1828,12 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             "claude-sonnet-5",
         ),
         _ => return None,
-    };
+    })
+}
+
+pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
+    let (provider, model) = split_spec(spec);
+    let (base, key_env, default_model) = provider_catalog(provider)?;
     let key = configured_api_key(key_env)?;
     // Containment hook (E.CB2-N): `YM_PROVIDER_BASE_URL_<PROVIDER>` re-points one provider at a
     // local counting proxy that holds the real key; the process itself then only needs a
@@ -1841,6 +1857,250 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             model,
         )) as Arc<dyn LLMBackend>)
     }
+}
+
+// ── E.CFG1: what the role router would actually call ─────────────────────────────────────────
+//
+// `Router::from_env` asks two questions of a spec — is the provider known, is its key present — and
+// never asks whether the MODEL exists. A role set to a model its provider does not serve therefore
+// builds a pool that reports itself as configured and fails only when something calls it. That is
+// live on the staging box today, and it cost E.CB2-N a preflight round when a provider answered 410
+// eight times for a model absent from its catalogue of 82. These types make the gap visible; they
+// change no routing.
+
+/// Why a spec would or would not produce a backend. `backend_from_spec` collapses the last two into
+/// `None`, which is why its one message has to say "unknown provider or missing key" — two different
+/// problems with two different fixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecStatus {
+    /// Provider known and its key present: this spec builds a backend.
+    Configured,
+    /// The provider is not in `provider_catalog`.
+    UnknownProvider,
+    /// The provider is known; `key_env` is unset or blank.
+    MissingKey { key_env: &'static str },
+}
+
+/// One configured route: which variable set it, what it says, and what that resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleRoute {
+    pub var: String,
+    pub role: String,
+    pub spec: String,
+    pub provider: String,
+    /// The model as written, or the provider's default when the spec named none.
+    pub model: String,
+    /// True when the spec named no model and the default was filled in.
+    pub model_defaulted: bool,
+    /// The base URL this route would actually call, `YM_PROVIDER_BASE_URL_<PROVIDER>` included.
+    pub base_url: String,
+    pub status: SpecStatus,
+}
+
+/// Classify one spec without building anything. Pure: the env lookup is injected.
+pub fn classify_spec(
+    spec: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> (String, String, bool, String, SpecStatus) {
+    let (provider, model) = split_spec(spec);
+    match provider_catalog(provider) {
+        None => (
+            provider.to_string(),
+            model.to_string(),
+            false,
+            String::new(),
+            SpecStatus::UnknownProvider,
+        ),
+        Some((base, key_env, default_model)) => {
+            let defaulted = model.is_empty();
+            let model = if defaulted { default_model } else { model }.to_string();
+            let base_url = resolve_provider_base(provider, base, &lookup);
+            let has_key = lookup(key_env)
+                .map(|k| !k.trim().is_empty())
+                .unwrap_or(false);
+            let status = if has_key {
+                SpecStatus::Configured
+            } else {
+                SpecStatus::MissingKey { key_env }
+            };
+            (provider.to_string(), model, defaulted, base_url, status)
+        }
+    }
+}
+
+/// Every explicitly configured route: the six `YM_ROLE_*` plus `YM_PRIMARY_BRAIN`. An unset variable
+/// is absent from the plan — an unset role uses the default pool and makes no configuration claim.
+/// Pure: env lookup injected, no network, no backends built.
+pub fn role_plan(lookup: impl Fn(&str) -> Option<String> + Copy) -> Vec<RoleRoute> {
+    let mut out = Vec::new();
+    let mut push = |var: String, role: &str, spec: String| {
+        let (provider, model, model_defaulted, base_url, status) = classify_spec(&spec, lookup);
+        out.push(RoleRoute {
+            var,
+            role: role.to_string(),
+            spec,
+            provider,
+            model,
+            model_defaulted,
+            base_url,
+            status,
+        });
+    };
+    for role in ["chat", "research", "util", "verify", "code", "consolidate"] {
+        let var = format!("YM_ROLE_{}", role.to_uppercase());
+        if let Some(spec) = lookup(&var)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+        {
+            push(var, role, spec);
+        }
+    }
+    if let Some(spec) = primary_brain_spec(lookup) {
+        push("YM_PRIMARY_BRAIN".to_string(), "primary-brain", spec);
+    }
+    out
+}
+
+/// Whether the provider serves the model a route names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelCheck {
+    /// The catalogue contains this exact model id.
+    Served,
+    /// The catalogue was read and this id is not in it. Carries the catalogue size, because "absent
+    /// from a catalogue of 82" and "absent from a catalogue of 0" are different situations.
+    NotServed { catalogue: usize },
+    /// The catalogue could not be read. NEVER reported as served: an unreachable provider is an
+    /// unknown, and a diagnostic that guessed here would be worse than none.
+    Unreachable { why: String },
+    /// The route builds no backend, so there is nothing to ask a provider about.
+    NotApplicable,
+}
+
+/// Check each route's model against its provider's catalogue. `fetch` takes (base_url, provider) and
+/// returns the served model ids; it is a parameter so the tests need no network. One fetch per
+/// distinct base URL, not per route.
+pub fn verify_models(
+    plan: &[RoleRoute],
+    mut fetch: impl FnMut(&str, &str) -> Result<Vec<String>, String>,
+) -> Vec<ModelCheck> {
+    let mut cache: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
+    plan.iter()
+        .map(|r| {
+            if r.status != SpecStatus::Configured {
+                return ModelCheck::NotApplicable;
+            }
+            if !cache.iter().any(|(b, _)| b == &r.base_url) {
+                let got = fetch(&r.base_url, &r.provider);
+                cache.push((r.base_url.clone(), got));
+            }
+            match cache.iter().find(|(b, _)| b == &r.base_url).map(|(_, g)| g) {
+                Some(Ok(ids)) => {
+                    if ids.iter().any(|i| i == &r.model) {
+                        ModelCheck::Served
+                    } else {
+                        ModelCheck::NotServed {
+                            catalogue: ids.len(),
+                        }
+                    }
+                }
+                Some(Err(why)) => ModelCheck::Unreachable { why: why.clone() },
+                None => ModelCheck::Unreachable {
+                    why: "no catalogue attempt".to_string(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The plan as an operator report. `checks` is `None` for the read that makes no network call — and
+/// then the report says so in its own words, rather than letting silence read as health.
+pub fn render_role_plan(plan: &[RoleRoute], checks: Option<&[ModelCheck]>) -> String {
+    if plan.is_empty() {
+        return "ROLE ROUTES — none configured: every function uses the default chain \
+                (YM_ROLE_CHAT/RESEARCH/UTIL/VERIFY/CODE/CONSOLIDATE, YM_PRIMARY_BRAIN)."
+            .to_string();
+    }
+    let mut out = String::from("ROLE ROUTES — what each configured function would actually call\n");
+    for (i, r) in plan.iter().enumerate() {
+        let status = match &r.status {
+            SpecStatus::Configured => "configured".to_string(),
+            SpecStatus::UnknownProvider => format!(
+                "UNKNOWN PROVIDER '{}' — this route builds nothing and the function falls back to the default pool",
+                r.provider
+            ),
+            SpecStatus::MissingKey { key_env } => format!(
+                "MISSING KEY {key_env} — the provider is known but its key is unset, so this route builds nothing"
+            ),
+        };
+        let model = if r.model_defaulted {
+            format!("{} (provider default; the spec named no model)", r.model)
+        } else {
+            r.model.clone()
+        };
+        let check = match checks.and_then(|c| c.get(i)) {
+            None => "model existence NOT verified (no network call was made)".to_string(),
+            Some(ModelCheck::Served) => "SERVED by the provider".to_string(),
+            Some(ModelCheck::NotServed { catalogue }) => format!(
+                "NOT SERVED — the provider's catalogue of {catalogue} model(s) does not contain this id, \
+                 so calls on this route fail at request time"
+            ),
+            Some(ModelCheck::Unreachable { why }) => {
+                format!("UNVERIFIED — the catalogue could not be read ({why})")
+            }
+            Some(ModelCheck::NotApplicable) => "not checked — this route builds nothing".to_string(),
+        };
+        out.push_str(&format!(
+            "{} = {}\n  provider {} · model {} · base {}\n  {}\n  {}\n",
+            r.var, r.spec, r.provider, model, r.base_url, status, check
+        ));
+    }
+    out.push_str(
+        "\nA route naming a model its provider does not serve looks configured here and in every other \
+         report; only the verified read can tell you otherwise.",
+    );
+    out
+}
+
+/// Read a provider's model catalogue over HTTP: `GET {base}/models`, OpenAI-compatible shape.
+/// Bounded and best-effort — every failure is a reason string, never a claim that a model is served.
+pub fn fetch_model_catalogue(base_url: &str, provider: &str) -> Result<Vec<String>, String> {
+    let key_env = provider_catalog(provider).map(|(_, k, _)| k).unwrap_or("");
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let mut req = ureq::get(&url).timeout(std::time::Duration::from_secs(20));
+    if let Some(key) = configured_api_key(key_env) {
+        req = req.set("Authorization", &format!("Bearer {key}"));
+    }
+    let body: serde_json::Value = req
+        .call()
+        .map_err(|e| format!("{e}").chars().take(120).collect::<String>())?
+        .into_json()
+        .map_err(|e| format!("unparseable catalogue: {e}"))?;
+    let ids: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Err("the catalogue response carried no model ids".to_string());
+    }
+    Ok(ids)
+}
+
+/// `ym why roles` — the plan from the real environment, no network call.
+pub fn render_roles_from_env() -> String {
+    let plan = role_plan(|k| std::env::var(k).ok());
+    render_role_plan(&plan, None)
+}
+
+/// `ym why roles verify` — the plan plus a live catalogue check per distinct base URL.
+pub fn render_roles_verified_from_env() -> String {
+    let plan = role_plan(|k| std::env::var(k).ok());
+    let checks = verify_models(&plan, fetch_model_catalogue);
+    render_role_plan(&plan, Some(&checks))
 }
 
 /// The trimmed `YM_PRIMARY_BRAIN` spec, `None` when unset or blank. Pure (lookup injected).
@@ -2295,6 +2555,169 @@ mod privacy_tests {
             resolve_provider_base("groq", "https://api.groq.com/openai/v1", env),
             "https://api.groq.com/openai/v1"
         );
+    }
+
+    // ── E.CFG1 ───────────────────────────────────────────────────────────────────────────────
+    //
+    // The bug these pin: a role can name a model its provider does not serve, and nothing says so
+    // until a call fails. Measured live — a provider answered 410 eight times for a model absent
+    // from its catalogue of 82, while the router reported the role as configured.
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + Copy + 'a {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn the_plan_carries_only_configured_routes_and_names_what_each_would_call() {
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b"),
+            ("YM_ROLE_RESEARCH", "  "),
+            ("YM_ROLE_VERIFY", "groq"),
+            ("NVIDIA_API_KEY", "k"),
+            ("GROQ_API_KEY", "k"),
+        ]);
+        let plan = role_plan(e);
+        assert_eq!(
+            plan.len(),
+            2,
+            "a blank spec is not a configured route: {plan:?}"
+        );
+        assert_eq!(plan[0].role, "chat");
+        assert_eq!(plan[0].model, "openai/gpt-oss-120b");
+        assert!(!plan[0].model_defaulted);
+        assert_eq!(plan[0].base_url, "https://integrate.api.nvidia.com/v1");
+        assert_eq!(plan[0].status, SpecStatus::Configured);
+        // a spec with no model is a real configuration, and the report must show what it resolves to
+        assert_eq!(plan[1].role, "verify");
+        assert!(plan[1].model_defaulted);
+        assert_eq!(plan[1].model, "llama-3.3-70b-versatile");
+    }
+
+    #[test]
+    fn unknown_provider_and_missing_key_are_different_findings() {
+        // backend_from_spec collapses both to None, so its one message has to say "unknown provider
+        // or missing key". They need different fixes, so the diagnostic separates them.
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nosuchprovider:some-model"),
+            ("YM_ROLE_CODE", "groq:llama-3.3-70b-versatile"),
+        ]);
+        let plan = role_plan(e);
+        assert_eq!(plan[0].status, SpecStatus::UnknownProvider);
+        assert_eq!(
+            plan[1].status,
+            SpecStatus::MissingKey {
+                key_env: "GROQ_API_KEY"
+            }
+        );
+        let out = render_role_plan(&plan, None);
+        assert!(out.contains("UNKNOWN PROVIDER"), "{out}");
+        assert!(out.contains("MISSING KEY GROQ_API_KEY"), "{out}");
+        assert!(
+            out.contains("NOT verified"),
+            "the unverified read must say so rather than let silence read as health: {out}"
+        );
+    }
+
+    #[test]
+    fn a_role_naming_a_model_the_provider_does_not_serve_is_reported_as_not_served() {
+        // The live case, reproduced exactly: the staging research role names a GLM the provider does
+        // not carry, while the chat role names one it does.
+        let e = env(&[
+            ("YM_ROLE_RESEARCH", "nim:z-ai/glm-5.2"),
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b"),
+            ("NVIDIA_API_KEY", "k"),
+        ]);
+        let plan = role_plan(e);
+        let mut fetches = 0;
+        let checks = verify_models(&plan, |_base, _p| {
+            fetches += 1;
+            Ok(vec![
+                "openai/gpt-oss-120b".to_string(),
+                "deepseek-ai/deepseek-v4-flash-0731".to_string(),
+            ])
+        });
+        assert_eq!(fetches, 1, "one fetch per distinct base URL, not per route");
+        let research = plan.iter().position(|r| r.role == "research").unwrap();
+        let chat = plan.iter().position(|r| r.role == "chat").unwrap();
+        assert_eq!(checks[research], ModelCheck::NotServed { catalogue: 2 });
+        assert_eq!(checks[chat], ModelCheck::Served);
+        let out = render_role_plan(&plan, Some(&checks));
+        assert!(out.contains("NOT SERVED"), "{out}");
+        assert!(
+            out.contains("fail at request time"),
+            "the report must say what happens, not just that something is wrong: {out}"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_catalogue_is_never_reported_as_served() {
+        // The failure mode that would make this diagnostic worse than none.
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b"),
+            ("NVIDIA_API_KEY", "k"),
+        ]);
+        let plan = role_plan(e);
+        let checks = verify_models(&plan, |_b, _p| Err("connection refused".to_string()));
+        assert_eq!(
+            checks[0],
+            ModelCheck::Unreachable {
+                why: "connection refused".to_string()
+            }
+        );
+        let out = render_role_plan(&plan, Some(&checks));
+        assert!(out.contains("UNVERIFIED"), "{out}");
+        assert!(!out.contains("SERVED by the provider"), "{out}");
+    }
+
+    #[test]
+    fn a_route_that_builds_nothing_is_not_asked_about() {
+        // Asking a provider about a spec that never resolves would produce a confusing NOT SERVED
+        // for what is really an unknown provider or a missing key.
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nosuchprovider:m"),
+            ("YM_ROLE_CODE", "groq:m"),
+        ]);
+        let plan = role_plan(e);
+        let mut fetches = 0;
+        let checks = verify_models(&plan, |_b, _p| {
+            fetches += 1;
+            Ok(vec!["m".to_string()])
+        });
+        assert_eq!(fetches, 0, "nothing to ask when no backend would be built");
+        assert!(checks.iter().all(|c| *c == ModelCheck::NotApplicable));
+    }
+
+    #[test]
+    fn the_verified_read_follows_the_base_url_override() {
+        // E.CB2-N points a provider at a local proxy. A check against the vendor's real endpoint
+        // would then be answering a question nobody asked.
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b"),
+            ("NVIDIA_API_KEY", "k"),
+            ("YM_PROVIDER_BASE_URL_NIM", "http://172.30.0.2:8080/v1"),
+        ]);
+        let plan = role_plan(e);
+        assert_eq!(plan[0].base_url, "http://172.30.0.2:8080/v1");
+        let mut seen = String::new();
+        let _ = verify_models(&plan, |base, _p| {
+            seen = base.to_string();
+            Ok(vec!["openai/gpt-oss-120b".to_string()])
+        });
+        assert_eq!(seen, "http://172.30.0.2:8080/v1");
+    }
+
+    #[test]
+    fn no_configured_route_says_so_plainly() {
+        let plan = role_plan(env(&[]));
+        assert!(plan.is_empty());
+        let out = render_role_plan(&plan, None);
+        assert!(out.contains("none configured"), "{out}");
+        assert!(out.contains("default chain"), "{out}");
     }
 
     #[test]

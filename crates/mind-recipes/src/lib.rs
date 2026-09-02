@@ -362,10 +362,12 @@ impl RunOrigin {
     }
 }
 
+/// Fields are private on purpose (Codex's hardening note on E.WEB19): only the three
+/// constructors exist, so `ScheduledGoal + Some(agent)` cannot be built by hand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeRunIdentity {
-    pub origin: RunOrigin,
-    pub canonical_agent: Option<String>,
+    origin: RunOrigin,
+    canonical_agent: Option<String>,
 }
 impl RecipeRunIdentity {
     pub fn other() -> Self {

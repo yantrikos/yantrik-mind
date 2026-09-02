@@ -1868,11 +1868,13 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 // is explicit and named.
 //
 // One honesty note, because review caught the first version of this comment claiming otherwise: the
-// measured 10 s → 0.9 s improvement — the ONLY place in this file that should mention it, because
-// review found the retraction appended here while three other comments still asserted it as fact —
-// was taken on the LOCAL lane, which uses the native endpoint
+// measured 10 s → 0.9 s improvement was taken on the LOCAL lane, which uses the native endpoint
 // where `think` alone suffices. No measurement of `ollama.com/v1` exists. The exclusion rests on the
 // endpoint family's behaviour, not on evidence from that host.
+//
+// A fifth review caught this passage claiming to be "the ONLY place in this file that should mention
+// it" while the figure appeared in two more comments — a sentence about the file's contents that had
+// stopped being true of the file. It is scoped in all three places now; none of them is privileged.
 //
 // The LOCAL Ollama lane is a separate constructor (`local_backend_from_env`, and the brain pool)
 // and is never wrapped at all.

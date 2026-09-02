@@ -23,6 +23,8 @@ except Exception:
   if [ "$FAILED" = "${EXPECT[$f]}" ]; then RES=agree; else RES=DISAGREE; BAD=1; fi
   echo "$f: $RES failed=[$FAILED] expected=[${EXPECT[$f]}]"
 done
+# The receipt decision, driven through every classification without a graded leg.
+if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi
 S=$(mktemp -d /tmp/cb2-tree-self-XXXX)
 mkfifo "$S/pipe"
 TREE=$(timeout -k 1 5 python3 "$FIX/tools/tree_hash.py" "$S"); TREE_RC=$?

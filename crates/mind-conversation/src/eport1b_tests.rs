@@ -376,9 +376,12 @@ async fn a_single_executor_box_runs_the_job_even_when_the_classifier_names_anoth
         1,
         "the job must exist on a two-executor box: {rows2:?}"
     );
-    assert_ne!(
-        rows2[0]["kind"], "code",
-        "the board must never name an executor this box does not have"
+    // Not `!= "code"`: that passes when the board says "research" too, and a website brief routed to
+    // the researcher is the wrong executor silently chosen — exactly the failure this test is for.
+    // Name the executor the box HAS and the brief WANTS.
+    assert_eq!(
+        rows2[0]["kind"], "page",
+        "a website brief on a page-capable box must be on the board as a page job: {rows2:?}"
     );
     f2.release();
 }
@@ -538,42 +541,49 @@ async fn a_delegations_model_calls_carry_the_opportunity_that_started_it() {
 
 #[test]
 fn every_spawn_in_the_delegation_path_carries_its_opportunity() {
-    // Review found the behavioural test above exercises two of six carries, and that the two ADDED
-    // by the fix were both in the untested four. A structural guard is the honest cover: every
-    // `tokio::spawn` in this file either wraps its future in `in_opportunity` or is the one inside
-    // `bounded_route`, which carries the opportunity inline a few lines above.
+    // Review found the FIRST version of this guard could not fail for the case it named: it matched
+    // lines STARTING with `tokio::spawn(`, and the one spawn its own comment excepted is written
+    // `let handle = tokio::spawn(...)`. So the exception was dead code, the anti-vacuity count was
+    // computed the same blind way and reported five while a sixth sat unexamined, and the comment
+    // claimed a check the code did not perform. Stripping the carry from THAT spawn left it green.
     //
-    // It is a source scan, so say what it cannot do: it would not notice a spawn that passes an
-    // opportunity captured from the wrong scope, and it does not reach spawns in other files.
+    // Now: every occurrence anywhere in a line, an exact expected count, and the exception named by
+    // line content rather than assumed.
+    //
+    // Its limits, stated: it is a source scan, so it cannot see a spawn that carries an opportunity
+    // captured from the wrong scope, and it does not reach spawns in other files reachable from
+    // delegate_cmd (code.rs, research.rs) — those are covered by the behavioural test above only for
+    // the page path.
     const SRC: &str = include_str!("delegate.rs");
+    let mut carried = Vec::new();
     let mut bare = Vec::new();
     for (n, line) in SRC.lines().enumerate() {
-        let t = line.trim();
-        if !t.starts_with("tokio::spawn(") {
+        if !line.contains("tokio::spawn(") && !line.contains("tokio::task::spawn(") {
             continue;
         }
-        let carried = t.contains("in_opportunity(");
-        // bounded_route's own spawn re-enters the scope inside the future rather than wrapping it
-        let inline = SRC
+        let lineno = n + 1;
+        // bounded_route's spawn re-enters the scope INSIDE the future rather than wrapping it, so
+        // it is identified by that body, not by position.
+        let inline_carry = SRC
             .lines()
             .skip(n)
             .take(6)
             .any(|l| l.contains("within_opportunity(id, routing)"));
-        if !carried && !inline {
-            bare.push(n + 1);
+        if line.contains("in_opportunity(") || inline_carry {
+            carried.push(lineno);
+        } else {
+            bare.push(lineno);
         }
     }
     assert!(
         bare.is_empty(),
-        "these spawns in delegate.rs lose the opportunity their delegation was created under, so a          loop that started the work is charged for none of it — lines {bare:?}"
+        "these spawns in delegate.rs lose the opportunity their delegation was created under, so a loop that started the work is charged for none of it — lines {bare:?}"
     );
-    // and the guard must be able to fire: there ARE spawns to find
-    let total = SRC
-        .lines()
-        .filter(|l| l.trim().starts_with("tokio::spawn("))
-        .count();
-    assert!(
-        total >= 5,
-        "expected the delegation spawns to be here, found {total}"
+    // Anti-vacuity, counted the same way the guard counts: an exact number, so a spawn that becomes
+    // invisible to the scan fails here instead of passing quietly.
+    assert_eq!(
+        carried.len(),
+        6,
+        "expected six carrying spawns in delegate.rs (five wrapped plus bounded_route's inline carry); found {carried:?} — if a spawn was added or removed, decide about it here"
     );
 }

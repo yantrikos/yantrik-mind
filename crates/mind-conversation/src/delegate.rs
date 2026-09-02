@@ -254,15 +254,21 @@ pub const KINDS: &[(&str, &str)] = &[
 /// kind, a wrapped answer, or a kind whose executor is not configured gets rejected.
 pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
     let low = reply.to_lowercase();
-    // FIRST MENTION WINS, by byte offset: a model that says "page — because …" means page. The
-    // ordering of the names being searched therefore cannot change the answer, and a comment here
-    // used to claim it did ("longest name first, so research is not shadowed") — review found the
-    // sort inert. The names are scanned in table order and the earliest match is taken.
+    // FIRST MENTION WINS, by byte offset: a model that says "page — because …" means page. A comment
+    // here once claimed the scan order was load-bearing ("longest name first, so research is not
+    // shadowed"); review found the sort inert and it was removed. Its replacement then over-corrected
+    // to "the ordering cannot change the answer", which is not true either: `<` is strict, so on a
+    // TIE the earlier name in `KINDS` wins. A tie needs two kind names starting at the same byte,
+    // which requires one to be a prefix of another — no two of `page`/`code`/`research` are, so the
+    // order is inert for TODAY'S table and would stop being so the moment a name like `page-app` is
+    // added beside `page`. That is the honest statement of the invariant.
     let mut best: Option<(usize, &'static str)> = None;
-    for (k, _) in KINDS.iter() {
-        if let Some(at) = low.find(k) {
-            let kind: &'static str = KINDS.iter().find(|(n, _)| n == k).map(|(n, _)| *n)?;
-            if available.contains(&kind) && best.map(|(b, _)| at < b).unwrap_or(true) {
+    for (kind, _) in KINDS.iter() {
+        // `kind` IS the table entry — it was looked up again in KINDS here, with a `?` that would
+        // have returned None for the whole function had the lookup ever missed. It cannot miss, so
+        // the `?` was an unreachable early exit guarding nothing. Use the binding.
+        if let Some(at) = low.find(kind) {
+            if available.contains(kind) && best.map(|(b, _)| at < b).unwrap_or(true) {
                 best = Some((at, kind));
             }
         }

@@ -305,9 +305,28 @@ fn a_cycle_label_round_trips_and_rejects_everything_else() {
         assert_eq!(CycleId::parse(bad), None, "accepted {bad:?}");
     }
 
-    // The version string exists and is distinct from the one v5 rows carry.
-    assert_eq!(LOOP_LEDGER_V6, "loop-ledger-v6");
+    // The version string is distinct from the one v5 rows carry. `assert_eq!(V6, "loop-ledger-v6")`
+    // used to stand here: a constant compared to the literal it is defined as, which restates the
+    // definition and tests nothing. What matters is the WALL — that today's reader, which is a v5
+    // reader, refuses to aggregate a v6 row rather than half-reading one. That can fail, so assert it.
     assert_ne!(LOOP_LEDGER_V6, crate::LOOP_LEDGER_VERSION);
+    let w = crate::LoopOpportunity::Window {
+        loop_id: crate::LoopId::Ics,
+        process_start_ms: 7,
+        key: 0,
+    };
+    let mut v6 = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
+        .to_event(10);
+    v6.evaluator_id = Some(LOOP_LEDGER_V6.into());
+    let v5 = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
+        .to_event(11);
+    let ledger = crate::loop_ledger(&[v6, v5], 20, 100);
+    assert_eq!(
+        ledger.superseded, 1,
+        "a v6 row must be walled off from a v5 report, not aggregated into it"
+    );
+    assert_eq!(ledger.malformed, 0, "it is a future row, not a broken one");
+    assert_eq!(ledger.loops.len(), 1, "and the v5 row beside it still reads");
 }
 
 #[test]

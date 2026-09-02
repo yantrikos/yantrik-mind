@@ -417,6 +417,37 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
         !graded_at.is_null(),
         "a graded row carries when: {after_first:?}"
     );
+
+    // RE-ARM BEFORE RE-RESOLVING, or this proves nothing. Review caught the first version
+    // asserting immutability through a pass that returns at the door: `resolve_proactive` exits
+    // immediately on an empty pending list, and the list is empty by now — so `outcome_at` could
+    // not have moved for ANY reason, including a missing immutability guard. Putting the ref back
+    // makes the resolver reach the grading path with a row that is already answered, which is the
+    // case the guard exists for.
+    let pending_before_probe = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    // The REAL entry shape (`PendingSend`), not a bare string: a string does not deserialise into
+    // an entry, so the resolver skipped it and the "re-grade" never happened — the fix for a check
+    // that cannot fail was itself a check that cannot fail, one layer down. Caught by deleting the
+    // immutability guard and watching this test stay green.
+    conv.memory
+        .profile_set(
+            "proactive_pending",
+            &format!(
+                "[{{\"sent_ms\":{now},\"ref\":\"{new_ref}\",\"surface\":\"console\"}}]"
+            ),
+        )
+        .await
+        .unwrap();
+    // A gap wide enough that a re-grade would stamp a DIFFERENT millisecond. Without it this test
+    // passed with the immutability guard deleted, because the two gradings landed in the same
+    // millisecond and the timestamps compared equal — a check that cannot fail, one layer below the
+    // one review had just found.
+    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
     conv.resolve_proactive(true).await;
     let after_second = ledger_rows(&conv, &new_ref).await;
     assert_eq!(after_second.len(), 1, "still one row: {after_second:?}");
@@ -424,6 +455,14 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
         after_second[0]["outcome_at"], graded_at,
         "a second pass re-graded a beat that was already answered: {after_second:?}"
     );
+    // The probe put the ref back deliberately; an already-answered ref is not removed again, so
+    // restore the state the rest of this test is about. (That an answered ref left in the pending
+    // list stays there is real behaviour, not a leak this test invented — it is simply not what
+    // this test is measuring.)
+    conv.memory
+        .profile_set("proactive_pending", &pending_before_probe)
+        .await
+        .unwrap();
     let pend = conv
         .memory
         .profile_get("proactive_pending")

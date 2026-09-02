@@ -5519,12 +5519,19 @@ impl CycleId {
     }
 }
 
-/// The version a row carrying a wake identity declares. v5 rows stay valid v5 and are never paired
-/// with a v6 row; the version string is what keeps the two eras apart.
+/// The version a row carrying a wake identity WILL declare. NOTHING WRITES IT YET — L2-B is the
+/// slice that adds the writer, and until it lands `LOOP_LEDGER_VERSION` below is what every row
+/// carries. The name exists now so the reader, the fixtures and the wall can be built against a
+/// spelling that will not move. Its rule when it does arrive: a v5 row is never paired with a v6
+/// row, because only a v6 row knows which wake it belongs to.
 pub const LOOP_LEDGER_V6: &str = "loop-ledger-v6";
 
-pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v5";
 /// L1d: v5 = v4 + sixteen loop ids + the lifecycle phase; v4 rows keep reading.
+///
+/// This doc comment was orphaned when V6 was inserted above it: the constant it described kept the
+/// line, but the line landed on V4 below, which then carried two eras' documentation and none of
+/// its own. Review caught it. It is back on the constant it describes.
+pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v5";
 /// v4 (L3a): superseded by v5 — kept as a name so the fixtures can prove the wall.
 pub const LOOP_LEDGER_V4: &str = "loop-ledger-v4";
 pub const LOOP_LEDGER_V3: &str = "loop-ledger-v3";

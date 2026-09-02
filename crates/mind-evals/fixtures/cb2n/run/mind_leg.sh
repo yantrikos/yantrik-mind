@@ -37,7 +37,7 @@ cleanup() {
   rm -rf "$ST"; chmod -R a-w "$A" 2>/dev/null
 }
 trap cleanup EXIT
-bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","void":true,"dq_independent":false,"dq_dependent":false,"disqualified":false}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
+bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","routed_kind":null,"void":true,"dq_independent":false,"dq_dependent":false,"disqualified":false}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
 BIN_SHA=$(sha256sum /opt/yantrik-mind/mind-core | cut -c1-64); PROV=$(cd /root/codes/ym-autodeploy && git rev-parse --short HEAD)
 docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
   -v /opt/yantrik-mind/mind-core:/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
@@ -62,7 +62,7 @@ if [ "$CB2_MIND_LANE" = roles ]; then
   BRAIN_GATE="{\"roles_exact\":$G1,\"no_local_lane\":$G2,\"no_other_keys\":$G3,\"boot_label_exact\":$G4}"
   if [ "$G1$G2$G3$G4" != truetruetruetrue ]; then
     echo "brain gate FAILED: $BRAIN_GATE — leg aborted, nothing graded"
-    printf '{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"disqualified":true,"void":false}\n' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5
+    printf '{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"routed_kind":null,"disqualified":true,"void":false}\n' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5
   fi
 fi
 timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count > "$OUT/raw/mind_${T}_driver.txt" 2>&1
@@ -82,11 +82,17 @@ ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
 except Exception:
-    d = {"system": "mind", "task": task, "status": "driver-failed", "dq_independent": True, "disqualified": True}
+    # `routed_kind` is in the schema, so it is present on EVERY exit path. It was absent on the
+    # three that abort before the driver writes a receipt, and any reader indexing the field
+    # crashed on exactly the legs whose failure it was trying to read.
+    d = {"system": "mind", "task": task, "status": "driver-failed", "routed_kind": None,
+         "dq_independent": True, "disqualified": True}
 try:
     p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p["upstream_errors"])
     acc = p["model_requests"]; ref = p["refused_over_cap"]
-    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and acc >= 0 and ref >= 0 and acc <= 8 and ref == 0 and tls
+    # `1 <= acc`, not `acc >= 0`: Hermes's receipt check requires at least one model request and
+    # the Mind's accepted zero, so a leg that never reached the model passed on one side only.
+    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= 8 and ref >= 0 and ref == 0 and tls
 except Exception:
     tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0

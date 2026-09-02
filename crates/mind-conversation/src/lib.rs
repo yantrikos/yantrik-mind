@@ -6828,6 +6828,23 @@ impl ConversationEngine {
                 }
                 Err(_) => serde_json::json!({ "available": false }).to_string(),
             },
+            // L1c (ARCH7): the loop ledger as rows for the cockpit's Loops instrument — the same
+            // aggregate `ym why loops` prints, over the verified log, last 24 h. Aggregates only.
+            "loops_json" => match self.recorder.read_all_verified() {
+                Ok(events) => {
+                    let now = chrono::Utc::now().timestamp_millis() as u64;
+                    let ledger =
+                        mind_observability::loop_ledger(&events, now, 24 * 60 * 60 * 1000);
+                    match serde_json::to_value(&ledger) {
+                        Ok(mut v) => {
+                            v["available"] = serde_json::json!(true);
+                            v.to_string()
+                        }
+                        Err(_) => serde_json::json!({ "available": false }).to_string(),
+                    }
+                }
+                Err(_) => serde_json::json!({ "available": false }).to_string(),
+            },
             "claims_json" => serde_json::json!({
                 "version": self_claims::REGISTRY_VERSION,
                 "claims": self_claims::CLAIMS.iter().map(|c| serde_json::json!({

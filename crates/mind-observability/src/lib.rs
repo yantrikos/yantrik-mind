@@ -4898,157 +4898,845 @@ mod sec1b_boundary {
     }
 }
 
-// ───────────────────────────── L1 (ARCH7): the loop ledger ─────────────────────────────
+// ───────────────────────────── L1 (ARCH7): the loop ledger, v3 ─────────────────────────────
+// Code-owned bounded schema (Codex's L1 reviews): a loop tick is built ONLY from the typed parts
+// below — loop, host, opportunity, considered signals, policy lines, result — so no raw content
+// can be constructed into the log; the renderer parses every row back through the same types and
+// counts what it cannot read as malformed. Opportunities dedupe by id (an act wins over a held
+// record for the same window; otherwise the latest stands) and duplicates are reported.
 
-/// Aggregate view of one background loop over a window: how often it ran, what it did, why it
-/// skipped, and what it spent. Reasons and counts only — a `loop_tick` event carries no content.
+macro_rules! bounded_enum {
+    ($(#[$m:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum $name { $($variant),+ }
+        impl $name {
+            pub const ALL: &'static [$name] = &[$($name::$variant),+];
+            pub fn as_str(self) -> &'static str { match self { $($name::$variant => $text),+ } }
+            pub fn parse(text: &str) -> Option<Self> { match text { $($text => Some($name::$variant)),+, _ => None } }
+        }
+    };
+}
+
+bounded_enum! {
+    /// Every background loop the ledger knows. Adding a loop is a schema change, on purpose.
+    LoopId {
+        Dmn => "dmn", Knock => "knock", Digest => "digest", Ask => "ask", Patterns => "patterns",
+        HomeWatch => "home-watch", Resolve => "resolve", ProfileRefresh => "profile-refresh",
+        Family => "family", FollowUp => "follow-up", PriceWatch => "price-watch",
+        MemberBeat => "member-beat", Ics => "ics", LeaseSweep => "lease-sweep",
+        Heartbeat => "heartbeat", WorldShadow => "world-shadow",
+    }
+}
+bounded_enum! {
+    /// Who ran the loop.
+    LoopHost { Telegram => "telegram", Headless => "headless" }
+}
+bounded_enum! {
+    /// What a loop did when it acted. Counts ride in `outcome` as `count:<n>`; no content ever.
+    LoopOutcome {
+        Dreamed => "dreamed", Knocked => "knocked", Evaluated => "evaluated",
+        DigestSent => "digest-sent", NothingToSay => "nothing-to-say", Asked => "asked",
+        NothingToAsk => "nothing-to-ask", Ran => "ran", Delegations => "delegations",
+        Surfaced => "surfaced", NothingFound => "nothing-found",
+    }
+}
+bounded_enum! {
+    /// Why a due loop did not act.
+    HeldReason {
+        IdleGate => "idle-gate", QuietHours => "quiet-hours", Receptivity => "receptivity",
+        Disabled => "disabled", SpokeAlready => "spoke-already", NothingDue => "nothing-due",
+        NoChat => "no-chat", Budget => "budget",
+    }
+}
+bounded_enum! {
+    /// The signals a loop may say it weighed. A closed list: a new signal is a schema change.
+    ConsideredSignal {
+        Tensions => "tensions", Beliefs => "beliefs", PaperDesk => "paper-desk",
+        Packets => "packets", Receptivity => "receptivity", DailyCap => "daily-cap",
+        Urges => "urges", ExecutiveShadow => "executive-shadow", Name => "name",
+        Purpose => "purpose", FollowUps => "follow-ups", DueDelegations => "due-delegations",
+        DueHorizons => "due-horizons",
+    }
+}
+bounded_enum! {
+    /// A named budget a loop consulted.
+    BudgetKind { DmnOneCall => "dmn-one-call", ReceptivityGate => "receptivity-gate" }
+}
+bounded_enum! {
+    /// A named cap a loop consulted.
+    CapKind { OnePerDay => "one-per-day", OneOutstanding => "one-outstanding" }
+}
+
+/// A policy line the loop actually consulted, typed so it renders bounded text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopPolicy {
+    Cadence(u64),
+    Idle(u64),
+    Beat(u64),
+    Report(u64),
+    Budget(BudgetKind),
+    Cap(CapKind),
+}
+impl LoopPolicy {
+    pub fn render(self) -> String {
+        match self {
+            LoopPolicy::Cadence(s) => format!("cadence:{s}s"),
+            LoopPolicy::Idle(s) => format!("idle:{s}s"),
+            LoopPolicy::Beat(s) => format!("beat:{s}s"),
+            LoopPolicy::Report(s) => format!("report:{s}s"),
+            LoopPolicy::Budget(b) => format!("budget:{}", b.as_str()),
+            LoopPolicy::Cap(c) => format!("cap:{}", c.as_str()),
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        let (k, v) = text.split_once(':')?;
+        let secs = |v: &str| v.strip_suffix('s').and_then(|d| d.parse::<u64>().ok());
+        match k {
+            "cadence" => secs(v).map(LoopPolicy::Cadence),
+            "idle" => secs(v).map(LoopPolicy::Idle),
+            "beat" => secs(v).map(LoopPolicy::Beat),
+            "report" => secs(v).map(LoopPolicy::Report),
+            "budget" => BudgetKind::parse(v).map(LoopPolicy::Budget),
+            "cap" => CapKind::parse(v).map(LoopPolicy::Cap),
+            _ => None,
+        }
+    }
+}
+
+/// The unit the ledger records: one due opportunity of one loop. Ids are rendered by the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopOpportunity {
+    /// The due window a legacy timer opens; `process_start` makes it unique across restarts.
+    Window {
+        loop_id: LoopId,
+        process_start_ms: u64,
+        key: u64,
+    },
+    /// One idle stretch, keyed by the activity that opened it.
+    Stretch { loop_id: LoopId, start_ms: u64 },
+    /// A wall-clock bucket (may repeat across a restart — the aggregate dedupes and reports).
+    Bucket { loop_id: LoopId, n: u64 },
+}
+impl LoopOpportunity {
+    pub fn loop_id(self) -> LoopId {
+        match self {
+            LoopOpportunity::Window { loop_id, .. }
+            | LoopOpportunity::Stretch { loop_id, .. }
+            | LoopOpportunity::Bucket { loop_id, .. } => loop_id,
+        }
+    }
+    pub fn id(self) -> String {
+        match self {
+            LoopOpportunity::Window {
+                loop_id,
+                process_start_ms,
+                key,
+            } => {
+                format!("{}:due:{process_start_ms}:{key}", loop_id.as_str())
+            }
+            LoopOpportunity::Stretch { loop_id, start_ms } => {
+                format!("{}:idle:{start_ms}", loop_id.as_str())
+            }
+            LoopOpportunity::Bucket { loop_id, n } => format!("{}:bucket:{n}", loop_id.as_str()),
+        }
+    }
+    /// The inverse of `id`, strict: anything that is not exactly one of the three shapes fails.
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut parts = text.split(':');
+        let loop_id = LoopId::parse(parts.next()?)?;
+        let kind = parts.next()?;
+        let a = parts.next()?.parse::<u64>().ok()?;
+        match (kind, parts.next(), parts.next()) {
+            ("due", Some(b), None) => Some(LoopOpportunity::Window {
+                loop_id,
+                process_start_ms: a,
+                key: b.parse().ok()?,
+            }),
+            ("idle", None, None) => Some(LoopOpportunity::Stretch {
+                loop_id,
+                start_ms: a,
+            }),
+            ("bucket", None, None) => Some(LoopOpportunity::Bucket { loop_id, n: a }),
+            _ => None,
+        }
+    }
+}
+
+pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v3";
+
+/// One loop tick. Fields are private: the only way to build one is from the typed parts, so the
+/// log can never receive free text under this kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopTick {
+    opportunity: LoopOpportunity,
+    host: LoopHost,
+    considered: Vec<ConsideredSignal>,
+    policy: Vec<LoopPolicy>,
+    result: Result<LoopOutcome, HeldReason>,
+    count: Option<u32>,
+    /// Operation-local model calls the loop body itself reported; `None` = unknown. Never a
+    /// global counter, never inferred from a send.
+    model_calls: Option<u32>,
+    wall_ms: u64,
+}
+impl LoopTick {
+    pub fn acted(opportunity: LoopOpportunity, host: LoopHost, outcome: LoopOutcome) -> Self {
+        Self {
+            opportunity,
+            host,
+            considered: Vec::new(),
+            policy: Vec::new(),
+            result: Ok(outcome),
+            count: None,
+            model_calls: None,
+            wall_ms: 0,
+        }
+    }
+    pub fn held(opportunity: LoopOpportunity, host: LoopHost, reason: HeldReason) -> Self {
+        Self {
+            opportunity,
+            host,
+            considered: Vec::new(),
+            policy: Vec::new(),
+            result: Err(reason),
+            count: None,
+            model_calls: None,
+            wall_ms: 0,
+        }
+    }
+    pub fn considered(mut self, signals: &[ConsideredSignal]) -> Self {
+        self.considered = signals.to_vec();
+        self
+    }
+    pub fn policy(mut self, lines: &[LoopPolicy]) -> Self {
+        self.policy = lines.to_vec();
+        self
+    }
+    pub fn count(mut self, n: u32) -> Self {
+        self.count = Some(n);
+        self
+    }
+    pub fn model_calls(mut self, n: Option<u32>) -> Self {
+        self.model_calls = n;
+        self
+    }
+    pub fn wall_ms(mut self, ms: u64) -> Self {
+        self.wall_ms = ms;
+        self
+    }
+    pub fn opportunity_id(&self) -> String {
+        self.opportunity.id()
+    }
+    /// The event exactly as the ledger stores it; `parse_tick` is its inverse.
+    pub fn to_event(&self, ts_ms: u64) -> DecisionEvent {
+        let loop_id = self.opportunity.loop_id();
+        let mut ev = DecisionEvent::new(&format!("loop-{}", self.opportunity.id()), "loop_tick");
+        ev.ts_ms = ts_ms;
+        ev.actor = Some(format!("loop:{}", loop_id.as_str()));
+        ev.lane = Some("primary".into());
+        ev.goal_id = Some(format!("loop:{}", loop_id.as_str()));
+        ev.trigger = Some(self.host.as_str().into());
+        ev.object_id = Some(self.opportunity.id());
+        ev.candidates = self
+            .considered
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect();
+        ev.policy = self.policy.iter().map(|p| p.render()).collect();
+        match self.result {
+            Ok(outcome) => {
+                ev.chosen = Some(outcome.as_str().into());
+                ev.verdict = Some("acted".into());
+            }
+            Err(held) => ev.verdict = Some(format!("held:{}", held.as_str())),
+        }
+        ev.outcome = self.count.map(|c| format!("count:{c}"));
+        ev.model_calls = self.model_calls;
+        ev.latency_ms = Some(self.wall_ms);
+        ev.evaluator_id = Some(LOOP_LEDGER_VERSION.into());
+        ev
+    }
+}
+
+/// A fully validated stored row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedTick {
+    pub opportunity: LoopOpportunity,
+    pub host: LoopHost,
+    pub considered: Vec<ConsideredSignal>,
+    pub policy: Vec<LoopPolicy>,
+    pub result: Result<LoopOutcome, HeldReason>,
+    pub count: Option<u32>,
+}
+
+/// Validate one stored row against the whole schema; `None` when any field cannot be read.
+pub fn parse_tick(e: &DecisionEvent) -> Option<ParsedTick> {
+    if e.kind != "loop_tick" {
+        return None;
+    }
+    let opportunity = LoopOpportunity::parse(e.object_id.as_deref()?)?;
+    let loop_id = opportunity.loop_id();
+    let expected = format!("loop:{}", loop_id.as_str());
+    if e.goal_id.as_deref()? != expected || e.actor.as_deref()? != expected {
+        return None;
+    }
+    let host = LoopHost::parse(e.trigger.as_deref()?)?;
+    let considered = e
+        .candidates
+        .iter()
+        .map(|c| ConsideredSignal::parse(c))
+        .collect::<Option<Vec<_>>>()?;
+    let policy = e
+        .policy
+        .iter()
+        .map(|p| LoopPolicy::parse(p))
+        .collect::<Option<Vec<_>>>()?;
+    let result = match e.verdict.as_deref()? {
+        "acted" => Ok(LoopOutcome::parse(e.chosen.as_deref()?)?),
+        v => {
+            if e.chosen.is_some() {
+                return None;
+            }
+            Err(HeldReason::parse(v.strip_prefix("held:")?)?)
+        }
+    };
+    let count = match e.outcome.as_deref() {
+        None => None,
+        Some(o) => Some(o.strip_prefix("count:")?.parse::<u32>().ok()?),
+    };
+    Some(ParsedTick {
+        opportunity,
+        host,
+        considered,
+        policy,
+        result,
+        count,
+    })
+}
+
+/// Aggregate view of one loop over a window. Reasons, labels and counts only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopLedgerRow {
     pub loop_id: String,
     pub hosts: std::collections::BTreeSet<String>,
-    pub ticks: usize,
+    pub opportunities: usize,
     pub acted: usize,
-    pub skipped: std::collections::BTreeMap<String, usize>,
+    pub held: std::collections::BTreeMap<String, usize>,
     pub outcomes: std::collections::BTreeMap<String, usize>,
+    /// How many opportunities named each signal / policy line.
+    pub considered: std::collections::BTreeMap<String, usize>,
+    pub policy: std::collections::BTreeMap<String, usize>,
+    pub counted: u64,
+    /// Opportunities of this loop that were emitted more than once (held then acted, or a
+    /// restart re-emitting a wall-clock bucket) — reduced to one row each, counted here so a
+    /// paired analysis can report with and without them.
+    pub duplicated_opportunities: usize,
+    /// Ticks whose model-call count the loop body reported, and their sum; unknown is not zero.
+    pub model_calls_measured: usize,
     pub model_calls: u64,
     pub wall_ms: u64,
     pub first_ts_ms: u64,
     pub last_ts_ms: u64,
 }
 
-/// The loop ledger over the events whose `ts_ms` falls inside `[since_ms, until_ms]`.
-pub fn loop_ledger(events: &[DecisionEvent], since_ms: u64, until_ms: u64) -> Vec<LoopLedgerRow> {
-    let mut rows: std::collections::BTreeMap<String, LoopLedgerRow> = Default::default();
+/// The whole ledger over a window anchored to a clock the CALLER names.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoopLedger {
+    pub version: String,
+    pub now_ms: u64,
+    pub since_ms: u64,
+    pub loops: Vec<LoopLedgerRow>,
+    /// `loop_tick` rows the schema could not read.
+    pub malformed: usize,
+    /// Rows written by an earlier ledger version, excluded.
+    pub superseded: usize,
+    /// The NUMBER OF OPPORTUNITY IDS that appeared more than once (a restart re-emitting a
+    /// wall-clock bucket, or a held record followed by its act); each collapsed to one row.
+    pub duplicates: usize,
+}
+
+/// The loop ledger over `[now_ms - window_ms, now_ms]`, anchored to the caller's clock.
+pub fn loop_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> LoopLedger {
+    let since = now_ms.saturating_sub(window_ms);
+    let mut malformed = 0usize;
+    let mut superseded = 0usize;
+    // One row per OPPORTUNITY: an act wins over a held record for the same id; otherwise the
+    // latest record stands.
+    let mut by_id: std::collections::BTreeMap<String, (&DecisionEvent, ParsedTick)> =
+        Default::default();
+    let mut dup_ids: std::collections::BTreeSet<String> = Default::default();
     for e in events
         .iter()
-        .filter(|e| e.kind == "loop_tick" && e.ts_ms >= since_ms && e.ts_ms <= until_ms)
+        .filter(|e| e.kind == "loop_tick" && e.ts_ms >= since && e.ts_ms <= now_ms)
     {
-        let id = e
-            .goal_id
-            .as_deref()
-            .and_then(|g| g.strip_prefix("loop:"))
-            .unwrap_or("unknown")
-            .to_string();
-        let row = rows.entry(id.clone()).or_insert_with(|| LoopLedgerRow {
-            loop_id: id,
+        if e.evaluator_id.as_deref() != Some(LOOP_LEDGER_VERSION) {
+            superseded += 1;
+            continue;
+        }
+        let Some(tick) = parse_tick(e) else {
+            malformed += 1;
+            continue;
+        };
+        let id = tick.opportunity.id();
+        match by_id.get(&id) {
+            None => {
+                by_id.insert(id, (e, tick));
+            }
+            Some((prev, prev_tick)) => {
+                dup_ids.insert(id.clone());
+                // Input-order invariant: an act beats a hold; within the same class the later
+                // timestamp wins, and on an equal timestamp the later input wins.
+                let replace = match (tick.result.is_ok(), prev_tick.result.is_ok()) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => e.ts_ms >= prev.ts_ms,
+                };
+                if replace {
+                    by_id.insert(id, (e, tick));
+                }
+            }
+        }
+    }
+    let duplicates = dup_ids.len();
+    let mut rows: std::collections::BTreeMap<LoopId, LoopLedgerRow> = Default::default();
+    for (e, tick) in by_id.into_values() {
+        let id = tick.opportunity.loop_id();
+        let row = rows.entry(id).or_insert_with(|| LoopLedgerRow {
+            loop_id: id.as_str().into(),
             first_ts_ms: e.ts_ms,
             ..Default::default()
         });
-        row.ticks += 1;
-        if let Some(h) = e.trigger.as_deref() {
-            row.hosts.insert(h.to_string());
+        row.opportunities += 1;
+        if dup_ids.contains(&tick.opportunity.id()) {
+            row.duplicated_opportunities += 1;
         }
-        match e.verdict.as_deref() {
-            Some("acted") => row.acted += 1,
-            Some(v) => {
-                let reason = v.strip_prefix("skipped:").unwrap_or(v).to_string();
-                *row.skipped.entry(reason).or_insert(0) += 1;
+        row.hosts.insert(tick.host.as_str().into());
+        match tick.result {
+            Ok(outcome) => {
+                row.acted += 1;
+                *row.outcomes.entry(outcome.as_str().into()).or_insert(0) += 1;
             }
-            None => *row.skipped.entry("unlabelled".into()).or_insert(0) += 1,
+            Err(held) => *row.held.entry(held.as_str().into()).or_insert(0) += 1,
         }
-        if let Some(c) = e.chosen.as_deref() {
-            *row.outcomes.entry(c.to_string()).or_insert(0) += 1;
+        for c in &tick.considered {
+            *row.considered.entry(c.as_str().into()).or_insert(0) += 1;
         }
-        row.model_calls += u64::from(e.model_calls.unwrap_or(0));
+        for p in &tick.policy {
+            *row.policy.entry(p.render()).or_insert(0) += 1;
+        }
+        row.counted += u64::from(tick.count.unwrap_or(0));
+        if let Some(c) = e.model_calls {
+            row.model_calls_measured += 1;
+            row.model_calls += u64::from(c);
+        }
         row.wall_ms += e.latency_ms.unwrap_or(0);
         row.first_ts_ms = row.first_ts_ms.min(e.ts_ms);
         row.last_ts_ms = row.last_ts_ms.max(e.ts_ms);
     }
-    rows.into_values().collect()
+    LoopLedger {
+        version: LOOP_LEDGER_VERSION.into(),
+        now_ms,
+        since_ms: since,
+        loops: rows.into_values().collect(),
+        malformed,
+        superseded,
+        duplicates,
+    }
 }
 
-/// `ym why loops`: the last 24 hours of the mind's idle time, one line per loop.
-pub fn render_loop_ledger(events: &[DecisionEvent]) -> String {
-    let until = events.iter().map(|e| e.ts_ms).max().unwrap_or(0);
-    let since = until.saturating_sub(24 * 60 * 60 * 1000);
-    let rows = loop_ledger(events, since, until);
-    if rows.is_empty() {
-        return "No loop ticks recorded yet — the loop ledger fills as background loops run."
-            .into();
+fn join_counts(m: &std::collections::BTreeMap<String, usize>) -> String {
+    if m.is_empty() {
+        return "—".to_string();
+    }
+    m.iter()
+        .map(|(k, v)| format!("{k} {v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `ym why loops`: the last 24 hours of the mind's idle time, one loop per block, anchored to now.
+pub fn render_loop_ledger_at(events: &[DecisionEvent], now_ms: u64) -> String {
+    let ledger = loop_ledger(events, now_ms, 24 * 60 * 60 * 1000);
+    if ledger.loops.is_empty() {
+        return format!(
+            "No loop opportunities in the last 24 h (as of ts_ms {}); superseded rows {}, malformed {}, duplicates {}.",
+            now_ms, ledger.superseded, ledger.malformed, ledger.duplicates
+        );
     }
     let mut out = format!(
-        "LOOP LEDGER — last 24 h ({} loop(s); window ends at ts_ms {until})\n",
-        rows.len()
+        "LOOP LEDGER {} — last 24 h as of ts_ms {} ({} loop(s); superseded {}, malformed {}, duplicates {})\n",
+        ledger.version,
+        now_ms,
+        ledger.loops.len(),
+        ledger.superseded,
+        ledger.malformed,
+        ledger.duplicates
     );
-    for r in rows {
-        let skipped: Vec<String> = r.skipped.iter().map(|(k, v)| format!("{k} {v}")).collect();
-        let outcomes: Vec<String> = r
-            .outcomes
-            .iter()
-            .filter(|(k, _)| !k.is_empty())
-            .map(|(k, v)| format!("{k} {v}"))
-            .collect();
+    for r in ledger.loops {
+        let calls = if r.model_calls_measured == 0 {
+            "unknown".to_string()
+        } else {
+            format!(
+                "{} (reported on {}/{})",
+                r.model_calls, r.model_calls_measured, r.opportunities
+            )
+        };
         out.push_str(&format!(
-            "  {:<18} host {:<9} ticks {:>4} · acted {:>3} · skipped [{}] · model calls {} · wall {} ms\n      outcomes: {}\n",
+            "  {:<16} host {:<9} opportunities {:>4} · acted {:>3} · held [{}] · model calls {} · wall {} ms · counted {}\n      outcomes: {}\n      considered: {}\n      policy: {}\n",
             r.loop_id,
             r.hosts.iter().cloned().collect::<Vec<_>>().join("+"),
-            r.ticks,
+            r.opportunities,
             r.acted,
-            skipped.join(", "),
-            r.model_calls,
+            join_counts(&r.held),
+            calls,
             r.wall_ms,
-            if outcomes.is_empty() { "—".to_string() } else { outcomes.join(", ") }
+            r.counted,
+            join_counts(&r.outcomes),
+            join_counts(&r.considered),
+            join_counts(&r.policy),
         ));
     }
     out
+}
+
+/// The `verified_report` shape: anchored to the wall clock at render time.
+pub fn render_loop_ledger(events: &[DecisionEvent]) -> String {
+    render_loop_ledger_at(events, now_ms())
+}
+
+/// The opportunity arithmetic every cadence loop shares, pure so a replayed schedule can prove
+/// "one held emission per opportunity". A wall-clock loop with period `p` has one opportunity per
+/// bucket `floor(now / p)`; a legacy-timer loop has one per due window (keyed by the timer's
+/// last-run stamp); the knock has one per idle stretch. The gate remembers the last key it
+/// recorded so a held state is emitted once, and `mark` lets the act that closes a window keep a
+/// later wake from adding a held record after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpportunityGate {
+    last_key: Option<u64>,
+}
+impl OpportunityGate {
+    pub fn bucket(now_ms: u64, period_secs: u64) -> u64 {
+        now_ms / period_secs.max(1).saturating_mul(1000)
+    }
+    pub fn take_bucket(
+        &mut self,
+        loop_id: LoopId,
+        now_ms: u64,
+        period_secs: u64,
+    ) -> Option<LoopOpportunity> {
+        let n = Self::bucket(now_ms, period_secs);
+        self.take_key(n)
+            .then_some(LoopOpportunity::Bucket { loop_id, n })
+    }
+    pub fn take_window(
+        &mut self,
+        loop_id: LoopId,
+        process_start_ms: u64,
+        key: u64,
+    ) -> Option<LoopOpportunity> {
+        self.take_key(key).then_some(LoopOpportunity::Window {
+            loop_id,
+            process_start_ms,
+            key,
+        })
+    }
+    pub fn take_stretch(&mut self, loop_id: LoopId, start_ms: u64) -> Option<LoopOpportunity> {
+        self.take_key(start_ms)
+            .then_some(LoopOpportunity::Stretch { loop_id, start_ms })
+    }
+    pub fn mark(&mut self, key: u64) {
+        self.last_key = Some(key);
+    }
+    fn take_key(&mut self, key: u64) -> bool {
+        if self.last_key == Some(key) {
+            return false;
+        }
+        self.last_key = Some(key);
+        true
+    }
 }
 
 #[cfg(test)]
 mod loop_ledger_tests {
     use super::*;
 
-    fn tick(
-        id: &str,
-        host: &str,
-        verdict: &str,
-        chosen: &str,
-        ts: u64,
-        calls: u32,
-    ) -> DecisionEvent {
-        let mut e = DecisionEvent::new(&format!("loop-{id}-{ts}"), "loop_tick");
-        e.ts_ms = ts;
-        e.goal_id = Some(format!("loop:{id}"));
-        e.actor = Some(format!("loop:{id}"));
-        e.trigger = Some(host.into());
-        e.verdict = Some(verdict.into());
-        e.chosen = Some(chosen.into());
-        e.model_calls = Some(calls);
-        e.latency_ms = Some(7);
-        e
+    fn ev(t: LoopTick, ts: u64) -> DecisionEvent {
+        t.to_event(ts)
+    }
+    fn dmn_window(key: u64) -> LoopOpportunity {
+        LoopOpportunity::Window {
+            loop_id: LoopId::Dmn,
+            process_start_ms: 77,
+            key,
+        }
     }
 
     #[test]
-    fn the_ledger_counts_ticks_acts_skips_and_spend_per_loop_inside_the_window() {
-        const B: u64 = 200_000_000_000; // a real epoch-ish base so "24 h earlier" is meaningful
-        let events = vec![
-            tick(
-                "dmn",
-                "telegram",
-                "acted",
-                "dreamed:reconcile",
+    fn the_schema_round_trips_and_rejects_what_it_does_not_own() {
+        for id in LoopId::ALL {
+            assert_eq!(LoopId::parse(id.as_str()), Some(*id));
+        }
+        for p in [
+            LoopPolicy::Cadence(300),
+            LoopPolicy::Idle(600),
+            LoopPolicy::Beat(30),
+            LoopPolicy::Report(600),
+            LoopPolicy::Budget(BudgetKind::DmnOneCall),
+            LoopPolicy::Cap(CapKind::OnePerDay),
+        ] {
+            assert_eq!(LoopPolicy::parse(&p.render()), Some(p));
+        }
+        for o in [
+            dmn_window(5),
+            LoopOpportunity::Stretch {
+                loop_id: LoopId::Knock,
+                start_ms: 9,
+            },
+            LoopOpportunity::Bucket {
+                loop_id: LoopId::Heartbeat,
+                n: 3,
+            },
+        ] {
+            assert_eq!(LoopOpportunity::parse(&o.id()), Some(o));
+        }
+        assert_eq!(
+            LoopOpportunity::parse("dmn:due:77"),
+            None,
+            "a window needs its key"
+        );
+        assert_eq!(LoopOpportunity::parse("dmn:idle:1:2"), None);
+        assert_eq!(LoopPolicy::parse("cadence:soon"), None);
+        let e = ev(
+            LoopTick::held(dmn_window(1), LoopHost::Telegram, HeldReason::IdleGate)
+                .policy(&[LoopPolicy::Cadence(300)]),
+            10,
+        );
+        assert_eq!(e.verdict.as_deref(), Some("held:idle-gate"));
+        assert_eq!(e.object_id.as_deref(), Some("dmn:due:77:1"));
+        assert!(e.context_fingerprint.is_none() && e.predicted.is_none());
+        let parsed = parse_tick(&e).unwrap();
+        assert_eq!(parsed.policy, vec![LoopPolicy::Cadence(300)]);
+        // Any field outside the schema makes the row malformed: a free label, a bad count, an
+        // actor that disagrees with the opportunity, an act without an outcome.
+        let mut bad = e.clone();
+        bad.candidates = vec!["vibes".into()];
+        assert!(parse_tick(&bad).is_none());
+        let mut bad = e.clone();
+        bad.outcome = Some("count:many".into());
+        assert!(parse_tick(&bad).is_none());
+        let mut bad = e.clone();
+        bad.actor = Some("loop:knock".into());
+        assert!(parse_tick(&bad).is_none());
+        let mut bad = e.clone();
+        bad.verdict = Some("acted".into());
+        assert!(parse_tick(&bad).is_none(), "acted needs an outcome");
+    }
+
+    #[test]
+    fn the_ledger_is_anchored_dedupes_by_opportunity_and_keeps_unknown_calls_unknown() {
+        const B: u64 = 200_000_000_000;
+        let mut events = vec![
+            ev(
+                LoopTick::acted(dmn_window(1), LoopHost::Telegram, LoopOutcome::Dreamed)
+                    .count(3)
+                    .considered(&[ConsideredSignal::Tensions])
+                    .policy(&[LoopPolicy::Cadence(300)]),
                 B + 1_000,
-                1,
             ),
-            tick("dmn", "telegram", "skipped:idle-gate", "", B + 2_000, 0),
-            tick("dmn", "telegram", "skipped:idle-gate", "", B + 3_000, 0),
-            tick("knock", "headless", "skipped:no-packets", "", B + 3_500, 0),
-            tick("dmn", "telegram", "acted", "dreamed:associate", 1_000, 1), // days before the window
+            ev(
+                LoopTick::held(dmn_window(2), LoopHost::Telegram, HeldReason::IdleGate)
+                    .policy(&[LoopPolicy::Cadence(300)]),
+                B + 2_000,
+            ),
+            ev(
+                LoopTick::held(
+                    LoopOpportunity::Bucket {
+                        loop_id: LoopId::Heartbeat,
+                        n: 4,
+                    },
+                    LoopHost::Headless,
+                    HeldReason::NothingDue,
+                )
+                .policy(&[LoopPolicy::Beat(30), LoopPolicy::Report(600)]),
+                B + 3_000,
+            ),
+            ev(
+                LoopTick::acted(dmn_window(0), LoopHost::Telegram, LoopOutcome::Dreamed)
+                    .model_calls(Some(1)),
+                1_000,
+            ), // days ago
         ];
-        let rows = loop_ledger(&events, B + 500, B + 4_000);
-        assert_eq!(rows.len(), 2);
-        let dmn = rows.iter().find(|r| r.loop_id == "dmn").unwrap();
-        assert_eq!((dmn.ticks, dmn.acted), (3, 1));
-        assert_eq!(dmn.skipped.get("idle-gate"), Some(&2));
-        assert_eq!(dmn.model_calls, 1);
-        assert_eq!(dmn.wall_ms, 21);
-        assert_eq!((dmn.first_ts_ms, dmn.last_ts_ms), (B + 1_000, B + 3_000));
-        let knock = rows.iter().find(|r| r.loop_id == "knock").unwrap();
-        assert!(knock.hosts.contains("headless"));
-        let text = render_loop_ledger(&events);
-        assert!(text.contains("dmn") && text.contains("idle-gate 2") && text.contains("knock"));
+        // A held record and then the act that closed the SAME window: one opportunity, act wins.
+        let w = LoopOpportunity::Window {
+            loop_id: LoopId::Ask,
+            process_start_ms: 77,
+            key: 9,
+        };
+        events.push(ev(
+            LoopTick::held(w, LoopHost::Telegram, HeldReason::IdleGate),
+            B + 2_500,
+        ));
+        events.push(ev(
+            LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::Asked).model_calls(Some(1)),
+            B + 2_600,
+        ));
+        // A restart re-emitting the same heartbeat bucket: counted once, reported as a duplicate.
+        events.push(ev(
+            LoopTick::held(
+                LoopOpportunity::Bucket {
+                    loop_id: LoopId::Heartbeat,
+                    n: 4,
+                },
+                LoopHost::Headless,
+                HeldReason::NothingDue,
+            )
+            .policy(&[LoopPolicy::Beat(30), LoopPolicy::Report(600)]),
+            B + 3_100,
+        ));
+        // A v1/v2 row and a row with an unknown label are counted, not aggregated.
+        let mut old = ev(
+            LoopTick::acted(dmn_window(3), LoopHost::Telegram, LoopOutcome::Dreamed),
+            B + 1_500,
+        );
+        old.evaluator_id = Some("loop-ledger-v2".into());
+        events.push(old);
+        let mut bad = ev(
+            LoopTick::acted(dmn_window(4), LoopHost::Telegram, LoopOutcome::Dreamed),
+            B + 1_600,
+        );
+        bad.verdict = Some("held:because".into());
+        bad.chosen = None;
+        events.push(bad);
+
+        let now = B + 4_000;
+        let ledger = loop_ledger(&events, now, 24 * 60 * 60 * 1000);
+        assert_eq!(
+            (ledger.superseded, ledger.malformed, ledger.duplicates),
+            (1, 1, 2)
+        );
+        let ask = ledger.loops.iter().find(|r| r.loop_id == "ask").unwrap();
+        assert_eq!((ask.opportunities, ask.acted), (1, 1));
+        assert!(ask.held.is_empty());
+        let hb = ledger
+            .loops
+            .iter()
+            .find(|r| r.loop_id == "heartbeat")
+            .unwrap();
+        assert_eq!((hb.opportunities, hb.duplicated_opportunities), (1, 1));
+        assert_eq!(
+            ask.duplicated_opportunities, 1,
+            "held-then-act is one duplicated opportunity"
+        );
+        assert_eq!(hb.policy.get("beat:30s"), Some(&1));
+        let dmn = ledger.loops.iter().find(|r| r.loop_id == "dmn").unwrap();
+        assert_eq!((dmn.opportunities, dmn.acted, dmn.counted), (2, 1, 3));
+        assert_eq!(dmn.considered.get("tensions"), Some(&1));
+        assert_eq!(
+            dmn.model_calls_measured, 0,
+            "no body reported a count: unknown, not zero"
+        );
+        // Anchored to `now`, not to the newest event.
+        let later = loop_ledger(&events, now + 2 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000);
+        assert!(later.loops.is_empty());
+        let text = render_loop_ledger_at(&events, now);
+        assert!(text.contains("considered: tensions 1") && text.contains("policy: cadence:300s 2"));
+        assert!(text.contains("duplicates 2") && text.contains("model calls unknown"));
+    }
+
+    /// Codex's v3 review: the reducer must not depend on input order. Three rows for one
+    /// opportunity — an older act, a newer act, a hold — must reduce to the NEWER act however
+    /// they are ordered, and `duplicates` counts ids, not extra rows.
+    #[test]
+    fn the_reducer_is_input_order_invariant_and_counts_duplicated_ids() {
+        const B: u64 = 200_000_000_000;
+        let w = LoopOpportunity::Window {
+            loop_id: LoopId::Digest,
+            process_start_ms: 1,
+            key: 5,
+        };
+        let older = ev(
+            LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::NothingToSay),
+            B + 1_000,
+        );
+        let newer = ev(
+            LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::DigestSent),
+            B + 2_000,
+        );
+        let held = ev(
+            LoopTick::held(w, LoopHost::Telegram, HeldReason::IdleGate),
+            B + 3_000,
+        );
+        let orders: [[&DecisionEvent; 3]; 4] = [
+            [&older, &newer, &held],
+            [&newer, &older, &held],
+            [&held, &newer, &older],
+            [&held, &older, &newer],
+        ];
+        for order in orders {
+            let events: Vec<DecisionEvent> = order.iter().map(|e| (*e).clone()).collect();
+            let ledger = loop_ledger(&events, B + 4_000, 24 * 60 * 60 * 1000);
+            let row = ledger.loops.iter().find(|r| r.loop_id == "digest").unwrap();
+            assert_eq!((row.opportunities, row.acted), (1, 1));
+            assert_eq!(
+                row.outcomes.get("digest-sent"),
+                Some(&1),
+                "the newer act stands"
+            );
+            assert!(row.held.is_empty(), "a hold never survives an act");
+            assert_eq!(
+                ledger.duplicates, 1,
+                "one duplicated id, whatever the row count"
+            );
+            assert_eq!(row.duplicated_opportunities, 1);
+        }
+        // Equal timestamps: the later input wins (deterministic, documented).
+        let a = ev(
+            LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::NothingToSay),
+            B + 9,
+        );
+        let b = ev(
+            LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::DigestSent),
+            B + 9,
+        );
+        let ledger = loop_ledger(&[a.clone(), b.clone()], B + 100, 1_000);
+        assert_eq!(ledger.loops[0].outcomes.get("digest-sent"), Some(&1));
+        let ledger = loop_ledger(&[b, a], B + 100, 1_000);
+        assert_eq!(ledger.loops[0].outcomes.get("nothing-to-say"), Some(&1));
+    }
+
+    #[test]
+    fn a_replayed_schedule_yields_one_held_record_per_opportunity_and_an_act_marks_its_window() {
+        // Wake every 1.5 s for an hour against a 300 s bucket: 12 buckets, 12 held ids.
+        let mut gate = OpportunityGate::default();
+        let mut ids = Vec::new();
+        let mut t = 1_788_300_000_000u64;
+        while t < 1_788_300_000_000 + 3_600_000 {
+            if let Some(o) = gate.take_bucket(LoopId::Heartbeat, t, 300) {
+                ids.push(o.id());
+            }
+            t += 1_500;
+        }
+        assert_eq!(ids.len(), 12);
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            12
+        );
+        // A legacy-timer window: held once, then the act marks it, then no more held records.
+        let mut g = OpportunityGate::default();
+        assert!(g.take_window(LoopId::Dmn, 77, 1_000).is_some());
+        assert!(g.take_window(LoopId::Dmn, 77, 1_000).is_none());
+        g.mark(1_000);
+        assert!(g.take_window(LoopId::Dmn, 77, 1_000).is_none());
         assert!(
-            !text.contains("dreamed:associate"),
-            "outside the 24 h window from the newest tick"
+            g.take_window(LoopId::Dmn, 77, 2_000).is_some(),
+            "a new window records again"
+        );
+        // A stretch records once however many wakes it sees.
+        let mut k = OpportunityGate::default();
+        assert!(
+            k.take_stretch(LoopId::Knock, 5).is_some()
+                && k.take_stretch(LoopId::Knock, 5).is_none()
         );
     }
 }

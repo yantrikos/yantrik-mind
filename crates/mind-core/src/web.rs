@@ -1159,6 +1159,24 @@ fn handle(
                 );
             }
         },
+        // L1c (ARCH7): the loop ledger for the Loops instrument (operator, read-only, aggregates).
+        ("GET", "/api/loops") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => {
+                let out = rt.block_on(
+                    conv.cli_dispatch("loops_json", &mind_types::AccessContext::operator_audit()),
+                );
+                match serde_json::from_str::<serde_json::Value>(&out) {
+                    Ok(v) => send_json(&mut stream, "200 OK", "", &v),
+                    Err(_) => send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "available": false }),
+                    ),
+                }
+            }
+        },
         ("GET", "/api/orders") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
@@ -2555,6 +2573,31 @@ mod tests {
                 && body.contains("no calls since start")
                 && body.contains("`all-time ${g.complete} / ${g.total}"),
             "the gate shows since-start as headline with all-time beneath"
+        );
+        // L1c (ARCH7): the Loops instrument reads the verified loop ledger through an operator,
+        // read-only route and shows counts and bounded reasons only.
+        assert!(
+            APP_HTML.contains("id=\"inst-loops\"") && APP_HTML.contains("id=\"loops-lines\""),
+            "the Loops card exists in the instrument column"
+        );
+        let loops_js = APP_JS
+            .find("fetch(\"/api/loops\"")
+            .expect("the Loops card reads the ledger from the server");
+        let loops_body: String = APP_JS[loops_js..].chars().take(1600).collect();
+        assert!(
+            loops_body.contains("l.opportunities")
+                && loops_body.contains("l.held")
+                && loops_body.contains("g.duplicates")
+                && !loops_body.contains("innerHTML"),
+            "the card shows opportunities, acts, held reasons and reduced duplicates, DOM-only"
+        );
+        let loops_route = src
+            .find("(\"GET\", \"/api/loops\")")
+            .expect("loops route exists");
+        assert!(
+            src[loops_route..loops_route + 400].contains("operator(&head, &devices)")
+                && src[loops_route..loops_route + 500].contains("\"loops_json\""),
+            "loops is operator-gated and read-only"
         );
         // The auditor's window reaches the engine: `?since=<token>` is forwarded as the verb
         // argument, alphanumeric only, and the engine's parser decides what it means.

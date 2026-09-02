@@ -205,6 +205,32 @@ async function loadInstruments() {
     }
     if (!rows.length) lines.appendChild(textP("nothing recorded yet"));
   } catch (_) { $("shadow-text").textContent = "unavailable"; }
+  // L1c (ARCH7): the loop ledger — what the mind did with its idle time, per loop, last 24 h.
+  // Everything here is a count or a bounded reason from the verified log; nothing is narrated.
+  try {
+    const r = await fetch("/api/loops", H);
+    const g = r.ok ? await r.json() : { available: false };
+    const state = $("loops-state"), lines = $("loops-lines");
+    lines.replaceChildren();
+    if (!g.available) { state.textContent = "unavailable"; lines.appendChild(textP("the verified loop ledger could not be read")); }
+    else if (!(g.loops || []).length) { state.textContent = "quiet"; lines.appendChild(textP(`no loop opportunities in the last 24 h${g.superseded ? ` · ${g.superseded} older-version rows` : ""}`)); }
+    else {
+      const loops = g.loops.slice().sort((a, b) => b.opportunities - a.opportunities);
+      const acted = loops.reduce((n, l) => n + l.acted, 0);
+      const opps = loops.reduce((n, l) => n + l.opportunities, 0);
+      state.textContent = `${acted} / ${opps} acted · 24h`;
+      for (const l of loops) {
+        const held = Object.entries(l.held || {}).map(([k, v]) => `${k} ${v}`).join(", ");
+        const outcomes = Object.entries(l.outcomes || {}).map(([k, v]) => `${k} ${v}`).join(", ");
+        const what = `${l.acted}/${l.opportunities}${outcomes ? " · " + outcomes : ""}${held ? " · held " + held : ""}`;
+        const cls = l.acted ? "" : "old";
+        lines.appendChild(evLine(cls, l.loop_id, what, [...(l.hosts || [])].join("+")));
+      }
+      if (g.duplicates || g.malformed) {
+        lines.appendChild(textP(`reduced ${g.duplicates || 0} duplicate opportunit${g.duplicates === 1 ? "y" : "ies"}${g.malformed ? ` · ${g.malformed} malformed row(s)` : ""}`));
+      }
+    }
+  } catch (_) { $("loops-state").textContent = "unavailable"; }
 }
 
 function refreshWelcome() {

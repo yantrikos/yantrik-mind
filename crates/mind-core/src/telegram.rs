@@ -1833,6 +1833,7 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
         // NOT run here: it commits an engagement prediction, and a prediction about an engagement
         // that cannot happen would poison what `judgment_trend` measures.
         let mut beats: u64 = 0;
+        let mut gate_heartbeat = mind_observability::OpportunityGate::default();
         loop {
             beat.tick().await;
             if beats % HEADLESS_WORLD_SHADOW_EVERY == 0 {
@@ -1844,26 +1845,45 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
             for note in &notes {
                 eprintln!("[headless-tick] {note}");
             }
-            // L1: the heartbeat records when it did something, and once per cadence otherwise.
+            // L1 v3: an act is ONE BEAT's opportunity (a 30 s bucket), so many acts in ten minutes
+            // are many opportunities; an idle stretch records "nothing-due" once per 600 s report
+            // bucket under its own id. Policy names both cadences honestly.
+            let hb_now = now_ms();
+            let hb_policy = [
+                mind_observability::LoopPolicy::Beat(30),
+                mind_observability::LoopPolicy::Report(600),
+            ];
+            let hb_considered = [
+                mind_observability::ConsideredSignal::DueDelegations,
+                mind_observability::ConsideredSignal::DueHorizons,
+            ];
             if !notes.is_empty() {
                 ticker.record_loop_tick(
-                    "heartbeat",
-                    "headless",
-                    30,
-                    &format!("delegations:{}", notes.len()),
-                    None,
-                    0,
-                    now_ms().saturating_sub(t0),
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Bucket {
+                            loop_id: mind_observability::LoopId::Heartbeat,
+                            n: mind_observability::OpportunityGate::bucket(hb_now, 30),
+                        },
+                        mind_observability::LoopHost::Headless,
+                        mind_observability::LoopOutcome::Delegations,
+                    )
+                    .considered(&hb_considered)
+                    .policy(&hb_policy)
+                    .count(notes.len() as u32)
+                    .wall_ms(now_ms().saturating_sub(t0)),
                 );
-            } else if beats % HEADLESS_WORLD_SHADOW_EVERY == 0 {
+            } else if let Some(bucket) =
+                gate_heartbeat.take_bucket(mind_observability::LoopId::Heartbeat, hb_now, 600)
+            {
                 ticker.record_loop_tick(
-                    "heartbeat",
-                    "headless",
-                    30,
-                    "",
-                    Some("nothing-due"),
-                    0,
-                    now_ms().saturating_sub(t0),
+                    mind_observability::LoopTick::held(
+                        bucket,
+                        mind_observability::LoopHost::Headless,
+                        mind_observability::HeldReason::NothingDue,
+                    )
+                    .considered(&hb_considered)
+                    .policy(&hb_policy)
+                    .wall_ms(now_ms().saturating_sub(t0)),
                 );
             }
         }
@@ -1954,12 +1974,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // live turn and needs no extra task. Disabled with YM_DMN=off.
     let mut last_activity = now_ms();
     let mut last_dmn = 0u64;
-    // L1 (ARCH7): loop-ledger report timers — a due-but-held loop records its skip at most once
-    // per its own period, so the ledger sees cadences, never the poll loop's wake rate.
-    let mut last_dmn_skip = 0u64;
-    let mut last_knock_tick = 0u64;
-    let mut last_digest_skip = 0u64;
-    let mut last_ask_skip = 0u64;
+    // L1 (ARCH7) v3: one opportunity gate per loop. An opportunity is the loop's own due window
+    // (keyed by the legacy timer it obeys, plus this process's start so restarts never collide)
+    // or, for the knock, one idle stretch. A held state records once per opportunity; an act
+    // records under the same id and marks it; the ledger reduces to one row per opportunity.
+    // Legacy timers are untouched.
+    let process_start_ms = now_ms();
+    let mut gate_dmn = mind_observability::OpportunityGate::default();
+    let mut gate_knock = mind_observability::OpportunityGate::default();
+    let mut gate_digest = mind_observability::OpportunityGate::default();
+    let mut gate_ask = mind_observability::OpportunityGate::default();
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
@@ -2914,7 +2938,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Default-mode ("sleep") tick: when the user has been idle past the threshold, run ONE bounded
         // offline-cognition pass (rehearse → reconcile → associate over the typed substrate). Paced so
         // it fires at most every YM_DMN_SECS, and only while idle so it never competes with a live turn.
-        if std::env::var("YM_DMN").map(|v| v != "off").unwrap_or(true) {
+        {
+            // L1 v3: the due window is computed OUTSIDE the enable switch so a disabled DMN still
+            // records `held:disabled` once per window; the switch itself is unchanged.
+            let dmn_on = std::env::var("YM_DMN").map(|v| v != "off").unwrap_or(true);
             let idle_secs: u64 = std::env::var("YM_DMN_IDLE_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -2925,26 +2952,61 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(300);
             let now = now_ms();
             let dmn_due = now.saturating_sub(last_dmn) >= period * 1000;
-            if dmn_due && now.saturating_sub(last_activity) >= idle_secs * 1000 {
+            let dmn_considered = [
+                mind_observability::ConsideredSignal::Tensions,
+                mind_observability::ConsideredSignal::Beliefs,
+                mind_observability::ConsideredSignal::PaperDesk,
+            ];
+            let dmn_policy = [
+                mind_observability::LoopPolicy::Cadence(period),
+                mind_observability::LoopPolicy::Idle(idle_secs),
+                mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::DmnOneCall),
+            ];
+            if dmn_on && dmn_due && now.saturating_sub(last_activity) >= idle_secs * 1000 {
                 let t0 = now_ms();
                 let lines = conv.dmn_tick().await;
                 for line in &lines {
                     eprintln!("{line}");
                 }
-                // L1: the DMN's own contract is one budgeted model call per tick.
+                // The act records under the due window it closes; model calls stay unknown until
+                // the DMN reports its own count (never inferred from its budget).
+                gate_dmn.mark(last_dmn);
                 conv.record_loop_tick(
-                    "dmn",
-                    "telegram",
-                    period,
-                    &format!("dreamed:{}", lines.len()),
-                    None,
-                    1,
-                    now_ms().saturating_sub(t0),
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Dmn,
+                            process_start_ms,
+                            key: last_dmn,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Dreamed,
+                    )
+                    .considered(&dmn_considered)
+                    .policy(&dmn_policy)
+                    .count(lines.len() as u32)
+                    .wall_ms(now_ms().saturating_sub(t0)),
                 );
                 last_dmn = now;
-            } else if dmn_due && now.saturating_sub(last_dmn_skip) >= period * 1000 {
-                conv.record_loop_tick("dmn", "telegram", period, "", Some("idle-gate"), 0, 0);
-                last_dmn_skip = now;
+            } else if dmn_due {
+                if let Some(window) = gate_dmn.take_window(
+                    mind_observability::LoopId::Dmn,
+                    process_start_ms,
+                    last_dmn,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            if dmn_on {
+                                mind_observability::HeldReason::IdleGate
+                            } else {
+                                mind_observability::HeldReason::Disabled
+                            },
+                        )
+                        .considered(&dmn_considered)
+                        .policy(&dmn_policy),
+                    );
+                }
             }
         }
 
@@ -2952,10 +3014,63 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // cap) and capped at ONE message per tick. A value DIGEST (urges that cleared the bar) takes
         // precedence; otherwise, while the brain is still sparse, the ASK-DRIVE poses ONE get-to-know-you
         // question (curiosity turned outward — cures cold-start instead of waiting to be fed).
-        if std::env::var("YM_PROACTIVE")
+        let proactive_on = std::env::var("YM_PROACTIVE")
             .map(|v| v != "off")
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+        if !proactive_on {
+            // L1 v3: a switched-off proactive lane still has due windows; record them as
+            // `held:disabled` once each so the ledger can say the loop was off, not silent.
+            let now = now_ms();
+            let pd_secs: u64 = std::env::var("YM_PROACTIVE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(86_400);
+            let ask_secs: u64 = std::env::var("YM_ASK_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(7_200);
+            if now.saturating_sub(last_digest) >= pd_secs * 1000 {
+                if let Some(window) = gate_digest.take_window(
+                    mind_observability::LoopId::Digest,
+                    process_start_ms,
+                    last_digest,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::HeldReason::Disabled,
+                        )
+                        .considered(&[
+                            mind_observability::ConsideredSignal::Urges,
+                            mind_observability::ConsideredSignal::Receptivity,
+                        ])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(pd_secs)]),
+                    );
+                }
+            }
+            if now.saturating_sub(last_ask) >= ask_secs * 1000 {
+                if let Some(window) = gate_ask.take_window(
+                    mind_observability::LoopId::Ask,
+                    process_start_ms,
+                    last_ask,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::HeldReason::Disabled,
+                        )
+                        .considered(&[
+                            mind_observability::ConsideredSignal::Name,
+                            mind_observability::ConsideredSignal::Purpose,
+                        ])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(ask_secs)]),
+                    );
+                }
+            }
+        }
+        if proactive_on {
             let idle_secs: u64 = std::env::var("YM_DMN_IDLE_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -2982,13 +3097,11 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // unprompted (prepared work + observed/told authority + a committed prediction), and it
             // is capped at one per day inside `maybe_knock`. If it speaks, nothing else does this
             // tick: the whole point is that an interruption is rare and earns itself.
-            // L1: the knock has no cadence of its own (it is evaluated every idle wake and capped
-            // inside), so its ledger tick is rate-limited to the DMN period; a knock that is
-            // actually sent always records.
-            let report_secs: u64 = std::env::var("YM_DMN_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(300);
+            // L1 v3: the knock has no cadence — it is evaluated on every idle wake and capped
+            // inside — so its opportunity is ONE IDLE STRETCH (keyed by the activity that opened
+            // it). The first evaluation of a stretch records "evaluated"; a knock that is sent
+            // records "knocked" under the same id and supersedes it. Not-idle is not an
+            // opportunity, so nothing is recorded outside a stretch.
             if idle_ok {
                 let t0 = now_ms();
                 let mut knocked = false;
@@ -3000,33 +3113,37 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         knocked = true;
                     }
                 }
-                if knocked || now.saturating_sub(last_knock_tick) >= report_secs * 1000 {
+                let first = gate_knock
+                    .take_stretch(mind_observability::LoopId::Knock, last_activity)
+                    .is_some();
+                if knocked || first {
                     conv.record_loop_tick(
-                        "knock",
-                        "telegram",
-                        report_secs,
-                        if knocked { "knocked" } else { "evaluated" },
-                        None,
-                        0,
-                        now_ms().saturating_sub(t0),
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Stretch {
+                                loop_id: mind_observability::LoopId::Knock,
+                                start_ms: last_activity,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            if knocked {
+                                mind_observability::LoopOutcome::Knocked
+                            } else {
+                                mind_observability::LoopOutcome::Evaluated
+                            },
+                        )
+                        .considered(&[
+                            mind_observability::ConsideredSignal::Packets,
+                            mind_observability::ConsideredSignal::Receptivity,
+                            mind_observability::ConsideredSignal::DailyCap,
+                        ])
+                        .policy(&[
+                            mind_observability::LoopPolicy::Idle(idle_secs),
+                            mind_observability::LoopPolicy::Cap(
+                                mind_observability::CapKind::OnePerDay,
+                            ),
+                        ])
+                        .wall_ms(now_ms().saturating_sub(t0)),
                     );
-                    last_knock_tick = now;
                 }
-            } else if now.saturating_sub(last_knock_tick) >= report_secs * 1000 {
-                conv.record_loop_tick(
-                    "knock",
-                    "telegram",
-                    report_secs,
-                    "",
-                    Some(if quiet_now {
-                        "quiet-hours"
-                    } else {
-                        "idle-gate"
-                    }),
-                    0,
-                    0,
-                );
-                last_knock_tick = now;
             }
             // EX4-LIVE-A ELIGIBLE CUT. The preconditions below decide whether a proactive
             // decision is even DUE; only past them does "should I speak now?" exist as a question.
@@ -3034,28 +3151,47 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             // so both SEND and DECLINE are recorded, and precondition declines (which mean "there
             // was nothing due", not "we chose silence") never enter the comparison at all.
             let digest_due = now.saturating_sub(last_digest) >= pd_secs * 1000;
-            if digest_due
-                && !spoke
-                && !idle_ok
-                && now.saturating_sub(last_digest_skip) >= report_secs * 1000
-            {
-                conv.record_loop_tick(
-                    "digest",
-                    "telegram",
-                    pd_secs,
-                    "",
-                    Some(if quiet_now {
-                        "quiet-hours"
-                    } else {
-                        "idle-gate"
-                    }),
-                    0,
-                    0,
-                );
-                last_digest_skip = now;
+            let digest_considered = [
+                mind_observability::ConsideredSignal::Urges,
+                mind_observability::ConsideredSignal::Receptivity,
+                mind_observability::ConsideredSignal::ExecutiveShadow,
+            ];
+            let digest_policy = [
+                mind_observability::LoopPolicy::Cadence(pd_secs),
+                mind_observability::LoopPolicy::Idle(idle_secs),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+            ];
+            // L1 v3: the digest's opportunity is its due window (keyed by the legacy timer).
+            if digest_due && (spoke || !idle_ok) {
+                if let Some(window) = gate_digest.take_window(
+                    mind_observability::LoopId::Digest,
+                    process_start_ms,
+                    last_digest,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            if spoke {
+                                mind_observability::HeldReason::SpokeAlready
+                            } else if chat == 0 {
+                                mind_observability::HeldReason::NoChat
+                            } else if quiet_now {
+                                mind_observability::HeldReason::QuietHours
+                            } else {
+                                mind_observability::HeldReason::IdleGate
+                            },
+                        )
+                        .considered(&digest_considered)
+                        .policy(&digest_policy),
+                    );
+                }
             }
             if !spoke && idle_ok && digest_due {
                 let t0 = now_ms();
+                let digest_window = last_digest;
                 // SHADOW ONLY. The return value must never reach control flow: the legacy gate
                 // below stays authoritative for every send. Keyed on `last_digest` so the ~144
                 // re-evaluations an hour that a suppressed opportunity produces collapse into one
@@ -3087,18 +3223,24 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         .await;
                     }
                     last_digest = now; // reset cadence whether or not we spoke (never hammer)
+                    gate_digest.mark(digest_window);
                     conv.record_loop_tick(
-                        "digest",
-                        "telegram",
-                        pd_secs,
-                        if spoke {
-                            "digest-sent"
-                        } else {
-                            "nothing-to-say"
-                        },
-                        None,
-                        u32::from(spoke),
-                        now_ms().saturating_sub(t0),
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Digest,
+                                process_start_ms,
+                                key: digest_window,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            if spoke {
+                                mind_observability::LoopOutcome::DigestSent
+                            } else {
+                                mind_observability::LoopOutcome::NothingToSay
+                            },
+                        )
+                        .considered(&digest_considered)
+                        .policy(&digest_policy)
+                        .wall_ms(now_ms().saturating_sub(t0)),
                     );
                 } else {
                     // Declined. `proactive_digest()` never ran, so whether there was anything to
@@ -3110,17 +3252,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         None,
                     )
                     .await;
-                    if now.saturating_sub(last_digest_skip) >= report_secs * 1000 {
+                    if let Some(window) = gate_digest.take_window(
+                        mind_observability::LoopId::Digest,
+                        process_start_ms,
+                        digest_window,
+                    ) {
                         conv.record_loop_tick(
-                            "digest",
-                            "telegram",
-                            pd_secs,
-                            "",
-                            Some("receptivity"),
-                            0,
-                            now_ms().saturating_sub(t0),
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                mind_observability::HeldReason::Receptivity,
+                            )
+                            .considered(&digest_considered)
+                            .policy(&digest_policy)
+                            .wall_ms(now_ms().saturating_sub(t0)),
                         );
-                        last_digest_skip = now;
                     }
                 }
             }
@@ -3135,8 +3281,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 && now.saturating_sub(last_activity) >= ask_idle * 1000;
             let ask_on = std::env::var("YM_ASK").map(|v| v != "off").unwrap_or(true);
             let ask_due = now.saturating_sub(last_ask) >= ask_secs * 1000;
+            let ask_considered = [
+                mind_observability::ConsideredSignal::Name,
+                mind_observability::ConsideredSignal::Purpose,
+                mind_observability::ConsideredSignal::FollowUps,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let ask_policy = [
+                mind_observability::LoopPolicy::Cadence(ask_secs),
+                mind_observability::LoopPolicy::Idle(ask_idle),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OneOutstanding),
+            ];
             if !spoke && ask_on && ask_ok && ask_due && conv.proactive_receptivity_ok().await {
                 let t0 = now_ms();
+                let ask_window = last_ask;
                 let mut asked = false;
                 if let Some(q) = conv.proactive_ask().await {
                     if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
@@ -3146,34 +3307,51 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     }
                 }
                 last_ask = now; // reset cadence whether or not it asked
+                gate_ask.mark(ask_window);
                 conv.record_loop_tick(
-                    "ask",
-                    "telegram",
-                    ask_secs,
-                    if asked { "asked" } else { "nothing-to-ask" },
-                    None,
-                    u32::from(asked),
-                    now_ms().saturating_sub(t0),
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Ask,
+                            process_start_ms,
+                            key: ask_window,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        if asked {
+                            mind_observability::LoopOutcome::Asked
+                        } else {
+                            mind_observability::LoopOutcome::NothingToAsk
+                        },
+                    )
+                    .considered(&ask_considered)
+                    .policy(&ask_policy)
+                    .wall_ms(now_ms().saturating_sub(t0)),
                 );
-            } else if ask_due && now.saturating_sub(last_ask_skip) >= report_secs * 1000 {
-                conv.record_loop_tick(
-                    "ask",
-                    "telegram",
-                    ask_secs,
-                    "",
-                    Some(if !ask_on {
-                        "disabled"
-                    } else if spoke {
-                        "spoke-already"
-                    } else if !ask_ok {
-                        "idle-gate"
-                    } else {
-                        "receptivity"
-                    }),
-                    0,
-                    0,
-                );
-                last_ask_skip = now;
+            } else if ask_due {
+                if let Some(window) = gate_ask.take_window(
+                    mind_observability::LoopId::Ask,
+                    process_start_ms,
+                    last_ask,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            if !ask_on {
+                                mind_observability::HeldReason::Disabled
+                            } else if spoke {
+                                mind_observability::HeldReason::SpokeAlready
+                            } else if chat == 0 {
+                                mind_observability::HeldReason::NoChat
+                            } else if !ask_ok {
+                                mind_observability::HeldReason::IdleGate
+                            } else {
+                                mind_observability::HeldReason::Receptivity
+                            },
+                        )
+                        .considered(&ask_considered)
+                        .policy(&ask_policy),
+                    );
+                }
             }
             // Pattern-finder surface — the flagship "learn from memory" loop turned outward. On its own
             // slow cadence (default ~2 days), while idle + awake, run the cross-domain pattern analysis;
@@ -3282,54 +3460,73 @@ mod tests {
         );
     }
 
-    /// L1 (ARCH7): the five judgement loops record one ledger tick per due iteration, acted or
-    /// held, and the ledger adds no model call and no send.
+    /// L1 (ARCH7) v3: the five judgement loops record through the typed ledger only — every
+    /// site builds a LoopTick from the enums (no string can reach the log), records an act under
+    /// its opportunity, holds through an opportunity gate, carries what it considered on holds
+    /// too, and never infers model calls. Disabled loops are observable outside their switches.
     #[test]
-    fn the_loop_ledger_covers_the_judgement_loops_without_adding_calls_or_sends() {
-        let poll = fn_body(SELF_SRC, "pub async fn run(");
+    fn the_loop_ledger_is_typed_once_per_opportunity_and_never_guesses_calls() {
+        // `run` is the last top-level fn before the test module, so its extracted body would
+        // otherwise run into this very test; cut at the module boundary.
+        let poll_all = fn_body(SELF_SRC, "pub async fn run(");
+        let poll = &poll_all[..poll_all.find("#[cfg(test)]").unwrap_or(poll_all.len())];
         let headless = fn_body(SELF_SRC, "pub async fn run_headless(");
-        for id in ["\"dmn\"", "\"knock\"", "\"digest\"", "\"ask\""] {
-            let n = poll
-                .matches(&format!(
-                    "record_loop_tick(
-                    {id}"
-                ))
-                .count()
-                + poll.matches(&format!("record_loop_tick({id}")).count()
-                + poll
-                    .matches(&format!(
-                        "record_loop_tick(
-                        {id}"
-                    ))
-                    .count();
-            assert!(
-                n >= 2,
-                "loop {id} records both an acted and a held tick ({n})"
-            );
-        }
-        assert!(
-            headless.contains(
-                "record_loop_tick(
-                    \"heartbeat\""
-            ) || headless.contains("record_loop_tick(\"heartbeat\""),
-            "the heartbeat records"
-        );
-        // Held ticks are rate-limited to a period, never the wake rate.
-        for timer in [
-            "last_dmn_skip",
-            "last_knock_tick",
-            "last_digest_skip",
-            "last_ask_skip",
+        for id in [
+            "LoopId::Dmn",
+            "LoopId::Knock",
+            "LoopId::Digest",
+            "LoopId::Ask",
         ] {
             assert!(
-                poll.contains(&format!("{timer} = now;")),
-                "{timer} advances on record"
+                poll.contains(&format!("loop_id: mind_observability::{id},")),
+                "{id} builds a typed opportunity"
             );
         }
+        assert!(headless.contains("loop_id: mind_observability::LoopId::Heartbeat,"));
+        // Only the typed constructors exist: no struct literal, no string loop ids.
+        // (split needles: this test's own text must not be the first match)
+        let literal = concat!("mind_observability::", "LoopTick {");
+        assert!(!poll.contains(literal));
+        assert!(!headless.contains(literal));
+        assert!(!poll.contains("record_loop_tick(\"") && !headless.contains("record_loop_tick(\""));
+        // Held states pass through an opportunity gate; acts mark the window they close.
+        for g in ["gate_dmn", "gate_digest", "gate_ask"] {
+            assert!(
+                poll.contains(&format!("{g}.take_window(")),
+                "{g} holds once per window"
+            );
+            assert!(
+                poll.contains(&format!("{g}.mark(")),
+                "{g} is marked by the act"
+            );
+        }
+        assert!(poll.contains(".take_stretch(mind_observability::LoopId::Knock, last_activity)"));
+        assert!(
+            headless.contains("gate_heartbeat.take_bucket(")
+                && headless.contains("LoopPolicy::Report(600)")
+        );
+        assert!(
+            headless.contains("OpportunityGate::bucket(hb_now, 30)"),
+            "acts are per beat"
+        );
+        // Windows carry the process start, so a restart cannot collide with an earlier window.
+        assert!(poll.matches("process_start_ms,").count() >= 6);
+        // Disabled loops are observable: the DMN switch and the proactive switch are read into
+        // names and the held:disabled path exists outside them.
+        assert!(poll.contains("let dmn_on = ") && poll.contains("let proactive_on = "));
+        assert!(poll.matches("HeldReason::Disabled").count() >= 3);
+        // Every held record says what it considered.
+        assert_eq!(
+            poll.matches("LoopTick::held(").count(),
+            poll.matches(".considered(&").count() - poll.matches("LoopTick::acted(").count(),
+            "every held tick carries considered signals"
+        );
+        // Model calls are never inferred: no global counter, no send-derived count.
+        assert!(!poll.contains("served_calls_total") && !poll.contains(".model_calls(Some("));
         // The ledger is measurement: no send and no model call is made for it.
         let ledger = fn_body(PROACTIVE_SRC, "pub fn record_loop_tick(");
         assert!(!ledger.contains(".await") && !ledger.contains("send") && !ledger.contains("chat"));
-        assert!(ledger.contains("\"loop_tick\"") && ledger.contains("loop-ledger-v1"));
+        assert!(ledger.contains("to_event(now)"));
     }
 
     /// The paired sample stays at the knock's own evaluation moment, under its original label, and

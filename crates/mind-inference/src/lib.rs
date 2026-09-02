@@ -2146,7 +2146,9 @@ mod privacy_tests {
         assert!(report.contains("dispatched (exposure"));
         assert!(report.contains("household dispatch sites"));
         assert!(
-            !report.lines().any(|line| line.trim_start().starts_with("served")),
+            !report
+                .lines()
+                .any(|line| line.trim_start().starts_with("served")),
             "pre-dispatch counters are not proof that a provider answered: {report}"
         );
     }
@@ -2180,7 +2182,9 @@ mod privacy_tests {
         let report = privacy_report("scripted");
         assert!(report.contains(&format!("{SITE} {after}")));
         assert!(
-            !report.lines().any(|line| line.trim_start().starts_with("served")),
+            !report
+                .lines()
+                .any(|line| line.trim_start().starts_with("served")),
             "a backend error must never become a rendered service claim: {report}"
         );
     }

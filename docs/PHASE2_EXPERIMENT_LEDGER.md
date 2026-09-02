@@ -3188,3 +3188,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Review closure (Codex 04:18Z) | A failure closure is idempotent only on a well-formed chain whose latest marker is this attempt, already closed, with nothing open; a stale close after a newer attempt opened, or a malformed chain containing the closed target, is the terminal integrity outcome (fixtures). |
 | Door evidence (Codex 04:26Z) | `ef2_door_tests` drives the real CLI dispatch: the `assuming` form persists the declared assumption, budgets and reserved binding with content-free receipts; malformed syntax is refused with nothing persisted. |
 | Suite | 45 binaries / 1528 passed / 0 failed (04:30Z); scoped fmt clean. |
+
+## E.F2 — DEPLOYED to staging and WITNESSED live (box log `2026-09-02T04:39:36Z | deploy | DEPLOYED | 588a8fe health-ok`; goal scheduled 04:40:05Z; read 04:43:11Z)
+
+| Field | Value |
+| --- | --- |
+| Deploy | `588a8fe` (= E.F2 code) via the provenance-gated `self_deploy.sh`, service active. Prod untouched at `61bbb03`. |
+| Witness goal | Console door on the canary: `horizon 1m :: Count my due tasks and report how many are pending assuming pending_tasks=0` → `goal:horizon:1a0606a974e`, authored by the live planner, read tool `due_tasks`. The declared value could not match what the segment observed, so the drift was certain. |
+| Receipt chain (from `horizon history`, times are the receipts' own ms) | `1788323993422 SCHEDULED` → `1788324060623 WAKE_STARTED` → `1788324060623 AWAITING_REPLAN running→pending` → `1788324090623 WAKE_STARTED` → `1788324090623 REPLAN_STARTED running→running` → `1788324090623 REPLANNED running→terminal` → `1788324090623 SCHEDULED` → `1788324120623 WAKE_STARTED` → `1788324123470 COMPLETED`. Outcome receipt: `actions 2 · cost 4 · replans 1`, chain verified by the reader. Active checkpoint: none (terminal). |
+| Reading | Exactly the preregistered witness: parked on the first segment's observation with a claimable carrier, one numbered attempt on the next heartbeat (30 s), the revised read-only plan validated and applied in one transaction with its `SCHEDULED`, the second segment observed the new value without drifting, and the goal COMPLETED with one replan counted. Three heartbeats, ~2 minutes, two planner calls (first plan, revision). No key or value appears in any receipt; the history renderer shows the new events without change. |
+| Second witness (max_replans = 0) | The door always mints `max_replans = 1` with `assuming`, so the budget-exhausted witness cannot be produced from the console; it is pinned by the fixture (`max_replans = 0`: one acquisition, zero planner calls, `FAILED(replan_budget_exhausted)`, Retry refused). Stated, not hidden. |

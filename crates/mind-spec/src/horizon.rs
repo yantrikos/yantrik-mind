@@ -159,6 +159,9 @@ pub enum HorizonLifecycleEvent {
     Replanned,
     /// E.F2: the lifecycle chain had a shape the reducer cannot authorise; terminal.
     ReplanIntegrityFailed,
+    /// E.F3: the goal's elapsed-time budget ran out before its next segment; terminal. The
+    /// checkpoint stays as history; the queue row is gone; nothing may claim or control it again.
+    Expired,
 }
 
 impl HorizonLifecycleEvent {
@@ -173,6 +176,7 @@ impl HorizonLifecycleEvent {
             Self::ReplanStarted => "replan_started",
             Self::Replanned => "replanned",
             Self::ReplanIntegrityFailed => "replan_integrity_failed",
+            Self::Expired => "expired",
         }
     }
 }
@@ -397,6 +401,18 @@ impl HorizonLifecycleReceipt {
                             && d.target_revision.is_some_and(|r| r >= 1)
                             && d.chain_digest.is_none()
                     })
+            }
+            // E.F3 — expiry: the last checkpoint's digest, the actual prior queue status (a
+            // legacy goal may have none) to no queue row, the one bounded reason, terminal.
+            HorizonLifecycleEvent::Expired => {
+                no_replan
+                    && self.state_sha256.is_some()
+                    && matches!(
+                        self.previous_queue_status.as_deref(),
+                        None | Some("pending") | Some("failed") | Some("paused")
+                    )
+                    && self.next_queue_status.is_none()
+                    && self.failure_reason.as_deref() == Some("budget_elapsed")
             }
             // E.F2 — integrity: terminal, no attempt, the malformed prefix's digest.
             HorizonLifecycleEvent::ReplanIntegrityFailed => {

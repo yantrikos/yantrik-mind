@@ -7259,7 +7259,35 @@ impl ConversationEngine {
                             .to_string()
                     }
                     Ok(active) => {
-                        let mut report = String::from("ACTIVE DURABLE HORIZON GOALS\n");
+                        // E.F3: expired goals are terminal and are listed OUTSIDE the active
+                        // heading, first — a commitment the mind lost is never shown as running.
+                        let (expired, active): (Vec<_>, Vec<_>) =
+                            active.into_iter().partition(|v| v.expired);
+                        let mut report = String::new();
+                        if !expired.is_empty() {
+                            report.push_str("EXPIRED DURABLE HORIZON GOALS (terminal: the time budget ran out before the next segment)\n");
+                            for view in expired {
+                                report.push_str(&format!(
+                                    "\n[{}] EXPIRED · actions {}/{} · replans {}\n    {}\n",
+                                    view.goal_id,
+                                    view.actions_used,
+                                    view.max_actions,
+                                    view.plan_revision,
+                                    view.objective
+                                        .split_whitespace()
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                        .chars()
+                                        .take(160)
+                                        .collect::<String>()
+                                ));
+                            }
+                            report.push('\n');
+                        }
+                        report.push_str("ACTIVE DURABLE HORIZON GOALS\n");
+                        if active.is_empty() {
+                            report.push_str("\n(none)\n");
+                        }
                         for view in active {
                             let gate = if view.budget_expired {
                                 "budget_expired".to_string()
@@ -7326,7 +7354,10 @@ impl ConversationEngine {
                     Ok(history) => {
                         let mut report = format!("HORIZON HISTORY [{}]\n", history.goal_id);
                         if let Some(active) = history.active {
-                            let gate = if active.budget_expired {
+                            // E.F3: the verified terminal lifecycle outranks the computed flag.
+                            let gate = if active.expired {
+                                "expired".to_string()
+                            } else if active.budget_expired {
                                 "budget_expired".to_string()
                             } else {
                                 active.queue_status.unwrap_or_else(|| "idle".into())

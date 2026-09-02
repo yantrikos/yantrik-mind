@@ -48,6 +48,8 @@ pub(crate) enum HorizonFailureReason {
     ReplanPlanner,
     /// E.F2: the lifecycle chain had a shape the reducer cannot authorise (terminal).
     ReplanLifecycleMismatch,
+    /// E.F3: the elapsed-time budget ran out before the next segment (terminal).
+    BudgetElapsed,
 }
 
 impl HorizonFailureReason {
@@ -57,7 +59,7 @@ impl HorizonFailureReason {
     pub(crate) const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::ReplanBudgetExhausted | Self::ReplanLifecycleMismatch
+            Self::ReplanBudgetExhausted | Self::ReplanLifecycleMismatch | Self::BudgetElapsed
         )
     }
     pub(crate) const fn as_str(self) -> &'static str {
@@ -74,6 +76,7 @@ impl HorizonFailureReason {
             Self::ReplanBudgetExhausted => "replan_budget_exhausted",
             Self::ReplanPlanner => "replan_planner_failed",
             Self::ReplanLifecycleMismatch => mind_spec::REPLAN_LIFECYCLE_MISMATCH,
+            Self::BudgetElapsed => "budget_elapsed",
         }
     }
 
@@ -107,12 +110,14 @@ const HORIZON_FAILURE_CODES: &[&str] = &[
     HorizonFailureReason::ReplanBudgetExhausted.as_str(),
     HorizonFailureReason::ReplanPlanner.as_str(),
     HorizonFailureReason::ReplanLifecycleMismatch.as_str(),
+    HorizonFailureReason::BudgetElapsed.as_str(),
 ];
 
 /// E.F2: the codes the operator retry control refuses (see `HorizonFailureReason::is_terminal`).
 const TERMINAL_HORIZON_FAILURE_CODES: &[&str] = &[
     HorizonFailureReason::ReplanBudgetExhausted.as_str(),
     HorizonFailureReason::ReplanLifecycleMismatch.as_str(),
+    HorizonFailureReason::BudgetElapsed.as_str(),
 ];
 
 fn bounded_failure_reason(raw: Option<&str>) -> String {
@@ -145,8 +150,19 @@ pub struct ActiveHorizonRecord {
     pub run: HorizonRun,
     pub wake_at_ms: Option<u64>,
     pub queue_status: Option<String>,
+    /// E.F3: a verified `expired` lifecycle event exists — terminal; listed outside the active
+    /// heading and first, never scheduled, claimed or controlled again.
+    pub expired: bool,
     /// A bounded code owned by the scheduler. Raw tool/backend errors never reach operator views.
     pub failure_reason: Option<String>,
+}
+
+/// E.F3: what one scheduler tick's atomic sweep-and-claim produced.
+#[derive(Debug, Clone, Default)]
+pub struct HorizonSweep {
+    /// Goals expired on this tick, in id order; each has exactly one `expired` receipt.
+    pub expired: Vec<String>,
+    pub jobs: Vec<HorizonJob>,
 }
 
 impl RecipeStore {
@@ -199,6 +215,11 @@ impl RecipeStore {
                 receipt_sha256 TEXT NOT NULL UNIQUE,
                 occurred_ms INTEGER NOT NULL
             )",
+        )?;
+        // E.F3: one `expired` receipt per goal, enforced by the store itself.
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS mind_horizon_lifecycle_expired_once
+                ON mind_horizon_lifecycle(goal_id) WHERE event='expired'",
         )?;
         Self::migrate_run_identity(&conn)?;
         Ok(Self {
@@ -394,6 +415,9 @@ impl RecipeStore {
     ) -> anyhow::Result<()> {
         HorizonRun::resume(checkpoint, checkpoint.created_at_ms)
             .map_err(|error| anyhow::anyhow!("invalid horizon checkpoint: {error:?}"))?;
+        if Self::verified_expired_on(tx, &checkpoint.goal_id)? {
+            anyhow::bail!("an expired horizon goal is terminal: its checkpoint is history");
+        }
         let checkpoint_json = serde_json::to_string(checkpoint)?;
         let created_ms = i64::try_from(checkpoint.created_at_ms)
             .map_err(|_| anyhow::anyhow!("horizon checkpoint timestamp is out of range"))?;
@@ -507,13 +531,17 @@ impl RecipeStore {
                 _ if queue_error.is_none() => None,
                 _ => anyhow::bail!("a non-failed horizon job carried a failure reason"),
             };
+            let expired = Self::verified_expired_on(&conn, &goal_id)?;
             active.push(ActiveHorizonRecord {
                 run,
                 wake_at_ms,
                 queue_status,
+                expired,
                 failure_reason,
             });
         }
+        // E.F3: expired goals first (verified lifecycle), the wake order kept within each group.
+        active.sort_by_key(|record| !record.expired);
         Ok(active)
     }
 
@@ -544,6 +572,9 @@ impl RecipeStore {
         let checkpoint: GoalCheckpoint = serde_json::from_str(&checkpoint_json)?;
         if checkpoint.goal_id != goal_id || checkpoint.state_sha256 != checkpoint_sha256 {
             anyhow::bail!("horizon checkpoint identity or digest mismatch");
+        }
+        if Self::verified_expired_on(&tx, goal_id)? {
+            anyhow::bail!("an expired horizon goal is terminal: no control applies");
         }
         HorizonRun::resume(&checkpoint, checkpoint.created_at_ms)
             .map_err(|error| anyhow::anyhow!("horizon checkpoint failed validation: {error:?}"))?;
@@ -718,8 +749,13 @@ impl RecipeStore {
             .collect::<rusqlite::Result<_>>()?;
         let mut receipts = Vec::with_capacity(rows.len());
         let mut previous_sha256: Option<String> = None;
+        let mut expired_seen = false;
         for (event, receipt_json, stored_sha256) in rows {
             let receipt: HorizonLifecycleReceipt = serde_json::from_str(&receipt_json)?;
+            // E.F3: the expiry receipt is terminal; a row after it is corruption, not history.
+            if expired_seen {
+                anyhow::bail!("horizon lifecycle receipt follows a terminal expiry");
+            }
             if receipt.goal_id != goal_id
                 || receipt.event.as_str() != event
                 || receipt.receipt_sha256 != stored_sha256
@@ -727,7 +763,9 @@ impl RecipeStore {
                 || !receipt.verify()
                 || (matches!(
                     receipt.event,
-                    HorizonLifecycleEvent::Failed | HorizonLifecycleEvent::ReplanIntegrityFailed
+                    HorizonLifecycleEvent::Failed
+                        | HorizonLifecycleEvent::ReplanIntegrityFailed
+                        | HorizonLifecycleEvent::Expired
                 ) && !receipt
                     .failure_reason
                     .as_deref()
@@ -736,6 +774,7 @@ impl RecipeStore {
                 anyhow::bail!("horizon lifecycle receipt chain failed validation");
             }
             previous_sha256 = Some(receipt.receipt_sha256.clone());
+            expired_seen = receipt.event == HorizonLifecycleEvent::Expired;
             receipts.push(receipt);
         }
         Ok(receipts)
@@ -779,7 +818,9 @@ impl RecipeStore {
     ) -> anyhow::Result<HorizonLifecycleReceipt> {
         if matches!(
             event,
-            HorizonLifecycleEvent::Failed | HorizonLifecycleEvent::ReplanIntegrityFailed
+            HorizonLifecycleEvent::Failed
+                | HorizonLifecycleEvent::ReplanIntegrityFailed
+                | HorizonLifecycleEvent::Expired
         ) && !failure_reason.is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason))
         {
             anyhow::bail!("unbounded horizon lifecycle failure reason");
@@ -794,6 +835,10 @@ impl RecipeStore {
             .optional()?;
         let previous_receipt_sha256 = if let Some((receipt_json, stored_sha256)) = previous {
             let receipt: HorizonLifecycleReceipt = serde_json::from_str(&receipt_json)?;
+            // E.F3: nothing is appended after the terminal expiry receipt.
+            if receipt.event == HorizonLifecycleEvent::Expired {
+                anyhow::bail!("an expired horizon goal is terminal: no lifecycle receipt follows");
+            }
             if receipt.goal_id != goal_id
                 || receipt.receipt_sha256 != stored_sha256
                 || !receipt.verify()
@@ -1138,6 +1183,31 @@ impl RecipeStore {
         Ok(())
     }
 
+    /// Test-only (E.F3): break the stored digest so the checkpoint is no longer provably the goal's.
+    #[cfg(test)]
+    pub(crate) fn corrupt_checkpoint_digest_for_test(&self, goal_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_horizon_checkpoints SET state_sha256='0000' WHERE goal_id=?1",
+            [goal_id],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only (E.F3): smuggle a raw row after the chain's end by copying the FIRST receipt
+    /// (its digest column altered past the store's uniqueness), modelling tampering after expiry.
+    #[cfg(test)]
+    pub(crate) fn duplicate_first_receipt_row_for_test(&self, goal_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mind_horizon_lifecycle(goal_id,event,receipt_json,receipt_sha256,occurred_ms)
+             SELECT goal_id,event,receipt_json,receipt_sha256||'x',occurred_ms
+             FROM mind_horizon_lifecycle WHERE goal_id=?1 ORDER BY id ASC LIMIT 1",
+            [goal_id],
+        )?;
+        Ok(())
+    }
+
     /// Test-only: append a `replan_started` marker with an arbitrary attempt, to model a chain
     /// that is malformed (a skipped ordinal) or has a newer open attempt.
     #[cfg(test)]
@@ -1471,7 +1541,7 @@ impl RecipeStore {
             )
             .optional()?
             .unwrap_or(false);
-        if checkpoint.is_none() || has_outcome {
+        if checkpoint.is_none() || has_outcome || Self::verified_expired_on(&tx, &job.goal_id)? {
             anyhow::bail!("horizon job requires one active, non-terminal goal");
         }
         let existing: Option<String> = tx
@@ -1512,17 +1582,100 @@ impl RecipeStore {
 
     /// Atomically claim a small batch so overlapping scheduler ticks cannot run the same segment.
     pub fn claim_due_horizon_jobs(&self, now_ms: u64) -> anyhow::Result<Vec<HorizonJob>> {
-        let now_ms = i64::try_from(now_ms)
+        Ok(self.sweep_and_claim(now_ms)?.jobs)
+    }
+
+    /// E.F3: whether the VERIFIED lifecycle chain carries the terminal `expired` receipt. A chain
+    /// that fails verification is an error here, so every consumer fails closed on corruption.
+    fn verified_expired_on(conn: &rusqlite::Connection, goal_id: &str) -> anyhow::Result<bool> {
+        Ok(Self::load_lifecycle_on(conn, goal_id)?
+            .iter()
+            .any(|receipt| receipt.event == HorizonLifecycleEvent::Expired))
+    }
+
+    /// E.F3: expire every goal whose elapsed budget ran out, then claim what is due — ONE
+    /// transaction, so no other scheduler can claim between the sweep and the claim. The sweep
+    /// covers queue rows `pending`, `failed`, `paused` and checkpoints with no row; it never
+    /// touches `running`. Each expiry appends one `expired` receipt (prior status → none,
+    /// `budget_elapsed`) and deletes the queue row; the checkpoint stays as history.
+    pub fn sweep_and_claim(&self, now_ms: u64) -> anyhow::Result<HorizonSweep> {
+        let now_i64 = i64::try_from(now_ms)
             .map_err(|_| anyhow::anyhow!("horizon tick timestamp is out of range"))?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let candidates: Vec<(String, String, String, Option<String>, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT c.goal_id,c.checkpoint_json,c.state_sha256,j.status,j.error
+                 FROM mind_horizon_checkpoints c
+                 LEFT JOIN mind_horizon_jobs j ON j.goal_id=c.goal_id
+                 WHERE (j.status IS NULL OR j.status IN ('pending','failed','paused'))
+                   AND NOT EXISTS (SELECT 1 FROM mind_horizon_outcomes o WHERE o.goal_id=c.goal_id)
+                 ORDER BY c.goal_id",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut expired = Vec::new();
+        for (goal_id, checkpoint_json, state_sha256, queue_status, queue_error) in candidates {
+            // Fail closed on identity: a receipt is signed only over the goal's own checkpoint,
+            // whose digest must match the column it is stored under.
+            let checkpoint: GoalCheckpoint = serde_json::from_str(&checkpoint_json)?;
+            if checkpoint.goal_id != goal_id || checkpoint.state_sha256 != state_sha256 {
+                anyhow::bail!("horizon checkpoint identity or digest mismatch");
+            }
+            let run =
+                HorizonRun::resume(&checkpoint, checkpoint.created_at_ms).map_err(|error| {
+                    anyhow::anyhow!("horizon checkpoint failed validation: {error:?}")
+                })?;
+            // The VERIFIED chain decides terminality (a corrupt chain fails the tick): an expired
+            // or integrity-failed chain, or a failed row carrying a terminal E.F2 code, is already
+            // terminal and gets no second terminal receipt.
+            let receipts = Self::load_lifecycle_on(&tx, &goal_id)?;
+            let already_terminal = receipts
+                .iter()
+                .any(|receipt| receipt.event == HorizonLifecycleEvent::Expired)
+                || reduce_replan(&receipts).integrity_failed.is_some()
+                || (queue_status.as_deref() == Some("failed")
+                    && queue_error
+                        .as_deref()
+                        .is_some_and(|code| TERMINAL_HORIZON_FAILURE_CODES.contains(&code)));
+            if already_terminal {
+                continue;
+            }
+            // Exactly `HorizonRun::check_time`'s boundary: equality is inside the budget.
+            if now_ms.saturating_sub(run.started_at_ms) <= run.budget.max_elapsed_ms {
+                continue;
+            }
+            tx.execute("DELETE FROM mind_horizon_jobs WHERE goal_id=?1", [&goal_id])?;
+            Self::append_horizon_lifecycle(
+                &tx,
+                &goal_id,
+                HorizonLifecycleEvent::Expired,
+                now_ms,
+                Some(&state_sha256),
+                queue_status.as_deref(),
+                None,
+                Some(HorizonFailureReason::BudgetElapsed.as_str()),
+            )?;
+            expired.push(goal_id);
+        }
         let mut stmt = tx.prepare(
             "SELECT j.goal_id,j.job_json,c.state_sha256 FROM mind_horizon_jobs j
              LEFT JOIN mind_horizon_checkpoints c ON c.goal_id=j.goal_id
              WHERE j.status='pending' AND j.wake_ms<=?1 ORDER BY j.wake_ms,j.goal_id LIMIT 8",
         )?;
         let rows: Vec<(String, String, Option<String>)> = stmt
-            .query_map([now_ms], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map([now_i64], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         drop(stmt);
         let mut jobs = Vec::with_capacity(rows.len());
@@ -1542,8 +1695,7 @@ impl RecipeStore {
                     &tx,
                     &goal_id,
                     HorizonLifecycleEvent::WakeStarted,
-                    u64::try_from(now_ms)
-                        .map_err(|_| anyhow::anyhow!("horizon tick timestamp is out of range"))?,
+                    now_ms,
                     checkpoint_sha256.as_deref(),
                     Some("pending"),
                     Some("running"),
@@ -1553,7 +1705,7 @@ impl RecipeStore {
             }
         }
         tx.commit()?;
-        Ok(jobs)
+        Ok(HorizonSweep { expired, jobs })
     }
 
     pub fn finish_horizon_job(&self, goal_id: &str) -> anyhow::Result<()> {

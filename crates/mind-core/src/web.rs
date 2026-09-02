@@ -2391,7 +2391,7 @@ mod tests {
         let goals_fn = js.find("async function loadHorizons()").unwrap();
         assert!(
             js[goals_fn..goals_fn + 6000].contains(
-                "columnFor(\"horizon\", g.budget_expired ? \"failed\" : (g.queue_status || g.status))"
+                "columnFor(\"horizon\", g.expired ? \"expired\" : (g.budget_expired ? \"failed\" : (g.queue_status || g.status)))"
             ) && !js[goals_fn..goals_fn + 6000].contains("includes(\"active\") ? \"running\""),
             "the goal badge classifies by queue_status through the board's rule"
         );
@@ -2634,12 +2634,23 @@ mod tests {
             !body.contains("81.2") && !body.contains("65 /") && !body.contains("100%"),
             "no literal metric is written into the instrument column"
         );
-        // Board: horizon goals classify by queue_status (budget-expired reads as failed).
+        // Board: horizon goals classify by queue_status; E.F3's verified `expired` lifecycle
+        // outranks the computed budget flag, which reads as failed.
         assert!(
             APP_JS.contains(
-                "const st = g.budget_expired ? \"failed\" : (g.queue_status || g.status)"
+                "const st = g.expired ? \"expired\" : (g.budget_expired ? \"failed\" : (g.queue_status || g.status))"
             ),
-            "the Board classifies horizon goals by queue_status"
+            "the Board classifies horizon goals by the verified lifecycle, then queue_status"
+        );
+        assert!(
+            APP_JS.contains("if (s.includes(\"expire\")) return \"needs\";"),
+            "an expired goal lands in the needs column"
+        );
+        assert!(
+            APP_JS.contains(
+                "st.textContent = g.expired ? \"expired\" : col === \"needs\" ? \"failed\""
+            ),
+            "an expired goal's side badge says expired, never failed"
         );
         // Two looks, one code path: a token switch persisted per device.
         assert!(

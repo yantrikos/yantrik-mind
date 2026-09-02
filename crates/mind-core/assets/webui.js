@@ -618,6 +618,7 @@ let tasksTimer = null;
 function columnFor(kind, status) {
   const s = String(status || "").toLowerCase();
   if (s.includes("fail")) return "needs";
+  if (s.includes("expire")) return "needs";
   if (s.includes("awaiting")) return "needs";
   if (kind === "order") return "scheduled";
   if (s.includes("run") || s.includes("active")) return "running";
@@ -659,7 +660,7 @@ async function loadBoard() {
   const [tasks, horizons, orders] = await Promise.all([pull("/api/tasks"), pull("/api/horizons"), fetchStandingOrders()]);
   // E.WEB18b: a run's card opens its agent's thread — the same key rule the lists use.
   for (const j of (tasks.jobs || [])) cols[columnFor("job", j.state || j.status)].push({ title: j.name || j.id, meta: (j.task || j.goal || "").slice(0, 80), cls: columnFor("job", j.state || j.status), agent: j.name || j.id });
-  for (const g of (horizons.goals || [])) { const st = g.budget_expired ? "failed" : (g.queue_status || g.status); const col = columnFor("horizon", st); cols[col].push({ title: g.objective || g.goal_id, meta: g.budget_expired ? "budget expired" : (g.queue_status || g.status || ""), cls: col }); }
+  for (const g of (horizons.goals || [])) { const st = g.expired ? "expired" : (g.budget_expired ? "failed" : (g.queue_status || g.status)); const col = columnFor("horizon", st); cols[col].push({ title: g.objective || g.goal_id, meta: g.expired ? "expired" : (g.budget_expired ? "budget expired" : (g.queue_status || g.status || "")), cls: col }); }
   // Standing orders, typed: one card each with the server's countdown, opening the agent's thread.
   for (const o of orders) {
     const secs = Number(o.in_seconds);
@@ -1146,7 +1147,8 @@ async function loadHorizons() {
         c.textContent = max == null ? `${label} ${used ?? 0}` : `${label} ${used ?? 0}/${max}`;
         chips.appendChild(c);
       }
-      if (g.budget_expired) { const c = el("span", "tag restart"); c.textContent = "budget expired"; chips.appendChild(c); }
+      if (g.expired) { const c = el("span", "tag restart"); c.textContent = "expired"; chips.appendChild(c); }
+      else if (g.budget_expired) { const c = el("span", "tag restart"); c.textContent = "budget expired"; chips.appendChild(c); }
       main.appendChild(chips);
       const key = el("div", "setting-key"); key.textContent = g.goal_id; main.appendChild(key);
       // E.WEB14: the receipt chain, on demand — the same verified view the peer checked
@@ -1179,9 +1181,10 @@ async function loadHorizons() {
       const side = el("div", "card-side");
       // One reader for a goal's state: the board's rule (queue_status; budget-expired reads as
       // failed). A FAILED goal must not wear an "active" badge because its lifecycle flag says so.
-      const col = columnFor("horizon", g.budget_expired ? "failed" : (g.queue_status || g.status));
+      const col = columnFor("horizon", g.expired ? "expired" : (g.budget_expired ? "failed" : (g.queue_status || g.status)));
       const st = el("span", "job-state " + (col === "needs" ? "failed" : col === "running" ? "running" : "done"));
-      st.textContent = col === "needs" ? "failed" : col === "running" ? "running" : col === "scheduled" ? "scheduled" : "done";
+      // E.F3: an expired goal keeps the needs column and colour but says what it is.
+      st.textContent = g.expired ? "expired" : col === "needs" ? "failed" : col === "running" ? "running" : col === "scheduled" ? "scheduled" : "done";
       side.appendChild(st);
       card.appendChild(side);
       host.appendChild(card);

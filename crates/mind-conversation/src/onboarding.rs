@@ -1200,23 +1200,8 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             .flat_map(|o| o.notifications)
             .collect();
         for outcome in recipes.resume_due_horizons(now).await {
-            match outcome.state {
-                mind_recipes::HorizonTickState::Advanced => {}
-                mind_recipes::HorizonTickState::AwaitingReplan => notifications.push(format!(
-                    "↻ Long-horizon goal {} paused safely: a declared assumption changed and the plan needs review.",
-                    outcome.goal_id
-                )),
-                mind_recipes::HorizonTickState::Replanned => notifications.push(format!(
-                    "↻ Long-horizon goal {} replanned within its budget: a declared assumption changed and a revised read-only segment is scheduled.",
-                    outcome.goal_id
-                )),
-                mind_recipes::HorizonTickState::Completed => {
-                    notifications.push(horizon_completion_notification(&outcome));
-                }
-                mind_recipes::HorizonTickState::Failed => notifications.push(format!(
-                    "⚠️ Long-horizon goal {} stopped safely; its scheduled segment needs local review.",
-                    outcome.goal_id
-                )),
+            if let Some(line) = horizon_tick_notification(&outcome) {
+                notifications.push(line);
             }
         }
         notifications
@@ -1458,5 +1443,64 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             .memory
             .profile_set("whois_asked", &serde_json::to_string(v).unwrap_or_default())
             .await;
+    }
+}
+
+/// One bounded line per horizon tick outcome, or none: the notice names the goal id and a
+/// bounded state word only — never the objective, never a raw error.
+pub(crate) fn horizon_tick_notification(
+    outcome: &mind_recipes::HorizonTickOutcome,
+) -> Option<String> {
+    match outcome.state {
+        mind_recipes::HorizonTickState::Advanced => None,
+        mind_recipes::HorizonTickState::AwaitingReplan => Some(format!(
+            "↻ Long-horizon goal {} paused safely: a declared assumption changed and the plan needs review.",
+            outcome.goal_id
+        )),
+        // E.F3: the expiry notice carries exactly the id and the bounded code.
+        mind_recipes::HorizonTickState::Expired => Some(format!(
+            "⌛ Long-horizon goal {} expired unfinished: budget_elapsed. Nothing was sent.",
+            outcome.goal_id
+        )),
+        mind_recipes::HorizonTickState::Replanned => Some(format!(
+            "↻ Long-horizon goal {} replanned within its budget: a declared assumption changed and a revised read-only segment is scheduled.",
+            outcome.goal_id
+        )),
+        mind_recipes::HorizonTickState::Completed => {
+            Some(horizon_completion_notification(outcome))
+        }
+        mind_recipes::HorizonTickState::Failed => Some(format!(
+            "⚠️ Long-horizon goal {} stopped safely; its scheduled segment needs local review.",
+            outcome.goal_id
+        )),
+    }
+}
+
+#[cfg(test)]
+mod ef3_notice_tests {
+    use super::horizon_tick_notification;
+
+    /// E.F3: one Expired outcome yields exactly the bounded template — id and code, never the
+    /// objective or whatever the outcome's error field carries.
+    #[test]
+    fn an_expired_outcome_yields_exactly_the_bounded_notice() {
+        let outcome = mind_recipes::HorizonTickOutcome {
+            goal_id: "goal:horizon:1a055fa26bf".into(),
+            state: mind_recipes::HorizonTickState::Expired,
+            receipt: None,
+            result: Some("verify staging stayed healthy overnight".into()),
+            error: Some("budget_elapsed".into()),
+        };
+        let line = horizon_tick_notification(&outcome).expect("an expiry is announced");
+        assert_eq!(
+            line,
+            "⌛ Long-horizon goal goal:horizon:1a055fa26bf expired unfinished: budget_elapsed. Nothing was sent."
+        );
+        assert!(!line.contains("staging"));
+        let advanced = mind_recipes::HorizonTickOutcome {
+            state: mind_recipes::HorizonTickState::Advanced,
+            ..outcome
+        };
+        assert!(horizon_tick_notification(&advanced).is_none());
     }
 }

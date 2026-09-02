@@ -599,6 +599,8 @@ pub enum HorizonTickState {
     Replanned,
     Completed,
     Failed,
+    /// E.F3: the elapsed-time budget ran out before the next segment; one receipt, terminal.
+    Expired,
 }
 
 #[derive(Debug, Clone)]
@@ -678,6 +680,9 @@ pub struct HorizonView {
     pub spent_cost_units: u64,
     pub max_cost_units: u64,
     pub budget_expired: bool,
+    /// E.F3: a verified `expired` lifecycle event exists — terminal, listed first.
+    #[serde(default)]
+    pub expired: bool,
     pub next_wake_ms: Option<u64>,
     pub queue_status: Option<String>,
     /// Bounded scheduler-owned diagnosis present only while `queue_status == failed`.
@@ -1248,6 +1253,7 @@ impl RecipeEngine {
                     spent_cost_units: run.spent_cost_units,
                     max_cost_units: run.budget.max_cost_units,
                     budget_expired,
+                    expired: record.expired,
                     next_wake_ms: record.wake_at_ms,
                     queue_status: record.queue_status,
                     failure_reason: record.failure_reason,
@@ -1565,8 +1571,9 @@ impl RecipeEngine {
         let Some(store) = &self.store else {
             return Vec::new();
         };
-        let jobs = match store.claim_due_horizon_jobs(now_ms) {
-            Ok(jobs) => jobs,
+        // E.F3: expiry and claim are one atomic sweep; an expired goal yields one outcome from it.
+        let sweep = match store.sweep_and_claim(now_ms) {
+            Ok(sweep) => sweep,
             Err(error) => {
                 return vec![HorizonTickOutcome {
                     goal_id: "scheduler".into(),
@@ -1577,7 +1584,17 @@ impl RecipeEngine {
                 }];
             }
         };
-        let mut outcomes = Vec::with_capacity(jobs.len());
+        let jobs = sweep.jobs;
+        let mut outcomes = Vec::with_capacity(jobs.len() + sweep.expired.len());
+        for goal_id in sweep.expired {
+            outcomes.push(HorizonTickOutcome {
+                goal_id,
+                state: HorizonTickState::Expired,
+                receipt: None,
+                result: None,
+                error: Some(HorizonFailureReason::BudgetElapsed.as_str().to_string()),
+            });
+        }
         for job in jobs {
             let failed_at = |reason: HorizonFailureReason,
                              error: anyhow::Error,
@@ -2631,6 +2648,8 @@ pub fn morning_briefing() -> Recipe {
 
 #[cfg(test)]
 mod ef2_tests;
+#[cfg(test)]
+mod ef3_tests;
 
 #[cfg(test)]
 mod tests {

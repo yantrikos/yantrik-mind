@@ -7841,11 +7841,12 @@ impl ConversationEngine {
                 // own counters, read live. Counts and stamps only; this call is itself a turn.
                 if prefix == "idle" {
                     let now = Self::now_ms();
-                    let last = self.turns.last_user_activity_ms();
+                    // This readout registered a turn on entry; report the activity BEFORE it.
+                    let before = self.turns.previous_activity_ms();
                     return format!(
-                        "TURN EXCLUSION — now {now} · active turns {} (this readout is one) · last user activity {last} ({} s ago) · dmn running {}",
+                        "TURN EXCLUSION — now {now} · active turns {} (this readout is one) · activity before this readout {before} ({} s ago) · dmn running {}",
                         self.turns.active_turns(),
-                        now.saturating_sub(last) / 1000,
+                        now.saturating_sub(before) / 1000,
                         self.turns.dmn_running()
                     );
                 }

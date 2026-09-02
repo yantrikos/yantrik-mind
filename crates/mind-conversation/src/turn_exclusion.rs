@@ -16,6 +16,9 @@ pub struct TurnExclusion {
     active_turns: AtomicUsize,
     /// Monotone: the latest user activity on any surface, in ms.
     last_user_activity_ms: AtomicU64,
+    /// The activity stamp as it was BEFORE the most recent registration — so a readout that is
+    /// itself a turn can still say how idle the mind was when it was asked.
+    previous_activity_ms: AtomicU64,
     dmn_running: AtomicBool,
 }
 
@@ -49,6 +52,7 @@ impl TurnExclusion {
             admission: RwLock::new(()),
             active_turns: AtomicUsize::new(0),
             last_user_activity_ms: AtomicU64::new(now_ms),
+            previous_activity_ms: AtomicU64::new(now_ms),
             dmn_running: AtomicBool::new(false),
         }
     }
@@ -58,8 +62,10 @@ impl TurnExclusion {
     pub fn begin_turn(&self, now_ms: u64) -> TurnGuard<'_> {
         let _shared = self.admission.read().unwrap_or_else(|p| p.into_inner());
         self.active_turns.fetch_add(1, Ordering::AcqRel);
-        self.last_user_activity_ms
+        let before = self
+            .last_user_activity_ms
             .fetch_max(now_ms, Ordering::AcqRel);
+        self.previous_activity_ms.store(before, Ordering::Release);
         TurnGuard { owner: self }
     }
 
@@ -85,6 +91,10 @@ impl TurnExclusion {
     }
     pub fn last_user_activity_ms(&self) -> u64 {
         self.last_user_activity_ms.load(Ordering::Acquire)
+    }
+    /// The activity stamp before the most recent registration (see the field).
+    pub fn previous_activity_ms(&self) -> u64 {
+        self.previous_activity_ms.load(Ordering::Acquire)
     }
     pub fn dmn_running(&self) -> bool {
         self.dmn_running.load(Ordering::Acquire)

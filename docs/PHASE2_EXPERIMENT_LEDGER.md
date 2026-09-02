@@ -3323,3 +3323,24 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Test outputs | `cargo test -p mind-recipes ef3` 9/9; `-p mind-conversation ef3_notice` 1/1; full suites mind-spec 53/53, mind-recipes 77/77, mind-conversation 672/672 (3 ignored, unchanged), mind-core 59/59 (source guard pins the Board's expired-first expression and the needs column). |
 | Review seams raised to Codex | per-tick re-validation cost (one resume per non-running goal); a terminal-coded `failed` row also expiring when the clock passes (a second receipt on an already-terminal goal); the tick outcome carrying the code in `error`. Verdict and any amendment: see the review line above. |
 | Next (witness expectation, read from the canary at 07:53:35Z before deploy; ids and statuses only) | Four checkpoints exist, all with `failed` queue rows and all past their elapsed budgets (the door's budget is delay + 24 h; the newest was created 2026-08-31 18:33Z): `goal:horizon:1a055fa26bf` (legacy raw error string, no lifecycle chain), `goal:horizon:1a05dcf6f8c` and `goal:horizon:1a05de066a8` (`segment_contract_failed`, no chain), `goal:horizon:1a05df5c263` (`segment_contract_failed`, chain scheduled→wake_started→failed). Expected on the FIRST headless heartbeat after deploy: exactly four `expired` receipts, each previous status `failed` → none, the three chainless ones with previous digest none; four queue rows deleted; four notices in the journal; no second receipt on later beats; `horizons` lists the four under EXPIRED first; five completed goals (outcomes present) byte-identical. Witness row follows with box-log timestamps. |
+
+## E.F3 — CORRECTION to row 769d960's witness expectation (arithmetic, not behaviour)
+
+| Field | Value |
+| --- | --- |
+| What was wrong | Row 769d960 expected FOUR expiries on the first heartbeat. Three of the four goals' start timestamps were converted a day early by hand: `goal:horizon:1a05dcf6f8c`, `1a05de066a8`, `1a05df5c263` started 2026-09-01 16:31Z, 16:49Z and 17:13Z (not 2026-08-31) with `max_elapsed_ms = 87 300 000` (24 h 15 min), so at deploy they had elapsed ~15 h and were NOT eligible. Only `goal:horizon:1a055fa26bf` (started 2026-08-31 04:00Z, budget 93 600 000 ms = 26 h, elapsed 52 h) was eligible. |
+| Consequence | The witness below holds against the rows ACTUALLY eligible on the sanitized re-read (Codex's condition), which is one. The three newer goals expire naturally today at 16:46Z, 17:04Z and 17:27Z (start + budget, strict): a second witness, unforced, of failed→none expiry — one of them (`1a05df5c263`) with a prior chain scheduled→wake_started→failed. |
+| Rule kept | Timestamps for expectations come from the box's own arithmetic (SQL over the stored millis), never from a hand conversion. |
+
+## E.F3 — WITNESS on the staging canary (deploy 769d960; box-log timestamps; sanitized: ids, statuses, counts, digests only)
+
+| Field | Value |
+| --- | --- |
+| Deploy | `self_deploy.sh` built main @ 769d960 (release, 3 m 34 s), binary provenance verified `769d960c5bb4ad733689a2c4db85493aaae1d27d`; service active since 08:00:46Z. |
+| Prestate (07:57:03Z, before deploy, file sha256 `aa6d4610…c39c86a`) | 4 checkpoints; 4 queue rows, all `failed`; 29 lifecycle receipts; 5 outcome receipts (`1a05e2d7b98`, `1a05e6c0d6e`, `1a05e8e69b4`, `1a05ecb1d7a`, `1a0606a974e`). Eligible by the box's own arithmetic: exactly one goal, `goal:horizon:1a055fa26bf` (legacy: raw error string on its row, no lifecycle chain). |
+| First heartbeat | 08:00:47Z journal: `[headless-tick] ⌛ Long-horizon goal goal:horizon:1a055fa26bf expired unfinished: budget_elapsed. Nothing was sent.` — one line, one second after service start. |
+| Receipt | `expired` at `occurred_ms 1788336047067` (08:00:47.067Z); first receipt of its chain (previous digest none); previous queue status `failed` → next none; `failure_reason budget_elapsed`; `state_sha256` equals the checkpoint column. |
+| Post-state diff vs prestate | exactly one line removed (`job goal:horizon:1a055fa26bf failed …`) and exactly one line added (`lc goal:horizon:1a055fa26bf expired <sha>`); checkpoints 4 → 4 (the expired goal's checkpoint retained); outcomes 5 → 5 with every digest unchanged; the other 29 receipts unchanged. |
+| No duplicates | Recount at 08:01:39Z (≥ one further 30 s beat): expired receipts 1, queue rows 3, journal expiry lines 1. Partial unique index `mind_horizon_lifecycle_expired_once` present in the live schema. |
+| Not witnessed here | The cockpit's EXPIRED block / `expired` badge: the box-local API answers `not paired` without a session, so the rendering is covered by the source guard and fixtures only until a paired read. |
+| Gate | PASS for the rows actually eligible: one receipt, one notice, queue row gone, checkpoint kept, completed outcomes byte-identical, service active, provenance matching. The three natural expiries this afternoon are the follow-up witness. |

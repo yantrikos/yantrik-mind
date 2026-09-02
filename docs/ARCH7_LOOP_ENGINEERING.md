@@ -85,7 +85,7 @@ Built the way this house builds: measure first, shadow second, activate only pas
   Gate: same answers on the turn corpus with fewer steps; idle spend within budget on both boxes.
 - **L5 — activation.** The attention loop chooses. Only after L2's gate, with rollback.
 
-## 4a. Status (2026-09-02 07:25Z; every item cites its ledger row)
+## 4a. Status (2026-09-02 09:00Z; every item cites its ledger row)
 
 - **L1 — FOLDED** (`3096637`, v3 schema; `95be2ae` L1b-v3 typed gates). Every timer and cadence
   site decides through a `Gated` kind; one reduced record per opportunity; `ym why loops` and the
@@ -101,13 +101,18 @@ Built the way this house builds: measure first, shadow second, activate only pas
   automatic JSON refreshes are turns, not people — origin is now explicit at the entry seam
   (`cli_dispatch_view`, nine polled routes, fail-closed allowlist). loop-ledger-v4 = v3 + the
   `process` host.
-- **L3b — IN CO-PREREG** (draft with Codex): a delivery contract before any speaking loop moves —
-  one `Delivery` seam (Telegram, a durable console notice queue, journal); journal-only is
-  `undelivered` and may mark nothing as spoken (E.G1c's wall made structural); Resolve,
-  ProfileRefresh and Patterns move with explicit one-call budgets; the engagement loops wait for
-  L3c (receptivity and reply grading on the console surface).
-- **E.F3 — IN CO-PREREG** (found sitting in the mind's seat): an expired commitment becomes a
-  receipt and a notice; today it is a silent corpse in the goal list.
+- **L3b — SHIPPED** (`d85b434`; prereg 297850f with Codex's notice accounting). One `Delivery`
+  seam: Telegram when a chat is pinned outside quiet hours, else a durable console notice queue
+  (queued → leased → shown receipts, one `shown` per notice, leased and acknowledged by the
+  cockpit's Notices card), else `undelivered`. Only Telegram acceptance is delivered; a queued
+  notice can mark nothing as spoken. Resolve, ProfileRefresh and Patterns run in the process
+  runner on every box with explicit one-call budget lines; quiet hours now queue instead of
+  drop; the headless heartbeat's notes reach the cockpit. `ym why deliveries` reads the ledger.
+  Engagement loops (knock, digest, ask) wait for L3c.
+- **E.F3 — SHIPPED** (`9c142be`; ledger 769d960, witness 06f537d). An expired commitment is
+  one `expired` receipt (terminal, from the verified chain, nothing appended after it) and one
+  bounded notice; the sweep and the claim are one transaction; expired goals list first, outside
+  the active heading. Witnessed on the canary one second after deploy.
 - **L4, L5 — not started.**
 
 ## 5. What this is not

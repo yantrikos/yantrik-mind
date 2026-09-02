@@ -3164,3 +3164,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Error | The witness row header says deploy 03:27Z and read 03:37Z. The box's evolution log records `2026-09-02T03:24:23Z | deploy | DEPLOYED | 2985a2b health-ok` (service restarted 03:24:16Z), and the readout's own `ts_ms 1788319773145` is 03:29:33Z. The header times were written from my clock, not the evidence. |
 | Consequence | None to the numbers; the aggregate is stamped by its own ts_ms. Rule for the next witness: take times from the box's log and the readout's ts_ms, never from the session clock. |
 | Rule | Ledger corrections are new rows; the original row is left as written. |
+
+## E.F2 second amendment — v10 row (docs-only; Codex's budget point, 03:35Z; landed after the mind-spec slice began — sequencing miss recorded here, not hidden)
+
+| Field | Value |
+| --- | --- |
+| Budget before authoring | After `REPLAN_STARTED` acquisition and BEFORE any planner call, the branch checks `plan_revision >= max_replans`. If exhausted it closes that attempt in one transaction with `FAILED(replan_budget_exhausted, attempt = n)` + the job row failed. |
+| Terminal | `replan_budget_exhausted` is terminal exactly like `replan_lifecycle_mismatch`: the operator Retry control refuses both codes (a retry can change neither the plan revision nor the budget); a typed budget-extension control is out of this slice and would be its own prereg. `replan_planner_failed` and `replan_validation_failed` remain retryable through Branch C. |
+| Fixture | `max_replans = 0` with a drift: parking, one acquisition, ZERO planner calls (counted on the inference stub), exactly one terminal failed attempt, Retry refused. |
+| Reducer identity (Codex 03:42Z, accepted) | Acquisition takes the claimed carrier's expected `(assumption_id, target_revision)`, not a bare flag: the latest `AWAITING_REPLAN`'s assumption id must match; a resumed open marker must match both; a retry's closed attempt must have matched both. Closures are validated in chain order — a `REPLANNED` / attempt-scoped `FAILED` closes only the currently open marker with the same attempt (and, for `REPLANNED`, the same identity); close-before-start, an unknown attempt, a duplicate close, or attempt 0 is a lifecycle mismatch. Every attempt-scoped receipt requires `attempt >= 1`. |
+| Sequencing note | The mind-spec slice (events, receipt detail, reducer) was in the working tree before this row landed. Rule restated: prereg rows land before the code that implements them; this row lands before the store and scheduler slices are shown for review. |

@@ -1,9 +1,10 @@
 """E.CB2 Mind driver v3 — runs INSIDE the cb2-mind container. Waits for the console, pairs with
-the instance's own code, submits ONE delegation, polls every 10 s, stops at done/failed, on the
-proxy's cap (429 from request 9 → the job fails or is cancelled here) or at 1800 s (the instance
-is killed). Declared output → /state/artifact (RESULT.md + files added under the web dir);
-receipt → /state/receipt.json, counts only, closed-schema accounting fail-closed."""
-import json, os, pathlib, shutil, signal, subprocess, sys, time, urllib.request, http.cookiejar
+the instance's own code, submits ONE delegation, polls every 10 s and STOPS (never kills its
+own container — the parent does that after this receipt) at done/failed, at the first proxy
+refusal (a ninth request was attempted → cap hit), or at 1800 s. Declared output → /state/
+artifact (RESULT.md + files added under the web dir); receipt → /state/receipt.json, counts only,
+closed-schema accounting fail-closed; a missing proxy receipt disqualifies."""
+import json, os, pathlib, shutil, sys, time, urllib.request, http.cookiejar
 T = sys.argv[1]; COUNT_DIR = sys.argv[2]
 BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800; CAP = 8
 FIX = pathlib.Path("/fixtures")
@@ -40,14 +41,14 @@ def spend_rows():
 
 
 def proxy_count():
+    """(accepted, refused, present). Absent or unreadable → (-1, -1, False): fail closed."""
     try:
         d = json.load(open(os.path.join(COUNT_DIR, "requests.json")))
-        return d.get("model_requests", -1), d.get("refused_over_cap", -1)
+        return int(d.get("model_requests", -1)), int(d.get("refused_over_cap", -1)), True
     except Exception:
-        return -1, -1
+        return -1, -1, False
 
 
-# wait for the console
 for _ in range(60):
     try:
         urllib.request.urlopen(BASE + "/", timeout=3); break
@@ -61,11 +62,14 @@ brief = (FIX / "briefs" / f"{T}.txt").read_text(encoding="utf-8").strip()
 before = set(p for p in (STATE / "public").rglob("*") if p.is_file())
 name = f"cb2-{T.lower()}"; t0 = time.time(); started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 st, _ = call("POST", "/api/agent", {"name": name, "task": brief}); print("submit:", st)
-status, result, cancel = "running", "", None
+status, result, stop = "running", "", None
 while True:
     time.sleep(10)
+    _, refused, present = proxy_count()
+    if refused > 0:
+        stop = "cap"; break
     if time.time() - t0 > WALL:
-        cancel = "timeout"; break
+        stop = "timeout"; break
     try:
         _, out = call("GET", "/api/tasks"); jobs = json.loads(out)
         jobs = jobs if isinstance(jobs, list) else (jobs.get("jobs") or jobs.get("delegations") or [])
@@ -76,22 +80,19 @@ while True:
         status = mine[-1].get("status", "?"); result = mine[-1].get("result") or ""
         if status in ("done", "failed"):
             break
-if cancel:
-    status = f"cancelled:{cancel}"
-    try:
-        os.kill(1, signal.SIGKILL)   # the container's PID 1 is the mind
-    except Exception:
-        pass
+if stop:
+    status = f"stopped:{stop}"
 finished = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()); wall = round(time.time() - t0, 1)
 art = STATE / "artifact"; art.mkdir(exist_ok=True)
 (art / "RESULT.md").write_text(result, encoding="utf-8")
 added = [p for p in (STATE / "public").rglob("*") if p.is_file() and p not in before]
 for p in added:
     dst = art / p.relative_to(STATE / "public"); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, dst)
-req, att, bad = spend_rows(); pm, pr = proxy_count()
+req, att, bad = spend_rows(); accepted, refused, present = proxy_count()
 receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
            "files_added": len(added), "result_bytes": len(result.encode("utf-8")),
            "ledger_requests": req, "ledger_attempts": att, "ledger_malformed": bad,
-           "proxy_model_requests": pm, "proxy_refused_over_cap": pr,
-           "disqualified": bad > 0 or pm > CAP or cancel is not None}
+           "proxy_receipt_present": present, "proxy_accepted": accepted, "proxy_refused": refused,
+           "proxy_attempted": (accepted + refused) if present else -1,
+           "disqualified": (not present) or bad > 0 or refused > 0 or accepted > CAP or stop is not None}
 (STATE / "receipt.json").write_text(json.dumps(receipt, indent=1)); print(json.dumps(receipt))

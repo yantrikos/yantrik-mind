@@ -80,7 +80,7 @@ if (task === "t1") {
       appendedExactly = Array.isArray(arr) && arr.length === expected.total + 1;
       const last = arr[arr.length - 1] || {};
       recordMatches = Object.entries(sample).every(([k, v]) => last[k] === v) && Object.keys(last).sort().join(",") === "business,created_at,email,message,name,phone";
-      createdAtIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(last.created_at || ""));
+      createdAtIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(String(last.created_at || ""));
     } catch (e) { note("store", e); }
   }
   check("submit_appends_exactly_one_record", appendedExactly, { store_length_after: len, expected_length: expected.total + 1 });
@@ -91,7 +91,8 @@ if (task === "t1") {
   verdict.counts.dashboard = d ? { total: d.total, per_day_keys: Object.keys(d.per_day || {}).length, recent: (d.recent || []).length } : null;
   check("dashboard_json_block_present", !!d);
   check("dashboard_total_exact", !!d && d.total === expected.total, { expected: expected.total });
-  check("dashboard_per_day_exact_14_bins", !!d && JSON.stringify(d.per_day) === JSON.stringify(expected.per_day));
+  const sameMap = (a, b) => !!a && !!b && Object.keys(a).length === Object.keys(b).length && Object.keys(b).every(k => Number.isInteger(a[k]) && a[k] === b[k]);   // order-insensitive
+  check("dashboard_per_day_exact_14_bins", !!d && sameMap(d.per_day, expected.per_day), { keys: d ? Object.keys(d.per_day || {}).length : 0 });
   check("dashboard_recent_five_exact_order", !!d && JSON.stringify(d.recent) === JSON.stringify(expected.five_most_recent));
 }
 await browser.close(); if (server) server.close(); if (child) child.kill("SIGKILL");

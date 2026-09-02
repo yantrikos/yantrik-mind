@@ -47,7 +47,8 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", "0") or 0)
         body = self.rfile.read(n) if n else None
         ctx = ssl.create_default_context()
-        conn = http.client.HTTPSConnection(UPSTREAM_IP, 443, timeout=600, context=ctx)
+        # by HOSTNAME (SNI and certificate match); the container resolves it through its hosts entry
+        conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=600, context=ctx)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
         headers["Host"] = UPSTREAM
         if body is not None:
@@ -98,7 +99,20 @@ class H(BaseHTTPRequestHandler):
         self._forward(False)
 
 
+def tls_self_check():
+    """A verified TLS handshake (CERT_REQUIRED + hostname check) to the upstream by hostname."""
+    try:
+        ctx = ssl.create_default_context()
+        import socket
+        with socket.create_connection((UPSTREAM, 443), timeout=10) as raw:
+            with ctx.wrap_socket(raw, server_hostname=UPSTREAM) as s:
+                return bool(s.getpeercert())
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
     os.makedirs(os.path.dirname(COUNT_FILE), exist_ok=True)
+    state["tls_hostname_verified"] = tls_self_check()
     persist()
     ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()

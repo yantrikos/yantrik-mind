@@ -3667,3 +3667,23 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Not claimed | Anything about owned-hardware speed; that a hosted 30-second answer generalises to the private lane, which never leaves the house; anything about models not run. |
 | Kill (additions) | The real key readable from any work container; a model differing between the two systems; the Qwen profile failing to reproduce the frozen smoke/cap results; any NIM leg started before Codex's word on the profile commit. |
 | Order | Codex verifies the Qwen reading's receipts on the box → the base-URL override lands in the inference crate (tests) → the profile lands in the fixtures (self-checks under both profiles on the box) → Codex reviews and gives the word → the six-leg sequence runs strictly sequentially under the BOX protocol → results rows per task. |
+
+## E.CB2 — Qwen reading VERIFIED by Codex on the box (17:52Z box clock), with one correction to the row above
+| Field | Value |
+| --- | --- |
+| Correction | The Hermes T1 tree line in the Qwen-reading row omits its last field. Full text: `2960cd6b4c6c36f5b9a83319ab652ddd812c461897d5ca7227693f48394fd952 files=4 bytes=24688 symlinks=0 specials=0`. The row above is left as written; this row supersedes that cell. |
+| Exact SHA-256 (Codex) | mind T1 receipt 018c1e696790c3f74328ae8accc8ebbac320a1e50035954bcf111fed2252a756; hermes T1 receipt 49b657035d9af7a9850206c0f6e546f5ee3be0107fd24d1cdfb078057dc572a7; mind T1 verdict 1842cdcd31b1fafe99cd34e4d7bfd032233d70720aa1b325d0b4e8cf67bb5775; mind proxy receipt 6cb0d8aba175a5579475b475c37ae90c7bfb5b4b810ed02d3256ee06df1ddc8d; hermes proxy receipt 7597990bbde15ec2f009bce8873880f875a88b793a11280ceba22fced7e36ad2. |
+| Trees recomputed (Codex) | mind 427fd575e482308f66c8ca14be9828dc78b47a9e6367ddb39ce272c8b8b99e9b files=1 bytes=153 symlinks=0 specials=0; hermes as corrected above. Both equal their receipts. |
+| Cleanup (Codex) | no T2/T3 outputs; no cb2 containers; both cb2 networks absent after cleanup; wrapper-vs-receipt timestamps differ only by outer-boundary overhead. |
+| Standing | With this row the Qwen-reading numbers are final. |
+
+## E.CB2-N — Codex gates (17:52Z), accepted; the profile design changes accordingly
+| Field | Value |
+| --- | --- |
+| Immutability | The d4febe6 fixtures and the Qwen evidence stay untouched; the profiled harness lives in a NEW path (`crates/mind-evals/fixtures/cb2n/`, derived from cb2 by a recorded patch) with its own version. |
+| Key | Proxy-only, never printed or recorded; leak scans read the key as a grep pattern file (`-Ff`) so neither the key nor its prefix ever sits in a variable, log or receipt — the receipt carries a hit COUNT only. |
+| Cap | Every attempted model POST consumes the cap (unchanged from v3). |
+| Void | An upstream 429/5xx on a model request, a transport failure or a TLS failure voids the leg as infrastructure: the first receipt is preserved under a `_void1` name, exactly one same-leg rerun is allowed, a second void stops the sequence. |
+| Model identity | The proxy tallies the `model` field of every model response; a leg is disqualified unless every tallied model equals the profile's model, and both systems' receipts must name the same model. Usage: provider-reported token counts only. |
+| Resolution evidence | The upstream's addresses are resolved on the box at run start, allowlisted exclusively (ACCEPTs for any other upstream removed), and written into every receipt; TLS hostname verification stays. |
+| Order | Qwen profile reproduces the v3 self-tests, cap test, smokes and the two leg receipts' tree hashes → Codex reviews the two product changes (b411a89 `YM_PROVIDER_BASE_URL_<PROVIDER>`, 21fc174 `YM_PRIMARY_BRAIN`) separately → no NIM request until spend is authorised directly by Pranab (Codex holds that his standing grant carves out spending money and that my quote of his NIM suggestion is peer evidence) or zero incremental charge is independently evidenced. |

@@ -4,7 +4,7 @@ own container — the parent does that after this receipt) at done/failed, at th
 refusal (a ninth request was attempted → cap hit), or at 1800 s. Declared output → /state/
 artifact (RESULT.md + files added under the web dir); receipt → /state/receipt.json, counts only,
 closed-schema accounting fail-closed; a missing proxy receipt disqualifies."""
-import json, os, pathlib, shutil, sys, time, urllib.request, http.cookiejar
+import json, os, pathlib, shutil, sys, time, urllib.request, http.cookiejar, hashlib
 T = sys.argv[1]; COUNT_DIR = sys.argv[2]
 BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800; CAP = 8
 FIX = pathlib.Path("/fixtures")
@@ -59,19 +59,31 @@ for _ in range(60):
 code = (STATE / "web-pairing.code").read_text().strip()
 st, _ = call("POST", "/api/pair", {"code": code, "name": "cb2-harness"}); print("pair:", st)
 brief = (FIX / "briefs" / f"{T}.txt").read_text(encoding="utf-8").strip()
-before = set(p for p in (STATE / "public").rglob("*") if p.is_file())
+def snapshot():
+    """path -> sha256 of every regular file under the web dir (symlinks excluded)."""
+    out = {}
+    for p in (STATE / "public").rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            out[p] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+before = snapshot()
 name = f"cb2-{T.lower()}"; t0 = time.time(); started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 st, _ = call("POST", "/api/agent", {"name": name, "task": brief}); print("submit:", st)
 status, result, stop = "running", "", None
 while True:
-    time.sleep(10)
+    remaining = WALL - (time.time() - t0)
+    if remaining <= 0:
+        stop = "timeout"; break
+    time.sleep(min(10, max(0.1, remaining)))
     _, refused, present = proxy_count()
     if refused > 0:
         stop = "cap"; break
     if time.time() - t0 > WALL:
         stop = "timeout"; break
     try:
-        _, out = call("GET", "/api/tasks"); jobs = json.loads(out)
+        _, out = call("GET", "/api/tasks", timeout=max(1, min(30, int(WALL - (time.time() - t0))))); jobs = json.loads(out)
         jobs = jobs if isinstance(jobs, list) else (jobs.get("jobs") or jobs.get("delegations") or [])
     except Exception:
         jobs = []
@@ -85,7 +97,8 @@ if stop:
 finished = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()); wall = round(time.time() - t0, 1)
 art = STATE / "artifact"; art.mkdir(exist_ok=True)
 (art / "RESULT.md").write_text(result, encoding="utf-8")
-added = [p for p in (STATE / "public").rglob("*") if p.is_file() and p not in before]
+after = snapshot()
+added = [p for p, h in after.items() if before.get(p) != h]   # created OR content-changed since the baseline
 for p in added:
     dst = art / p.relative_to(STATE / "public"); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, dst)
 req, att, bad = spend_rows(); accepted, refused, present = proxy_count()

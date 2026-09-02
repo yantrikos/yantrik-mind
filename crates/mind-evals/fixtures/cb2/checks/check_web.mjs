@@ -23,6 +23,7 @@ function staticServer(root) {
     let p = decodeURIComponent(req.url.split("?")[0]); if (p.endsWith("/")) p += "index.html";
     let f = path.resolve(rootAbs, "." + path.posix.normalize("/" + p));
     if (!f.startsWith(rootAbs + path.sep) && f !== rootAbs) { res.writeHead(403); res.end(); return; }   // no escape above the root
+    try { const real = fs.realpathSync(f); if (!real.startsWith(fs.realpathSync(rootAbs) + path.sep)) { res.writeHead(403); res.end(); return; } } catch { res.writeHead(404); res.end(); return; }   // no symlink escape
     if (!fs.existsSync(f) && fs.existsSync(f + ".html")) f += ".html";
     if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { "content-type": types[path.extname(f)] || "application/octet-stream" }); res.end(fs.readFileSync(f));

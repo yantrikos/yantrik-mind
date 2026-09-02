@@ -9,6 +9,12 @@ T=$1; OUT=${2:-/root/cb2/out}; WALL=1800
 FIX="$(cd "$(dirname "$0")/.." && pwd)"
 A="$OUT/artifacts/mind_$T"; R="$OUT/receipts"; CD="$OUT/proxy/mind_$T"; ST="$OUT/state/mind_$T"
 [ -e "$A" ] && { echo "refusing: $A exists (one invocation per task)"; exit 2; }
+# runs are SEQUENTIAL: refuse if anything is still attached to either network (a stale proxy or a
+# cross-run container would stay reachable)
+for NET in cb2net cb2egress; do
+  ATT=$(docker network inspect $NET --format '{{len .Containers}}' 2>/dev/null || echo missing)
+  [ "$ATT" = "0" ] || { echo "refusing: $NET has $ATT attached container(s) — runs are sequential"; exit 3; }
+done
 mkdir -p "$A" "$R" "$ST/public" "$OUT/raw"; chown -R 10003:10003 "$ST" "$A"
 NAME="cb2-mind-$T"; PROXY="cb2proxy-mind-$T"; PIP=172.30.0.2
 cleanup() {
@@ -18,7 +24,7 @@ cleanup() {
   rm -rf "$ST"; chmod -R a-w "$A" 2>/dev/null
 }
 trap cleanup EXIT
-bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null
+bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","disqualified":true}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
 BIN_SHA=$(sha256sum /opt/yantrik-mind/mind-core | cut -c1-64); PROV=$(cd /root/codes/ym-autodeploy && git rev-parse --short HEAD)
 docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
   -v /opt/yantrik-mind/mind-core:/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
@@ -28,20 +34,26 @@ docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off \
   cb2-mind /mind-core > "$OUT/raw/mind_${T}_stdout.txt" 2>&1 || true
 docker logs "$NAME" > "$OUT/raw/mind_${T}_boot.txt" 2>&1 &
-timeout -k 10 $((WALL + 120)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count > "$OUT/raw/mind_${T}_driver.txt" 2>&1
+timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count > "$OUT/raw/mind_${T}_driver.txt" 2>&1
 RC=$?
 docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1
 docker rm -f "$NAME" >/dev/null 2>&1   # the parent stops the instance AFTER the driver wrote its receipt
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" <<'EOF'
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" <<'EOF'
 import json, sys
-src, dst, bin_sha, prov, img, tree, rc, task = sys.argv[1:]
+src, dst, bin_sha, prov, img, tree, rc, task, prx = sys.argv[1:]
 try:
     d = json.load(open(src))
 except Exception:
     d = {"system": "mind", "task": task, "status": "driver-failed", "disqualified": True}
-d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc)})
+try:
+    p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p.get("upstream_errors", -1))
+except Exception:
+    tls, upe = False, -1
+syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0
+d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "symlinks": syml})
+d["disqualified"] = bool(d.get("disqualified")) or (not tls) or upe != 0 or syml > 0 or int(rc) != 0
 json.dump(d, open(dst, "w"), indent=1); print(json.dumps(d))
 EOF

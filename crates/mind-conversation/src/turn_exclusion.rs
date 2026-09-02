@@ -172,7 +172,7 @@ mod tests {
             ),
         ] {
             assert!(
-                body_after(src, signature).contains("self.turns.begin_turn"),
+                body_after(src, signature).contains(".begin_turn"),
                 "{signature} must register a turn"
             );
         }

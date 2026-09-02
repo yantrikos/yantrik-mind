@@ -6,7 +6,7 @@ set -u
 FIX="$(cd "$(dirname "$0")/.." && pwd)"; CD=$(mktemp -d /tmp/cb2-captest-XXXX)
 trap 'bash "$FIX/run/proxy.sh" down cb2proxy-captest >/dev/null 2>&1; docker rm -f cb2-captest-client >/dev/null 2>&1; rm -rf "$CD"' EXIT
 bash "$FIX/run/proxy.sh" up cb2proxy-captest "$CD" 172.30.0.8 >/dev/null || { echo "proxy not ready"; exit 1; }
-docker run --rm --name cb2-captest-client --network cb2net --dns 127.0.0.1 -v "$FIX/net/captest_client.py:/c.py:ro" python:3.13-slim python3 /c.py 2>/dev/null
+docker run --rm --name cb2-captest-client --network cb2net --dns 127.0.0.1 -v "$FIX/net/captest_client.py:/c.py:ro" python:3.13-slim python3 /c.py 2>/dev/null || { echo "client statuses were not exactly eight 200s then a 429"; exit 1; }
 python3 - "$CD/requests.json" <<'EOF'
 import json, sys
 d = json.load(open(sys.argv[1]))

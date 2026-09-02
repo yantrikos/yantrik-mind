@@ -12,3 +12,5 @@ for i in range(9):
     except Exception:
         codes.append(0)
 print("status codes:", codes)
+import sys
+sys.exit(0 if codes == [200] * 8 + [429] else 1)

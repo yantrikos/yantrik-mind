@@ -49,11 +49,14 @@ try:
 except Exception:
     d = {"system": "mind", "task": task, "status": "driver-failed", "disqualified": True}
 try:
-    p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p.get("upstream_errors", -1))
+    p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p["upstream_errors"])
+    acc = p["model_requests"]; ref = p["refused_over_cap"]
+    receipt_ok = isinstance(acc, int) and isinstance(ref, int) and acc >= 0 and ref >= 0 and acc <= 8 and ref == 0 and upe == 0 and tls
 except Exception:
-    tls, upe = False, -1
+    tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0
-d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "symlinks": syml})
-d["disqualified"] = bool(d.get("disqualified")) or (not tls) or upe != 0 or syml > 0 or int(rc) != 0
+capture_ok = len(bin_sha) == 64 and bool(prov) and tree.startswith(tuple("0123456789abcdef")) and "files=" in tree
+d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "proxy_accepted_parent": acc, "proxy_refused_parent": ref, "proxy_receipt_ok": receipt_ok, "capture_ok": capture_ok, "symlinks": syml})
+d["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or int(rc) != 0
 json.dump(d, open(dst, "w"), indent=1); print(json.dumps(d))
 EOF

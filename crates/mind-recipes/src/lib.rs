@@ -309,10 +309,37 @@ pub struct Recipe {
     pub steps: Vec<RecipeStep>,
 }
 
-/// E.WEB19: reserved run vars that carry the typed identity from the run boundary into every
-/// persisted row. Reserved names, never user-facing.
-pub const RUN_ORIGIN_VAR: &str = "__origin";
-pub const RUN_AGENT_VAR: &str = "__canonical_agent";
+/// E.WEB19: the persisted form of a run's identity, carried SEPARATELY from the run's vars so no
+/// step (`store_as`), replan or answer can ever rewrite it. Set once at the boundary from a
+/// `RecipeRunIdentity`, or copied from the stored columns on every resume.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunIdentity {
+    pub origin: Option<String>,
+    pub canonical_agent: Option<String>,
+}
+impl RunIdentity {
+    /// A resume carries exactly what the row already says — never re-derived from anything.
+    pub fn from_record(rec: &RunRecord) -> Self {
+        Self {
+            origin: rec.origin.clone(),
+            canonical_agent: rec.canonical_agent.clone(),
+        }
+    }
+    pub fn other() -> Self {
+        Self {
+            origin: Some(RunOrigin::Other.as_str().to_string()),
+            canonical_agent: None,
+        }
+    }
+}
+impl From<RecipeRunIdentity> for RunIdentity {
+    fn from(id: RecipeRunIdentity) -> Self {
+        Self {
+            origin: Some(id.origin.as_str().to_string()),
+            canonical_agent: id.canonical_agent,
+        }
+    }
+}
 
 /// Where a run came from — typed at the boundary, persisted, never inferred from its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -781,21 +808,19 @@ impl RecipeEngine {
     pub async fn run_with_identity(
         &self,
         recipe: &Recipe,
-        mut vars: HashMap<String, Value>,
+        vars: HashMap<String, Value>,
         identity: RecipeRunIdentity,
     ) -> RunOutcome {
         let id = format!("{}-{}", recipe.id, now_ms());
-        vars.insert(RUN_ORIGIN_VAR.into(), Value::from(identity.origin.as_str()));
-        match &identity.canonical_agent {
-            Some(agent) => {
-                vars.insert(RUN_AGENT_VAR.into(), Value::from(agent.as_str()));
-            }
-            None => {
-                vars.remove(RUN_AGENT_VAR);
-            }
-        }
-        self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, vars)
-            .await
+        self.run_from(
+            &id,
+            &recipe.name,
+            recipe.steps.clone(),
+            0,
+            vars,
+            RunIdentity::from(identity),
+        )
+        .await
     }
 
     /// THE PLANNER — author a runnable recipe from a free-form goal. The LLM emits a JSON array of
@@ -1089,8 +1114,15 @@ GOAL: GOAL_HERE"#;
                     );
                 }
                 _ => {
-                    self.run_from(&rec.id, &rec.name, rec.steps, rec.current_step, rec.vars)
-                        .await;
+                    self.run_from(
+                        &rec.id,
+                        &rec.name,
+                        rec.steps.clone(),
+                        rec.current_step,
+                        rec.vars.clone(),
+                        RunIdentity::from_record(&rec),
+                    )
+                    .await;
                     resumed += 1;
                 }
             }
@@ -1256,6 +1288,7 @@ GOAL: GOAL_HERE"#;
                     job.recipe.steps.clone(),
                     0,
                     HashMap::new(),
+                    RunIdentity::other(),
                 )
                 .await;
             // `now_ms` is the scheduler tick captured before execution. Receipt timestamps after an
@@ -1447,8 +1480,15 @@ GOAL: GOAL_HERE"#;
                 _ => rec.current_step,
             };
             outcomes.push(
-                self.run_from(&rec.id, &rec.name, rec.steps, resume_at, rec.vars)
-                    .await,
+                self.run_from(
+                    &rec.id,
+                    &rec.name,
+                    rec.steps.clone(),
+                    resume_at,
+                    rec.vars.clone(),
+                    RunIdentity::from_record(&rec),
+                )
+                .await,
             );
         }
         outcomes
@@ -1473,6 +1513,7 @@ GOAL: GOAL_HERE"#;
         let Some(rec) = store.load(run_id) else {
             return empty();
         };
+        let identity = RunIdentity::from_record(&rec);
         let mut vars = rec.vars;
         // Bind the answer to the AskUser step's store_as, then continue past it.
         if let Some(RecipeStep::AskUser { store_as, .. }) = rec.steps.get(rec.current_step) {
@@ -1484,6 +1525,7 @@ GOAL: GOAL_HERE"#;
             rec.steps.clone(),
             rec.current_step + 1,
             vars,
+            identity,
         )
         .await
     }
@@ -1495,6 +1537,7 @@ GOAL: GOAL_HERE"#;
         mut steps: Vec<RecipeStep>,
         start: usize,
         mut vars: HashMap<String, Value>,
+        identity: RunIdentity,
     ) -> RunOutcome {
         let mut notifications = Vec::new();
         let mut failure_learnings = Vec::new();
@@ -1515,14 +1558,9 @@ GOAL: GOAL_HERE"#;
                         steps: steps.to_vec(),
                         vars: vars.clone(),
                         error: error.map(|e| e.to_string()),
-                        origin: vars
-                            .get(RUN_ORIGIN_VAR)
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        canonical_agent: vars
-                            .get(RUN_AGENT_VAR)
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
+                        // Identity is what the boundary or the row said — vars cannot reach it.
+                        origin: identity.origin.clone(),
+                        canonical_agent: identity.canonical_agent.clone(),
                     },
                     now_ms(),
                 );
@@ -2363,6 +2401,69 @@ mod tests {
         let scripted = Arc::new(ScriptedLLM::new("unused"));
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
         RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS").with_store(store)
+    }
+
+    /// E.WEB19 (Codex's seam blocker): identity is immutable across execution and resume. Vars
+    /// poisoned with the old reserved keys, and a step that stores into them, never reach the
+    /// persisted columns; a generic scheduled goal stays scheduled_goal / NULL after every persist
+    /// and after a resume — so it can never acquire an agent and join a thread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn poisoned_vars_cannot_rewrite_a_runs_identity_across_persist_and_resume() {
+        let dir = std::env::temp_dir().join(format!("ym-web19-collide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(RecipeStore::open(dir.join("r.db").to_str().unwrap()).unwrap());
+        let engine = plain_engine_with_store(store.clone());
+        let mut vars: HashMap<String, Value> = HashMap::new();
+        vars.insert("__canonical_agent".into(), Value::from("X"));
+        vars.insert("__origin".into(), Value::from("imported_agent"));
+        // A Render step that writes the poisoned key again during execution.
+        let steps = vec![
+            RecipeStep::Render {
+                input_var: "__canonical_agent".into(),
+                store_as: "__canonical_agent".into(),
+                format: RenderFormat::default(),
+            },
+            RecipeStep::WaitUntil { until_ms: u64::MAX },
+        ];
+        let recipe = Recipe {
+            id: "sched:collide".into(),
+            name: "standing: X".into(),
+            steps,
+        };
+        let _ = engine
+            .run_with_identity(&recipe, vars, RecipeRunIdentity::scheduled_goal())
+            .await;
+        let rows = store.by_status("sleeping");
+        assert_eq!(rows.len(), 1, "the run parked at its wait");
+        assert_eq!(rows[0].origin.as_deref(), Some("scheduled_goal"));
+        assert_eq!(
+            rows[0].canonical_agent, None,
+            "vars never reach the columns"
+        );
+        assert!(
+            rows[0].vars.contains_key("__canonical_agent"),
+            "the poisoned var is still just a var (rendered, kept, harmless)"
+        );
+        // A resume copies the columns, not the vars: identity survives unchanged.
+        let mut rec = rows[0].clone();
+        rec.vars
+            .insert("__origin".into(), Value::from("imported_agent"));
+        store.save(&rec, 5).unwrap();
+        let _ = engine
+            .run_from(
+                &rec.id,
+                &rec.name,
+                rec.steps.clone(),
+                rec.current_step,
+                rec.vars.clone(),
+                RunIdentity::from_record(&rec),
+            )
+            .await;
+        let again = store.load(&rec.id).unwrap();
+        assert_eq!(again.origin.as_deref(), Some("scheduled_goal"));
+        assert_eq!(again.canonical_agent, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn horizon_run(

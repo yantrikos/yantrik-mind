@@ -96,6 +96,11 @@ mod ef2_door_tests;
 #[cfg(test)]
 mod l1d_tests;
 #[cfg(test)]
+mod l4_0_tests;
+pub mod spend;
+/// L4-0: the loop host wraps a model-calling act so its spend rows carry the opportunity id.
+pub use mind_inference::within_opportunity;
+#[cfg(test)]
 mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;
@@ -6312,6 +6317,14 @@ impl ConversationEngine {
     /// Wire the cognitive flight recorder. `DecisionLog::record` is fail-sticky and cannot fail
     /// its caller, so every emit site below logs unconditionally.
     pub fn with_recorder(mut self, r: Arc<mind_observability::DecisionLog>) -> Self {
+        // L4-0: the pool family records its spend into THIS recorder — bound here, on the
+        // engine's own log, never through a process-wide observer.
+        // The PINNED process start (`process_started_ms`), so every engine and every later
+        // bind in one process carries one process identity.
+        self.inference.bind_ledger(Arc::new(spend::SpendSink::new(
+            r.clone(),
+            process_started_ms(),
+        )));
         self.recorder = r;
         self
     }
@@ -8054,6 +8067,14 @@ impl ConversationEngine {
                 // L1 (ARCH7): the loop ledger — the mind's idle time, one line per loop.
                 if prefix == "loops" {
                     return verified_report(mind_observability::render_loop_ledger);
+                }
+                // L4-0: what the mind spent on inference — logical requests and backend
+                // attempts per callsite, per loop, per hour; tokens absent until reported.
+                if prefix == "spend" || prefix == "spend 24h" {
+                    return verified_report(mind_observability::render_spend_ledger);
+                }
+                if prefix == "spend 1h" {
+                    return verified_report(mind_observability::render_spend_ledger_1h);
                 }
                 // L3b: where the loops' lines went — one row per kind over the verified log,
                 // plus the console queue's depth. Counts only.

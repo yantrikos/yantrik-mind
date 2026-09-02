@@ -492,13 +492,20 @@ pub(crate) fn verdict_ships(v: &str) -> bool {
 /// `nanogpt:deepseek/deepseek-v4-pro`. Unset keeps the previous behaviour exactly. Household lane:
 /// a delegated build is household work, so a cloud judge is in bounds here (a Private turn never
 /// reaches this code path).
-pub(crate) fn critic_from_env() -> Option<(InferencePool, String)> {
+/// L4-0: the named critic is its own pool but the SAME spend ledger — it joins the house
+/// pool's family, so a critic call never escapes the meter.
+pub(crate) fn critic_from_env(family: &InferencePool) -> Option<(InferencePool, String)> {
     let spec = std::env::var("YM_CRITIC_MODEL").ok()?.trim().to_string();
     if spec.is_empty() {
         return None;
     }
     let backend = mind_inference::backend_from_spec(&spec)?;
-    Some((InferencePool::new(backend, 2).with_provider(&spec), spec))
+    Some((
+        InferencePool::new(backend, 2)
+            .with_provider(&spec)
+            .share_ledger_slot(family),
+        spec,
+    ))
 }
 
 /// Fingerprint of a workdir's visible files: name → (size, mtime-seconds). Two equal snapshots
@@ -1466,7 +1473,7 @@ impl super::ConversationEngine {
             // loop working — and the critique trail survives for the promotion gate to keep.
             let c = self.coder.clone().unwrap();
             let house = self.inference.clone();
-            let named_critic = critic_from_env();
+            let named_critic = critic_from_env(&house);
             // 50, not 3. The cap is a RUNAWAY BACKSTOP, not the quality bar: the loop's real exits
             // are the critic's SHIP, the dead-provider guard, and the fail-closed critic path. With
             // those in place a low cap only truncates honest iteration — the whole point is to keep
@@ -2006,7 +2013,7 @@ impl super::ConversationEngine {
             let queue = self.notify_queue.clone();
             let jobs = self.bg_jobs.clone();
             let house = self.inference.clone();
-            let named_critic = critic_from_env();
+            let named_critic = critic_from_env(&house);
             let id = id.to_string();
             let receipt_id = id.clone();
             let name = spec.name.clone();

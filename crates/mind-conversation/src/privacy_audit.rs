@@ -829,7 +829,7 @@ mod tests {
                     .unwrap_or("")
                     .to_string();
                 // tests may call chat() freely — they carry no real household data.
-                if base == "tests.rs" || base == "privacy_audit.rs" {
+                if base == "tests.rs" || base == "privacy_audit.rs" || base == "l4_0_tests.rs" {
                     continue;
                 }
                 // CRATE-RELATIVE, so a decision about one crate's `lib.rs` cannot speak for
@@ -983,9 +983,11 @@ mod tests {
             let mut files = Vec::new();
             rs_files(&src, &mut files);
             for path in files {
+                // L4-0: the spend-ledger fixtures call the seam with scripted backends and the
+                // literal words "hello"/"x"; a test file, exempt like tests.rs.
                 if matches!(
                     path.file_name().and_then(|name| name.to_str()),
-                    Some("privacy_audit.rs" | "tests.rs")
+                    Some("privacy_audit.rs" | "tests.rs" | "l4_0_tests.rs")
                 ) {
                     continue;
                 }

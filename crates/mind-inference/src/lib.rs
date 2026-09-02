@@ -195,6 +195,110 @@ fn note_serving_link(label: &str) {
     SERVING_LINK.with(|c| *c.borrow_mut() = Some(label.to_string()));
 }
 
+// ── L4-0: the spend ledger seam (inference-ledger-v1) ─────────────────────────────────────────
+// One terminal record per LOGICAL request at the outer request seam — gate through completion,
+// plain and streaming alike. Refused = zero backend attempts; failed = accepted, nothing served;
+// served = a response. The pool does not know how rows are stored: a bound `InferenceLedger`
+// (the engine's own recorder, never a process-wide observer) receives the typed record.
+
+thread_local! {
+    /// The request's attempt counter, installed on the blocking thread for the request's
+    /// duration. It is an `Arc` the awaiting side also holds, so a backend panic (a JoinError)
+    /// loses the thread but not the count.
+    static ATTEMPTS: std::cell::RefCell<Option<Arc<std::sync::atomic::AtomicU32>>> =
+        const { std::cell::RefCell::new(None) };
+}
+fn install_attempts(counter: Arc<std::sync::atomic::AtomicU32>) {
+    ATTEMPTS.with(|a| *a.borrow_mut() = Some(counter));
+}
+/// Count ONE backend invocation at the observable boundary: one direct `LLMBackend::chat` on a
+/// leaf backend (counted by the pool BEFORE the call, so a panic inside it is still one
+/// attempt), or one link invocation inside a provider chain (its survival tier included).
+/// Transport-internal retries a backend hides are NOT counted — the number is invocations the
+/// pool can see, never a claim about outbound HTTP attempts. Outside a request it is a no-op.
+pub fn note_attempt() {
+    ATTEMPTS.with(|a| {
+        if let Some(c) = a.borrow().as_ref() {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+}
+/// A chain counts its own links; a leaf backend cannot, so the pool counts its invocation.
+/// Chain-ness is read off the backend OBJECT, never off a configured label.
+fn is_chain_backend(backend: &dyn LLMBackend) -> bool {
+    backend.backend_name().starts_with("chain[")
+}
+
+tokio::task_local! {
+    /// The loop opportunity a model call runs inside, set by the loop host around the act.
+    static OPPORTUNITY: String;
+}
+/// Run `f` with the loop opportunity id every inference row inside it will carry. The id is
+/// the loop ledger's own opportunity id, so a spend row joins its loop by identity — never by
+/// timestamp.
+pub async fn within_opportunity<F: std::future::Future>(id: String, f: F) -> F::Output {
+    OPPORTUNITY.scope(id, f).await
+}
+fn current_opportunity() -> Option<String> {
+    OPPORTUNITY.try_with(|s| s.clone()).ok()
+}
+
+/// How one logical request ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// The privacy gate refused it: zero backend attempts.
+    Refused,
+    /// Accepted, but no backend served it.
+    Failed,
+    /// A response came back.
+    Served,
+}
+impl CallOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CallOutcome::Refused => "refused",
+            CallOutcome::Failed => "failed",
+            CallOutcome::Served => "served",
+        }
+    }
+}
+/// Where a token count came from. Only a backend contract that REPORTS counts may construct a
+/// `TokenUsage`; today no backend does, so every row carries tokens absent. An estimate never
+/// becomes a count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenProvenance {
+    ProviderReported,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt: u64,
+    pub completion: u64,
+    pub provenance: TokenProvenance,
+}
+/// One logical inference request, as the pool saw it. No prompt, no reply, no user datum: the
+/// callsite is the static string the code authored.
+#[derive(Clone, Debug)]
+pub struct InferenceCall {
+    pub callsite: &'static str,
+    pub scope: PrivacyScope,
+    /// The SELECTED route label (a provider or a chain) — never relabelled as a model.
+    pub route: String,
+    /// The link that answered, when the chain noted one (post-success fact).
+    pub served_by: Option<String>,
+    pub outcome: CallOutcome,
+    /// Backend invocations at the observable boundary (see [`note_attempt`]).
+    pub attempts: u32,
+    pub latency_ms: u64,
+    pub streaming: bool,
+    /// The loop opportunity id this call ran inside, if the host set one.
+    pub opportunity: Option<String>,
+    pub tokens: Option<TokenUsage>,
+}
+/// The sink a pool records into — bound per pool by whoever owns the recorder.
+pub trait InferenceLedger: Send + Sync {
+    fn record_call(&self, call: InferenceCall);
+}
+
 fn take_serving_link() -> Option<String> {
     SERVING_LINK.with(|c| c.borrow_mut().take())
 }
@@ -307,6 +411,9 @@ pub struct InferencePool {
     /// fails, the request FAILS CLOSED — it is never re-sent to the cloud/household backend, because
     /// an outage must reduce capability, never confidentiality. Set only from an owned endpoint.
     private: Option<(Arc<dyn LLMBackend>, Arc<str>)>,
+    /// L4-0: the bound spend ledger. Shared by every clone and every role pool derived from this
+    /// one, so binding the engine's recorder once binds the whole pool family.
+    ledger: Arc<std::sync::RwLock<Option<Arc<dyn InferenceLedger>>>>,
 }
 
 impl InferencePool {
@@ -318,6 +425,35 @@ impl InferencePool {
             sem: Arc::new(Semaphore::new(max_concurrency.max(1))),
             provider: Arc::from("scripted"),
             private: None,
+            ledger: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// L4-0: bind the spend ledger this pool (and every pool sharing its slot) records into.
+    pub fn bind_ledger(&self, ledger: Arc<dyn InferenceLedger>) {
+        *self.ledger.write().unwrap_or_else(|e| e.into_inner()) = Some(ledger);
+    }
+    /// L4-0: a derived pool records into the same ledger as the pool it was derived from.
+    pub fn share_ledger_slot(mut self, from: &InferencePool) -> Self {
+        self.ledger = from.ledger.clone();
+        self
+    }
+    fn record_call(&self, call: InferenceCall) {
+        if let Some(l) = self
+            .ledger
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            l.record_call(call);
+        }
+    }
+    /// The route label the gate would select for `scope` — the same choice `gate_scope` makes,
+    /// read without counting, so a refusal row can name what was refused.
+    fn route_label(&self, scope: PrivacyScope) -> String {
+        match (scope, &self.private) {
+            (PrivacyScope::Private, Some((_, lbl))) => lbl.to_string(),
+            _ => self.provider.to_string(),
         }
     }
 
@@ -434,7 +570,27 @@ impl InferencePool {
         // order — and it makes the mind portable across templates instead of only working on the
         // ones that happen to be lenient.
         let messages = merge_system_messages(messages);
-        let (backend, selected_label) = self.gate_scope(scope, callsite)?;
+        // L4-0: one terminal row per logical request, whatever happens next.
+        let call_t0 = std::time::Instant::now();
+        let opportunity = current_opportunity();
+        let (backend, selected_label) = match self.gate_scope(scope, callsite) {
+            Ok(x) => x,
+            Err(e) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: self.route_label(scope),
+                    served_by: None,
+                    outcome: CallOutcome::Refused,
+                    attempts: 0,
+                    latency_ms: call_t0.elapsed().as_millis() as u64,
+                    streaming: false,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(e);
+            }
+        };
         let permit = self
             .sem
             .clone()
@@ -443,11 +599,17 @@ impl InferencePool {
             .expect("semaphore never closed");
         let scope_for_lane = scope;
         let provider_for_lane = selected_label;
-        let result = tokio::task::spawn_blocking(move || {
+        // L4-0: the attempt counter outlives the blocking thread — a panic there still yields
+        // a Failed row with the attempts made.
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_in = attempts.clone();
+        let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
             // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
             // read afterwards can only have been written by THIS call's chain traversal.
             let _ = take_serving_link();
+            install_attempts(attempts_in);
+            let leaf = !is_chain_backend(backend.as_ref());
             let tools_ref = if tools.is_empty() { None } else { Some(tools.as_slice()) };
             let outcome: anyhow::Result<LLMResponse> = (|| {
             // BACKPRESSURE IS NOT AN OUTAGE.
@@ -464,6 +626,11 @@ impl InferencePool {
             // retrying a real error just delays the truth.
             let mut wait_ms = 400;
             for attempt in 0..3 {
+                // L4-0: a leaf backend's invocation IS the attempt, counted before the call so
+                // a panic inside it is still one attempt; a chain counts its links itself.
+                if leaf {
+                    note_attempt();
+                }
                 match backend.chat(&messages, &config, tools_ref) {
                     Ok(r) => return Ok(r),
                     Err(e) => {
@@ -492,9 +659,65 @@ impl InferencePool {
             let served = take_serving_link();
             (outcome, served)
         })
-        .await?;
-        let (outcome, served) = result;
-        let response = outcome?;
+        .await;
+        let attempts = attempts.load(std::sync::atomic::Ordering::SeqCst);
+        let latency_ms = call_t0.elapsed().as_millis() as u64;
+        // L4-0: a panic on the blocking thread is a failed request, not a missing row.
+        let (outcome, served) = match joined {
+            Ok(x) => x,
+            Err(join) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: None,
+                    outcome: CallOutcome::Failed,
+                    attempts,
+                    latency_ms,
+                    streaming: false,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(anyhow::anyhow!("inference task failed: {join}"));
+            }
+        };
+        // L4-0: the terminal row. `served_by` follows E.OBS1c's rule below — a route is not a
+        // server — and is absent on a failure.
+        let served_by_label = served.clone().or_else(|| {
+            (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.clone())
+        });
+        let response = match outcome {
+            Ok(r) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: served_by_label,
+                    outcome: CallOutcome::Served,
+                    attempts,
+                    latency_ms,
+                    streaming: false,
+                    opportunity,
+                    tokens: None,
+                });
+                r
+            }
+            Err(e) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: None,
+                    outcome: CallOutcome::Failed,
+                    attempts,
+                    latency_ms,
+                    streaming: false,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(e);
+            }
+        };
         // E.OBS1c: "served by" is a POST-SUCCESS fact. A chain notes the link that answered; a
         // single-provider backend never notes, and its configured label IS the server — but a
         // chain label ("chain[a -> b]") that somehow arrives un-noted must NOT be shown as if a
@@ -584,7 +807,28 @@ impl InferencePool {
         // compose declared the same lane for a turn grounded in family memory as for one about the
         // weather. A lane belongs to the MATERIAL, not to the transport that happens to carry it.
         let messages = merge_system_messages(messages);
-        let (backend, selected_label) = self.gate_scope(scope, "chat_streaming_sink")?;
+        // L4-0: the streaming path writes the same single terminal row as the plain path.
+        let callsite: &'static str = "chat_streaming_sink";
+        let call_t0 = std::time::Instant::now();
+        let opportunity = current_opportunity();
+        let (backend, selected_label) = match self.gate_scope(scope, callsite) {
+            Ok(x) => x,
+            Err(e) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: self.route_label(scope),
+                    served_by: None,
+                    outcome: CallOutcome::Refused,
+                    attempts: 0,
+                    latency_ms: call_t0.elapsed().as_millis() as u64,
+                    streaming: true,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(e);
+            }
+        };
         let permit = self
             .sem
             .clone()
@@ -593,16 +837,76 @@ impl InferencePool {
             .expect("semaphore never closed");
         let scope_for_lane = scope;
         let provider_for_lane = selected_label;
-        let (outcome, served) = tokio::task::spawn_blocking(move || {
+        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts_in = attempts.clone();
+        let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _ = take_serving_link();
+            install_attempts(attempts_in);
+            if !is_chain_backend(backend.as_ref()) {
+                note_attempt();
+            }
             let out = backend.chat_streaming(&messages, &config, None, &mut |tok| {
                 let _ = sink.send(tok.to_string());
             });
             (out, take_serving_link())
         })
-        .await?;
-        let response = outcome?;
+        .await;
+        let attempts = attempts.load(std::sync::atomic::Ordering::SeqCst);
+        let latency_ms = call_t0.elapsed().as_millis() as u64;
+        let (outcome, served) = match joined {
+            Ok(x) => x,
+            Err(join) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: None,
+                    outcome: CallOutcome::Failed,
+                    attempts,
+                    latency_ms,
+                    streaming: true,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(anyhow::anyhow!("inference task failed: {join}"));
+            }
+        };
+        let served_by_label = served.clone().or_else(|| {
+            (!provider_for_lane.starts_with("chain[")).then(|| provider_for_lane.clone())
+        });
+        let response = match outcome {
+            Ok(r) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: served_by_label,
+                    outcome: CallOutcome::Served,
+                    attempts,
+                    latency_ms,
+                    streaming: true,
+                    opportunity,
+                    tokens: None,
+                });
+                r
+            }
+            Err(e) => {
+                self.record_call(InferenceCall {
+                    callsite,
+                    scope,
+                    route: provider_for_lane.clone(),
+                    served_by: None,
+                    outcome: CallOutcome::Failed,
+                    attempts,
+                    latency_ms,
+                    streaming: true,
+                    opportunity,
+                    tokens: None,
+                });
+                return Err(e);
+            }
+        };
         // Same post-success rule as the plain path (E.OBS1c): a route is not a server.
         if let Some(observe) = LANE_OBSERVER.get() {
             let label = served.or_else(|| {
@@ -1334,6 +1638,8 @@ impl LLMBackend for ChainBackend {
             // call or an answer to save a token that costs nothing. Cloud links pass through.
             let raised = local_budget(label, config);
             let config = raised.as_ref().unwrap_or(config);
+            // L4-0: one link invocation is one attempt at the observable boundary.
+            note_attempt();
             match be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
                     // Cloud answered: clear survival mode if it was active.
@@ -1375,6 +1681,7 @@ impl LLMBackend for ChainBackend {
             // already failed — the worst moment to also truncate the reply.
             let raised = local_budget(local_label, config);
             let config = raised.as_ref().unwrap_or(config);
+            note_attempt();
             match local_be.chat(messages, config, tools) {
                 Ok(r) if Self::is_usable(&r) => {
                     if !SURVIVAL_MODE.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1758,7 +2065,9 @@ fn role_pool(
     concurrency: usize,
     spec: &str,
 ) -> InferencePool {
-    let mut pool = InferencePool::new(backend, concurrency).with_provider(spec.trim());
+    let mut pool = InferencePool::new(backend, concurrency)
+        .with_provider(spec.trim())
+        .share_ledger_slot(default);
     if let Some((private_backend, private_label)) = default.private_lane() {
         pool = pool.with_private_backend(private_backend, &private_label);
     }

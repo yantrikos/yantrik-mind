@@ -7380,3 +7380,528 @@ mod l1d_lifecycle_tests {
         );
     }
 }
+
+// ── L4-0: the spend ledger (inference-ledger-v1) ──────────────────────────────────────────────
+// One row per LOGICAL inference request, written by the engine's recorder from the pool's typed
+// record. The reducer answers "how many model requests, by whom, in the last window" from the
+// verified log alone: attribution by the loop opportunity id ON the row first, by a static
+// code-authored callsite table second (classification only — it never invents identity), and
+// `unattributed` otherwise, counted, never guessed. Tokens are absent until a backend contract
+// reports them; nothing here estimates.
+
+/// The spend ledger's schema version; a row under any other version is superseded, never read.
+pub const INFERENCE_LEDGER_VERSION: &str = "inference-ledger-v1";
+
+bounded_enum! {
+    /// How one logical request ended: refused (zero attempts), failed (accepted, none served),
+    /// served (a response).
+    InferenceOutcome { Refused => "refused", Failed => "failed", Served => "served" }
+}
+bounded_enum! {
+    /// The privacy lane the request declared.
+    InferenceLane { Private => "private", Household => "household", Public => "public" }
+}
+
+/// A fully validated spend row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedInferenceCall {
+    pub callsite: String,
+    pub lane: InferenceLane,
+    pub route: String,
+    pub served_by: Option<String>,
+    pub outcome: InferenceOutcome,
+    pub attempts: u32,
+    pub latency_ms: u64,
+    pub streaming: bool,
+    pub process_start_ms: u64,
+    pub opportunity: Option<LoopOpportunity>,
+}
+
+/// Validate one stored row against the whole schema; `None` when any field cannot be read.
+/// A refused row must carry zero attempts; a served or failed row at least one.
+pub fn parse_inference_call(e: &DecisionEvent) -> Option<ParsedInferenceCall> {
+    if e.kind != "inference_call" || e.evaluator_id.as_deref() != Some(INFERENCE_LEDGER_VERSION) {
+        return None;
+    }
+    // The schema wall is closed: a row carrying ANY field the schema does not own — the free-text
+    // fields that could hold a prompt or a user datum — is outside the schema and is refused.
+    if e.trace_id != "inference"
+        || e.purpose.is_some()
+        || e.context_fingerprint.is_some()
+        || e.goal.is_some()
+        || e.predicted.is_some()
+        || e.confidence.is_some()
+        || e.prediction_error.is_some()
+        || e.brier.is_some()
+        || e.semantic_success.is_some()
+        || e.tool_version.is_some()
+        || e.lesson.is_some()
+        || e.parent_event_id.is_some()
+        || !e.evidence_ids.is_empty()
+        || !e.candidates.is_empty()
+        || !e.rejected.is_empty()
+        || !e.policy.is_empty()
+    {
+        return None;
+    }
+    if e.actor.as_deref() != Some("spend") {
+        return None;
+    }
+    let callsite = e.trigger.as_deref()?.strip_prefix("callsite:")?.to_string();
+    if callsite.is_empty() || callsite.ends_with('…') {
+        return None;
+    }
+    let lane = InferenceLane::parse(e.lane.as_deref()?)?;
+    let route = e.model_route.clone()?;
+    let outcome = InferenceOutcome::parse(e.verdict.as_deref()?)?;
+    let attempts: u32 = e
+        .outcome
+        .as_deref()?
+        .strip_prefix("attempts:")?
+        .parse()
+        .ok()?;
+    match outcome {
+        InferenceOutcome::Refused if attempts != 0 => return None,
+        InferenceOutcome::Served | InferenceOutcome::Failed if attempts == 0 => return None,
+        _ => {}
+    }
+    let served_by = e.chosen.clone();
+    if outcome != InferenceOutcome::Served && served_by.is_some() {
+        return None;
+    }
+    let streaming = match e.subject.as_deref()? {
+        "stream" => true,
+        "plain" => false,
+        _ => return None,
+    };
+    let process_start_ms: u64 = e
+        .goal_id
+        .as_deref()?
+        .strip_prefix("process:")?
+        .parse()
+        .ok()?;
+    // The event id binds the row to its process: `inference-call:<process start>:<seq>`.
+    let seq = e
+        .event_id
+        .as_deref()?
+        .strip_prefix(&format!("inference-call:{process_start_ms}:"))?;
+    if seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let opportunity = match e.object_id.as_deref() {
+        None => None,
+        Some(id) => Some(LoopOpportunity::parse(id)?),
+    };
+    // Tokens have no place on a v1 row: a row that claims them is outside the schema.
+    if e.model_calls.is_some() {
+        return None;
+    }
+    Some(ParsedInferenceCall {
+        callsite,
+        lane,
+        route,
+        served_by,
+        outcome,
+        attempts,
+        latency_ms: e.latency_ms?,
+        streaming,
+        process_start_ms,
+        opportunity,
+    })
+}
+
+/// Static classification of a code-authored callsite to the loop it serves — only what the
+/// source verifies. It classifies an otherwise unattributed row; it never invents identity.
+pub fn callsite_loop(callsite: &str) -> Option<LoopId> {
+    if callsite.contains(":forge-") {
+        Some(LoopId::Forge)
+    } else {
+        None
+    }
+}
+
+/// One aggregated line of the spend ledger.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpendRow {
+    pub callsite: String,
+    /// The loop this callsite's requests belong to, when known.
+    pub loop_id: Option<String>,
+    /// `opportunity` (from the row's own id), `callsite` (static table), or `unattributed`.
+    pub attribution: String,
+    pub requests: u32,
+    pub served: u32,
+    pub failed: u32,
+    pub refused: u32,
+    pub attempts: u32,
+    pub wall_ms: u64,
+    pub streaming: u32,
+}
+
+/// The spend ledger over a window. Counts, labels and totals only.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpendLedger {
+    pub version: String,
+    pub since_ms: u64,
+    pub until_ms: u64,
+    pub rows: Vec<SpendRow>,
+    /// Requests and attempts per loop id, from rows attributed by opportunity or callsite.
+    pub by_loop: std::collections::BTreeMap<String, (u32, u32)>,
+    pub unattributed_requests: u32,
+    /// Requests per hour bucket over the window, oldest first.
+    pub per_hour: Vec<u32>,
+    pub malformed: usize,
+    pub superseded: usize,
+}
+
+pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> SpendLedger {
+    let since = now_ms.saturating_sub(window_ms);
+    let buckets = (window_ms / 3_600_000).max(1) as usize;
+    let mut per_hour = vec![0u32; buckets];
+    let mut malformed = 0usize;
+    let mut superseded = 0usize;
+    let mut rows: std::collections::BTreeMap<(String, Option<String>), SpendRow> =
+        Default::default();
+    let mut by_loop: std::collections::BTreeMap<String, (u32, u32)> = Default::default();
+    let mut unattributed = 0u32;
+    for e in events
+        .iter()
+        .filter(|e| e.kind == "inference_call" && e.ts_ms >= since && e.ts_ms <= now_ms)
+    {
+        if e.evaluator_id.as_deref() != Some(INFERENCE_LEDGER_VERSION) {
+            superseded += 1;
+            continue;
+        }
+        let Some(c) = parse_inference_call(e) else {
+            malformed += 1;
+            continue;
+        };
+        let (loop_id, attribution) = match (c.opportunity, callsite_loop(&c.callsite)) {
+            (Some(opp), _) => (Some(opp.loop_id().as_str().to_string()), "opportunity"),
+            (None, Some(l)) => (Some(l.as_str().to_string()), "callsite"),
+            (None, None) => (None, "unattributed"),
+        };
+        let row = rows
+            .entry((c.callsite.clone(), loop_id.clone()))
+            .or_insert_with(|| SpendRow {
+                callsite: c.callsite.clone(),
+                loop_id: loop_id.clone(),
+                attribution: attribution.into(),
+                ..Default::default()
+            });
+        row.requests += 1;
+        match c.outcome {
+            InferenceOutcome::Served => row.served += 1,
+            InferenceOutcome::Failed => row.failed += 1,
+            InferenceOutcome::Refused => row.refused += 1,
+        }
+        row.attempts += c.attempts;
+        row.wall_ms += c.latency_ms;
+        row.streaming += u32::from(c.streaming);
+        match &loop_id {
+            Some(l) => {
+                let t = by_loop.entry(l.clone()).or_insert((0, 0));
+                t.0 += 1;
+                t.1 += c.attempts;
+            }
+            None => unattributed += 1,
+        }
+        let b = ((e.ts_ms - since) / 3_600_000) as usize;
+        per_hour[b.min(buckets - 1)] += 1;
+    }
+    let mut rows: Vec<SpendRow> = rows.into_values().collect();
+    rows.sort_by(|a, b| {
+        b.requests
+            .cmp(&a.requests)
+            .then(a.callsite.cmp(&b.callsite))
+    });
+    SpendLedger {
+        version: INFERENCE_LEDGER_VERSION.into(),
+        since_ms: since,
+        until_ms: now_ms,
+        rows,
+        by_loop,
+        unattributed_requests: unattributed,
+        per_hour,
+        malformed,
+        superseded,
+    }
+}
+
+pub fn render_spend_ledger_at(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> String {
+    let l = spend_ledger(events, now_ms, window_ms);
+    let hours = window_ms / 3_600_000;
+    if l.rows.is_empty() {
+        return format!(
+            "No inference requests in the last {hours} h (as of ts_ms {now_ms}); superseded rows {}, malformed {}. Tokens: absent (no backend reports them).",
+            l.superseded, l.malformed
+        );
+    }
+    let mut out = format!(
+        "SPEND LEDGER {} — last {hours} h as of ts_ms {now_ms} ({} row(s); superseded {}, malformed {}). Requests are logical; attempts are backend invocations at the observable boundary. Tokens: absent (no backend reports them).\n",
+        l.version,
+        l.rows.len(),
+        l.superseded,
+        l.malformed
+    );
+    for r in &l.rows {
+        out.push_str(&format!(
+            "  {:<44} {:<14} {:<12} req {:>4}  served {:>4}  failed {:>3}  refused {:>3}  attempts {:>4}  wall {:>7} ms  streaming {}\n",
+            r.callsite,
+            r.loop_id.as_deref().unwrap_or("-"),
+            r.attribution,
+            r.requests,
+            r.served,
+            r.failed,
+            r.refused,
+            r.attempts,
+            r.wall_ms,
+            r.streaming
+        ));
+    }
+    let mut loops: Vec<(&String, &(u32, u32))> = l.by_loop.iter().collect();
+    loops.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(b.0)));
+    out.push_str("  by loop (requests / attempts):");
+    for (k, (r, a)) in loops {
+        out.push_str(&format!(" {k} {r}/{a}"));
+    }
+    out.push_str(&format!(
+        "; unattributed {}\n  requests per hour (oldest first): {:?}\n",
+        l.unattributed_requests, l.per_hour
+    ));
+    out
+}
+/// `ym why spend` — the last 24 h.
+pub fn render_spend_ledger(events: &[DecisionEvent]) -> String {
+    render_spend_ledger_at(events, now_ms(), 24 * 60 * 60 * 1000)
+}
+/// `ym why spend 1h` — the last hour.
+pub fn render_spend_ledger_1h(events: &[DecisionEvent]) -> String {
+    render_spend_ledger_at(events, now_ms(), 60 * 60 * 1000)
+}
+
+#[cfg(test)]
+mod spend_ledger_tests {
+    use super::*;
+
+    fn row(
+        ts: u64,
+        callsite: &str,
+        outcome: &str,
+        attempts: u32,
+        opp: Option<&str>,
+    ) -> DecisionEvent {
+        let mut e = DecisionEvent::new("inference", "inference_call");
+        e.ts_ms = ts;
+        e.event_id = Some(format!("inference-call:1000:{ts}"));
+        e.goal_id = Some("process:1000".into());
+        e.actor = Some("spend".into());
+        e.trigger = Some(format!("callsite:{callsite}"));
+        e.lane = Some("household".into());
+        e.model_route = Some("scripted".into());
+        e.chosen = (outcome == "served").then(|| "scripted".to_string());
+        e.verdict = Some(outcome.into());
+        e.outcome = Some(format!("attempts:{attempts}"));
+        e.latency_ms = Some(7);
+        e.subject = Some("plain".into());
+        e.object_id = opp.map(String::from);
+        e.evaluator_id = Some(INFERENCE_LEDGER_VERSION.into());
+        e
+    }
+
+    /// L4-0: a row round-trips; each wrong shape is refused — a refused row with attempts, a
+    /// served row without any, a served_by on a failure, an unknown lane or outcome, a token
+    /// claim, an opportunity id that does not parse, another version (superseded, never read).
+    #[test]
+    fn spend_rows_parse_strictly_and_the_wall_is_fail_closed() {
+        let ok = row(5, "mind_conversation::x:forge-panel", "served", 2, None);
+        let p = parse_inference_call(&ok).unwrap();
+        assert_eq!(
+            (p.attempts, p.outcome, p.lane),
+            (2, InferenceOutcome::Served, InferenceLane::Household)
+        );
+        assert_eq!(p.process_start_ms, 1000);
+        assert!(
+            parse_inference_call(&row(5, "x", "refused", 1, None)).is_none(),
+            "refused with attempts"
+        );
+        assert!(parse_inference_call(&row(5, "x", "refused", 0, None)).is_some());
+        assert!(
+            parse_inference_call(&row(5, "x", "served", 0, None)).is_none(),
+            "served without an attempt"
+        );
+        assert!(
+            parse_inference_call(&row(5, "x", "failed", 0, None)).is_none(),
+            "failed without an attempt"
+        );
+        let mut sb = row(5, "x", "failed", 1, None);
+        sb.chosen = Some("scripted".into());
+        assert!(
+            parse_inference_call(&sb).is_none(),
+            "served_by on a failure"
+        );
+        let mut lane = row(5, "x", "served", 1, None);
+        lane.lane = Some("secret".into());
+        assert!(parse_inference_call(&lane).is_none());
+        let mut tok = row(5, "x", "served", 1, None);
+        tok.model_calls = Some(1);
+        assert!(
+            parse_inference_call(&tok).is_none(),
+            "a token claim on a v1 row"
+        );
+        assert!(parse_inference_call(&row(5, "x", "served", 1, Some("nonsense"))).is_none());
+        assert!(parse_inference_call(&row(5, "x", "served", 1, Some("dmn:due:1000:5"))).is_some());
+        let mut empty = row(5, "", "served", 1, None);
+        empty.trigger = Some("callsite:".into());
+        assert!(parse_inference_call(&empty).is_none());
+        let mut cut = row(5, "x", "served", 1, None);
+        cut.trigger = Some("callsite:mind_conversation::some…".into());
+        assert!(
+            parse_inference_call(&cut).is_none(),
+            "a truncated callsite is refused"
+        );
+        let mut wrong_actor = row(5, "x", "served", 1, None);
+        wrong_actor.actor = Some("loop:dmn".into());
+        assert!(parse_inference_call(&wrong_actor).is_none());
+        // The closed wall: every field the schema does not own refuses the row.
+        let base = || row(5, "x", "served", 1, None);
+        let mut r = base();
+        r.trace_id = "turn-123".into();
+        assert!(parse_inference_call(&r).is_none(), "trace");
+        let mut r = base();
+        r.event_id = Some("inference-call:999:0".into());
+        assert!(
+            parse_inference_call(&r).is_none(),
+            "event id of another process"
+        );
+        let mut r = base();
+        r.event_id = Some("inference-call:1000:x".into());
+        assert!(parse_inference_call(&r).is_none(), "non-numeric seq");
+        let mut r = base();
+        r.purpose = Some("p".into());
+        assert!(parse_inference_call(&r).is_none(), "purpose");
+        let mut r = base();
+        r.context_fingerprint = Some("f".into());
+        assert!(parse_inference_call(&r).is_none(), "context_fingerprint");
+        let mut r = base();
+        r.goal = Some("draft the family note".into());
+        assert!(parse_inference_call(&r).is_none(), "goal");
+        let mut r = base();
+        r.predicted = Some("p".into());
+        assert!(parse_inference_call(&r).is_none(), "predicted");
+        let mut r = base();
+        r.confidence = Some(0.5);
+        assert!(parse_inference_call(&r).is_none(), "confidence");
+        let mut r = base();
+        r.prediction_error = Some(0.1);
+        assert!(parse_inference_call(&r).is_none(), "prediction_error");
+        let mut r = base();
+        r.brier = Some(0.1);
+        assert!(parse_inference_call(&r).is_none(), "brier");
+        let mut r = base();
+        r.semantic_success = Some(true);
+        assert!(parse_inference_call(&r).is_none(), "semantic_success");
+        let mut r = base();
+        r.tool_version = Some("v".into());
+        assert!(parse_inference_call(&r).is_none(), "tool_version");
+        let mut r = base();
+        r.lesson = Some("l".into());
+        assert!(parse_inference_call(&r).is_none(), "lesson");
+        let mut r = base();
+        r.parent_event_id = Some("e".into());
+        assert!(parse_inference_call(&r).is_none(), "parent_event_id");
+        let mut r = base();
+        r.evidence_ids = vec!["e".into()];
+        assert!(parse_inference_call(&r).is_none(), "evidence_ids");
+        let mut r = base();
+        r.candidates = vec!["the prompt".into()];
+        assert!(parse_inference_call(&r).is_none(), "candidates");
+        let mut r = base();
+        r.rejected = vec!["r".into()];
+        assert!(parse_inference_call(&r).is_none(), "rejected");
+        let mut r = base();
+        r.policy = vec!["p".into()];
+        assert!(parse_inference_call(&r).is_none(), "policy");
+        let mut v0 = row(5, "x", "served", 1, None);
+        v0.evaluator_id = Some("inference-ledger-v0".into());
+        assert!(parse_inference_call(&v0).is_none());
+        let l = spend_ledger(&[v0], 10_000, 10_000);
+        assert_eq!((l.superseded, l.malformed, l.rows.len()), (1, 0, 0));
+    }
+
+    /// L4-0: attribution by the row's own opportunity first, by the static table second,
+    /// unattributed otherwise — counted, never guessed; refused rows are requests with zero
+    /// attempts; the per-hour histogram and the loop totals add up.
+    #[test]
+    fn the_spend_ledger_attributes_by_identity_then_table_then_says_unattributed() {
+        let events = vec![
+            row(
+                1_000,
+                "mind_conversation::dmn:tick",
+                "served",
+                1,
+                Some("dmn:due:1000:5"),
+            ),
+            row(
+                2_000,
+                "mind_conversation::dmn:tick",
+                "failed",
+                3,
+                Some("dmn:due:1000:5"),
+            ),
+            row(
+                3_000,
+                "mind_conversation::code:forge-panel",
+                "served",
+                1,
+                None,
+            ),
+            row(4_000, "chat_scoped_tools", "served", 2, None),
+            row(4_500, "chat_scoped_tools", "refused", 0, None),
+        ];
+        let l = spend_ledger(&events, 7_200_000, 7_200_000);
+        assert_eq!((l.malformed, l.superseded), (0, 0));
+        assert_eq!(l.rows.len(), 3);
+        let dmn = l
+            .rows
+            .iter()
+            .find(|r| r.callsite.ends_with("dmn:tick"))
+            .unwrap();
+        assert_eq!(
+            (dmn.loop_id.as_deref(), dmn.attribution.as_str()),
+            (Some("dmn"), "opportunity")
+        );
+        assert_eq!(
+            (dmn.requests, dmn.served, dmn.failed, dmn.attempts),
+            (2, 1, 1, 4)
+        );
+        let forge = l
+            .rows
+            .iter()
+            .find(|r| r.callsite.ends_with("forge-panel"))
+            .unwrap();
+        assert_eq!(
+            (forge.loop_id.as_deref(), forge.attribution.as_str()),
+            (Some("forge"), "callsite")
+        );
+        let un = l
+            .rows
+            .iter()
+            .find(|r| r.callsite == "chat_scoped_tools")
+            .unwrap();
+        assert_eq!(
+            (un.loop_id.as_deref(), un.attribution.as_str()),
+            (None, "unattributed")
+        );
+        assert_eq!(
+            (un.requests, un.served, un.refused, un.attempts),
+            (2, 1, 1, 2)
+        );
+        assert_eq!(l.by_loop.get("dmn"), Some(&(2, 4)));
+        assert_eq!(l.by_loop.get("forge"), Some(&(1, 1)));
+        assert_eq!(l.unattributed_requests, 2);
+        assert_eq!(l.per_hour.iter().sum::<u32>(), 5);
+        let text = render_spend_ledger_at(&events, 7_200_000, 7_200_000);
+        assert!(text.contains("Tokens: absent"));
+        assert!(text.contains("unattributed 2"));
+    }
+}

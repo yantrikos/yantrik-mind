@@ -2474,7 +2474,16 @@ mod tests {
         let issued = events[0].confidence.unwrap();
         assert_eq!(events[1].prediction_error, Some(1.0 - issued));
         assert_eq!(events[1].brier, Some((issued - 1.0).powi(2)));
-        assert_eq!(mind_observability::verify_log(&path), Ok(2));
+        // L4-0: the grading model call now leaves its own spend row in the same log, outside
+        // this trace; the log verifies with exactly those rows added.
+        let spend = engine
+            .recorder()
+            .read_all()
+            .iter()
+            .filter(|e| e.kind == "inference_call")
+            .count();
+        assert!(spend >= 1, "the grading model call is on the spend ledger");
+        assert_eq!(mind_observability::verify_log(&path), Ok(2 + spend));
 
         let gate = engine
             .cli_dispatch(
@@ -2586,7 +2595,16 @@ mod tests {
         assert_eq!(events[1].model_calls, Some(1));
         assert!(events[1].model_route.is_some());
         assert!(events[1].latency_ms.is_some());
-        assert_eq!(mind_observability::verify_log(&path), Ok(2));
+        // L4-0: the grading model call now leaves its own spend row in the same log, outside
+        // this trace; the log verifies with exactly those rows added.
+        let spend = engine
+            .recorder()
+            .read_all()
+            .iter()
+            .filter(|e| e.kind == "inference_call")
+            .count();
+        assert!(spend >= 1, "the grading model call is on the spend ledger");
+        assert_eq!(mind_observability::verify_log(&path), Ok(2 + spend));
 
         let gate = engine
             .cli_dispatch(

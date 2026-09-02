@@ -169,7 +169,16 @@ pub(crate) async fn run_resolve(
     }
     let rs_t0 = now_ms();
     let mut verdicts: u32 = 0;
-    for verdict in conv.resolve_predictions(false).await {
+    // L4-0: the act's model calls carry this opportunity id on their spend rows, by identity.
+    let rs_opportunity = mind_observability::LoopOpportunity::Window {
+        loop_id: mind_observability::LoopId::Resolve,
+        process_start_ms,
+        key: last_resolve,
+    };
+    for verdict in
+        mind_conversation::within_opportunity(rs_opportunity.id(), conv.resolve_predictions(false))
+            .await
+    {
         verdicts += 1;
         delivery
             .deliver(mind_observability::DeliveryKind::Verdict, &verdict)
@@ -221,7 +230,14 @@ pub(crate) async fn run_profile_refresh(
     }
     let pr_t0 = now_ms();
     let mut refreshed: u32 = 0;
-    if let Some(update) = conv.refresh_profile().await {
+    let pr_opportunity = mind_observability::LoopOpportunity::Window {
+        loop_id: mind_observability::LoopId::ProfileRefresh,
+        process_start_ms,
+        key: last_profile,
+    };
+    if let Some(update) =
+        mind_conversation::within_opportunity(pr_opportunity.id(), conv.refresh_profile()).await
+    {
         refreshed = 1;
         delivery
             .deliver(
@@ -842,7 +858,13 @@ pub(crate) async fn run_patterns(
     if let Some(_permit) = permit {
         let pat_t0 = now_ms();
         let pat_window = st.last_patterns;
-        let msg = conv.find_patterns().await;
+        let pat_opportunity = mind_observability::LoopOpportunity::Window {
+            loop_id: mind_observability::LoopId::Patterns,
+            process_start_ms,
+            key: pat_window,
+        };
+        let msg =
+            mind_conversation::within_opportunity(pat_opportunity.id(), conv.find_patterns()).await;
         let found = msg.starts_with('\u{1f4a1}');
         let outcome = if found {
             match delivery
@@ -1036,7 +1058,13 @@ pub(crate) async fn run_dmn(
     };
     if let Some(_permit) = permit {
         let t0 = now_ms();
-        let lines = conv.dmn_tick().await;
+        let dmn_opportunity = mind_observability::LoopOpportunity::Window {
+            loop_id: mind_observability::LoopId::Dmn,
+            process_start_ms,
+            key: st.last_dmn,
+        };
+        let lines =
+            mind_conversation::within_opportunity(dmn_opportunity.id(), conv.dmn_tick()).await;
         for line in &lines {
             eprintln!("{line}");
         }

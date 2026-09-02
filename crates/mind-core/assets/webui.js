@@ -637,7 +637,7 @@ async function loadBoard() {
   for (const o of orders) {
     const secs = Number(o.in_seconds);
     const when = !Number.isFinite(secs) ? "" : secs <= 0 ? "due now" : secs < 3600 ? `in ${Math.round(secs / 60)}m` : secs < 172800 ? `in ${Math.round(secs / 3600)}h` : `in ${Math.round(secs / 86400)}d`;
-    cols.scheduled.push({ title: o.name || o.id, meta: o.state === "paused" ? `paused · would fire ${when}` : `fires ${when}`, cls: "scheduled", agent: o.name || o.id });
+    cols.scheduled.push({ title: o.name || o.id, meta: o.state === "paused" ? `paused · would fire ${when}` : `fires ${when}`, cls: "scheduled", agent: orderThreadKey(o) || `order:${o.id}` });
   }
   host.replaceChildren();
   for (const [key, label] of [["scheduled", "Scheduled"], ["running", "Running"], ["done", "Done"], ["needs", "Needs review"]]) {
@@ -790,10 +790,12 @@ function bucketPaint() {
    composer already uses; the lists show agents, and a thread shows one agent's history like a
    conversation — brief, then every run in time order, then what is scheduled, then the reply box
    (run again). One pure function does the grouping so a run can never sit in two threads. */
-// The ONE key rule: the schedule store names an order "standing: <agent>" while the agent's runs
-// carry "<agent>"; one thread per agent means every path — grouping, opening from a list, opening
-// from the Board — sees through that prefix the same way.
-function agentKey(name) { return String(name || "(unnamed)").replace(/^standing:\s*/i, ""); }
+// E.WEB19: identity is TYPED, never read off a display name. A run's key is its agent name; an
+// order joins a thread only through the server's persisted `agent_name` (an imported agent's
+// exact name). A generic scheduled goal carries no agent_name and stands alone — even when its
+// display name happens to equal an agent's. The "standing: " display prefix stays as it is.
+function agentKey(name) { return String(name || "(unnamed)"); }
+function orderThreadKey(o) { return o && o.agent_name ? String(o.agent_name) : null; }
 function agentThreads(jobs, orders) {
   const byName = new Map();
   const get = (name) => {
@@ -810,7 +812,12 @@ function agentThreads(jobs, orders) {
     if (!a.task && (j.task || j.goal)) a.task = j.task || j.goal;
   }
   for (const o of orders || []) {
-    const a = get(o.name || o.id);
+    // Typed join: only an order with a persisted agent_name belongs to an agent's thread; a
+    // generic scheduled goal becomes its own standalone row, keyed by its id so it cannot
+    // collide with an agent that shares its display name.
+    const key = orderThreadKey(o);
+    const a = key ? get(key) : get(`order:${o.id}`);
+    if (!key) a.display = o.name || o.id;
     a.orders.push(o);
   }
   for (const a of byName.values()) a.runs.sort((x, y) => Number(x.started_ms || 0) - Number(y.started_ms || 0));
@@ -847,7 +854,7 @@ async function loadTasks() {
     bucketAdd(row, agentState(a));
     const dot = el("span", "agent-dot " + (a.running ? "running" : "dormant")); row.appendChild(dot);
     const main = el("div", "agent-row-main");
-    const name = el("div", "agent-row-name"); name.textContent = a.name; main.appendChild(name);
+    const name = el("div", "agent-row-name"); name.textContent = a.display || a.name; main.appendChild(name);
     const meta = el("div", "agent-row-meta");
     const runs = a.runs.length ? `${a.runs.length} run${a.runs.length === 1 ? "" : "s"}` : "no runs yet";
     const last = a.last_ms ? ` · last ${fmtTs(a.last_ms)}` : "";
@@ -908,7 +915,7 @@ function renderThread(name) {
   const agent = agentThreads(agentsCache.jobs, agentsCache.orders).find((a) => a.name === name);
   const host = $("agent-thread");
   host.replaceChildren();
-  $("tasks-title").textContent = name;
+  $("tasks-title").textContent = agent && agent.display ? agent.display : name;
   $("tasks-sub").textContent = agent ? (agent.running ? "Working now." : agent.orders.length ? "Dormant · scheduled." : "Dormant.") : "No such agent.";
   const back = el("button", "link-btn thread-back"); back.type = "button"; back.textContent = "← all agents";
   back.addEventListener("click", closeThread);

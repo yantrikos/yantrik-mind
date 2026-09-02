@@ -2321,19 +2321,29 @@ mod tests {
             1,
             "each run placed once"
         );
+        // E.WEB19: identity is typed. A run's key is its agent name; an order joins a thread ONLY
+        // through the server's persisted `agent_name`; a generic or legacy order stands alone
+        // under its own id. No read-time name convention anywhere in the join (the E.WEB18b
+        // prefix strip is gone — it was the convention the prereg forbids).
         assert!(
             group_body.contains("get(j.name || j.id)")
-                && group_body.contains("get(o.name || o.id)"),
-            "runs and orders share the name rule"
+                && group_body.contains("const key = orderThreadKey(o);")
+                && group_body.contains("get(`order:${o.id}`)"),
+            "runs key by agent name; orders join only through agent_name, else stand alone"
         );
-        // The schedule store names an order "standing: <agent>" (import_skill.rs); the key rule
-        // sees through it, or one agent becomes two threads the first time its order fires.
-        // E.WEB18b found by use: opening a thread from the Board with the store's name showed
-        // "No such agent" — so the rule is ONE function, used by grouping and by every opener.
         let key_fn = js.find("function agentKey(name)").expect("one key rule");
         assert!(
-            js[key_fn..key_fn + 200].contains(".replace(/^standing:\\s*/i, \"\")"),
-            "the key rule strips the store's standing: prefix"
+            !js[key_fn..key_fn + 200].contains("standing:")
+                && !group_body.contains("standing:")
+                && !group_body.contains(".replace("),
+            "no display-name convention is used as identity in the join"
+        );
+        let order_key = js
+            .find("function orderThreadKey(o)")
+            .expect("typed order key exists");
+        assert!(
+            js[order_key..order_key + 120].contains("o.agent_name"),
+            "the order key reads the persisted agent_name"
         );
         assert!(
             group_body.contains("const key = agentKey(name);"),
@@ -2395,7 +2405,7 @@ mod tests {
                 && !board_body.contains("/api/orders")
                 && board_body.contains("openThreadFromAnywhere(c.agent)")
                 && board_body.contains("agent: j.name || j.id")
-                && board_body.contains("agent: o.name || o.id"),
+                && board_body.contains("agent: orderThreadKey(o) || `order:${o.id}`"),
             "board cards open their agent's thread; orders are typed on the board"
         );
         // A card that acts like a button is one for the keyboard too (Codex's review).

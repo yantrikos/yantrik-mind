@@ -7551,21 +7551,29 @@ pub struct SpendLedger {
     pub per_hour: Vec<u32>,
     pub malformed: usize,
     pub superseded: usize,
+    /// Valid rows inside the time range whose typed process identity was outside this scope.
+    #[serde(default)]
+    pub other_process_rows: usize,
 }
 
-pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> SpendLedger {
-    let since = now_ms.saturating_sub(window_ms);
-    let buckets = (window_ms / 3_600_000).max(1) as usize;
+fn spend_ledger_scoped(
+    events: &[DecisionEvent],
+    now_ms: u64,
+    since_ms: u64,
+    buckets: usize,
+    process_start_ms: Option<u64>,
+) -> SpendLedger {
     let mut per_hour = vec![0u32; buckets];
     let mut malformed = 0usize;
     let mut superseded = 0usize;
+    let mut other_process_rows = 0usize;
     let mut rows: std::collections::BTreeMap<(String, Option<String>), SpendRow> =
         Default::default();
     let mut by_loop: std::collections::BTreeMap<String, (u32, u32)> = Default::default();
     let mut unattributed = 0u32;
     for e in events
         .iter()
-        .filter(|e| e.kind == "inference_call" && e.ts_ms >= since && e.ts_ms <= now_ms)
+        .filter(|e| e.kind == "inference_call" && e.ts_ms >= since_ms && e.ts_ms <= now_ms)
     {
         if e.evaluator_id.as_deref() != Some(INFERENCE_LEDGER_VERSION) {
             superseded += 1;
@@ -7575,6 +7583,12 @@ pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Sp
             malformed += 1;
             continue;
         };
+        if let Some(expected) = process_start_ms {
+            if c.process_start_ms != expected {
+                other_process_rows += 1;
+                continue;
+            }
+        }
         let (loop_id, attribution) = match (c.opportunity, callsite_loop(&c.callsite)) {
             (Some(opp), _) => (Some(opp.loop_id().as_str().to_string()), "opportunity"),
             (None, Some(l)) => (Some(l.as_str().to_string()), "callsite"),
@@ -7605,7 +7619,7 @@ pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Sp
             }
             None => unattributed += 1,
         }
-        let b = ((e.ts_ms - since) / 3_600_000) as usize;
+        let b = ((e.ts_ms - since_ms) / 3_600_000) as usize;
         per_hour[b.min(buckets - 1)] += 1;
     }
     let mut rows: Vec<SpendRow> = rows.into_values().collect();
@@ -7616,7 +7630,7 @@ pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Sp
     });
     SpendLedger {
         version: INFERENCE_LEDGER_VERSION.into(),
-        since_ms: since,
+        since_ms,
         until_ms: now_ms,
         rows,
         by_loop,
@@ -7624,20 +7638,48 @@ pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Sp
         per_hour,
         malformed,
         superseded,
+        other_process_rows,
     }
 }
 
-pub fn render_spend_ledger_at(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> String {
-    let l = spend_ledger(events, now_ms, window_ms);
-    let hours = window_ms / 3_600_000;
+pub fn spend_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> SpendLedger {
+    let since_ms = now_ms.saturating_sub(window_ms);
+    let buckets = (window_ms / 3_600_000).max(1) as usize;
+    spend_ledger_scoped(events, now_ms, since_ms, buckets, None)
+}
+
+/// The spend ledger for one exact process identity. Timestamp filtering alone is insufficient:
+/// a short wall-clock window can straddle a deploy and mix rows from two binaries.
+pub fn spend_ledger_for_process(
+    events: &[DecisionEvent],
+    now_ms: u64,
+    process_start_ms: u64,
+) -> SpendLedger {
+    let since_ms = process_start_ms.min(now_ms);
+    let elapsed_ms = now_ms.saturating_sub(since_ms);
+    let buckets = (elapsed_ms.saturating_add(3_600_000 - 1) / 3_600_000).max(1) as usize;
+    spend_ledger_scoped(events, now_ms, since_ms, buckets, Some(process_start_ms))
+}
+
+fn render_spend_ledger_report(
+    l: SpendLedger,
+    empty_scope: &str,
+    heading_scope: &str,
+    show_process_filter: bool,
+) -> String {
+    let process_filter = if show_process_filter {
+        format!(", other-process rows excluded {}", l.other_process_rows)
+    } else {
+        String::new()
+    };
     if l.rows.is_empty() {
         return format!(
-            "No inference requests in the last {hours} h (as of ts_ms {now_ms}); superseded rows {}, malformed {}. Tokens: absent (no backend reports them).",
-            l.superseded, l.malformed
+            "No inference requests {empty_scope}; superseded rows {}, malformed {}{process_filter}. Tokens: absent (no backend reports them).",
+            l.superseded, l.malformed,
         );
     }
     let mut out = format!(
-        "SPEND LEDGER {} — last {hours} h as of ts_ms {now_ms} ({} row(s); superseded {}, malformed {}). Requests are logical; attempts are backend invocations at the observable boundary. Tokens: absent (no backend reports them).\n",
+        "SPEND LEDGER {} — {heading_scope} ({} row(s); superseded {}, malformed {}{process_filter}). Requests are logical; attempts are backend invocations at the observable boundary. Tokens: absent (no backend reports them).\n",
         l.version,
         l.rows.len(),
         l.superseded,
@@ -7669,6 +7711,38 @@ pub fn render_spend_ledger_at(events: &[DecisionEvent], now_ms: u64, window_ms: 
         l.unattributed_requests, l.per_hour
     ));
     out
+}
+
+pub fn render_spend_ledger_at(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> String {
+    let hours = window_ms / 3_600_000;
+    render_spend_ledger_report(
+        spend_ledger(events, now_ms, window_ms),
+        &format!("in the last {hours} h (as of ts_ms {now_ms})"),
+        &format!("last {hours} h as of ts_ms {now_ms}"),
+        false,
+    )
+}
+
+/// `ym why spend since-start` — only rows whose typed process identity matches this binary.
+pub fn render_spend_ledger_since_process_at(
+    events: &[DecisionEvent],
+    now_ms: u64,
+    process_start_ms: u64,
+) -> String {
+    render_spend_ledger_report(
+        spend_ledger_for_process(events, now_ms, process_start_ms),
+        &format!("for process:{process_start_ms} since this binary started (as of ts_ms {now_ms})"),
+        &format!("since this binary started at ts_ms {process_start_ms}, as of ts_ms {now_ms}"),
+        true,
+    )
+}
+
+/// `ym why spend since-start` using the current wall clock.
+pub fn render_spend_ledger_since_process(
+    events: &[DecisionEvent],
+    process_start_ms: u64,
+) -> String {
+    render_spend_ledger_since_process_at(events, now_ms(), process_start_ms)
 }
 /// `ym why spend` — the last 24 h.
 pub fn render_spend_ledger(events: &[DecisionEvent]) -> String {
@@ -7903,5 +7977,37 @@ mod spend_ledger_tests {
         let text = render_spend_ledger_at(&events, 7_200_000, 7_200_000);
         assert!(text.contains("Tokens: absent"));
         assert!(text.contains("unattributed 2"));
+    }
+
+    /// L4-0c: a wall-clock window can straddle a deploy. The current-process view keys on the
+    /// row's typed process identity, while malformed and superseded rows in the current time
+    /// range remain visible instead of disappearing behind the filter.
+    #[test]
+    fn the_process_spend_ledger_never_mixes_two_binary_epochs() {
+        let current = row(
+            2_000,
+            "mind_conversation::dmn:tick",
+            "served",
+            1,
+            Some("dmn:due:1000:5"),
+        );
+        let mut previous = row(1_500, "private-grounded", "served", 1, None);
+        previous.goal_id = Some("process:500".into());
+        previous.event_id = Some("inference-call:500:1".into());
+        let mut malformed = row(2_500, "private-grounded", "served", 1, None);
+        malformed.actor = Some("not-spend".into());
+        let mut superseded = row(2_600, "private-grounded", "served", 1, None);
+        superseded.evaluator_id = Some("inference-ledger-v0".into());
+
+        let events = [previous, current, malformed, superseded];
+        let l = spend_ledger_for_process(&events, 3_000, 1_000);
+        assert_eq!(l.rows.len(), 1);
+        assert_eq!(l.rows[0].callsite, "mind_conversation::dmn:tick");
+        assert_eq!(l.rows[0].requests, 1);
+        assert_eq!((l.malformed, l.superseded), (1, 1));
+        assert_eq!(l.other_process_rows, 1);
+        assert_eq!(l.per_hour.iter().sum::<u32>(), 1);
+        let text = render_spend_ledger_since_process_at(&events, 3_000, 1_000);
+        assert!(text.contains("other-process rows excluded 1"), "{text}");
     }
 }

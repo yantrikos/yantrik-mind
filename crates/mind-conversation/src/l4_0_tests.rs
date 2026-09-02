@@ -517,4 +517,15 @@ async fn role_pools_share_the_ledger_and_why_spend_reads_it() {
         .await;
     assert!(text.contains(concat!(module_path!(), ":role")), "{text}");
     assert!(text.contains("Tokens: absent"));
+    let since_start = conv
+        .cli_dispatch(
+            "why spend since-start",
+            &mind_types::AccessContext::operator_audit(),
+        )
+        .await;
+    assert!(since_start.contains("since this binary started"));
+    assert!(
+        since_start.contains(concat!(module_path!(), ":role")),
+        "{since_start}"
+    );
 }

@@ -8076,6 +8076,17 @@ impl ConversationEngine {
                 if prefix == "spend 1h" {
                     return verified_report(mind_observability::render_spend_ledger_1h);
                 }
+                if prefix == "spend since-start" {
+                    return match self.recorder.read_all_verified() {
+                        Ok(events) => mind_observability::render_spend_ledger_since_process(
+                            &events,
+                            process_started_ms(),
+                        ),
+                        Err(valid) => format!(
+                            "DECISION ANALYTICS UNAVAILABLE — the decision log failed integrity after {valid} valid event(s); repair or rotate it before using this report."
+                        ),
+                    };
+                }
                 // L3b: where the loops' lines went — one row per kind over the verified log,
                 // plus the console queue's depth. Counts only.
                 if prefix == "deliveries" {

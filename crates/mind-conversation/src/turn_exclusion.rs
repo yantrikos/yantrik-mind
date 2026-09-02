@@ -16,15 +16,21 @@ pub struct TurnExclusion {
     active_turns: AtomicUsize,
     /// Monotone: the latest user activity on any surface, in ms.
     last_user_activity_ms: AtomicU64,
-    /// The activity stamp as it was BEFORE the most recent registration — so a readout that is
-    /// itself a turn can still say how idle the mind was when it was asked.
-    previous_activity_ms: AtomicU64,
     dmn_running: AtomicBool,
 }
 
 /// Held for the whole life of one turn. Dropping it (normally or by cancellation) releases it.
 pub struct TurnGuard<'a> {
     owner: &'a TurnExclusion,
+    /// The activity stamp observed atomically when THIS turn registered. Keeping it on the guard
+    /// prevents a concurrent turn from overwriting a diagnostic turn's evidence.
+    previous_activity_ms: u64,
+}
+
+impl TurnGuard<'_> {
+    pub fn previous_activity_ms(&self) -> u64 {
+        self.previous_activity_ms
+    }
 }
 
 impl Drop for TurnGuard<'_> {
@@ -52,7 +58,6 @@ impl TurnExclusion {
             admission: RwLock::new(()),
             active_turns: AtomicUsize::new(0),
             last_user_activity_ms: AtomicU64::new(now_ms),
-            previous_activity_ms: AtomicU64::new(now_ms),
             dmn_running: AtomicBool::new(false),
         }
     }
@@ -65,8 +70,10 @@ impl TurnExclusion {
         let before = self
             .last_user_activity_ms
             .fetch_max(now_ms, Ordering::AcqRel);
-        self.previous_activity_ms.store(before, Ordering::Release);
-        TurnGuard { owner: self }
+        TurnGuard {
+            owner: self,
+            previous_activity_ms: before,
+        }
     }
 
     /// Admit the offline-cognition pass iff no turn is active, the idle stretch is met, and no
@@ -91,10 +98,6 @@ impl TurnExclusion {
     }
     pub fn last_user_activity_ms(&self) -> u64 {
         self.last_user_activity_ms.load(Ordering::Acquire)
-    }
-    /// The activity stamp before the most recent registration (see the field).
-    pub fn previous_activity_ms(&self) -> u64 {
-        self.previous_activity_ms.load(Ordering::Acquire)
     }
     pub fn dmn_running(&self) -> bool {
         self.dmn_running.load(Ordering::Acquire)
@@ -144,7 +147,7 @@ mod tests {
             ),
         ] {
             assert!(
-                body_after(src, signature).contains("let _turn = self.turns.begin_turn("),
+                body_after(src, signature).contains("self.turns.begin_turn("),
                 "{signature} must register a turn"
             );
         }
@@ -219,6 +222,24 @@ mod tests {
         drop(b);
         assert_eq!(x.active_turns(), 0);
         assert_eq!(x.last_user_activity_ms(), 30);
+    }
+
+    /// A diagnostic turn owns the activity stamp it observed before registration. A second turn
+    /// may register before the diagnostic renders, but cannot overwrite the diagnostic's snapshot.
+    #[test]
+    fn overlapping_turns_keep_independent_previous_activity_snapshots() {
+        let x = TurnExclusion::starting_at(100);
+        let diagnostic = x.begin_turn(1_000);
+        let concurrent = x.begin_turn(2_000);
+
+        assert_eq!(diagnostic.previous_activity_ms(), 100);
+        assert_eq!(concurrent.previous_activity_ms(), 1_000);
+        assert_eq!(x.last_user_activity_ms(), 2_000);
+        assert_eq!(x.active_turns(), 2);
+
+        drop(concurrent);
+        drop(diagnostic);
+        assert_eq!(x.active_turns(), 0);
     }
 
     /// The two frozen interleavings of the race.

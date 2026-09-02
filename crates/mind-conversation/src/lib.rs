@@ -6704,7 +6704,7 @@ impl ConversationEngine {
             return "(the ym console requires operator authorization)".to_string();
         }
         // L3a: an operator turn is a turn on a surface; held for the dispatch's whole life.
-        let _turn = self.turns.begin_turn(Self::now_ms());
+        let turn = self.turns.begin_turn(Self::now_ms());
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
@@ -7842,7 +7842,7 @@ impl ConversationEngine {
                 if prefix == "idle" {
                     let now = Self::now_ms();
                     // This readout registered a turn on entry; report the activity BEFORE it.
-                    let before = self.turns.previous_activity_ms();
+                    let before = turn.previous_activity_ms();
                     return format!(
                         "TURN EXCLUSION — now {now} · active turns {} (this readout is one) · activity before this readout {before} ({} s ago) · dmn running {}",
                         self.turns.active_turns(),

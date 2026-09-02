@@ -311,6 +311,12 @@ pub struct StandingOrder {
     /// Which actions apply in this state, so the client renders exactly the buttons that will work
     /// instead of offering all four and failing three of them.
     pub actions: Vec<&'static str>,
+    /// E.WEB19: typed identity, from the store's persisted columns — `imported_agent`,
+    /// `scheduled_goal`, `other`, or `None` on a legacy row the backfill could not classify.
+    pub origin: Option<String>,
+    /// The exact agent an imported order belongs to. This — never the display name — is what an
+    /// agent thread joins on; a generic scheduled goal carries `None` and joins nothing.
+    pub agent_name: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,13 +725,14 @@ impl ConversationEngine {
         let now = local_now().timestamp_millis();
         let mut orders: Vec<StandingOrder> = Vec::new();
         for (state, rows) in [
-            (OrderState::Sleeping, recipes.list_sleeping()),
-            (OrderState::Paused, recipes.list_paused()),
+            (OrderState::Sleeping, recipes.list_sleeping_typed()),
+            (OrderState::Paused, recipes.list_paused_typed()),
         ] {
-            for (id, name, next_ms) in rows {
+            for run in rows {
+                let next_ms = run.wake_ms;
                 orders.push(StandingOrder {
-                    id,
-                    name,
+                    id: run.id,
+                    name: run.name,
                     state,
                     next_ms,
                     in_seconds: (next_ms as i64 - now) / 1000,
@@ -733,6 +740,8 @@ impl ConversationEngine {
                         OrderState::Sleeping => vec!["run", "pause", "cancel"],
                         OrderState::Paused => vec!["resume", "cancel"],
                     },
+                    origin: run.origin,
+                    agent_name: run.canonical_agent,
                 });
             }
         }

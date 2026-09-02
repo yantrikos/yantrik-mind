@@ -309,6 +309,68 @@ pub struct Recipe {
     pub steps: Vec<RecipeStep>,
 }
 
+/// E.WEB19: reserved run vars that carry the typed identity from the run boundary into every
+/// persisted row. Reserved names, never user-facing.
+pub const RUN_ORIGIN_VAR: &str = "__origin";
+pub const RUN_AGENT_VAR: &str = "__canonical_agent";
+
+/// Where a run came from — typed at the boundary, persisted, never inferred from its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOrigin {
+    /// A standing order minted by importing an agent document; `canonical_agent` is its name.
+    ImportedAgent,
+    /// `ym schedule … :: <goal>` — a scheduled goal with no agent behind it.
+    ScheduledGoal,
+    /// Everything else (delegations, horizon segments, legacy rows).
+    Other,
+}
+impl RunOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOrigin::ImportedAgent => "imported_agent",
+            RunOrigin::ScheduledGoal => "scheduled_goal",
+            RunOrigin::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipeRunIdentity {
+    pub origin: RunOrigin,
+    pub canonical_agent: Option<String>,
+}
+impl RecipeRunIdentity {
+    pub fn other() -> Self {
+        Self {
+            origin: RunOrigin::Other,
+            canonical_agent: None,
+        }
+    }
+    pub fn imported_agent(name: &str) -> Self {
+        Self {
+            origin: RunOrigin::ImportedAgent,
+            canonical_agent: Some(name.to_string()),
+        }
+    }
+    pub fn scheduled_goal() -> Self {
+        Self {
+            origin: RunOrigin::ScheduledGoal,
+            canonical_agent: None,
+        }
+    }
+}
+
+/// A sleeping or paused run as the orders surface sees it, identity included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingRun {
+    pub id: String,
+    pub name: String,
+    pub wake_ms: u64,
+    pub origin: Option<String>,
+    pub canonical_agent: Option<String>,
+}
+
 /// One scheduler-owned, bounded piece of a long-horizon goal.
 ///
 /// Only read/reason/validate/render recipe steps are accepted. The unattended scheduler cannot
@@ -708,7 +770,30 @@ impl RecipeEngine {
     }
 
     pub async fn run_with(&self, recipe: &Recipe, vars: HashMap<String, Value>) -> RunOutcome {
+        self.run_with_identity(recipe, vars, RecipeRunIdentity::other())
+            .await
+    }
+
+    /// E.WEB19: run with a TYPED identity. The identity rides the run's own vars under reserved
+    /// keys (so every resume path carries it without a signature change) and is persisted into
+    /// the store's `origin` / `canonical_agent` columns by the same `persist` every step uses.
+    /// It is set once, here, at the run boundary — never inferred from a display name later.
+    pub async fn run_with_identity(
+        &self,
+        recipe: &Recipe,
+        mut vars: HashMap<String, Value>,
+        identity: RecipeRunIdentity,
+    ) -> RunOutcome {
         let id = format!("{}-{}", recipe.id, now_ms());
+        vars.insert(RUN_ORIGIN_VAR.into(), Value::from(identity.origin.as_str()));
+        match &identity.canonical_agent {
+            Some(agent) => {
+                vars.insert(RUN_AGENT_VAR.into(), Value::from(agent.as_str()));
+            }
+            None => {
+                vars.remove(RUN_AGENT_VAR);
+            }
+        }
         self.run_from(&id, &recipe.name, recipe.steps.clone(), 0, vars)
             .await
     }
@@ -1430,6 +1515,14 @@ GOAL: GOAL_HERE"#;
                         steps: steps.to_vec(),
                         vars: vars.clone(),
                         error: error.map(|e| e.to_string()),
+                        origin: vars
+                            .get(RUN_ORIGIN_VAR)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        canonical_agent: vars
+                            .get(RUN_AGENT_VAR)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
                     },
                     now_ms(),
                 );
@@ -2787,6 +2880,8 @@ mod tests {
                     steps: job.recipe.steps,
                     vars: HashMap::new(),
                     error: None,
+                    origin: None,
+                    canonical_agent: None,
                 },
                 start,
             )
@@ -2956,6 +3051,8 @@ mod tests {
                     }],
                     vars: HashMap::new(),
                     error: None,
+                    origin: None,
+                    canonical_agent: None,
                 },
                 now_ms(),
             )
@@ -3019,6 +3116,8 @@ mod tests {
                     }],
                     vars: HashMap::new(),
                     error: None,
+                    origin: None,
+                    canonical_agent: None,
                 },
                 now_ms(),
             )
@@ -3781,6 +3880,33 @@ mod schedule_loop_tests {
 impl RecipeEngine {
     /// Every sleeping run: (id, name, wake_at_ms). The visibility half of standing orders — a
     /// scheduled run that exists only as a DB row is indistinguishable from one never registered.
+    /// E.WEB19: a sleeping or paused run with its typed identity — what the orders surface reads.
+    pub fn list_sleeping_typed(&self) -> Vec<StandingRun> {
+        self.typed_runs(|store| store.due_sleeping(u64::MAX))
+    }
+    pub fn list_paused_typed(&self) -> Vec<StandingRun> {
+        self.typed_runs(|store| store.by_status("paused"))
+    }
+    fn typed_runs(&self, pick: impl Fn(&RecipeStore) -> Vec<RunRecord>) -> Vec<StandingRun> {
+        let Some(store) = &self.store else {
+            return Vec::new();
+        };
+        pick(store)
+            .into_iter()
+            .map(|r| StandingRun {
+                wake_ms: r
+                    .vars
+                    .get("__wake_at")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                id: r.id,
+                name: r.name,
+                origin: r.origin,
+                canonical_agent: r.canonical_agent,
+            })
+            .collect()
+    }
+
     pub fn list_sleeping(&self) -> Vec<(String, String, u64)> {
         let Some(store) = &self.store else {
             return Vec::new();

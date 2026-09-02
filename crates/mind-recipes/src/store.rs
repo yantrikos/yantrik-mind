@@ -98,6 +98,11 @@ pub struct RunRecord {
     pub steps: Vec<RecipeStep>,
     pub vars: HashMap<String, Value>,
     pub error: Option<String>,
+    /// E.WEB19: typed run identity, persisted — never inferred from `name` at read time.
+    /// `origin` ∈ imported_agent | scheduled_goal | other; `None` on legacy rows the backfill
+    /// could not classify. `canonical_agent` is the exact agent name an imported order belongs to.
+    pub origin: Option<String>,
+    pub canonical_agent: Option<String>,
 }
 
 pub struct RecipeStore {
@@ -163,6 +168,7 @@ impl RecipeStore {
                 occurred_ms INTEGER NOT NULL
             )",
         )?;
+        Self::migrate_run_identity(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -173,12 +179,14 @@ impl RecipeStore {
         let vars = serde_json::to_string(&r.vars)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO mind_recipe_runs (id,name,status,current_step,steps_json,vars_json,error,updated_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+            "INSERT INTO mind_recipe_runs (id,name,status,current_step,steps_json,vars_json,error,updated_ms,origin,canonical_agent)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
                 status=excluded.status, current_step=excluded.current_step, steps_json=excluded.steps_json,
-                vars_json=excluded.vars_json, error=excluded.error, updated_ms=excluded.updated_ms",
-            rusqlite::params![r.id, r.name, r.status, r.current_step as i64, steps, vars, r.error, now_ms as i64],
+                vars_json=excluded.vars_json, error=excluded.error, updated_ms=excluded.updated_ms,
+                origin=COALESCE(excluded.origin, mind_recipe_runs.origin),
+                canonical_agent=COALESCE(excluded.canonical_agent, mind_recipe_runs.canonical_agent)",
+            rusqlite::params![r.id, r.name, r.status, r.current_step as i64, steps, vars, r.error, now_ms as i64, r.origin, r.canonical_agent],
         )?;
         Ok(())
     }
@@ -192,10 +200,54 @@ impl RecipeStore {
     }
 
     /// Load a single run by id (any status) — used to resume a recipe waiting on an AskUser answer.
+    /// E.WEB19: typed run identity, added as two nullable columns and backfilled ONCE.
+    /// Idempotent by construction: the ALTERs run only when the column is absent, and the
+    /// backfill touches only rows whose `origin` is still NULL — a second open changes nothing.
+    /// Classification happens here and never again: an `import:` id with a `standing: ` name is
+    /// an imported agent (canonical = the name after the prefix, taken now); a `sched:` id is a
+    /// scheduled goal with no agent; anything else stays legacy/NULL. No rename, no id change.
+    fn migrate_run_identity(conn: &Connection) -> anyhow::Result<()> {
+        let mut have_origin = false;
+        let mut have_agent = false;
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(mind_recipe_runs)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for c in cols.flatten() {
+                if c == "origin" {
+                    have_origin = true;
+                }
+                if c == "canonical_agent" {
+                    have_agent = true;
+                }
+            }
+        }
+        if !have_origin {
+            conn.execute("ALTER TABLE mind_recipe_runs ADD COLUMN origin TEXT", [])?;
+        }
+        if !have_agent {
+            conn.execute(
+                "ALTER TABLE mind_recipe_runs ADD COLUMN canonical_agent TEXT",
+                [],
+            )?;
+        }
+        conn.execute(
+            "UPDATE mind_recipe_runs
+                SET origin = 'imported_agent', canonical_agent = substr(name, 11)
+              WHERE origin IS NULL AND id LIKE 'import:%' AND name LIKE 'standing: %'",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE mind_recipe_runs SET origin = 'scheduled_goal'
+              WHERE origin IS NULL AND id LIKE 'sched:%'",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn load(&self, id: &str) -> Option<RunRecord> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE id=?1",
+            "SELECT id,name,status,current_step,steps_json,vars_json,error,origin,canonical_agent FROM mind_recipe_runs WHERE id=?1",
             [id],
             |row| {
                 let steps_json: String = row.get(4)?;
@@ -208,6 +260,8 @@ impl RecipeStore {
                     steps: serde_json::from_str(&steps_json).unwrap_or_default(),
                     vars: serde_json::from_str(&vars_json).unwrap_or_default(),
                     error: row.get::<_, Option<String>>(6)?,
+                    origin: row.get::<_, Option<String>>(7)?,
+                    canonical_agent: row.get::<_, Option<String>>(8)?,
                 })
             },
         )
@@ -219,7 +273,7 @@ impl RecipeStore {
     pub fn due_sleeping(&self, now_ms: u64) -> Vec<RunRecord> {
         let conn = self.conn.lock().unwrap();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE status='sleeping'",
+            "SELECT id,name,status,current_step,steps_json,vars_json,error,origin,canonical_agent FROM mind_recipe_runs WHERE status='sleeping'",
         ) else {
             return Vec::new();
         };
@@ -234,6 +288,8 @@ impl RecipeStore {
                 steps: serde_json::from_str(&steps_json).unwrap_or_default(),
                 vars: serde_json::from_str(&vars_json).unwrap_or_default(),
                 error: row.get::<_, Option<String>>(6)?,
+                origin: row.get::<_, Option<String>>(7)?,
+                canonical_agent: row.get::<_, Option<String>>(8)?,
             })
         });
         match rows {
@@ -260,7 +316,7 @@ impl RecipeStore {
     pub fn by_status(&self, status: &str) -> Vec<RunRecord> {
         let conn = self.conn.lock().unwrap();
         let Ok(mut stmt) = conn.prepare(
-            "SELECT id,name,status,current_step,steps_json,vars_json,error FROM mind_recipe_runs WHERE status=?1",
+            "SELECT id,name,status,current_step,steps_json,vars_json,error,origin,canonical_agent FROM mind_recipe_runs WHERE status=?1",
         ) else {
             return Vec::new();
         };
@@ -275,6 +331,8 @@ impl RecipeStore {
                 steps: serde_json::from_str(&steps_json).unwrap_or_default(),
                 vars: serde_json::from_str(&vars_json).unwrap_or_default(),
                 error: row.get::<_, Option<String>>(6)?,
+                origin: row.get::<_, Option<String>>(7)?,
+                canonical_agent: row.get::<_, Option<String>>(8)?,
             })
         });
         match rows {
@@ -1378,5 +1436,145 @@ mod horizon_tests {
             Some("checkpoint_validation_failed")
         );
         assert!(lifecycle.iter().all(HorizonLifecycleReceipt::verify));
+    }
+}
+
+/// E.WEB19: the identity migration is idempotent and classifies exactly once.
+#[cfg(test)]
+mod run_identity_migration_tests {
+    use super::*;
+
+    fn pre_migration_db(path: &str) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE mind_recipe_runs (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+                current_step INTEGER NOT NULL, steps_json TEXT NOT NULL, vars_json TEXT NOT NULL,
+                error TEXT, updated_ms INTEGER NOT NULL);",
+        )
+        .unwrap();
+        for (id, name) in [
+            ("import:market-check-1", "standing: market-check"),
+            ("sched:abc123-1", "standing: check the weather"),
+            ("delegate:legacy-1", "standing: market-check"),
+        ] {
+            conn.execute(
+                "INSERT INTO mind_recipe_runs VALUES (?1,?2,'sleeping',0,'[]','{\"__wake_at\":123}',NULL,1)",
+                [id, name],
+            )
+            .unwrap();
+        }
+    }
+
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+
+    /// Reads rows with their identity when the columns exist, and as `None` before the migration
+    /// has run — so the same helper can compare the two states.
+    fn rows(path: &str) -> Vec<Row> {
+        let conn = Connection::open(path).unwrap();
+        let has_identity = conn
+            .prepare("SELECT origin FROM mind_recipe_runs LIMIT 1")
+            .is_ok();
+        let sql = if has_identity {
+            "SELECT id,name,status,origin,canonical_agent,vars_json FROM mind_recipe_runs ORDER BY id"
+        } else {
+            "SELECT id,name,status,NULL,NULL,vars_json FROM mind_recipe_runs ORDER BY id"
+        };
+        let mut stmt = conn.prepare(sql).unwrap();
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get(5)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn opening_a_pre_migration_store_twice_classifies_once_and_changes_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("ym-web19-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("recipes.db").to_str().unwrap().to_string();
+        pre_migration_db(&path);
+        let before = rows(&path);
+        assert!(
+            before.iter().all(|r| r.3.is_none()),
+            "pre-migration rows carry no identity"
+        );
+
+        let first = RecipeStore::open(&path).unwrap();
+        let after = rows(&path);
+        let by_id = |id: &str| after.iter().find(|r| r.0 == id).cloned().unwrap();
+        // The imported order is classified with its canonical agent, taken once from the name.
+        let imported = by_id("import:market-check-1");
+        assert_eq!(imported.3.as_deref(), Some("imported_agent"));
+        assert_eq!(imported.4.as_deref(), Some("market-check"));
+        // The scheduled goal is typed and carries NO agent: it must never join one.
+        let sched = by_id("sched:abc123-1");
+        assert_eq!(sched.3.as_deref(), Some("scheduled_goal"));
+        assert_eq!(sched.4, None);
+        // The ambiguous legacy row is not promoted, whatever its name says.
+        let legacy = by_id("delegate:legacy-1");
+        assert_eq!(legacy.3, None);
+        assert_eq!(legacy.4, None);
+        // Nothing else moved: ids, names, status and vars are byte-identical.
+        for (b, a) in before.iter().zip(after.iter()) {
+            assert_eq!((&b.0, &b.1, &b.2, &b.5), (&a.0, &a.1, &a.2, &a.5));
+        }
+        drop(first);
+
+        // A second open is a no-op: same rows, same values, no error.
+        let second = RecipeStore::open(&path).unwrap();
+        assert_eq!(rows(&path), after, "idempotent");
+        // The typed reader sees the same classification; wake and state survive.
+        let sleeping = second.due_sleeping(u64::MAX);
+        assert_eq!(sleeping.len(), 3);
+        let imp = sleeping
+            .iter()
+            .find(|r| r.id == "import:market-check-1")
+            .unwrap();
+        assert_eq!(imp.canonical_agent.as_deref(), Some("market-check"));
+        assert_eq!(
+            imp.vars.get("__wake_at").and_then(|v| v.as_u64()),
+            Some(123)
+        );
+        // Saving a legacy row back (as a resume would) keeps its NULL identity, and saving an
+        // identified row without identity keeps what the backfill set (COALESCE, not overwrite).
+        let mut leg = second.load("delegate:legacy-1").unwrap();
+        leg.status = "paused".into();
+        second.save(&leg, 2).unwrap();
+        let mut imp2 = second.load("import:market-check-1").unwrap();
+        imp2.origin = None;
+        imp2.canonical_agent = None;
+        second.save(&imp2, 2).unwrap();
+        let again = rows(&path);
+        assert_eq!(
+            again.iter().find(|r| r.0 == "delegate:legacy-1").unwrap().3,
+            None
+        );
+        assert_eq!(
+            again
+                .iter()
+                .find(|r| r.0 == "import:market-check-1")
+                .unwrap()
+                .4
+                .as_deref(),
+            Some("market-check")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

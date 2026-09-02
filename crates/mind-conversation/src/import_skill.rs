@@ -240,7 +240,11 @@ impl super::ConversationEngine {
                     .collect(),
                 };
                 let out = recipes
-                    .run_with(&rec, std::collections::HashMap::new())
+                    .run_with_identity(
+                        &rec,
+                        std::collections::HashMap::new(),
+                        mind_recipes::RecipeRunIdentity::imported_agent(&agent.name),
+                    )
                     .await;
                 receipt.push_str(&match out.sleeping_until {
                     Some(_) => format!(

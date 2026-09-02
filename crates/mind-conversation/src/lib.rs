@@ -7630,7 +7630,13 @@ impl ConversationEngine {
                         steps.retain(|s| !matches!(s, RecipeStep::Schedule { .. }));
                         steps.insert(0, RecipeStep::Schedule { every: every.into(), weekday, hour, minute });
                         let rec = Recipe { id: format!("sched:{:x}", now & 0xffffff), name: format!("standing: {goal}"), steps };
-                        let out = recipes.run_with(&rec, std::collections::HashMap::new()).await;
+                        let out = recipes
+                            .run_with_identity(
+                                &rec,
+                                std::collections::HashMap::new(),
+                                mind_recipes::RecipeRunIdentity::scheduled_goal(),
+                            )
+                            .await;
                         match out.sleeping_until {
                             Some(wake) => {
                                 let mins = (wake.saturating_sub(now)) / 60_000;

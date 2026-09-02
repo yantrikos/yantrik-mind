@@ -2937,3 +2937,17 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Closure | Codex's independent review of `8be07cf`: every production `run_from` path explicit (typed new-run boundary; stored-column identity for resumable, due and AskUser resumes; `other` for horizon segments); persist writes only the separate identity, never vars; mind-recipes 57/57 including poison-across-resume and idempotent migration; the UI fixture executed independently. No blocker remains. |
 | Non-blocking hardening, taken | `RecipeRunIdentity`'s fields were public, so a future caller could build `ScheduledGoal + Some(agent)` by hand; they are private now — only the three constructors exist, so the invariant is enforced by the type. |
+
+## E.EX4-LIVE-A — live reading on prod (durable witness for the roadmap row)
+
+| Field | Value |
+| --- | --- |
+| Source | `ym ex4` against prod (`YM_BOX=root@192.168.4.90 ./deploy/ym ex4`), prod at build `61bbb03`, read 2026-09-01 ~21:55Z. Aggregates only, as printed. |
+| Report | `EX4-LIVE-A - executive SHADOWED on the live path (ex4-live-a-v1, exec-v1)` · call site `telegram.periodic_proactive_digest` · opportunities 5 (from 5 eligible-cut evaluations; re-evaluation does not inflate the sample) · legacy: sent 5, nothing-to-say 0, declined-by-receptivity 0, undetermined 0 · policy agreement 5, disagreement 0 · outcomes: observable 5 (engaged 2, ignored 3), pending 0, CENSORED 0. Staging: "no opportunities recorded yet — the executive has not been reached on the live path" (headless, as E.D2 predicts). |
+| Meaning | Shadow-consistent evidence, not proof either policy is better; the disagreement that would justify switching is the one this design cannot observe (E.D2 / E.D4). Decides nothing. |
+
+## E.MQ — count correction: three scored router candidates, not four
+
+| Field | Value |
+| --- | --- |
+| Correction | The E.MQ6 KILL row and the roadmap said "four kills". Three router CANDIDATES were scored on sealed sets: the lexicon (E.MQ4c, v2, 2/10), the closed-schema LLM (E.MQ5, v3, 7/10 + 3 misroutes), the singleton shortlist (E.MQ6, v4, 5/20 + 2 wrong). The "fourth" was E.MQ1–E.MQ3's generative-answer audits, which measured the answer path, not a router. The conclusion is unchanged: paraphrase routing is unsolved; the line is closed pending a different class. |

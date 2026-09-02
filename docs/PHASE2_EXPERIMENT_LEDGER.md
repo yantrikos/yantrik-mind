@@ -2922,3 +2922,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Fold | `8be07cf` (mind-recipes only). Clean full suite 45 / 1,496 / 0. Identity is an explicit `run_from` parameter; every resume copies the stored columns; persist ignores vars; the reserved keys are gone. Collision fixture green. |
 | Re-witness (staging at 8be07cf) | The real order: `origin imported_agent`, `agent_name pending-tasks-daily`, sleeping, `in_seconds` 49,141, actions run / pause / cancel — unchanged across the redeploy (the backfill is a no-op on a classified row). Dormant row and thread typed; no page errors. |
 | Status | Store half `39e08bc` → seam v2 `8be07cf`; UI half `940feea`. All kill lines re-checked against v2: generic sched cannot acquire an agent even through a step that writes the old key (fixture). Closure on Codex's independent ACK. |
+
+## Prod batch readiness — dry run of the only migration in the batch (read-only)
+
+| Field | Value |
+| --- | --- |
+| Batch | main is 101 commits (39 touching code, 21 files) ahead of prod's `61bbb03`. Every schema change in it is additive: horizon receipt tables are `CREATE TABLE IF NOT EXISTS`; E.WEB19 adds two nullable columns to `mind_recipe_runs` and backfills only NULL rows. |
+| Dry run on prod's store (SQL, counts only) | 39 runs. The backfill would classify 15 as `scheduled_goal` (8 cancelled, 6 failed, 1 sleeping) and leave 24 legacy done / failed rows unclassified. Zero `import:` rows exist on prod, so no imported agent is affected. No rename, no id change, idempotent on the second open (store test). |
+| Decision | Pranab's, explicitly; the deploy is provenance-gated and reads health after. |

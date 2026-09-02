@@ -25,6 +25,12 @@ Eighteen background cadences live as independent `last_x` timers inside one func
 (`telegram.rs`, the poll loop). Two more run in the headless heartbeat. None of them knows about the
 others.
 
+**L1d status (2026-09-02 13:00Z):** L1d-A (`bb2914c`) and L1d-B (`9b0a921`) SHIPPED — all
+thirty-five loops record under loop-ledger-v5 in code; witnessed on staging only for the six loops
+that run there (process-hosted and headless). The sixteen poll-loop speakers are unwitnessed by
+construction until a Telegram-hosted box carries this binary (Pranab's word). One declared deviation
+on the ledger: the forge gate names the venture it acts on.
+
 **Correction (2026-09-02, L1d finding):** the table above was every loop that had a name, not every
 loop the mind runs. A source census of the poll body found sixteen more proactive speakers with no
 loop id and no ledger record — the morning briefing, foresight, the evening look-ahead, event prep,

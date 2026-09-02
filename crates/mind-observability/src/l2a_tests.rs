@@ -268,3 +268,57 @@ fn the_floor_excludes_a_candidate_that_scores_nothing() {
 fn the_policy_version_is_named_so_a_changed_constant_cannot_pass_as_the_same_policy() {
     assert_eq!(ATTENTION_POLICY, "attention-policy-v1");
 }
+
+// ── L2-B: the wake identity, before anything writes one ──────────────────────────────────────
+
+#[test]
+fn a_cycle_label_round_trips_and_rejects_everything_else() {
+    use crate::{CycleId, LOOP_LEDGER_V6};
+
+    let c = CycleId::new(1_788_000_000_000, 7);
+    assert_eq!(c.render(), "cycle:1788000000000:7");
+    assert_eq!(CycleId::parse(&c.render()), Some(c));
+    assert_eq!(CycleId::parse("cycle:0:0"), Some(CycleId::new(0, 0)));
+
+    // Everything a reader might be handed instead. A v6 row whose label does not parse is
+    // MALFORMED: pairing a shadow against a row of unknown wake would be evidence about nothing.
+    for bad in [
+        "",
+        "cycle:",
+        "cycle:1",
+        "cycle:1:",
+        "cycle::1",
+        "cycle:1:2:3",
+        "cycle:-1:2",
+        "cycle:+1:2",
+        "cycle: 1:2",
+        "cycle:1 :2",
+        "cycle:01:2", // one wake, two renderings, is not an identity
+        "cycle:1:007",
+        "cycle:1.0:2",
+        "cycle:abc:2",
+        "cycle:1:abc",
+        "wake:1:2",
+        "1:2",
+        "cycle:99999999999999999999:1", // wider than u64
+    ] {
+        assert_eq!(CycleId::parse(bad), None, "accepted {bad:?}");
+    }
+
+    // The version string exists and is distinct from the one v5 rows carry.
+    assert_eq!(LOOP_LEDGER_V6, "loop-ledger-v6");
+    assert_ne!(LOOP_LEDGER_V6, crate::LOOP_LEDGER_VERSION);
+}
+
+#[test]
+fn wake_identity_is_ordered_within_a_process_and_unique_across_restarts() {
+    use crate::CycleId;
+    let boot_a = 1_788_000_000_000u64;
+    let boot_b = 1_788_000_005_000u64;
+    // Monotone within a process...
+    assert!(CycleId::new(boot_a, 1) < CycleId::new(boot_a, 2));
+    // ...and a restart never reuses an identity, which is why the process start is in the label:
+    // a bare wake number restarts at zero on every boot and would pair two different wakes.
+    assert_ne!(CycleId::new(boot_a, 0), CycleId::new(boot_b, 0));
+    assert!(CycleId::new(boot_a, 9_999) < CycleId::new(boot_b, 0));
+}

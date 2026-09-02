@@ -5464,6 +5464,65 @@ impl LoopOpportunity {
 
 /// L3a bumped v3 → v4 for the `process` host (a bounded-enum addition is a schema change by this
 /// ledger's own rule). v3 rows stay in the log and read as superseded by version, never malformed.
+// ── L2-B: wake identity (loop-ledger-v6 = v5 + one bounded label) ────────────────────────────
+//
+// The attention shadow has to pair what it would have chosen against what the timers actually did,
+// ON THE SAME WAKE. Without a wake identity that pairing is a guess about timestamps, and two loops
+// that acted a millisecond apart are indistinguishable from two loops that acted on different wakes.
+//
+// So every v6 row carries `cycle:<process_start_ms>:<wake_no>`. The process start makes it unique
+// across restarts (a wake number alone repeats from 0 on every boot); the wake number is monotone
+// within a process. This type is the label and nothing else: no clock, no counter, no I/O.
+
+/// One poll wake's identity: which process, and which wake within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CycleId {
+    pub process_start_ms: u64,
+    pub wake_no: u64,
+}
+
+impl CycleId {
+    pub fn new(process_start_ms: u64, wake_no: u64) -> Self {
+        Self {
+            process_start_ms,
+            wake_no,
+        }
+    }
+
+    /// The stored form. Exactly three colon-separated parts, so a reader can reject anything else.
+    pub fn render(&self) -> String {
+        format!("cycle:{}:{}", self.process_start_ms, self.wake_no)
+    }
+
+    /// Strict inverse of `render`. Anything else is `None` — a v6 row whose label does not parse is
+    /// MALFORMED, never silently read as a v5 row, because a shadow paired against a row of unknown
+    /// wake would be evidence about nothing.
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix("cycle:")?;
+        let (a, b) = rest.split_once(':')?;
+        if a.is_empty() || b.is_empty() || a.len() > 20 || b.len() > 20 {
+            return None;
+        }
+        // DIGITS ONLY, checked here rather than left to `u64::from_str` — which accepts a leading
+        // `+`, as the test caught when this comment claimed it did not. A leading zero is refused
+        // too, so one wake cannot have two renderings and therefore two identities.
+        if !a.bytes().chain(b.bytes()).all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        if (a.len() > 1 && a.starts_with('0')) || (b.len() > 1 && b.starts_with('0')) {
+            return None;
+        }
+        Some(Self {
+            process_start_ms: a.parse().ok()?,
+            wake_no: b.parse().ok()?,
+        })
+    }
+}
+
+/// The version a row carrying a wake identity declares. v5 rows stay valid v5 and are never paired
+/// with a v6 row; the version string is what keeps the two eras apart.
+pub const LOOP_LEDGER_V6: &str = "loop-ledger-v6";
+
 pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v5";
 /// L1d: v5 = v4 + sixteen loop ids + the lifecycle phase; v4 rows keep reading.
 /// v4 (L3a): superseded by v5 — kept as a name so the fixtures can prove the wall.

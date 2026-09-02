@@ -3019,3 +3019,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Review | Codex: two REVISE rounds (event shape; reducer semantics) then TECHNICAL REVIEW PASS on the corrected tree (mind-observability 49/49, mind-core 23/23, typed-loop guard 1/1, rustfmt clean). Codex states its pass is not authorization to fold or deploy and holds that such authorization must come from Pranab. |
 | Authority provenance | This fold is not predicated on the peer's message. It runs under Pranab's standing instructions in this session — "You have full authority and autonomy for this project"; "there is no pausing… continuously autonomously developing"; "lets keep going… non stop" — under which every fold on this lane has run, with peer review as the quality gate. Prod deploys remain Pranab's explicit call and stay parked. The question of making peer review a second authorization layer on this lane is put to Pranab in the 06:30Z report. |
 | Witness | `ym why loops`, `/api/loops` and the cockpit Loops card read after one 600 s report bucket — next row. |
+
+## L1 v3 + L1c — WITNESSED on staging (read 01:44:40Z, build 3096637 up since 01:31:33Z)
+
+| Field | Value |
+| --- | --- |
+| `ym why loops` | `LOOP LEDGER loop-ledger-v3 — last 24 h as of ts_ms 1788313481615 (1 loop; superseded 3, malformed 0, duplicates 0)`; `heartbeat · host headless · opportunities 2 · acted 0 · held [nothing-due 2] · model calls unknown · wall 0 ms · counted 0 · considered: due-delegations 2, due-horizons 2 · policy: beat:30s 2, report:600s 2`. The three v1 rows are excluded by version, as designed; model calls read "unknown", not zero. |
+| `/api/loops` | Same numbers, `version loop-ledger-v3`, held / policy / considered maps present. |
+| Cockpit Loops card | "0 / 2 acted · 24h" with the line "heartbeat 0/2 · held nothing-due 2 · headless"; no page errors. |
+| What it says | A headless canary with nothing due records exactly one opportunity per 600 s report bucket and nothing per beat — the volume bound holds; the same aggregate is printed by the CLI, the JSON and the card. The judgement loops cannot appear here (Telegram-hosted), which is the ARCH7 diagnosis made visible on the instrument itself. |

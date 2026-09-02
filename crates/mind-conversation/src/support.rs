@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// L1d: one prepared support nudge — its one-shot event key, the person, the rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportNudge {
+    pub event_key: String,
+    pub person: String,
+    pub rendered: String,
+}
+
 impl super::ConversationEngine {
     /// ---------- SUPPORT-NOT-REPLACE (CR-1) ----------
     /// The opt-in/mute/status surface for the support-nudge class. The class is
@@ -133,11 +141,72 @@ impl super::ConversationEngine {
     /// proactive path. Reuses the birthday horizon (observed/told events),
     /// applies the full [`support_nudge::NudgeGate`], renders opportunity-first,
     /// and writes an audit record. Returns None (silence) by default.
+    ///
+    /// L1d: the audit is written BEFORE the send and never undone — a failed API send
+    /// therefore suppresses the event for good (`already_sent`). Recorded on the ledger as a
+    /// pre-existing gap; the loop ledger's outcome (`found-undelivered`) is what makes it
+    /// visible.
     pub async fn support_nudge_candidate(
         &self,
         quiet_hours: bool,
         emotion_heavy: bool,
     ) -> Option<String> {
+        let nudge = self
+            .support_nudge_prepare(quiet_hours, emotion_heavy)
+            .await?;
+        self.support_nudge_commit(&nudge).await;
+        Some(nudge.rendered)
+    }
+
+    /// L1d: prepare the one eligible nudge WITHOUT writing anything — every content gate
+    /// (opt-in, mutes, one-shot key, kill switch, cleanliness) applied; the surface blockers
+    /// (quiet hours, emotional weight) are the caller's when it gates the surface itself. The
+    /// loop ledger's opportunity is this exact candidate's event key; the same value is
+    /// committed and sent, so the ledger can never be bound to a candidate that moved.
+    pub async fn support_nudge_prepare(
+        &self,
+        quiet_hours: bool,
+        emotion_heavy: bool,
+    ) -> Option<SupportNudge> {
+        self.support_nudge_build(quiet_hours, emotion_heavy)
+            .await
+            .map(|(event_key, person, rendered)| SupportNudge {
+                event_key,
+                person,
+                rendered,
+            })
+    }
+
+    /// L1d: commit a prepared nudge — the audit record, written BEFORE the send exactly as
+    /// before (eligibility/provenance/controls, never a predicted action), bounded.
+    pub async fn support_nudge_commit(&self, nudge: &SupportNudge) {
+        let mut audits = self.support_audits().await;
+        audits.push(support_nudge::NudgeAudit {
+            event_key: nudge.event_key.clone(),
+            person: nudge.person.clone(),
+            provenance: "told".into(),
+            controls_shown: true,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            feedback: None,
+        });
+        // Keep the audit trail bounded.
+        let n_keep = audits.len().saturating_sub(200);
+        let trimmed = audits[n_keep..].to_vec();
+        let _ = self
+            .memory
+            .profile_set(
+                "snr_audits",
+                &serde_json::to_string(&trimmed).unwrap_or_default(),
+            )
+            .await;
+    }
+
+    /// The candidate without its audit: `(event key, person, rendered text)`.
+    async fn support_nudge_build(
+        &self,
+        quiet_hours: bool,
+        emotion_heavy: bool,
+    ) -> Option<(String, String, String)> {
         if self
             .memory
             .profile_get("snr_optin")
@@ -161,7 +230,7 @@ impl super::ConversationEngine {
             return None;
         }
         let muted = self.support_muted_people().await;
-        let mut audits = self.support_audits().await;
+        let audits = self.support_audits().await;
         if support_nudge::class_health(&audits) == support_nudge::ClassHealth::KillDisabled {
             return None; // kill switch tripped — stay silent pending review
         }
@@ -227,26 +296,7 @@ impl super::ConversationEngine {
             if !support_nudge::is_clean(&rendered) {
                 continue; // belt-and-suspenders: never emit guilt framing
             }
-            // Audit BEFORE returning — captures eligibility/provenance/controls, never a predicted action.
-            audits.push(support_nudge::NudgeAudit {
-                event_key: key,
-                person: person.clone(),
-                provenance: "told".into(),
-                controls_shown: true,
-                ts_ms: chrono::Utc::now().timestamp_millis(),
-                feedback: None,
-            });
-            // Keep the audit trail bounded.
-            let n_keep = audits.len().saturating_sub(200);
-            let trimmed = audits[n_keep..].to_vec();
-            let _ = self
-                .memory
-                .profile_set(
-                    "snr_audits",
-                    &serde_json::to_string(&trimmed).unwrap_or_default(),
-                )
-                .await;
-            return Some(rendered);
+            return Some((key, person, rendered));
         }
         None
     }

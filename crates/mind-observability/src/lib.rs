@@ -4927,8 +4927,40 @@ bounded_enum! {
         MemberBeat => "member-beat", Ics => "ics", LeaseSweep => "lease-sweep",
         MailSweep => "mail-sweep", Whois => "whois", TraditionPrep => "tradition-prep",
         Heartbeat => "heartbeat", WorldShadow => "world-shadow",
+        // L1d (loop-ledger-v5): the sixteen proactive speakers the census had missed.
+        Briefing => "briefing", Foresight => "foresight", Evening => "evening",
+        EventPrep => "event-prep", Anticipate => "anticipate", ThenNow => "then-now",
+        Dream => "dream", Forge => "forge", WorkWatch => "work-watch", WorkRadar => "work-radar",
+        BookAsk => "book-ask", EventAsk => "event-ask", Support => "support",
+        GiftScout => "gift-scout", WeeklyReport => "weekly-report", NewsDigest => "news-digest",
     }
 }
+impl LoopId {
+    /// L1d: the nine detached speakers — the only loops whose records may carry a phase.
+    pub fn is_detached(self) -> bool {
+        matches!(
+            self,
+            LoopId::Foresight
+                | LoopId::EventPrep
+                | LoopId::ThenNow
+                | LoopId::Forge
+                | LoopId::WorkWatch
+                | LoopId::WorkRadar
+                | LoopId::GiftScout
+                | LoopId::WeeklyReport
+                | LoopId::NewsDigest
+        )
+    }
+}
+
+/// L1d: a stable 64-bit key for an opportunity that is identified by a string (a support
+/// nudge's event key) — the first eight bytes of its SHA-256, so the ledger carries no name.
+pub fn opportunity_key_digest(s: &str) -> u64 {
+    use sha2::Digest;
+    let d = sha2::Sha256::digest(s.as_bytes());
+    u64::from_be_bytes(d[..8].try_into().expect("eight bytes"))
+}
+
 bounded_enum! {
     /// Who ran the loop: the Telegram poll loop, the headless heartbeat, or (L3a) the
     /// process-hosted runner that runs on every box. The executor, never the delivery surface.
@@ -4942,6 +4974,8 @@ bounded_enum! {
         NothingToAsk => "nothing-to-ask", Ran => "ran", Delegations => "delegations",
         Surfaced => "surfaced", FoundUndelivered => "found-undelivered",
         NothingFound => "nothing-found", FoundQueued => "found-queued",
+        // L1d: a detached speaker's act at spawn; its terminal outcome supersedes it.
+        Delegated => "delegated",
     }
 }
 bounded_enum! {
@@ -4967,12 +5001,16 @@ bounded_enum! {
     BudgetKind {
         DmnOneCall => "dmn-one-call", ReceptivityGate => "receptivity-gate",
         ResolveGrade => "resolve-grade", ProfileLearnOneCall => "profile-learn-one-call",
-        PatternsOneCall => "patterns-one-call",
+        PatternsOneCall => "patterns-one-call", ModelOneCall => "model-one-call",
     }
 }
 bounded_enum! {
     /// A named cap a loop consulted.
     CapKind { OnePerDay => "one-per-day", OneOutstanding => "one-outstanding" }
+}
+bounded_enum! {
+    /// L1d (loop-ledger-v5): a detached speaker's two-phase lifecycle. Absent for synchronous acts.
+    LoopPhase { Delegated => "delegated", Terminal => "terminal" }
 }
 bounded_enum! {
     /// L3b: what a loop handed to the delivery seam. A closed list; the text never rides here.
@@ -5274,7 +5312,10 @@ impl LoopOpportunity {
 
 /// L3a bumped v3 → v4 for the `process` host (a bounded-enum addition is a schema change by this
 /// ledger's own rule). v3 rows stay in the log and read as superseded by version, never malformed.
-pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v4";
+pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v5";
+/// L1d: v5 = v4 + sixteen loop ids + the lifecycle phase; v4 rows keep reading.
+/// v4 (L3a): superseded by v5 — kept as a name so the fixtures can prove the wall.
+pub const LOOP_LEDGER_V4: &str = "loop-ledger-v4";
 pub const LOOP_LEDGER_V3: &str = "loop-ledger-v3";
 
 /// One loop tick. Fields are private: the only way to build one is from the typed parts, so the
@@ -5291,6 +5332,8 @@ pub struct LoopTick {
     /// global counter, never inferred from a send.
     model_calls: Option<u32>,
     wall_ms: u64,
+    /// L1d: the lifecycle phase of a detached speaker's record; `None` for a synchronous act.
+    phase: Option<LoopPhase>,
 }
 impl LoopTick {
     pub fn acted(opportunity: LoopOpportunity, host: LoopHost, outcome: LoopOutcome) -> Self {
@@ -5303,6 +5346,7 @@ impl LoopTick {
             count: None,
             model_calls: None,
             wall_ms: 0,
+            phase: None,
         }
     }
     pub fn held(opportunity: LoopOpportunity, host: LoopHost, reason: HeldReason) -> Self {
@@ -5315,6 +5359,7 @@ impl LoopTick {
             count: None,
             model_calls: None,
             wall_ms: 0,
+            phase: None,
         }
     }
     pub fn considered(mut self, signals: &[ConsideredSignal]) -> Self {
@@ -5337,8 +5382,18 @@ impl LoopTick {
         self.wall_ms = ms;
         self
     }
+    /// L1d: mark this record as one phase of a detached lifecycle.
+    pub fn phase(mut self, phase: LoopPhase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
     pub fn opportunity_id(&self) -> String {
         self.opportunity.id()
+    }
+    /// L1d: the deterministic identity of a detached speaker's terminal record, for the
+    /// recorder's once-by-id write — a retry after any crash cannot write it twice.
+    pub fn terminal_event_id(&self) -> String {
+        format!("loop-{}:terminal", self.opportunity.id())
     }
     /// The event exactly as the ledger stores it; `parse_tick` is its inverse.
     pub fn to_event(&self, ts_ms: u64) -> DecisionEvent {
@@ -5366,6 +5421,11 @@ impl LoopTick {
         ev.outcome = self.count.map(|c| format!("count:{c}"));
         ev.model_calls = self.model_calls;
         ev.latency_ms = Some(self.wall_ms);
+        // L1d: the phase rides in `subject`; a terminal record carries its once-by-id identity.
+        ev.subject = self.phase.map(|p| format!("phase:{}", p.as_str()));
+        if self.phase == Some(LoopPhase::Terminal) {
+            ev.event_id = Some(self.terminal_event_id());
+        }
         ev.evaluator_id = Some(LOOP_LEDGER_VERSION.into());
         ev
     }
@@ -5380,6 +5440,8 @@ pub struct ParsedTick {
     pub policy: Vec<LoopPolicy>,
     pub result: Result<LoopOutcome, HeldReason>,
     pub count: Option<u32>,
+    /// L1d: the lifecycle phase, or `None` for a synchronous record.
+    pub phase: Option<LoopPhase>,
 }
 
 /// Validate one stored row against the whole schema; `None` when any field cannot be read.
@@ -5417,6 +5479,45 @@ pub fn parse_tick(e: &DecisionEvent) -> Option<ParsedTick> {
         None => None,
         Some(o) => Some(o.strip_prefix("count:")?.parse::<u32>().ok()?),
     };
+    let phase = match e.subject.as_deref() {
+        None => None,
+        Some(sub) => Some(LoopPhase::parse(sub.strip_prefix("phase:")?)?),
+    };
+    // The declared phase shape (Codex, L1d-A review): a synchronous record carries no phase, no
+    // `delegated` outcome and no terminal identity; a `delegated` record is an act of outcome
+    // `delegated` without the terminal identity; a `terminal` record carries EXACTLY the
+    // once-by-id identity and a real outcome; only a detached speaker may carry a phase at all.
+    // The reader binds the terminal row to its deterministic id — that is what makes the
+    // recorder's once-by-id write honest.
+    let terminal_id = format!("loop-{}:terminal", opportunity.id());
+    let carries_terminal_id = e.event_id.as_deref() == Some(terminal_id.as_str());
+    match phase {
+        None => {
+            // A detached speaker's act is EITHER `delegated` OR `terminal` — a phase-less act
+            // on a detached id would bypass the lifecycle accounting. A phase-less HELD row on
+            // a detached id is the synchronous hold its poll-loop block records, and stands.
+            if result == Ok(LoopOutcome::Delegated)
+                || carries_terminal_id
+                || (loop_id.is_detached() && result.is_ok())
+            {
+                return None;
+            }
+        }
+        Some(LoopPhase::Delegated) => {
+            if !loop_id.is_detached() || result != Ok(LoopOutcome::Delegated) || carries_terminal_id
+            {
+                return None;
+            }
+        }
+        Some(LoopPhase::Terminal) => {
+            if !loop_id.is_detached()
+                || result == Ok(LoopOutcome::Delegated)
+                || !carries_terminal_id
+            {
+                return None;
+            }
+        }
+    }
     Some(ParsedTick {
         opportunity,
         host,
@@ -5424,6 +5525,7 @@ pub fn parse_tick(e: &DecisionEvent) -> Option<ParsedTick> {
         policy,
         result,
         count,
+        phase,
     })
 }
 
@@ -5482,6 +5584,9 @@ pub fn loop_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Loo
         .iter()
         .filter(|e| e.kind == "loop_tick" && e.ts_ms >= since && e.ts_ms <= now_ms)
     {
+        // The version wall (Codex, L1d-A review): only rows written under THIS schema aggregate;
+        // a v4 row is superseded by version exactly as v3 was under v4 — never parsed, so a
+        // v4-labelled row can never smuggle a new id or a phase into a v5 report.
         if e.evaluator_id.as_deref() != Some(LOOP_LEDGER_VERSION) {
             superseded += 1;
             continue;
@@ -5496,6 +5601,20 @@ pub fn loop_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Loo
                 by_id.insert(id, (e, tick));
             }
             Some((prev, prev_tick)) => {
+                // L1d: a detached speaker's `delegated` record and its one `terminal` record are
+                // ONE opportunity — the terminal wins in either input order and it is not a
+                // duplicate. Two terminals, or two records without a phase, are duplicates.
+                let chain = matches!(
+                    (tick.phase, prev_tick.phase),
+                    (Some(LoopPhase::Terminal), Some(LoopPhase::Delegated))
+                        | (Some(LoopPhase::Delegated), Some(LoopPhase::Terminal))
+                );
+                if chain {
+                    if tick.phase == Some(LoopPhase::Terminal) {
+                        by_id.insert(id, (e, tick));
+                    }
+                    continue;
+                }
                 dup_ids.insert(id.clone());
                 // Input-order invariant: an act beats a hold; within the same class the later
                 // timestamp wins, and on an equal timestamp the later input wins.
@@ -6099,6 +6218,12 @@ pub enum LegacyGate {
     PersistedReceptive,
     /// `!quiet && due && chat` — mail-sweep (quiet is checked before due; chat before run).
     PersistedChatQuiet,
+    /// L1d: `open && chat && !quiet` — a window rule (the morning briefing, the evening
+    /// look-ahead): due-ness is the window being open and the day not done, read as state.
+    WindowChatQuiet,
+    /// L1d: `open && chat && !quiet && receptive` — anticipate, dream, book-ask, event-ask,
+    /// support: a persisted due read plus the receptivity gate.
+    WindowReceptive,
     /// `chat && forced` — a forced whois runs regardless of quiet, due or receptivity.
     Forced,
 }
@@ -6168,6 +6293,42 @@ impl Gated {
         }
     }
     /// Mail-sweep: a persisted daily cadence that checks quiet first and needs a chat to run.
+    /// L1d: a window rule — `open` is the site's side-effect-free due read.
+    pub fn window_chat_quiet(now_ms: u64, open: bool, presence: Presence) -> Self {
+        Self {
+            kind: LegacyGate::WindowChatQuiet,
+            state: GateState {
+                now_ms,
+                last_ms: 0,
+                period_ms: 0,
+                enabled: open,
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                idle: false,
+                spoke: false,
+                receptive: false,
+                forced: false,
+            },
+        }
+    }
+    /// L1d: a window rule with the receptivity gate after presence.
+    pub fn window_receptive(now_ms: u64, open: bool, presence: Presence, receptive: bool) -> Self {
+        Self {
+            kind: LegacyGate::WindowReceptive,
+            state: GateState {
+                now_ms,
+                last_ms: 0,
+                period_ms: 0,
+                enabled: open,
+                chat_present: presence.chat_present,
+                quiet: presence.quiet,
+                idle: false,
+                spoke: false,
+                receptive,
+                forced: false,
+            },
+        }
+    }
     pub fn persisted_chat_quiet(timer: Timer, presence: Presence) -> Self {
         Gated {
             kind: LegacyGate::PersistedChatQuiet,
@@ -6232,7 +6393,9 @@ impl Gated {
             (
                 LegacyGate::PersistedReceptive
                 | LegacyGate::PersistedChatQuiet
-                | LegacyGate::Forced,
+                | LegacyGate::Forced
+                | LegacyGate::WindowChatQuiet
+                | LegacyGate::WindowReceptive,
                 _,
             ) => st.last_ms,
         }
@@ -6240,12 +6403,41 @@ impl Gated {
     /// The decision, with each kind's blockers checked in the order the legacy code checked
     /// them, so a hold names the FIRST legacy blocker, not the seam's generic precedence.
     pub fn decide(&self) -> GateDecision {
-        if !self.due() {
+        let window = matches!(
+            self.kind,
+            LegacyGate::WindowChatQuiet | LegacyGate::WindowReceptive
+        );
+        if window {
+            // Due-ness IS the window being open; the timer fields are unused.
+            if !self.state.enabled {
+                return GateDecision::NotDue;
+            }
+        } else if !self.due() {
             return GateDecision::NotDue;
         }
         let st = &self.state;
         let hold = |r: HeldReason| GateDecision::Hold(r);
         match self.kind {
+            LegacyGate::WindowChatQuiet => {
+                if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else {
+                    GateDecision::Act
+                }
+            }
+            LegacyGate::WindowReceptive => {
+                if !st.chat_present {
+                    hold(HeldReason::NoChat)
+                } else if st.quiet {
+                    hold(HeldReason::QuietHours)
+                } else if !st.receptive {
+                    hold(HeldReason::Receptivity)
+                } else {
+                    GateDecision::Act
+                }
+            }
             LegacyGate::TimerChatQuiet => {
                 if !st.enabled {
                     hold(HeldReason::Disabled)
@@ -6316,6 +6508,8 @@ mod legacy_gate_tests {
     fn oracle_due(kind: LegacyGate, st: &GateState) -> bool {
         match kind {
             LegacyGate::Forced => st.forced && st.chat_present,
+            // L1d: a window rule's due-ness is the open window, read as state.
+            LegacyGate::WindowChatQuiet | LegacyGate::WindowReceptive => st.enabled,
             _ => st.now_ms >= st.last_ms && st.now_ms - st.last_ms >= st.period_ms,
         }
     }
@@ -6332,6 +6526,10 @@ mod legacy_gate_tests {
             LegacyGate::PersistedReceptive => st.chat_present && !st.quiet && due && st.receptive,
             LegacyGate::PersistedChatQuiet => !st.quiet && due && st.chat_present,
             LegacyGate::Forced => st.chat_present && st.forced,
+            // L1d: `if chat != 0 && !quiet { if let Some(_) = due() { run } }` and the same with
+            // `&& receptivity_ok()` — the window is the due read.
+            LegacyGate::WindowChatQuiet => due && st.chat_present && !st.quiet,
+            LegacyGate::WindowReceptive => due && st.chat_present && !st.quiet && st.receptive,
         }
     }
 
@@ -6361,6 +6559,15 @@ mod legacy_gate_tests {
                 (st.quiet, HeldReason::QuietHours),
                 (!st.chat_present, HeldReason::NoChat),
             ],
+            LegacyGate::WindowChatQuiet => &[
+                (!st.chat_present, HeldReason::NoChat),
+                (st.quiet, HeldReason::QuietHours),
+            ],
+            LegacyGate::WindowReceptive => &[
+                (!st.chat_present, HeldReason::NoChat),
+                (st.quiet, HeldReason::QuietHours),
+                (!st.receptive, HeldReason::Receptivity),
+            ],
         };
         checks.iter().find(|(blocks, _)| *blocks).map(|(_, r)| *r)
     }
@@ -6370,6 +6577,8 @@ mod legacy_gate_tests {
         let due = oracle_due(kind, st);
         let runs = oracle_runs(kind, st);
         match kind {
+            // L1d: window rules have no timer to advance.
+            LegacyGate::WindowChatQuiet | LegacyGate::WindowReceptive => st.last_ms,
             // `if enabled { if due { last = now; if chat && !quiet { run } } }`
             LegacyGate::TimerChatQuiet => {
                 if st.enabled && due {
@@ -6430,6 +6639,13 @@ mod legacy_gate_tests {
             }
             LegacyGate::PersistedChatQuiet => Gated::persisted_chat_quiet(timer, presence),
             LegacyGate::Forced => Gated::forced(st.now_ms, st.chat_present),
+            // L1d: the window kinds read the open window as `enabled`.
+            LegacyGate::WindowChatQuiet => {
+                Gated::window_chat_quiet(st.now_ms, st.enabled, presence)
+            }
+            LegacyGate::WindowReceptive => {
+                Gated::window_receptive(st.now_ms, st.enabled, presence, st.receptive)
+            }
         }
     }
 
@@ -6809,6 +7025,358 @@ mod delivery_ledger_tests {
         assert_eq!(
             LoopOutcome::parse("found-queued"),
             Some(LoopOutcome::FoundQueued)
+        );
+    }
+}
+
+#[cfg(test)]
+mod l1d_lifecycle_tests {
+    use super::*;
+
+    fn opp() -> LoopOpportunity {
+        LoopOpportunity::Window {
+            loop_id: LoopId::Foresight,
+            process_start_ms: 1_000,
+            key: 5,
+        }
+    }
+    fn delegated(ts: u64) -> DecisionEvent {
+        LoopTick::acted(opp(), LoopHost::Process, LoopOutcome::Delegated)
+            .phase(LoopPhase::Delegated)
+            .to_event(ts)
+    }
+    fn terminal_ok(ts: u64) -> DecisionEvent {
+        LoopTick::acted(opp(), LoopHost::Process, LoopOutcome::Ran)
+            .count(1)
+            .phase(LoopPhase::Terminal)
+            .to_event(ts)
+    }
+    fn terminal_held(ts: u64) -> DecisionEvent {
+        LoopTick::held(opp(), LoopHost::Process, HeldReason::NoChat)
+            .phase(LoopPhase::Terminal)
+            .to_event(ts)
+    }
+    fn row(events: &[DecisionEvent]) -> (LoopLedgerRow, usize) {
+        let ledger = loop_ledger(events, 10_000, 10_000);
+        let row = ledger
+            .loops
+            .into_iter()
+            .find(|r| r.loop_id == "foresight")
+            .expect("the loop appears");
+        (row, ledger.duplicates)
+    }
+
+    /// L1d: spawn + success is ONE opportunity whose outcome is the terminal's; spawn + silent
+    /// is one unfinished delegated act; spawn + failure is one held; a duplicate terminal is a
+    /// duplicate; input order does not matter; the phase round-trips and a delegated record
+    /// with any other outcome is malformed.
+    #[test]
+    fn a_detached_lifecycle_reduces_to_one_opportunity_in_any_order() {
+        let (r, dups) = row(&[delegated(100), terminal_ok(200)]);
+        assert_eq!((r.opportunities, r.acted, dups), (1, 1, 0));
+        assert_eq!(r.outcomes.get("ran"), Some(&1));
+        assert_eq!(r.outcomes.get("delegated"), None);
+        let (r, dups) = row(&[terminal_ok(200), delegated(100)]);
+        assert_eq!(
+            (r.opportunities, r.acted, dups),
+            (1, 1, 0),
+            "order-invariant"
+        );
+        assert_eq!(r.outcomes.get("ran"), Some(&1));
+        let (r, dups) = row(&[delegated(100)]);
+        assert_eq!((r.opportunities, r.acted, dups), (1, 1, 0));
+        assert_eq!(r.outcomes.get("delegated"), Some(&1), "unfinished, visibly");
+        let (r, dups) = row(&[delegated(100), terminal_held(200)]);
+        assert_eq!((r.opportunities, r.acted, dups), (1, 0, 0));
+        assert_eq!(r.held.get("no-chat"), Some(&1));
+        let (r, dups) = row(&[delegated(100), terminal_ok(200), terminal_ok(300)]);
+        assert_eq!(
+            (r.opportunities, dups),
+            (1, 1),
+            "a second terminal is a duplicate"
+        );
+        let ev = terminal_ok(200);
+        let parsed = parse_tick(&ev).unwrap();
+        assert_eq!(parsed.phase, Some(LoopPhase::Terminal));
+        assert_eq!(
+            ev.event_id.as_deref(),
+            Some("loop-foresight:due:1000:5:terminal")
+        );
+        assert_eq!(
+            parse_tick(&delegated(100)).unwrap().phase,
+            Some(LoopPhase::Delegated)
+        );
+        let mut wrong = delegated(100);
+        wrong.chosen = Some("ran".into());
+        assert!(
+            parse_tick(&wrong).is_none(),
+            "a delegated record with another outcome"
+        );
+        // v4 rows are superseded by version (the wall), as v3 rows are.
+        let mut v4 = terminal_ok(400);
+        v4.evaluator_id = Some(LOOP_LEDGER_V4.into());
+        v4.subject = None;
+        v4.event_id = None;
+        let ledger = loop_ledger(&[v4], 10_000, 10_000);
+        assert_eq!((ledger.superseded, ledger.loops.len()), (1, 0));
+        let mut v3 = terminal_ok(400);
+        v3.evaluator_id = Some(LOOP_LEDGER_V3.into());
+        let ledger = loop_ledger(&[v3], 10_000, 10_000);
+        assert_eq!(ledger.superseded, 1);
+        // The sixteen new ids parse.
+        for id in [
+            "briefing",
+            "foresight",
+            "evening",
+            "event-prep",
+            "anticipate",
+            "then-now",
+            "dream",
+            "forge",
+            "work-watch",
+            "work-radar",
+            "book-ask",
+            "event-ask",
+            "support",
+            "gift-scout",
+            "weekly-report",
+            "news-digest",
+        ] {
+            assert!(LoopId::parse(id).is_some(), "{id}");
+        }
+    }
+
+    /// L1d-A review (Codex): the version wall is fail-closed and the phase shape is enforced.
+    /// A well-formed v4 row is superseded, never aggregated; a v4-labelled row carrying a new id
+    /// or a phase never enters the v5 report either way; and each wrong phase shape is refused
+    /// by the reader: `delegated` without a phase, a delegated record carrying the terminal
+    /// identity, a terminal without (or with the wrong) identity, a terminal of outcome
+    /// `delegated`, and any phase on a synchronous loop.
+    #[test]
+    fn the_version_wall_is_fail_closed_and_the_phase_shape_is_enforced() {
+        // A well-formed v4 row: an Ics window act from before L1d.
+        let ics = LoopTick::acted(
+            LoopOpportunity::Window {
+                loop_id: LoopId::Ics,
+                process_start_ms: 7,
+                key: 0,
+            },
+            LoopHost::Process,
+            LoopOutcome::Ran,
+        );
+        let mut v4 = ics.to_event(500);
+        v4.evaluator_id = Some(LOOP_LEDGER_V4.into());
+        assert!(parse_tick(&v4).is_some(), "well-formed on its own");
+        let ledger = loop_ledger(&[v4.clone()], 10_000, 10_000);
+        assert_eq!(
+            (ledger.superseded, ledger.malformed, ledger.loops.len()),
+            (1, 0, 0),
+            "superseded by version, never aggregated"
+        );
+        // A v4-labelled row with a new id and a phase: superseded, never malformed, never in.
+        let mut smuggled = delegated(600);
+        smuggled.evaluator_id = Some(LOOP_LEDGER_V4.into());
+        let ledger = loop_ledger(&[smuggled], 10_000, 10_000);
+        assert_eq!(
+            (ledger.superseded, ledger.malformed, ledger.loops.len()),
+            (1, 0, 0)
+        );
+        // The shapes.
+        assert!(parse_tick(&delegated(1)).is_some());
+        assert!(parse_tick(&terminal_ok(1)).is_some());
+        assert!(parse_tick(&terminal_held(1)).is_some());
+        let mut no_phase = delegated(1);
+        no_phase.subject = None;
+        assert!(
+            parse_tick(&no_phase).is_none(),
+            "outcome delegated without a phase"
+        );
+        let mut delegated_with_terminal_id = delegated(1);
+        delegated_with_terminal_id.event_id = Some(terminal_ok(1).event_id.clone().unwrap());
+        assert!(
+            parse_tick(&delegated_with_terminal_id).is_none(),
+            "a delegated record carrying the terminal identity"
+        );
+        let mut no_id = terminal_ok(1);
+        no_id.event_id = None;
+        assert!(
+            parse_tick(&no_id).is_none(),
+            "a terminal without its identity"
+        );
+        let mut wrong_id = terminal_ok(1);
+        wrong_id.event_id = Some("loop-foresight:due:1000:6:terminal".into());
+        assert!(
+            parse_tick(&wrong_id).is_none(),
+            "a terminal under another id"
+        );
+        let mut terminal_delegated = terminal_ok(1);
+        terminal_delegated.chosen = Some("delegated".into());
+        assert!(
+            parse_tick(&terminal_delegated).is_none(),
+            "a terminal of outcome delegated"
+        );
+        let sync_phase = LoopTick::acted(
+            LoopOpportunity::Window {
+                loop_id: LoopId::Briefing,
+                process_start_ms: 1,
+                key: 1,
+            },
+            LoopHost::Telegram,
+            LoopOutcome::Ran,
+        )
+        .phase(LoopPhase::Terminal)
+        .to_event(1);
+        assert!(
+            parse_tick(&sync_phase).is_none(),
+            "a phase on a synchronous loop"
+        );
+        let sync_delegated = LoopTick::acted(
+            LoopOpportunity::Window {
+                loop_id: LoopId::Briefing,
+                process_start_ms: 1,
+                key: 1,
+            },
+            LoopHost::Telegram,
+            LoopOutcome::Delegated,
+        )
+        .phase(LoopPhase::Delegated)
+        .to_event(1);
+        assert!(parse_tick(&sync_delegated).is_none());
+        // A phase-less ACT on a detached id is outside the shape; a phase-less HOLD stands.
+        let phaseless_detached_act = LoopTick::acted(opp(), LoopHost::Telegram, LoopOutcome::Ran)
+            .count(1)
+            .to_event(1);
+        assert!(
+            parse_tick(&phaseless_detached_act).is_none(),
+            "a detached act without a lifecycle phase"
+        );
+        let phaseless_detached_hold =
+            LoopTick::held(opp(), LoopHost::Telegram, HeldReason::QuietHours).to_event(1);
+        assert!(
+            parse_tick(&phaseless_detached_hold).is_some(),
+            "a detached hold is synchronous and carries no phase"
+        );
+        let mut sync_with_terminal_id = ics.to_event(1);
+        sync_with_terminal_id.event_id = Some(ics.terminal_event_id());
+        assert!(
+            parse_tick(&sync_with_terminal_id).is_none(),
+            "a synchronous record carrying a terminal identity"
+        );
+        // The nine detached ids, and only they, may carry a phase.
+        let detached: Vec<&str> = [
+            "foresight",
+            "event-prep",
+            "then-now",
+            "forge",
+            "work-watch",
+            "work-radar",
+            "gift-scout",
+            "weekly-report",
+            "news-digest",
+        ]
+        .to_vec();
+        for id in [
+            "dmn",
+            "knock",
+            "digest",
+            "ask",
+            "patterns",
+            "home-watch",
+            "resolve",
+            "profile-refresh",
+            "family",
+            "follow-up",
+            "price-watch",
+            "member-beat",
+            "ics",
+            "lease-sweep",
+            "mail-sweep",
+            "whois",
+            "tradition-prep",
+            "heartbeat",
+            "world-shadow",
+            "briefing",
+            "foresight",
+            "evening",
+            "event-prep",
+            "anticipate",
+            "then-now",
+            "dream",
+            "forge",
+            "work-watch",
+            "work-radar",
+            "book-ask",
+            "event-ask",
+            "support",
+            "gift-scout",
+            "weekly-report",
+            "news-digest",
+        ] {
+            let l = LoopId::parse(id).unwrap();
+            assert_eq!(l.is_detached(), detached.contains(&id), "{id}");
+        }
+        // The string-key digest is stable and name-free.
+        assert_eq!(
+            opportunity_key_digest("snr:birthday:x:1"),
+            opportunity_key_digest("snr:birthday:x:1")
+        );
+        assert_ne!(
+            opportunity_key_digest("snr:birthday:x:1"),
+            opportunity_key_digest("snr:birthday:x:2")
+        );
+    }
+
+    /// L1d: the window kinds — due-ness is the open window, then the legacy blocker order.
+    #[test]
+    fn window_gates_hold_in_the_legacy_blocker_order() {
+        let present = Presence {
+            chat_present: true,
+            quiet: false,
+        };
+        assert_eq!(
+            Gated::window_chat_quiet(1, false, present).decide(),
+            GateDecision::NotDue
+        );
+        assert_eq!(
+            Gated::window_chat_quiet(1, true, present).decide(),
+            GateDecision::Act
+        );
+        assert_eq!(
+            Gated::window_chat_quiet(
+                1,
+                true,
+                Presence {
+                    chat_present: false,
+                    quiet: true
+                }
+            )
+            .decide(),
+            GateDecision::Hold(HeldReason::NoChat),
+            "chat before quiet"
+        );
+        assert_eq!(
+            Gated::window_chat_quiet(
+                1,
+                true,
+                Presence {
+                    chat_present: true,
+                    quiet: true
+                }
+            )
+            .decide(),
+            GateDecision::Hold(HeldReason::QuietHours)
+        );
+        assert_eq!(
+            Gated::window_receptive(1, true, present, false).decide(),
+            GateDecision::Hold(HeldReason::Receptivity)
+        );
+        assert_eq!(
+            Gated::window_receptive(1, true, present, true).decide(),
+            GateDecision::Act
+        );
+        assert_eq!(
+            Gated::window_receptive(1, false, present, true).decide(),
+            GateDecision::NotDue
         );
     }
 }

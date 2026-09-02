@@ -1999,6 +1999,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut gate_mail_sweep = mind_observability::OpportunityGate::default();
     let mut gate_whois = mind_observability::OpportunityGate::default();
     let mut gate_tradprep = mind_observability::OpportunityGate::default();
+    // L1d-A: the seven synchronous speakers' opportunity gates.
+    let mut gate_briefing = mind_observability::OpportunityGate::default();
+    let mut gate_evening = mind_observability::OpportunityGate::default();
+    let mut gate_anticipate = mind_observability::OpportunityGate::default();
+    let mut gate_dream = mind_observability::OpportunityGate::default();
+    let mut gate_bookask = mind_observability::OpportunityGate::default();
+    let mut gate_eventask = mind_observability::OpportunityGate::default();
+    let mut gate_support = mind_observability::OpportunityGate::default();
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
@@ -2450,23 +2458,87 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // briefing_due() self-gates (morning window + persisted once-per-date, survives restarts), so
         // this fires on the first non-quiet tick of the morning and stays silent the rest of the day.
         {
+            // L1d: the morning briefing — one opportunity per local day while its window is
+            // open; gate reads state only, the composition stays inside `briefing_due`.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() {
-                if let Some(msg) = conv.briefing_due().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        eprintln!(
-                            "[briefing] sent the daily morning briefing ({} chars)",
-                            msg.len()
-                        );
-                        conv.note_proactive_sent().await;
-                        conv.ledger_sent("briefing", "morning briefing").await;
-                        // A real photo memory from this day in a past year rides the briefing —
-                        // queued here, delivered by the photo drain a tick later.
-                        if conv.queue_on_this_day().await {
-                            eprintln!("[briefing] attached an on-this-day photo memory");
+            let now = now_ms();
+            let open = conv.briefing_window_open().await;
+            let br_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                open.is_some(),
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+            );
+            let br_key = open.unwrap_or(0);
+            let br_considered = [mind_observability::ConsideredSignal::FollowUps];
+            let br_policy = [
+                mind_observability::LoopPolicy::Cadence(86_400),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match br_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let br_t0 = now_ms();
+                    // Three outcomes, never collapsed: nothing to say, sent, or composed and
+                    // undelivered; `briefing_due` marks the day either way.
+                    let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                    let mut sent: u32 = 0;
+                    if let Some(msg) = conv.briefing_due().await {
+                        outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Ran;
+                            eprintln!(
+                                "[briefing] sent the daily morning briefing ({} chars)",
+                                msg.len()
+                            );
+                            conv.note_proactive_sent().await;
+                            conv.ledger_sent("briefing", "morning briefing").await;
+                            // A real photo memory from this day in a past year rides the briefing —
+                            // queued here, delivered by the photo drain a tick later.
+                            if conv.queue_on_this_day().await {
+                                eprintln!("[briefing] attached an on-this-day photo memory");
+                            }
                         }
                     }
+                    gate_briefing.mark(br_key);
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Briefing,
+                                process_start_ms,
+                                key: br_key,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            outcome,
+                        )
+                        .considered(&br_considered)
+                        .policy(&br_policy)
+                        .count(sent)
+                        .wall_ms(now_ms().saturating_sub(br_t0)),
+                    );
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_briefing.take_window(
+                        mind_observability::LoopId::Briefing,
+                        process_start_ms,
+                        br_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&br_considered)
+                            .policy(&br_policy),
+                        );
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2493,14 +2565,77 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Evening look-ahead tick: the THIRD daily beat — tomorrow's shape tonight (once per
         // evening, persisted-by-date; same restart-safe pattern as the briefing).
         {
+            // L1d: the evening look-ahead — one opportunity per local day while its window is open.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() {
-                if let Some(msg) = conv.evening_due().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        eprintln!("[evening] sent the look-ahead ({} chars)", msg.len());
-                        conv.note_proactive_sent().await;
+            let now = now_ms();
+            let open = conv.evening_window_open().await;
+            let ev_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                open.is_some(),
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: in_quiet_hours_now(),
+                },
+            );
+            let ev_key = open.unwrap_or(0);
+            let ev_considered = [mind_observability::ConsideredSignal::FollowUps];
+            let ev_policy = [
+                mind_observability::LoopPolicy::Cadence(86_400),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match ev_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let ev_t0 = now_ms();
+                    // Three outcomes, never collapsed: nothing to say, sent, or composed and
+                    // undelivered; `evening_due` marks the day either way.
+                    let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                    let mut sent: u32 = 0;
+                    if let Some(msg) = conv.evening_due().await {
+                        outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Ran;
+                            eprintln!("[evening] sent the look-ahead ({} chars)", msg.len());
+                            conv.note_proactive_sent().await;
+                        }
+                    }
+                    gate_evening.mark(ev_key);
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Evening,
+                                process_start_ms,
+                                key: ev_key,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            outcome,
+                        )
+                        .considered(&ev_considered)
+                        .policy(&ev_policy)
+                        .count(sent)
+                        .wall_ms(now_ms().saturating_sub(ev_t0)),
+                    );
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_evening.take_window(
+                        mind_observability::LoopId::Evening,
+                        process_start_ms,
+                        ev_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&ev_considered)
+                            .policy(&ev_policy),
+                        );
                     }
                 }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2738,18 +2873,90 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Anticipation: project the family's OWN rhythms forward (festivals, recurring visits)
         // and nudge ONCE inside the actionable window — rhythm-based foresight, not calendar math.
         {
+            // L1d: anticipate — its persisted due state (last stamp, effective period) and the receptivity gate, recorded once per window; the act itself is unchanged.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.anticipate_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                if let Some(msg) = conv.anticipate_run().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        conv.note_proactive_sent().await;
-                        eprintln!("[anticipate] rhythm nudge sent");
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let (an_key, an_period_ms) = conv.anticipate_state().await;
+            let an_open = conv.anticipate_due().await;
+            let an_receptive =
+                an_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let an_gate = mind_observability::Gated::window_receptive(
+                now,
+                an_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+                an_receptive,
+            );
+            let an_considered = [
+                mind_observability::ConsideredSignal::Beliefs,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let an_policy = [
+                // The EFFECTIVE period — the domain pace applied — as the due rule consults it.
+                mind_observability::LoopPolicy::Cadence(an_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match an_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let an_t0 = now_ms();
+                    // Three outcomes, never collapsed: nothing to say, sent, or generated and
+                    // undelivered. The run moves its own stamp first, so the window closes
+                    // either way and no second act can fall under this key.
+                    let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                    let mut sent: u32 = 0;
+                    if let Some(msg) = conv.anticipate_run().await {
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                            eprintln!("[anticipate] rhythm nudge sent");
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Ran;
+                        } else {
+                            outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        }
+                    }
+                    gate_anticipate.mark(an_key);
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Anticipate,
+                                process_start_ms,
+                                key: an_key,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            outcome,
+                        )
+                        .considered(&an_considered)
+                        .policy(&an_policy)
+                        .count(sent)
+                        .wall_ms(now_ms().saturating_sub(an_t0)),
+                    );
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_anticipate.take_window(
+                        mind_observability::LoopId::Anticipate,
+                        process_start_ms,
+                        an_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&an_considered)
+                            .policy(&an_policy),
+                        );
                     }
                 }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2774,18 +2981,90 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
 
         // The nightly dream: one verified cross-domain connection with breakfast — or silence.
         {
+            // L1d: the dream — its persisted due state (last stamp, effective period), the morning window inside `dream_due`, and the receptivity gate; the act itself is unchanged.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.dream_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                if let Some(msg) = conv.dream_run().await {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                        conv.note_proactive_sent().await;
-                        eprintln!("[dream] morning connection sent");
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let (dr_key, dr_period_ms) = conv.dream_state().await;
+            let dr_open = conv.dream_due().await;
+            let dr_receptive =
+                dr_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let dr_gate = mind_observability::Gated::window_receptive(
+                now,
+                dr_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+                dr_receptive,
+            );
+            let dr_considered = [
+                mind_observability::ConsideredSignal::Beliefs,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let dr_policy = [
+                // The EFFECTIVE period — the domain pace applied — as the due rule consults it.
+                mind_observability::LoopPolicy::Cadence(dr_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match dr_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let dr_t0 = now_ms();
+                    // Three outcomes, never collapsed: nothing to say, sent, or generated and
+                    // undelivered. The run moves its own stamp first, so the window closes
+                    // either way and no second act can fall under this key.
+                    let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                    let mut sent: u32 = 0;
+                    if let Some(msg) = conv.dream_run().await {
+                        if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+                            conv.note_proactive_sent().await;
+                            eprintln!("[dream] morning connection sent");
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Ran;
+                        } else {
+                            outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        }
+                    }
+                    gate_dream.mark(dr_key);
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Dream,
+                                process_start_ms,
+                                key: dr_key,
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            outcome,
+                        )
+                        .considered(&dr_considered)
+                        .policy(&dr_policy)
+                        .count(sent)
+                        .wall_ms(now_ms().saturating_sub(dr_t0)),
+                    );
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_dream.take_window(
+                        mind_observability::LoopId::Dream,
+                        process_start_ms,
+                        dr_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&dr_considered)
+                            .policy(&dr_policy),
+                        );
                     }
                 }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2891,18 +3170,94 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Book interview: ONE question per period about a chapter the archive can't explain;
         // the answer becomes lore and rewrites its chapter.
         {
+            // L1d: book-ask — its persisted due state (last stamp, effective period) and the receptivity gate; the act itself is unchanged.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.book_ask_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                if let Some((slot, q)) = conv.book_ask_next().await {
-                    if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
-                        conv.book_ask_arm(&slot).await;
-                        eprintln!("[book] chapter-gap question sent");
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let (bk_stamp, bk_period_ms) = conv.book_ask_state().await;
+            let bk_open = conv.book_ask_due().await;
+            let bk_receptive =
+                bk_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let bk_gate = mind_observability::Gated::window_receptive(
+                now,
+                bk_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+                bk_receptive,
+            );
+            let bk_considered = [
+                mind_observability::ConsideredSignal::Name,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let bk_policy = [
+                // The EFFECTIVE period — the domain pace applied — as the due rule consults it.
+                mind_observability::LoopPolicy::Cadence(bk_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OneOutstanding),
+            ];
+            // Attempt keying (Codex, L1d-A review): a failed send leaves the stamp where it was,
+            // so the poll loop retries under the same window. The FIRST act of a window is keyed
+            // by the stamp; every later attempt in that window is its own opportunity keyed by
+            // its instant — the reducer sees every attempt, never a duplicate that hides one.
+            let bk_key: u64 = bk_stamp;
+            match bk_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let bk_t0 = now_ms();
+                    let bk_first = gate_bookask.take_act(bk_stamp);
+                    let mut outcome = mind_observability::LoopOutcome::NothingToAsk;
+                    let mut sent: u32 = 0;
+                    if let Some((slot, q)) = conv.book_ask_next().await {
+                        // The post-accept ordering is preserved verbatim: the slot, the stamp,
+                        // the claim and the ledger row are written only after the API accepted.
+                        if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Asked;
+                            conv.book_ask_arm(&slot).await;
+                            eprintln!("[book] chapter-gap question sent");
+                        } else {
+                            outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        }
+                    }
+                    if bk_first || outcome != mind_observability::LoopOutcome::NothingToAsk {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                mind_observability::LoopOpportunity::Window {
+                                    loop_id: mind_observability::LoopId::BookAsk,
+                                    process_start_ms,
+                                    key: if bk_first { bk_stamp } else { now },
+                                },
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .considered(&bk_considered)
+                            .policy(&bk_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(bk_t0)),
+                        );
                     }
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_bookask.take_window(
+                        mind_observability::LoopId::BookAsk,
+                        process_start_ms,
+                        bk_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&bk_considered)
+                            .policy(&bk_policy),
+                        );
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2992,38 +3347,191 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // Event ask-to-learn: ONE "what was this day?" question per period — a sample photo from
         // the biggest unexplained photo-burst; the reply becomes a labeled life event.
         {
+            // L1d: event-ask (a photo — recorded, never moved to the text door) — its persisted due state (last stamp, effective period) and the receptivity gate; the act itself is unchanged.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.event_ask_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                if let Some((caption, jpeg, slot)) = conv.event_ask_next().await {
-                    if tg_send_photo(&api, chat, jpeg, &caption).await {
-                        conv.event_ask_arm(&slot).await;
-                        conv.mirror_proactive(&caption).await;
-                        eprintln!("[events] asked about {slot}");
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let (ea_stamp, ea_period_ms) = conv.event_ask_state().await;
+            let ea_open = conv.event_ask_due().await;
+            let ea_receptive =
+                ea_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let ea_gate = mind_observability::Gated::window_receptive(
+                now,
+                ea_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+                ea_receptive,
+            );
+            let ea_considered = [
+                mind_observability::ConsideredSignal::Name,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let ea_policy = [
+                // The EFFECTIVE period — the domain pace applied — as the due rule consults it.
+                mind_observability::LoopPolicy::Cadence(ea_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OneOutstanding),
+            ];
+            // Attempt keying (Codex, L1d-A review): a failed send leaves the stamp where it was,
+            // so the poll loop retries under the same window. The FIRST act of a window is keyed
+            // by the stamp; every later attempt in that window is its own opportunity keyed by
+            // its instant — the reducer sees every attempt, never a duplicate that hides one.
+            let ea_key: u64 = ea_stamp;
+            match ea_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    let ea_t0 = now_ms();
+                    let ea_first = gate_eventask.take_act(ea_stamp);
+                    let mut outcome = mind_observability::LoopOutcome::NothingToAsk;
+                    let mut sent: u32 = 0;
+                    if let Some((caption, jpeg, slot)) = conv.event_ask_next().await {
+                        if tg_send_photo(&api, chat, jpeg, &caption).await {
+                            sent = 1;
+                            outcome = mind_observability::LoopOutcome::Asked;
+                            conv.event_ask_arm(&slot).await;
+                            conv.mirror_proactive(&caption).await;
+                            eprintln!("[events] asked about {slot}");
+                        } else {
+                            outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                        }
+                    }
+                    if ea_first || outcome != mind_observability::LoopOutcome::NothingToAsk {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                mind_observability::LoopOpportunity::Window {
+                                    loop_id: mind_observability::LoopId::EventAsk,
+                                    process_start_ms,
+                                    key: if ea_first { ea_stamp } else { now },
+                                },
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .considered(&ea_considered)
+                            .policy(&ea_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(ea_t0)),
+                        );
                     }
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_eventask.take_window(
+                        mind_observability::LoopId::EventAsk,
+                        process_start_ms,
+                        ea_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&ea_considered)
+                            .policy(&ea_policy),
+                        );
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
         // Support-not-replace (CR-1): if the owner OPTED IN and someone they know has a
         // birthday coming with prep unmet, offer to help them show up — opportunity-first,
         // never guilt. Silent by default; every gate (opt-in, mutes, one-shot event key,
-        // kill switch, quiet hours) lives inside support_nudge_candidate.
+        // kill switch) lives inside the prepared candidate; quiet hours are the surface gate's.
         {
+            // L1d: the support nudge — prepared ONCE per tick without writing anything and
+            // without the surface blockers (quiet hours and receptivity are the outer gate's,
+            // so a quiet-hours candidate is a `held:quiet-hours`, not a non-opportunity). Its
+            // opportunity is that exact candidate's event key (digested, name-free), never a
+            // clock bucket: no candidate, no opportunity. The SAME prepared candidate is
+            // committed (the audit, before the send, as before) and sent, so the ledger is
+            // never bound to a candidate that moved. A failed send after the audit is recorded
+            // as `found-undelivered` (the pre-existing gap: the audit then suppresses the event).
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && conv.proactive_receptivity_ok().await {
-                if let Some(msg) = conv
-                    .support_nudge_candidate(in_quiet_hours_now(), false)
-                    .await
-                {
-                    if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let sn_pending = conv.support_nudge_prepare(false, false).await;
+            let sn_key: u64 = sn_pending
+                .as_ref()
+                .map(|n| mind_observability::opportunity_key_digest(&n.event_key))
+                .unwrap_or(0);
+            let sn_open = sn_pending.is_some();
+            let sn_receptive =
+                sn_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let sn_gate = mind_observability::Gated::window_receptive(
+                now,
+                sn_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+                sn_receptive,
+            );
+            let sn_considered = [
+                mind_observability::ConsideredSignal::FollowUps,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let sn_policy = [
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Cap(mind_observability::CapKind::OneOutstanding),
+            ];
+            match (sn_gate.decide(), sn_pending) {
+                (mind_observability::GateDecision::Act, Some(nudge)) => {
+                    let sn_t0 = now_ms();
+                    // Attempt keying: the first act under this candidate is keyed by its event
+                    // key; a repeat under the same key (the audit failed to persist) by its
+                    // instant — every attempt visible, never a duplicate that hides one.
+                    let sn_first = gate_support.take_act(sn_key);
+                    conv.support_nudge_commit(&nudge).await;
+                    let outcome = if tg_send_mirrored(&conv, &api, chat, &nudge.rendered)
+                        .await
+                        .is_ok()
+                    {
                         conv.note_proactive_sent().await;
                         eprintln!("[support] opportunity nudge sent");
+                        mind_observability::LoopOutcome::Ran
+                    } else {
+                        mind_observability::LoopOutcome::FoundUndelivered
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            mind_observability::LoopOpportunity::Window {
+                                loop_id: mind_observability::LoopId::Support,
+                                process_start_ms,
+                                key: if sn_first { sn_key } else { now },
+                            },
+                            mind_observability::LoopHost::Telegram,
+                            outcome,
+                        )
+                        .considered(&sn_considered)
+                        .policy(&sn_policy)
+                        .count(u32::from(outcome == mind_observability::LoopOutcome::Ran))
+                        .wall_ms(now_ms().saturating_sub(sn_t0)),
+                    );
+                }
+                (mind_observability::GateDecision::Hold(reason), Some(_)) => {
+                    if let Some(window) = gate_support.take_window(
+                        mind_observability::LoopId::Support,
+                        process_start_ms,
+                        sn_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&sn_considered)
+                            .policy(&sn_policy),
+                        );
                     }
                 }
+                _ => {}
             }
         }
 
@@ -3445,6 +3953,12 @@ mod tests {
         let poll = &poll_all[..poll_all.find("#[cfg(test)]").unwrap_or(poll_all.len())];
         let headless = fn_body(SELF_SRC, "pub async fn run_headless(");
         for id in [
+            "LoopId::Briefing",
+            "LoopId::Evening",
+            "LoopId::Anticipate",
+            "LoopId::Dream",
+            "LoopId::BookAsk",
+            "LoopId::EventAsk",
             "LoopId::HomeWatch",
             "LoopId::Family",
             "LoopId::FollowUp",
@@ -3460,6 +3974,29 @@ mod tests {
             );
         }
         assert!(headless.contains("loop_id: mind_observability::LoopId::Heartbeat,"));
+        // L1d-A: the seven synchronous speakers record in the block that sends; the guard is
+        // per block, not lexical over the whole body.
+        for (tag, id) in [
+            ("[briefing]", "LoopId::Briefing"),
+            ("[evening]", "LoopId::Evening"),
+            ("[anticipate]", "LoopId::Anticipate"),
+            ("[dream]", "LoopId::Dream"),
+            ("[book]", "LoopId::BookAsk"),
+            ("[events]", "LoopId::EventAsk"),
+            ("[support]", "LoopId::Support"),
+        ] {
+            let at = poll.find(tag).unwrap_or_else(|| panic!("{tag}"));
+            let start = poll[..at].rfind("\n        {\n").unwrap();
+            let end = at + poll[at..].find("\n        }\n").unwrap();
+            let block = &poll[start..end];
+            assert!(block.contains("record_loop_tick("), "{tag} records");
+            assert!(block.contains(id), "{tag} records under its own id");
+            assert!(
+                block.contains("Gated::window_chat_quiet(")
+                    || block.contains("Gated::window_receptive("),
+                "{tag} decides through a window gate"
+            );
+        }
         // Only the typed constructors exist: no struct literal, no string loop ids.
         // (split needles: this test's own text must not be the first match)
         let literal = concat!("mind_observability::", "LoopTick {");

@@ -227,6 +227,13 @@ impl super::ConversationEngine {
     /// Anticipation nudge gate: one pattern entering its actionable window (10-75 days), not yet
     /// nudged for this occurrence.
     pub async fn anticipate_due(&self) -> bool {
+        let (last, period_ms) = self.anticipate_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: anticipate's persisted cadence state — (last run ms, EFFECTIVE period ms, the
+    /// domain pace applied). Side-effect-free; the ledger's cadence line reads this.
+    pub async fn anticipate_state(&self) -> (u64, u64) {
         let period_ms: i64 = std::env::var("YM_ANTICIPATE_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -241,7 +248,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     /// Pick the soonest un-nudged pattern in the window and compose the anticipation.

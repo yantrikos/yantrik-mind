@@ -316,6 +316,13 @@ impl super::ConversationEngine {
         if !(7..=11).contains(&h) {
             return false;
         }
+        let (last, period_ms) = self.dream_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: the dream's persisted cadence state — (last run ms, EFFECTIVE period ms with the
+    /// domain pace applied). Side-effect-free; the morning-window clause stays in `dream_due`.
+    pub async fn dream_state(&self) -> (u64, u64) {
         let period_ms = (20.0 * 3_600_000.0 * self.domain_pace("dream").await) as i64;
         let last: i64 = self
             .memory
@@ -325,7 +332,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     /// DREAM — pick a vision, hold it against what I actually am today (studied self-architecture,

@@ -417,6 +417,13 @@ impl super::ConversationEngine {
         if self.pending_slot().await.is_some() {
             return false;
         }
+        let (last, period_ms) = self.event_ask_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: event-ask's persisted cadence state — (last run ms, EFFECTIVE period ms with the
+    /// domain pace applied). Side-effect-free; the pending-slot clause stays in `event_ask_due`.
+    pub async fn event_ask_state(&self) -> (u64, u64) {
         let period_ms: i64 = std::env::var("YM_EVENTASK_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -431,7 +438,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     pub(crate) async fn load_trips(&self) -> Vec<serde_json::Value> {

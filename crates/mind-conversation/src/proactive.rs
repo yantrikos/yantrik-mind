@@ -950,6 +950,19 @@ impl super::ConversationEngine {
         self.recorder.record(tick.to_event(now));
     }
 
+    /// L1d: a persisted cadence stamp read side-effect free (0 when unset) — the opportunity key
+    /// of the speakers whose due rule is "period elapsed since <stamp>".
+    pub async fn profile_stamp_ms(&self, key: &str) -> u64 {
+        self.memory
+            .profile_get(key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .map(|n| n.max(0) as u64)
+            .unwrap_or(0)
+    }
+
     /// L3b: whether a proactive line was SENT within `within_ms` — the process runner's stand-in
     /// for the poll loop's per-tick `spoke` flag, so a pattern does not pile onto a fresh digest.
     pub async fn spoke_recently(&self, within_ms: i64) -> bool {

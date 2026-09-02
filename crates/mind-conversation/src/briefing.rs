@@ -231,6 +231,33 @@ impl super::ConversationEngine {
     /// and hand it back for the poll loop to send. Persisted by DATE (not an in-memory timer) so a
     /// mid-day service restart never re-briefs — the wired-but-re-fires-on-restart bug class we've
     /// already been bitten by. Returns None the rest of the day (cheap fast-path).
+    /// L1d: the briefing's due read WITHOUT side effects — `Some(local day number)` while the
+    /// morning window is open and today's briefing has not gone out. The ledger's opportunity.
+    pub async fn briefing_window_open(&self) -> Option<u64> {
+        let now = local_now();
+        let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(12);
+        let start_h: u32 = std::env::var("YM_BRIEF_HOUR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
+        let end_h: u32 = std::env::var("YM_BRIEF_UNTIL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(11);
+        if hour < start_h || hour >= end_h {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self
+            .memory
+            .profile_get("briefing_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        (last != today).then(|| (now.timestamp_millis() / 86_400_000).max(0) as u64)
+    }
+
     pub async fn briefing_due(&self) -> Option<String> {
         let now = local_now();
         let hour = now.format("%H").to_string().parse::<u32>().unwrap_or(12);
@@ -417,6 +444,32 @@ impl super::ConversationEngine {
     }
 
     /// Once per evening (YM_EVENING_HOUR..YM_EVENING_UNTIL local, default 20..22), persisted by date.
+    /// L1d: the evening look-ahead's due read without side effects (see `briefing_window_open`).
+    pub async fn evening_window_open(&self) -> Option<u64> {
+        let now = local_now();
+        let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);
+        let start: u32 = std::env::var("YM_EVENING_HOUR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20);
+        let end: u32 = std::env::var("YM_EVENING_UNTIL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(22);
+        if hour < start || hour >= end {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self
+            .memory
+            .profile_get("evening_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        (last != today).then(|| (now.timestamp_millis() / 86_400_000).max(0) as u64)
+    }
+
     pub async fn evening_due(&self) -> Option<String> {
         let now = local_now();
         let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);

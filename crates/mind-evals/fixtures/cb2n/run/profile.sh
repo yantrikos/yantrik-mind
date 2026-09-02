@@ -1,6 +1,6 @@
 #!/bin/bash
 # Profile loader (sourced): `cb2_profile_load <fixtures dir>` exports the CB2_* upstream/model/key
-# settings of profiles/${CB2_PROFILE:-qwen}.profile (.profile, not .env: the repository ignores *.env). With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
+# settings of profiles/${CB2_PROFILE:-qwen}.profile. With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
 # addresses are resolved HERE, once per invocation (CB2_UPSTREAM_IPS; the first -> CB2_UPSTREAM_IP)
 # and CB2_RESOLVED_AT records when. A named key file must exist and be non-empty; its content is
 # read by nothing in these scripts — the proxy container gets it by bind mount, and the leak

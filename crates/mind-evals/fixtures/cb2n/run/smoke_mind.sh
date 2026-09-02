@@ -8,7 +8,9 @@ if [ "$CB2_MIND_LANE" = local ]; then
   LANE=(-e YM_LOCAL_OLLAMA_URL=http://172.30.0.7:8080 -e YM_LOCAL_OLLAMA_MODEL="$CB2_MODEL" -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local); BOOTLINE="LOCAL primary + private lane active (ollama-local:$CB2_MODEL)"
 else
   PU=$(echo "$CB2_MIND_PROVIDER" | tr 'a-z-' 'A-Z_')
-  LANE=(-e YM_PRIMARY_BRAIN="$CB2_MIND_PROVIDER:$CB2_MODEL" -e "YM_PROVIDER_BASE_URL_$PU=http://172.30.0.7:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"); BOOTLINE="$CB2_MIND_PROVIDER:$CB2_MODEL"
+  SPEC="$CB2_MIND_PROVIDER:$CB2_MODEL"
+  LANE=(-e YM_PRIMARY_BRAIN="$SPEC" -e "YM_PROVIDER_BASE_URL_$PU=http://172.30.0.7:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"
+        -e YM_ROLE_CHAT="$SPEC" -e YM_ROLE_RESEARCH="$SPEC" -e YM_ROLE_UTIL="$SPEC" -e YM_ROLE_VERIFY="$SPEC" -e YM_ROLE_CODE="$SPEC" -e YM_ROLE_CONSOLIDATE="$SPEC"); BOOTLINE="cloud provider '$SPEC'"
 fi
 trap 'docker rm -f cb2-mind-smoke >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down cb2proxy-mind-smoke >/dev/null 2>&1; rm -rf "$OUT"' EXIT
 mkdir -p "$OUT/state/public" "$OUT/count"; chown -R 10003:10003 "$OUT/state"

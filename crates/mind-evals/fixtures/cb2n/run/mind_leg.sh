@@ -53,9 +53,9 @@ CHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "${CB2_RESOLVED_AT:-static}" "$CB2_MODEL" "$LEAK" "$CHECKS" <<'EOF'
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "${CB2_RESOLVED_AT:-static}" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<'EOF'
 import json, sys
-src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, model, leak, checks = sys.argv[1:]
+src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, model, leak, checks, brain_gate = sys.argv[1:]
 ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
@@ -73,7 +73,7 @@ import re
 capture_ok = bool(re.fullmatch(r"[0-9a-f]{64}", bin_sha)) and bool(prov) and bool(re.fullmatch(r"[0-9a-f]{64} files=\d+ bytes=\d+ symlinks=\d+ specials=\d+", tree))
 d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "proxy_accepted_parent": acc, "proxy_refused_parent": ref, "proxy_receipt_ok": receipt_ok, "capture_ok": capture_ok, "symlinks": syml, "specials": special})
 void = ck.get("http_errors") != "0" or ck.get("transport_errors") != "0"
-d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "model": model, "model_ok": ck.get("model_ok") == "true", "key_leak_hits": int(leak),
+d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "model": model, "model_ok": ck.get("model_ok") == "true", "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
           "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
           "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)), "usage_responses": int(ck.get("usage_n", 0)), "void": void})
 d["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or special > 0 or int(rc) != 0 or int(leak) != 0 or ck.get("model_ok") != "true"

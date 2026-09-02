@@ -1,12 +1,12 @@
 # E.CB2-N — the profiled harness (derived; the frozen `cb2` tree is untouched)
 
 This tree is `fixtures/cb2` at d4febe6 plus exactly the patch recorded in `scratch/cb2n_patch.py`
-(re-derivable: copy cb2, run the patch, diff). It adds `profiles/` (qwen | nim), `run/profile.sh`,
-`run/receipt_checks.py`, the proxy's key injection / response-model tally / usage counts, the
-exclusive upstream allowlist, the key-leak and model-identity disqualifiers, and the void/rerun
-rule. Images: `cb2n-proxy` (this proxy), `cb2-hermes` / `cb2-mind` / `cb2-check` unchanged.
-Under the `qwen` profile every behaviour of the frozen reading is reproduced; the `nim` profile is
-E.CB2-N (ledger row of 2026-09-02).
+(re-derivable: copy cb2, run the patch, diff). It adds `profiles/` (qwen | nim, `.profile` because
+the repository ignores `*.env`), `run/profile.sh`, `run/receipt_checks.py`, the proxy's key
+injection / response-model tally / usage counts, the exclusive upstream allowlist, the key-leak,
+model-identity and brain-gate disqualifiers, and the void/rerun rule. Images: `cb2n-proxy` (this
+proxy), `cb2-hermes` / `cb2-mind` / `cb2-check` unchanged. Under the `qwen` profile every
+behaviour of the frozen reading is reproduced; the `nim` profile is E.CB2-N (ledger, 2026-09-02).
 
 # E.CB2 — three-task exploratory bakeoff, Mind vs Hermes (frozen harness, v3)
 

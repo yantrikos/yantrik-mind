@@ -1052,6 +1052,36 @@ fn code_resume_spec(
     })
 }
 
+/// E.PORT1-B: run a routing future under a deadline, falling back to the deterministic floor.
+///
+/// A timed-out blocking provider call cannot be cancelled from here — it finishes in its own time.
+/// So the one thing that must not happen is silence: `on_timeout` fires exactly once when the budget
+/// is exceeded, and the caller reports that a model request may still be in flight. The abandoned
+/// request still writes its own terminal spend row when it completes, so it is accounted for even
+/// though nothing waits on it.
+pub(crate) async fn bounded_route<F>(
+    routing: F,
+    floor: &'static str,
+    budget: std::time::Duration,
+    on_timeout: impl FnOnce(),
+) -> &'static str
+where
+    F: std::future::Future<Output = &'static str>,
+{
+    match tokio::time::timeout(budget, routing).await {
+        Ok(kind) => kind,
+        Err(_) => {
+            on_timeout();
+            floor
+        }
+    }
+}
+
+/// How long the router may take before the deterministic classification stands. A delegation is an
+/// interactive act: the person who typed it is owed an answer in seconds, and a one-word routing
+/// hint is never worth making them wait longer than this.
+pub(crate) const ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl super::ConversationEngine {
     /// Which executors this box can actually run right now.
     fn available_kinds(&self) -> Vec<&'static str> {
@@ -1410,16 +1440,40 @@ impl super::ConversationEngine {
                 }
             };
         }
-        let kind = self.route(&task).await;
-        // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
-        let runnable = match kind {
+        // E.PORT1-B — THE BOARD FIRST, THE MODEL SECOND.
+        //
+        // This used to await `route(&task)` before minting an id or writing a row. `route` calls a
+        // model, and when every call to that provider was rejected the call never returned: no row
+        // was ever written, `ym jobs` and /api/tasks listed nothing, and a job that had been
+        // accepted sat invisible for thirty minutes. The delegation was not slow; it had not been
+        // born. So the deterministic classification decides what this job IS, the board learns
+        // about it immediately, and the model is only ever asked to REFINE that — under a deadline.
+        let floor = classify(&task);
+        let runnable_kind = |k: &str| match k {
             "code" => self.coder.is_some(),
             "page" => self.recipes.is_some(),
             _ => self.researcher.is_some(),
         };
-        if !runnable {
-            return format!("(the {kind} executor isn't configured on this box)");
+        // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
+        if !runnable_kind(floor) {
+            return format!("(the {floor} executor isn't configured on this box)");
         }
+        // The budget is a field so a test can drive this timeout path in milliseconds instead of
+        // making every suite run wait out a human-scale one.
+        let budget = self.route_budget;
+        let refined = bounded_route(self.route(&task), floor, budget, || {
+            eprintln!(
+                "[delegate] routing exceeded {budget:?} — using the deterministic kind '{floor}'; \
+                 the routing model request may still be in flight and will write its own spend row"
+            );
+        })
+        .await;
+        // A refinement is only accepted when its executor exists; otherwise the floor stands.
+        let kind = if runnable_kind(refined) {
+            refined
+        } else {
+            floor
+        };
         if !self.try_acquire_bg(3) {
             return "(the job board is full — a few delegations are already running; `ym jobs` to see them)".to_string();
         }

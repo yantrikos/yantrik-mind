@@ -96,6 +96,8 @@ mod ecb2f_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
+mod eport1b_tests;
+#[cfg(test)]
 mod l1d_tests;
 #[cfg(test)]
 mod l4_0_tests;
@@ -4818,6 +4820,10 @@ pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
     persona: String,
+    /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
+    /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
+    /// of making every suite run wait out a production-sized budget.
+    route_budget: std::time::Duration,
     /// How many recent raw messages to thread in (≈10 per side).
     recent_window: usize,
     /// Web fetcher — when set, a URL in a message is browsed and grounded (read-only, untrusted).
@@ -5039,6 +5045,7 @@ impl ConversationEngine {
             pending: Mutex::new(None),
             pending_question: Mutex::new(None),
             recipes: None,
+            route_budget: crate::delegate::ROUTE_BUDGET,
             researcher: None,
             sandbox: None,
             coder: None,
@@ -5384,6 +5391,12 @@ impl ConversationEngine {
     /// Give the mind a code sandbox (isolated, no-network execution of shell/python/rust).
     pub fn with_sandbox(mut self, sandbox: Arc<Sandbox>) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// E.PORT1-B: shorten the delegation router's deadline (tests drive the timeout path with it).
+    pub fn with_route_budget(mut self, budget: std::time::Duration) -> Self {
+        self.route_budget = budget;
         self
     }
 

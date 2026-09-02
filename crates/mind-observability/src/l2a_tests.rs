@@ -133,21 +133,43 @@ fn out_of_range_inputs_are_clamped_not_wrapped() {
 
 #[test]
 fn the_integer_score_agrees_with_the_float_scoring_path() {
-    // The equivalence the co-prereg requires: on the seventeen loop constants at every urgency
-    // multiple of 100, |score/1000 − ScoreAxes::priority()| < 0.001. If these two ever diverge, the
-    // shadow row and the live governor are ranking by different rules.
+    // The equivalence the co-prereg requires: on the full per-mille axis grid in steps of 100, plus
+    // the seventeen named loop constants at every urgency step, |score/1000 − priority| < 0.001.
+    // The first version tested only the named constants while claiming the full grid in its comment.
     let mut worst = 0.0f64;
+    let mut check = |c: AttentionConstants, urg: u64, case: &str| {
+        let integer = attention_score(&c, urg) as f64 / 1000.0;
+        let float = axes_of(&c, urg).priority();
+        let delta = (integer - float).abs();
+        assert!(
+            delta < 0.001,
+            "{case} at urgency {urg}: integer {integer} vs float {float}"
+        );
+        worst = worst.max(delta);
+    };
+
+    for ev in (0..=1000).step_by(100) {
+        for conf in (0..=1000).step_by(100) {
+            for ann in (0..=1000).step_by(100) {
+                for acc in (0..=1000).step_by(100) {
+                    let c = AttentionConstants {
+                        expected_value: ev,
+                        confidence: conf,
+                        annoyance_risk: ann,
+                        acceptance_rate: acc,
+                    };
+                    for urg in (0..=1000).step_by(100) {
+                        check(c, urg, "full grid");
+                    }
+                }
+            }
+        }
+    }
+
     for id in ATTENTION_SCOPE {
         let c = attention_constants(id).expect("in scope");
         for urg in (0..=1000).step_by(100) {
-            let integer = attention_score(&c, urg) as f64 / 1000.0;
-            let float = axes_of(&c, urg).priority();
-            let delta = (integer - float).abs();
-            assert!(
-                delta < 0.001,
-                "{id:?} at urgency {urg}: integer {integer} vs float {float}"
-            );
-            worst = worst.max(delta);
+            check(c, urg, &format!("{id:?}"));
         }
     }
     assert!(worst < 0.001, "worst divergence {worst}");

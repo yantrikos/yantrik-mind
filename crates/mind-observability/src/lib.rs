@@ -4953,6 +4953,158 @@ impl LoopId {
     }
 }
 
+// ── L2-A: the attention policy's arithmetic (attention-policy-v1) ────────────────────────────
+//
+// L2 asks a question the mind has never been able to answer: of everything that was due on one
+// wake, which would it have CHOSEN? This is the arithmetic half — pure, exact, and frozen by the
+// co-preregistration before any evidence exists. It computes nothing about what to do; it ranks
+// what was already due, in shadow, so a later row can compare that ranking with what the timers
+// actually did.
+//
+// Integers, not floats, for one reason: this number goes into an append-only ledger that two agents
+// read independently. `ScoreAxes::priority` is f64 and its value depends on the order the multiplies
+// happen; a per-mille integer with saturating operations is the same on both sides of any review.
+// The equivalence with the f64 path is asserted on a grid rather than assumed.
+
+/// The policy version. Every constant below is a prior guess fixed BEFORE evidence; changing any of
+/// them is a new version and a new ledger row, never an edit of this one.
+#[cfg(test)]
+mod l2a_tests;
+
+pub const ATTENTION_POLICY: &str = "attention-policy-v1";
+
+/// The four per-loop constants, per mille.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttentionConstants {
+    pub expected_value: u64,
+    pub confidence: u64,
+    pub annoyance_risk: u64,
+    pub acceptance_rate: u64,
+}
+
+/// The frozen scope: the seventeen loops L2 ranks, in the order that breaks ties. A loop outside
+/// this list has no constants and is never ranked — silence about it is deliberate, not an omission.
+pub const ATTENTION_SCOPE: [LoopId; 17] = [
+    LoopId::Dmn,
+    LoopId::Knock,
+    LoopId::Digest,
+    LoopId::Ask,
+    LoopId::Patterns,
+    LoopId::HomeWatch,
+    LoopId::Resolve,
+    LoopId::ProfileRefresh,
+    LoopId::Family,
+    LoopId::FollowUp,
+    LoopId::PriceWatch,
+    LoopId::MemberBeat,
+    LoopId::Ics,
+    LoopId::LeaseSweep,
+    LoopId::MailSweep,
+    LoopId::Whois,
+    LoopId::TraditionPrep,
+];
+
+/// The frozen constant table (ev / conf / ann / acc, per mille). `None` means out of scope.
+pub fn attention_constants(loop_id: LoopId) -> Option<AttentionConstants> {
+    let (ev, conf, ann, acc) = match loop_id {
+        LoopId::Knock => (900, 700, 400, 600),
+        LoopId::Dmn => (600, 600, 300, 500),
+        LoopId::Digest => (700, 700, 300, 600),
+        LoopId::Ask => (500, 500, 500, 400),
+        LoopId::Patterns => (600, 500, 400, 500),
+        LoopId::HomeWatch => (800, 800, 300, 700),
+        LoopId::Resolve => (300, 900, 0, 1000),
+        LoopId::ProfileRefresh => (200, 900, 0, 1000),
+        LoopId::Family => (700, 700, 300, 600),
+        LoopId::FollowUp => (800, 800, 400, 700),
+        LoopId::PriceWatch => (600, 800, 300, 600),
+        LoopId::MemberBeat => (300, 900, 0, 1000),
+        LoopId::Ics => (300, 900, 0, 1000),
+        LoopId::LeaseSweep => (200, 900, 0, 1000),
+        LoopId::MailSweep => (700, 600, 300, 600),
+        LoopId::Whois => (500, 600, 600, 400),
+        LoopId::TraditionPrep => (600, 700, 300, 600),
+        _ => return None,
+    };
+    Some(AttentionConstants {
+        expected_value: ev,
+        confidence: conf,
+        annoyance_risk: ann,
+        acceptance_rate: acc,
+    })
+}
+
+/// Urgency for a loop on a cadence: how far past its period it is, as a fraction of that period,
+/// capped at one period late. A loop that is not yet due scores zero rather than negative, because
+/// `saturating_sub` floors at zero — which is also why a clock that moved backwards cannot produce
+/// a bogus urgency.
+pub fn window_urgency(now_ms: u64, last_ms: u64, period_ms: u64) -> u64 {
+    let overdue = now_ms.saturating_sub(last_ms).saturating_sub(period_ms);
+    (overdue.saturating_mul(1000) / period_ms.max(1)).min(1000)
+}
+
+/// Urgency for the knock, whose gate is an idle stretch rather than a cadence.
+pub fn idle_urgency(idle_elapsed_ms: u64, idle_required_ms: u64) -> u64 {
+    let over = idle_elapsed_ms.saturating_sub(idle_required_ms);
+    (over.saturating_mul(1000) / idle_required_ms.max(1)).min(1000)
+}
+
+/// The exact integer priority, per mille, range [0, 2000].
+///
+/// `num = ev × conf × (1000 + urg) × (2000 − ann) × (1000 + acc)`, left to right, saturating at
+/// every step. Every input is clamped to [0, 1000] first, so the true maximum is
+/// 1000 × 1000 × 2000 × 2000 × 2000 = 8 × 10^15, comfortably below u64::MAX: the saturation can
+/// never fire, and `attention_score_bound_is_unreachable` asserts exactly that rather than trusting
+/// the arithmetic in a comment. (The co-preregistration first wrote this bound as 8 × 10^18; the
+/// correction row records the real figure, and this is the code that agrees with the correction.)
+pub fn attention_score(c: &AttentionConstants, urgency: u64) -> u64 {
+    let ev = c.expected_value.min(1000);
+    let conf = c.confidence.min(1000);
+    let ann = c.annoyance_risk.min(1000);
+    let acc = c.acceptance_rate.min(1000);
+    let urg = urgency.min(1000);
+    let num = ev
+        .saturating_mul(conf)
+        .saturating_mul(1000 + urg)
+        .saturating_mul(2000 - ann)
+        .saturating_mul(1000 + acc);
+    num / 4_000_000_000_000
+}
+
+/// One ranked opportunity on one wake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttentionCandidate {
+    pub loop_id: LoopId,
+    pub score: u64,
+    /// When this loop last ran; the final tie-break, so the longest-waiting one wins.
+    pub last_ms: u64,
+}
+
+impl AttentionCandidate {
+    /// The floor: below one per mille there is nothing to rank.
+    pub fn ranked(&self) -> bool {
+        self.score >= 1
+    }
+}
+
+/// Rank a wake's candidates by the frozen rule: higher score first, then the scope order, then the
+/// longest wait. Total and deterministic — two readers of the same ledger row must be able to
+/// recompute the same order, so nothing here may depend on hashing or insertion order.
+pub fn attention_rank(candidates: &mut [AttentionCandidate]) {
+    let scope_index = |id: LoopId| {
+        ATTENTION_SCOPE
+            .iter()
+            .position(|s| *s == id)
+            .unwrap_or(usize::MAX)
+    };
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| scope_index(a.loop_id).cmp(&scope_index(b.loop_id)))
+            .then_with(|| a.last_ms.cmp(&b.last_ms))
+    });
+}
+
 /// L1d: a stable 64-bit key for an opportunity that is identified by a string (a support
 /// nudge's event key) — the first eight bytes of its SHA-256, so the ledger carries no name.
 pub fn opportunity_key_digest(s: &str) -> u64 {

@@ -221,20 +221,13 @@ impl super::ConversationEngine {
 
     /// Resolve recent pending predictions: the user replying within the window = engaged; the
     /// stale-resolver calling with false = ignored. Mirrors the world-model resolution.
+    ///
+    /// E.P3 (corrected): the tick pass (`engaged == false`) may only retire rows whose window has
+    /// RUN OUT. The old predicate marked a row `ignored` seconds after its send.
     pub async fn ledger_resolve(&self, engaged: bool) {
         let now = chrono::Utc::now().timestamp_millis();
         let mut l = self.ledger().await;
-        let mut changed = false;
-        for e in l.iter_mut().rev().take(12) {
-            if e["outcome"].as_str() == Some("pending") {
-                let age = now - e["ts"].as_i64().unwrap_or(0);
-                if age < 90 * 60_000 {
-                    e["outcome"] = serde_json::json!(if engaged { "engaged" } else { "ignored" });
-                    changed = true;
-                }
-            }
-        }
-        if changed {
+        if resolve_pace_rows(&mut l, now, engaged) {
             self.save_ledger(&l).await;
         }
     }
@@ -330,6 +323,119 @@ pub(crate) fn evidence_used(evidence: &str, reply: &str) -> (bool, f64) {
     let shared = ev.iter().filter(|w| rp.contains(*w)).count();
     let share = shared as f64 / ev.len() as f64;
     (shared >= 3 && share >= 0.25, share)
+}
+
+/// The pace resolver's one rule, pure so the clock can be injected. Over the last 12 rows:
+/// a `pending` row with a VALID timestamp (not in the future) and `age >= 90 min` is `ignored`
+/// on either pass; on the user-engaged pass a valid row with `0 <= age < 90 min` is `engaged`;
+/// a future-dated or unreadable timestamp stays `pending` (fail closed). Returns whether any
+/// row changed, so a second pass over settled rows is a no-op.
+pub(crate) fn resolve_pace_rows(
+    rows: &mut [serde_json::Value],
+    now_ms: i64,
+    engaged: bool,
+) -> bool {
+    const WINDOW_MS: i64 = 90 * 60_000;
+    let mut changed = false;
+    for e in rows.iter_mut().rev().take(12) {
+        if e["outcome"].as_str() != Some("pending") {
+            continue;
+        }
+        let Some(ts) = e["ts"].as_i64() else {
+            continue;
+        };
+        // Fail closed on anything the arithmetic cannot vouch for: a future stamp, a negative
+        // clock, or a value so extreme the subtraction would overflow.
+        if ts < 0 || now_ms < 0 {
+            continue;
+        }
+        let Some(age) = now_ms.checked_sub(ts) else {
+            continue;
+        };
+        if age < 0 {
+            continue;
+        }
+        let outcome = if age >= WINDOW_MS {
+            Some("ignored")
+        } else if engaged {
+            Some("engaged")
+        } else {
+            None
+        };
+        if let Some(outcome) = outcome {
+            e["outcome"] = serde_json::json!(outcome);
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod pace_resolver_tests {
+    use super::resolve_pace_rows;
+
+    fn row(ts: i64) -> serde_json::Value {
+        serde_json::json!({ "ts": ts, "domain": "digest", "what": "x", "outcome": "pending" })
+    }
+    fn outcome(v: &serde_json::Value) -> &str {
+        v["outcome"].as_str().unwrap()
+    }
+    const W: i64 = 90 * 60_000;
+
+    /// E.P3: the seven preregistered cases.
+    #[test]
+    fn the_tick_pass_retires_only_windows_that_ran_out_and_the_engaged_pass_grades_the_open_ones() {
+        // false at 89m59.999s stays pending.
+        let mut rows = vec![row(0)];
+        assert!(!resolve_pace_rows(&mut rows, W - 1, false));
+        assert_eq!(outcome(&rows[0]), "pending");
+        // false at exactly 90m becomes ignored.
+        assert!(resolve_pace_rows(&mut rows, W, false));
+        assert_eq!(outcome(&rows[0]), "ignored");
+        // true inside the window becomes engaged.
+        let mut rows = vec![row(1_000)];
+        assert!(resolve_pace_rows(&mut rows, 1_000 + W / 2, true));
+        assert_eq!(outcome(&rows[0]), "engaged");
+        // true at the boundary becomes ignored (the window had run out before the reply).
+        let mut rows = vec![row(1_000)];
+        assert!(resolve_pace_rows(&mut rows, 1_000 + W, true));
+        assert_eq!(outcome(&rows[0]), "ignored");
+        let mut rows = vec![row(1_000)];
+        assert!(resolve_pace_rows(&mut rows, 1_000 + W + 5, true));
+        assert_eq!(outcome(&rows[0]), "ignored");
+        // Mixed fresh and stale rows resolve independently in one pass.
+        let mut rows = vec![row(0), row(W), row(W + 60_000)];
+        assert!(resolve_pace_rows(&mut rows, W + 90_000, false));
+        assert_eq!(outcome(&rows[0]), "ignored");
+        assert_eq!(outcome(&rows[1]), "pending");
+        assert_eq!(outcome(&rows[2]), "pending");
+        // A second pass is idempotent.
+        assert!(!resolve_pace_rows(&mut rows, W + 90_000, false));
+        // A future-dated row stays pending under both passes; an unreadable timestamp too.
+        let mut rows = vec![
+            row(5_000),
+            serde_json::json!({ "outcome": "pending", "ts": "soon" }),
+        ];
+        assert!(!resolve_pace_rows(&mut rows, 4_000, false));
+        assert!(!resolve_pace_rows(&mut rows, 4_000, true));
+        assert_eq!(outcome(&rows[0]), "pending");
+        assert_eq!(outcome(&rows[1]), "pending");
+        // Extreme numeric timestamps cannot overflow the age arithmetic: they stay pending.
+        let mut rows = vec![row(i64::MIN), row(i64::MAX), row(-1)];
+        assert!(!resolve_pace_rows(&mut rows, W, false));
+        assert!(!resolve_pace_rows(&mut rows, W, true));
+        assert!(rows.iter().all(|r| outcome(r) == "pending"));
+        // A negative clock decides nothing.
+        let mut rows = vec![row(0)];
+        assert!(!resolve_pace_rows(&mut rows, -1, false));
+        assert!(!resolve_pace_rows(&mut rows, i64::MIN, true));
+        assert_eq!(outcome(&rows[0]), "pending");
+        // Only the last twelve rows are considered, as before.
+        let mut rows: Vec<_> = (0..13).map(|_| row(0)).collect();
+        assert!(resolve_pace_rows(&mut rows, W, false));
+        assert_eq!(outcome(&rows[0]), "pending");
+        assert!(rows[1..].iter().all(|r| outcome(r) == "ignored"));
+    }
 }
 
 #[cfg(test)]

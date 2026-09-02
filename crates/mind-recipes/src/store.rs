@@ -9,7 +9,9 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use mind_spec::{bounded_notice_text, sha256_hex, NoticeEvent, NoticeKind, NoticeReceipt};
+use mind_spec::{
+    bounded_notice_text, sha256_hex, EngagementMarker, NoticeEvent, NoticeKind, NoticeReceipt,
+};
 use mind_spec::{
     reduce_replan, GoalCheckpoint, HorizonControlAction, HorizonControlReceipt,
     HorizonLifecycleEvent, HorizonLifecycleReceipt, HorizonRun, OutcomeReceipt, ReplanAcquisition,
@@ -169,6 +171,29 @@ pub struct QueuedNotice {
     pub created_ms: u64,
     pub chars: usize,
     pub text_sha256: String,
+    /// L3c: the engagement marker for an engaging notice.
+    pub marker: Option<EngagementMarker>,
+    /// L3c: the show-by bound for an engaging notice.
+    pub show_by_ms: Option<u64>,
+}
+
+/// L3c: what one acknowledgement established — the durable outbox record the engine commits
+/// from. `shown_now` is false when this lease had already acknowledged (idempotent), in which
+/// case `shown_ms` and `marker` are the ORIGINAL ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeAck {
+    pub shown_now: bool,
+    pub shown_ms: u64,
+    pub kind: NoticeKind,
+    pub marker: Option<EngagementMarker>,
+}
+
+/// L3c: a shown engaging notice, for the reconciler that finishes commits after a crash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownEngagement {
+    pub notice_id: String,
+    pub shown_ms: u64,
+    pub marker: EngagementMarker,
 }
 
 /// L3b: a notice handed to one cockpit under a lease; the text travels here and only here.
@@ -279,6 +304,20 @@ impl RecipeStore {
             CREATE UNIQUE INDEX IF NOT EXISTS mind_notice_shown_once
                 ON mind_notice_receipts(notice_id) WHERE event='shown';",
         )?;
+        // L3c: the engagement marker and the show-by bound, added to the L3b table in place.
+        // Rows queued before this column exist keep validating under the L3b identity formula.
+        let has_marker: bool = conn
+            .prepare("PRAGMA table_info(mind_notices)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|c| c == "engagement_json");
+        if !has_marker {
+            conn.execute_batch(
+                "ALTER TABLE mind_notices ADD COLUMN engagement_json TEXT;
+                 ALTER TABLE mind_notices ADD COLUMN show_by_ms INTEGER;",
+            )?;
+        }
         Self::migrate_run_identity(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -2433,6 +2472,50 @@ struct NoticeRow {
     text_sha256: String,
     chars: i64,
     dedupe_key: String,
+    /// L3c: the canonical engagement marker for an engaging notice; None for the L3b kinds.
+    engagement_json: Option<String>,
+    /// L3c: the instant after which an unshown engaging notice expires; None for the L3b kinds.
+    show_by_ms: Option<i64>,
+}
+
+const NOTICE_COLUMNS: &str =
+    "notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key,engagement_json,show_by_ms";
+
+fn notice_row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoticeRow> {
+    Ok(NoticeRow {
+        notice_id: row.get(0)?,
+        operator_id: row.get(1)?,
+        kind: row.get(2)?,
+        created_ms: row.get(3)?,
+        text: row.get(4)?,
+        text_sha256: row.get(5)?,
+        chars: row.get(6)?,
+        dedupe_key: row.get(7)?,
+        engagement_json: row.get(8)?,
+        show_by_ms: row.get(9)?,
+    })
+}
+
+/// L3c: the identity of an engaging notice binds the marker's digest and the show-by bound.
+fn engaging_notice_id_for(
+    operator_id: &str,
+    kind: NoticeKind,
+    created_ms: u64,
+    text_sha256: &str,
+    dedupe_key: &str,
+    marker_digest: &str,
+    show_by_ms: u64,
+) -> String {
+    format!(
+        "notice:{}",
+        sha256_hex(
+            format!(
+                "v2\\n{operator_id}\\n{}\\n{created_ms}\\n{text_sha256}\\n{dedupe_key}\\n{marker_digest}\\n{show_by_ms}",
+                kind.as_str()
+            )
+            .as_bytes()
+        )
+    )
 }
 
 /// The notice id is the full digest of the row's identity: operator, kind, creation instant,
@@ -2456,9 +2539,19 @@ fn notice_id_for(
     )
 }
 
-/// Bind the row to itself: bounded text, digest, length, kind and the recomputed id. Every read
-/// that hands text to a renderer goes through here, so a mutated row is an error, never a line.
-fn verify_notice_row(row: &NoticeRow, operator_id: &str) -> anyhow::Result<(NoticeKind, u64)> {
+/// A verified notice row's typed facts.
+struct VerifiedNotice {
+    kind: NoticeKind,
+    created_ms: u64,
+    marker: Option<EngagementMarker>,
+    show_by_ms: Option<u64>,
+}
+
+/// Bind the row to itself: bounded text, digest, length, kind and the recomputed id — under the
+/// L3b formula for a plain notice, under the v2 formula (marker digest + show-by) for an engaging
+/// one. Every read that hands text to a renderer goes through here, so a mutated row, a doctored
+/// marker or a moved show-by bound is an error, never a line.
+fn verify_notice_row(row: &NoticeRow, operator_id: &str) -> anyhow::Result<VerifiedNotice> {
     let kind = NoticeKind::parse(&row.kind)
         .ok_or_else(|| anyhow::anyhow!("notice kind failed validation"))?;
     let created_ms = u64::try_from(row.created_ms)
@@ -2469,18 +2562,55 @@ fn verify_notice_row(row: &NoticeRow, operator_id: &str) -> anyhow::Result<(Noti
         || row.text.is_empty()
         || sha256_hex(row.text.as_bytes()) != row.text_sha256
         || row.text.chars().count() != chars
-        || row.notice_id
-            != notice_id_for(
-                operator_id,
-                kind,
-                created_ms,
-                &row.text_sha256,
-                &row.dedupe_key,
-            )
     {
         anyhow::bail!("notice row failed validation");
     }
-    Ok((kind, created_ms))
+    let (marker, show_by_ms) = match (&row.engagement_json, row.show_by_ms) {
+        (None, None) => {
+            if kind.is_engaging()
+                || row.notice_id
+                    != notice_id_for(
+                        operator_id,
+                        kind,
+                        created_ms,
+                        &row.text_sha256,
+                        &row.dedupe_key,
+                    )
+            {
+                anyhow::bail!("notice row failed validation");
+            }
+            (None, None)
+        }
+        (Some(stored), Some(show_by)) => {
+            let marker = EngagementMarker::parse(stored)
+                .ok_or_else(|| anyhow::anyhow!("engagement marker failed validation"))?;
+            let show_by_ms = u64::try_from(show_by)
+                .map_err(|_| anyhow::anyhow!("notice show-by failed validation"))?;
+            if marker.kind != kind
+                || show_by_ms <= created_ms
+                || row.notice_id
+                    != engaging_notice_id_for(
+                        operator_id,
+                        kind,
+                        created_ms,
+                        &row.text_sha256,
+                        &row.dedupe_key,
+                        &marker.digest(),
+                        show_by_ms,
+                    )
+            {
+                anyhow::bail!("engaging notice row failed validation");
+            }
+            (Some(marker), Some(show_by_ms))
+        }
+        _ => anyhow::bail!("engaging notice row failed validation"),
+    };
+    Ok(VerifiedNotice {
+        kind,
+        created_ms,
+        marker,
+        show_by_ms,
+    })
 }
 
 /// L3b: the console notice queue.
@@ -2499,24 +2629,12 @@ impl RecipeStore {
             "ORDER BY created_ms,notice_id"
         };
         let sql = format!(
-            "SELECT notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key
-             FROM mind_notices WHERE operator_id=?1 {order} LIMIT ?2"
+            "SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE operator_id=?1 {order} LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
         let limit = limit.map(|l| l as i64).unwrap_or(-1);
         let rows = stmt
-            .query_map(rusqlite::params![operator_id, limit], |row| {
-                Ok(NoticeRow {
-                    notice_id: row.get(0)?,
-                    operator_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    created_ms: row.get(3)?,
-                    text: row.get(4)?,
-                    text_sha256: row.get(5)?,
-                    chars: row.get(6)?,
-                    dedupe_key: row.get(7)?,
-                })
-            })?
+            .query_map(rusqlite::params![operator_id, limit], notice_row_from)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -2544,33 +2662,25 @@ impl RecipeStore {
         let tx = conn.transaction()?;
         let duplicate: Option<NoticeRow> = tx
             .query_row(
-                "SELECT notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key
-                 FROM mind_notices WHERE dedupe_key=?1 AND operator_id=?2",
+                &format!(
+                    "SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE dedupe_key=?1 AND operator_id=?2"
+                ),
                 rusqlite::params![dedupe_key, operator_id],
-                |row| {
-                    Ok(NoticeRow {
-                        notice_id: row.get(0)?,
-                        operator_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        created_ms: row.get(3)?,
-                        text: row.get(4)?,
-                        text_sha256: row.get(5)?,
-                        chars: row.get(6)?,
-                        dedupe_key: row.get(7)?,
-                    })
-                },
+                notice_row_from,
             )
             .optional()?;
         if let Some(row) = duplicate {
-            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            let verified = verify_notice_row(&row, operator_id)?;
             return Ok(QueuedNotice {
                 fresh: false,
                 notice_id: row.notice_id,
                 operator_id: operator_id.to_string(),
-                kind,
-                created_ms,
+                kind: verified.kind,
+                created_ms: verified.created_ms,
                 chars: row.text.chars().count(),
                 text_sha256: row.text_sha256,
+                marker: verified.marker,
+                show_by_ms: verified.show_by_ms,
             });
         }
         let notice_id = notice_id_for(operator_id, kind, now_ms, &text_sha256, dedupe_key);
@@ -2610,7 +2720,265 @@ impl RecipeStore {
             created_ms: now_ms,
             chars,
             text_sha256,
+            marker: None,
+            show_by_ms: None,
         })
+    }
+
+    /// L3c: queue an ENGAGING notice — one that predicts engagement — with its canonical marker
+    /// and a show-by bound, in one transaction with its `queued` receipt. Refused: a kind that is
+    /// not engaging, a marker of another kind, a bound at or before now, and (for a knock) any
+    /// other knock for this operator on the same UTC day whose verified chain is not terminal —
+    /// at most ONE outstanding knock per day, decided over receipts, not text. A repeated dedupe
+    /// key names the existing notice (`fresh == false`) and writes nothing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_engaging_notice(
+        &self,
+        operator_id: &str,
+        kind: NoticeKind,
+        text: &str,
+        dedupe_key: &str,
+        marker: &EngagementMarker,
+        show_by_ms: u64,
+        now_ms: u64,
+    ) -> anyhow::Result<QueuedNotice> {
+        if !kind.is_engaging() || marker.kind != kind || !marker.validate() {
+            anyhow::bail!("an engaging notice needs a marker of its own kind");
+        }
+        if show_by_ms <= now_ms {
+            anyhow::bail!("an engaging notice needs a show-by bound after now");
+        }
+        if operator_id.is_empty() || dedupe_key.is_empty() || dedupe_key.len() > 200 {
+            anyhow::bail!("notice requires an operator and a bounded dedupe key");
+        }
+        let text = bounded_notice_text(text);
+        if text.is_empty() {
+            anyhow::bail!("notice text is empty after bounding");
+        }
+        let chars = text.chars().count();
+        let text_sha256 = sha256_hex(text.as_bytes());
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let duplicate: Option<NoticeRow> = tx
+            .query_row(
+                &format!(
+                    "SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE dedupe_key=?1 AND operator_id=?2"
+                ),
+                rusqlite::params![dedupe_key, operator_id],
+                notice_row_from,
+            )
+            .optional()?;
+        if let Some(row) = duplicate {
+            let verified = verify_notice_row(&row, operator_id)?;
+            return Ok(QueuedNotice {
+                fresh: false,
+                notice_id: row.notice_id,
+                operator_id: operator_id.to_string(),
+                kind: verified.kind,
+                created_ms: verified.created_ms,
+                chars: row.text.chars().count(),
+                text_sha256: row.text_sha256,
+                marker: verified.marker,
+                show_by_ms: verified.show_by_ms,
+            });
+        }
+        if kind == NoticeKind::Knock {
+            let day = now_ms / 86_400_000;
+            for row in Self::load_notice_rows(&tx, operator_id, false, None)? {
+                let verified = verify_notice_row(&row, operator_id)?;
+                if verified.kind != NoticeKind::Knock || verified.created_ms / 86_400_000 != day {
+                    continue;
+                }
+                let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;
+                let terminal = receipts.last().is_some_and(|r| {
+                    matches!(
+                        r.event,
+                        NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                    )
+                });
+                if !terminal {
+                    anyhow::bail!("one outstanding knock per operator per day");
+                }
+            }
+        }
+        let notice_id = engaging_notice_id_for(
+            operator_id,
+            kind,
+            now_ms,
+            &text_sha256,
+            dedupe_key,
+            &marker.digest(),
+            show_by_ms,
+        );
+        let created_ms = i64::try_from(now_ms)
+            .map_err(|_| anyhow::anyhow!("notice timestamp is out of range"))?;
+        let show_by = i64::try_from(show_by_ms)
+            .map_err(|_| anyhow::anyhow!("notice show-by is out of range"))?;
+        tx.execute(
+            &format!(
+                "INSERT INTO mind_notices ({NOTICE_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"
+            ),
+            rusqlite::params![
+                notice_id,
+                operator_id,
+                kind.as_str(),
+                created_ms,
+                text,
+                text_sha256,
+                chars as i64,
+                dedupe_key,
+                marker.canonical_json(),
+                show_by
+            ],
+        )?;
+        let receipt = NoticeReceipt::issue(
+            notice_id.clone(),
+            operator_id,
+            NoticeEvent::Queued,
+            now_ms,
+            None,
+            None,
+            None,
+        )
+        .ok_or_else(|| anyhow::anyhow!("queued notice receipt has an invalid shape"))?;
+        Self::insert_notice_receipt(&tx, &receipt)?;
+        tx.commit()?;
+        Ok(QueuedNotice {
+            fresh: true,
+            notice_id,
+            operator_id: operator_id.to_string(),
+            kind,
+            created_ms: now_ms,
+            chars,
+            text_sha256,
+            marker: Some(marker.clone()),
+            show_by_ms: Some(show_by_ms),
+        })
+    }
+
+    /// L3c: write the terminal `expired` receipt for every engaging notice of the operator whose
+    /// show-by bound has passed without a `shown` and without a live lease. Idempotent. Called by
+    /// the lease path and by the runner's housekeeping beat, so a cockpit that never returns
+    /// still lets the day's knock slot free up.
+    pub fn sweep_engaging_expiry(&self, operator_id: &str, now_ms: u64) -> anyhow::Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let expired = Self::sweep_expiry_on(&tx, operator_id, now_ms)?;
+        tx.commit()?;
+        Ok(expired)
+    }
+
+    fn sweep_expiry_on(
+        tx: &rusqlite::Transaction<'_>,
+        operator_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<usize> {
+        let mut expired = 0usize;
+        for row in Self::load_notice_rows(tx, operator_id, false, None)? {
+            let verified = verify_notice_row(&row, operator_id)?;
+            let Some(show_by) = verified.show_by_ms else {
+                continue;
+            };
+            if now_ms <= show_by {
+                continue;
+            }
+            let receipts = Self::load_notice_chain(tx, &row.notice_id, operator_id)?;
+            let Some(last) = receipts.last() else {
+                anyhow::bail!("notice without a queued receipt");
+            };
+            let terminal = matches!(
+                last.event,
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+            );
+            let live_lease = last.event == NoticeEvent::Leased
+                && last.lease_until_ms.is_some_and(|until| until > now_ms);
+            if terminal || live_lease {
+                continue;
+            }
+            let receipt = NoticeReceipt::issue(
+                row.notice_id.clone(),
+                operator_id,
+                NoticeEvent::Expired,
+                now_ms,
+                None,
+                None,
+                Some(last.receipt_sha256.clone()),
+            )
+            .ok_or_else(|| anyhow::anyhow!("expired notice receipt has an invalid shape"))?;
+            Self::insert_notice_receipt(tx, &receipt)?;
+            expired += 1;
+        }
+        Ok(expired)
+    }
+
+    /// L3c: the durable outbox — every engaging notice that was SHOWN and whose prediction has
+    /// not yet been marked committed. A completed item (last receipt `committed`) never comes
+    /// back, however old, so the reconciler can neither replay nor cycle.
+    pub fn shown_engagements(&self, operator_id: &str) -> anyhow::Result<Vec<ShownEngagement>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+        for row in Self::load_notice_rows(&conn, operator_id, false, None)? {
+            let verified = verify_notice_row(&row, operator_id)?;
+            let Some(marker) = verified.marker else {
+                continue;
+            };
+            let receipts = Self::load_notice_chain(&conn, &row.notice_id, operator_id)?;
+            if let Some(last) = receipts.last() {
+                if last.event == NoticeEvent::Shown {
+                    out.push(ShownEngagement {
+                        notice_id: row.notice_id,
+                        shown_ms: last.occurred_at_ms,
+                        marker,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// L3c: durable outbox completion — append the `committed` receipt after `shown`. Idempotent:
+    /// an item already completed returns `Ok(false)`; anything else than a shown engaging notice
+    /// is an error, so completion can never be written for a line nobody saw.
+    pub fn mark_engagement_committed(&self, notice_id: &str, now_ms: u64) -> anyhow::Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let row: Option<NoticeRow> = tx
+            .query_row(
+                &format!("SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE notice_id=?1"),
+                [notice_id],
+                notice_row_from,
+            )
+            .optional()?;
+        let Some(row) = row else {
+            anyhow::bail!("no notice matches that id");
+        };
+        let operator_id = row.operator_id.clone();
+        let verified = verify_notice_row(&row, &operator_id)?;
+        if verified.marker.is_none() {
+            anyhow::bail!("only an engaging notice completes an engagement");
+        }
+        let receipts = Self::load_notice_chain(&tx, notice_id, &operator_id)?;
+        let Some(last) = receipts.last() else {
+            anyhow::bail!("notice without a queued receipt");
+        };
+        match last.event {
+            NoticeEvent::Committed => return Ok(false),
+            NoticeEvent::Shown => {}
+            _ => anyhow::bail!("an engagement completes only after it was shown"),
+        }
+        let receipt = NoticeReceipt::issue(
+            notice_id,
+            operator_id.as_str(),
+            NoticeEvent::Committed,
+            now_ms.max(last.occurred_at_ms),
+            None,
+            None,
+            Some(last.receipt_sha256.clone()),
+        )
+        .ok_or_else(|| anyhow::anyhow!("committed notice receipt has an invalid shape"))?;
+        Self::insert_notice_receipt(&tx, &receipt)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Lease up to `limit` unseen notices for one operator, oldest first, each under a fresh
@@ -2628,6 +2996,8 @@ impl RecipeStore {
         }
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        // L3c: an engaging notice past its show-by bound expires before anything is leased.
+        Self::sweep_expiry_on(&tx, operator_id, now_ms)?;
         let rows = Self::load_notice_rows(&tx, operator_id, false, None)?;
         let mut leased = Vec::new();
         for row in rows {
@@ -2636,17 +3006,23 @@ impl RecipeStore {
             }
             // The row and its chain are verified whole before anything is read from them; a
             // forged `shown` row cannot hide a notice, and a mutated text cannot be rendered.
-            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            let verified = verify_notice_row(&row, operator_id)?;
             let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;
             let Some(last) = receipts.last() else {
                 anyhow::bail!("notice without a queued receipt");
             };
-            if last.event == NoticeEvent::Shown {
+            if matches!(
+                last.event,
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+            ) {
                 continue;
             }
             if last.event == NoticeEvent::Leased
                 && last.lease_until_ms.is_some_and(|until| until > now_ms)
             {
+                continue;
+            }
+            if verified.show_by_ms.is_some_and(|show_by| now_ms > show_by) {
                 continue;
             }
             let lease_id = sha256_hex(
@@ -2673,47 +3049,61 @@ impl RecipeStore {
                 notice_id: row.notice_id,
                 lease_id,
                 lease_until_ms,
-                kind,
+                kind: verified.kind,
                 text: row.text,
-                created_ms,
+                created_ms: verified.created_ms,
             });
         }
         tx.commit()?;
         Ok(leased)
     }
 
-    /// Acknowledge a paint: the chain's last receipt must be THIS live lease. `Ok(true)` writes
-    /// the one `shown` receipt; `Ok(false)` means this lease already acknowledged (idempotent);
-    /// any other shape — unknown notice, not leased, foreign or expired lease — is an error.
+    /// Acknowledge a paint: the chain's last receipt must be THIS live lease. `shown_now` is true
+    /// when this call wrote the one `shown` receipt; false when this same lease had already
+    /// acknowledged — then the ORIGINAL `shown_ms` and marker come back, so an interrupted commit
+    /// can be finished without moving the clock. Any other shape — unknown notice, not leased,
+    /// foreign or expired lease, an expired notice — is an error.
     pub fn ack_notice_shown(
         &self,
         notice_id: &str,
         lease_id: &str,
         now_ms: u64,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<NoticeAck> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
-        let operator_id: Option<String> = tx
+        let row: Option<NoticeRow> = tx
             .query_row(
-                "SELECT operator_id FROM mind_notices WHERE notice_id=?1",
+                &format!("SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE notice_id=?1"),
                 [notice_id],
-                |row| row.get(0),
+                notice_row_from,
             )
             .optional()?;
-        let Some(operator_id) = operator_id else {
+        let Some(row) = row else {
             anyhow::bail!("no notice matches that id");
         };
+        let operator_id = row.operator_id.clone();
+        let verified = verify_notice_row(&row, &operator_id)?;
         let receipts = Self::load_notice_chain(&tx, notice_id, &operator_id)?;
         let Some(last) = receipts.last() else {
             anyhow::bail!("notice without a queued receipt");
         };
         match last.event {
-            NoticeEvent::Shown => {
-                if last.lease_id.as_deref() == Some(lease_id) {
-                    return Ok(false);
+            NoticeEvent::Shown | NoticeEvent::Committed => {
+                let shown = receipts
+                    .iter()
+                    .find(|r| r.event == NoticeEvent::Shown)
+                    .unwrap_or(last);
+                if shown.lease_id.as_deref() == Some(lease_id) {
+                    return Ok(NoticeAck {
+                        shown_now: false,
+                        shown_ms: shown.occurred_at_ms,
+                        kind: verified.kind,
+                        marker: verified.marker,
+                    });
                 }
                 anyhow::bail!("notice already shown under another lease");
             }
+            NoticeEvent::Expired => anyhow::bail!("notice expired unshown"),
             NoticeEvent::Queued => anyhow::bail!("notice is not leased"),
             NoticeEvent::Leased => {
                 if last.lease_id.as_deref() != Some(lease_id) {
@@ -2736,7 +3126,12 @@ impl RecipeStore {
         .ok_or_else(|| anyhow::anyhow!("shown notice receipt has an invalid shape"))?;
         Self::insert_notice_receipt(&tx, &receipt)?;
         tx.commit()?;
-        Ok(true)
+        Ok(NoticeAck {
+            shown_now: true,
+            shown_ms: now_ms,
+            kind: verified.kind,
+            marker: verified.marker,
+        })
     }
 
     /// Every notice for an operator, newest first, each with its verified chain. A corrupt chain
@@ -2750,17 +3145,19 @@ impl RecipeStore {
         let rows = Self::load_notice_rows(&conn, operator_id, true, Some(limit))?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            let verified = verify_notice_row(&row, operator_id)?;
             let receipts = Self::load_notice_chain(&conn, &row.notice_id, operator_id)?;
             out.push(NoticeHistoryEntry {
                 notice: QueuedNotice {
                     fresh: false,
                     notice_id: row.notice_id,
                     operator_id: operator_id.to_string(),
-                    kind,
-                    created_ms,
+                    kind: verified.kind,
+                    created_ms: verified.created_ms,
                     chars: row.text.chars().count(),
                     text_sha256: row.text_sha256,
+                    marker: verified.marker,
+                    show_by_ms: verified.show_by_ms,
                 },
                 receipts,
             });
@@ -2784,7 +3181,10 @@ impl RecipeStore {
             let Some(last) = receipts.last() else {
                 anyhow::bail!("notice without a queued receipt");
             };
-            if last.event == NoticeEvent::Shown {
+            if matches!(
+                last.event,
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+            ) {
                 continue;
             }
             unseen += 1;
@@ -2846,7 +3246,11 @@ impl RecipeStore {
                 || (opens != (receipt.event == NoticeEvent::Queued))
                 || receipt.previous_receipt_sha256.as_deref()
                     != previous.map(|p| p.receipt_sha256.as_str())
-                || previous.is_some_and(|p| p.event == NoticeEvent::Shown)
+                || previous.is_some_and(|p| {
+                    matches!(p.event, NoticeEvent::Expired | NoticeEvent::Committed)
+                })
+                || (previous.is_some_and(|p| p.event == NoticeEvent::Shown)
+                    && receipt.event != NoticeEvent::Committed)
             {
                 anyhow::bail!("notice receipt chain failed validation");
             }
@@ -2862,7 +3266,9 @@ impl RecipeStore {
                             NoticeEvent::Leased => prev
                                 .lease_until_ms
                                 .is_some_and(|until| receipt.occurred_at_ms >= until),
-                            NoticeEvent::Shown => false,
+                            NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed => {
+                                false
+                            }
                         },
                         NoticeEvent::Shown => {
                             prev.event == NoticeEvent::Leased
@@ -2871,6 +3277,16 @@ impl RecipeStore {
                                     .lease_until_ms
                                     .is_some_and(|until| receipt.occurred_at_ms < until)
                         }
+                        // Expired follows queued, or a lease that had already run out.
+                        NoticeEvent::Expired => match prev.event {
+                            NoticeEvent::Queued => true,
+                            NoticeEvent::Leased => prev
+                                .lease_until_ms
+                                .is_some_and(|until| receipt.occurred_at_ms >= until),
+                            _ => false,
+                        },
+                        // Committed follows shown and nothing else.
+                        NoticeEvent::Committed => prev.event == NoticeEvent::Shown,
                     };
                 if !semantic_ok {
                     anyhow::bail!("notice receipt chain failed transition validation");
@@ -2911,6 +3327,29 @@ impl RecipeStore {
             [notice_id],
             |row| row.get(0),
         )?)
+    }
+
+    /// Test-only (L3c): move an engaging notice's show-by bound under a still-valid chain.
+    #[cfg(test)]
+    pub(crate) fn shift_show_by_for_test(&self, notice_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_notices SET show_by_ms=show_by_ms+1 WHERE notice_id=?1",
+            [notice_id],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only (L3c): smuggle a well-formed marker onto a plain (L3b-identity) row.
+    #[cfg(test)]
+    pub(crate) fn smuggle_marker_for_test(&self, notice_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let marker = EngagementMarker::ask("name", 300).expect("valid marker");
+        conn.execute(
+            "UPDATE mind_notices SET engagement_json=?2, show_by_ms=9999999999 WHERE notice_id=?1",
+            rusqlite::params![notice_id, marker.canonical_json()],
+        )?;
+        Ok(())
     }
 
     /// Test-only (L3b): a second `shown` row by raw write must be refused by the store's index.

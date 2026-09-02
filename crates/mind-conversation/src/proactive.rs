@@ -37,7 +37,7 @@ mod knock_disposition_tests {
     async fn an_evaluation_with_no_packets_leaves_one_shadow_and_one_joined_disposition() {
         let (conv, dir) = engine("nopk");
         assert!(
-            conv.maybe_knock().await.is_none(),
+            conv.prepare_knock().await.is_none(),
             "no packet ⇒ no knock (unchanged)"
         );
         let events = conv
@@ -70,7 +70,11 @@ mod knock_disposition_tests {
     /// the set of dispositions is exactly the preregistered nine; the judgment ref is untouched.
     #[test]
     fn every_exit_after_the_shadow_carries_a_disposition_and_the_ref_is_byte_identical() {
-        let start = SRC.find(concat!("pub async fn ", "maybe_knock(")).unwrap();
+        // L3c: the evaluation is `prepare_knock`; the sent branch is `commit_knock`; both precede
+        // `knock_reply` in this file, so the window covers the split as it covered the whole.
+        let start = SRC
+            .find(concat!("pub async fn ", "prepare_knock("))
+            .unwrap();
         let end = start
             + SRC[start..]
                 .find(concat!("pub async fn ", "knock_reply("))
@@ -95,7 +99,7 @@ mod knock_disposition_tests {
         assert_eq!(exits, 3, "no_packets, candidate-none, blocked");
         assert!(
             after.contains(
-                "record_knock_disposition(&eval_id, now, \"sent\", Some(!unreceptive), Some(sref))"
+                "record_knock_disposition(&c.eval_id, sent_ms, \"sent\", c.receptive, Some(sref))"
             ),
             "the sent branch records with the packet ref"
         );
@@ -114,7 +118,7 @@ mod knock_disposition_tests {
         // muted / daily_cap / unreceptive / below_band come from Silence::as_str with '-' → '_'.
         assert!(after.contains("reason.as_str().replace('-', \"_\")"));
         assert!(
-            after.contains("let sref = format!(\"knock:{pkt_id}\");"),
+            after.contains("let sref = format!(\"knock:{}\", c.pkt_id);"),
             "the judgment ref is byte-identical — knock_reply rebuilds it"
         );
         // The evaluation begins after the precheck: the off-return precedes the shadow row.
@@ -238,6 +242,58 @@ mod dmn_log_tests {
         assert_eq!(read[0].message, "[dmn] [redacted-secret]");
         assert!(!read[0].message.contains("EXAMPLE"));
     }
+}
+
+/// L3c: one outstanding proactive send, keyed by the claim's ref.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingSend {
+    pub sent_ms: i64,
+    pub r#ref: String,
+    pub surface: String,
+}
+
+impl PendingSend {
+    fn legacy(sent_ms: i64) -> Self {
+        Self {
+            sent_ms,
+            r#ref: sent_ms.to_string(),
+            surface: "telegram".into(),
+        }
+    }
+    fn from_value(v: &serde_json::Value) -> Option<Self> {
+        if let Some(n) = v.as_i64() {
+            return Some(Self::legacy(n));
+        }
+        serde_json::from_value(v.clone()).ok()
+    }
+}
+
+/// L3c: a knock decided but not yet committed — the facts the commit needs and the render uses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnockCandidate {
+    pub pkt_id: String,
+    pub band: u8,
+    pub p: f64,
+    pub eval_id: String,
+    pub trigger: String,
+    pub title: String,
+    /// The receptivity read at decision time; unknown when committed from a marker.
+    pub receptive: Option<bool>,
+}
+
+impl KnockCandidate {
+    /// The spoken line, rendered from the decided band and the packet's own words.
+    pub fn render(&self) -> String {
+        crate::knock::render(self.band, &self.trigger, &self.title)
+    }
+}
+
+/// L3c: a question prepared but not yet armed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskCandidate {
+    /// The slot the answer fills; `None` for an open follow-up that arms nothing.
+    pub slot: Option<String>,
+    pub text: String,
 }
 
 impl super::ConversationEngine {
@@ -831,10 +887,12 @@ impl super::ConversationEngine {
     /// for the poll loop's per-tick `spoke` flag, so a pattern does not pile onto a fresh digest.
     pub async fn spoke_recently(&self, within_ms: i64) -> bool {
         let now = chrono::Utc::now().timestamp_millis();
-        self.proactive_pending()
-            .await
-            .iter()
-            .any(|sent| now.saturating_sub(*sent) <= within_ms)
+        self.proactive_pending().await.iter().any(|sent| {
+            sent.sent_ms >= 0
+                && now
+                    .checked_sub(sent.sent_ms)
+                    .is_some_and(|age| age >= 0 && age <= within_ms)
+        })
     }
 
     /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
@@ -845,7 +903,7 @@ impl super::ConversationEngine {
     /// `judgment_trend` something to measure. Returns None to stay silent, which is the common case.
     ///
     /// Silence here is not a failure mode; it is the design. See `knock` for the full rationale.
-    pub async fn maybe_knock(&self) -> Option<String> {
+    pub async fn prepare_knock(&self) -> Option<KnockCandidate> {
         if std::env::var("YM_KNOCK")
             .map(|v| v == "off")
             .unwrap_or(false)
@@ -983,37 +1041,64 @@ impl super::ConversationEngine {
             );
             return None;
         }
-        self.funnel_bump("knock:sent").await;
         let band = band_opt?;
         let title = pkt
             .get("title")
             .and_then(|x| x.as_str())
-            .unwrap_or("a prepared option");
+            .unwrap_or("a prepared option")
+            .to_string();
         let trigger = pkt
             .get("reason")
             .and_then(|x| x.as_str())
-            .unwrap_or("something you asked me to watch");
+            .unwrap_or("something you asked me to watch")
+            .to_string();
         let pkt_id = pkt
             .get("id")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        // ACCOUNTABILITY: commit the prediction BEFORE the message goes out. `knock:<pkt>` is the
-        // grading ref the reply handler resolves.
-        let sref = format!("knock:{pkt_id}");
-        self.judgment_log(
-            "knock",
-            "engagement",
-            &format!("recipient engages with the {band}% knock within 90m"),
-            p_engage,
-            now + 90 * 60_000,
-            &sref,
-        )
-        .await;
+        Some(KnockCandidate {
+            pkt_id,
+            band,
+            p: p_engage,
+            eval_id,
+            trigger,
+            title,
+            receptive: Some(!unreceptive),
+        })
+    }
+
+    /// L3c: the knock's commits — the one claim (`knock:<pkt>`), the day's cap, the pending reply
+    /// slot and the `sent` disposition — with the due clock from `sent_ms`. Telegram calls it
+    /// only AFTER the API accepted the send; the console calls it at `shown`. A line that was
+    /// never displayed earns nothing and arms nothing. Idempotent by the claim ref: a second call
+    /// for the same packet writes nothing and returns false.
+    pub async fn commit_knock(&self, c: &KnockCandidate, sent_ms: i64, surface: &str) -> bool {
+        let _serial = self.engagement_lock.lock().await;
+        self.commit_knock_locked(c, sent_ms, surface).await
+    }
+
+    async fn commit_knock_locked(&self, c: &KnockCandidate, sent_ms: i64, surface: &str) -> bool {
+        let sref = format!("knock:{}", c.pkt_id);
+        let committed = self
+            .commit_engagement_locked(
+                "knock",
+                &sref,
+                surface,
+                sent_ms,
+                c.p,
+                &format!("recipient engages with the {}% knock within 90m", c.band),
+            )
+            .await;
+        if !committed {
+            return false;
+        }
+        self.funnel_bump("knock:sent").await;
+        let today = local_now().format("%Y-%m-%d").to_string();
         let _ = self.memory.profile_set("knock_last_date", &today).await;
-        let _ = self.memory.profile_set("knock_pending", &pkt_id).await;
-        self.record_knock_disposition(&eval_id, now, "sent", Some(!unreceptive), Some(sref));
-        Some(crate::knock::render(band, trigger, title))
+        let _ = self.memory.profile_set("knock_pending", &c.pkt_id).await;
+        self.record_knock_disposition(&c.eval_id, sent_ms, "sent", c.receptive, Some(sref));
+        true
     }
 
     /// Handle a reply to an outstanding knock: deliver the work, defer, or close the class. Grades
@@ -1030,6 +1115,8 @@ impl super::ConversationEngine {
         let reply = crate::knock::KnockReply::parse(msg)?;
         let sref = format!("knock:{pending}");
         let _ = self.memory.profile_set("knock_pending", "").await;
+        // L3c: the reply is the knock's one grade; the resolver must not grade it again.
+        self.retire_pending_ref(&sref).await;
         match reply {
             crate::knock::KnockReply::ShowIt => {
                 self.judgment_grade(&sref, true).await; // the interruption was earned
@@ -1053,23 +1140,27 @@ impl super::ConversationEngine {
     /// it goes quiet once it knows enough (never pesters). The caller gates it to ≤1/period + idle +
     /// quiet-hours. Name/purpose answers are captured directly (`handle_turn` → `capture_onboard`);
     /// later answers flow back as ordinary chat → consolidation → typed beliefs.
-    pub async fn proactive_ask(&self) -> Option<String> {
+    pub async fn prepare_ask(&self) -> Option<AskCandidate> {
         // Don't stack a new question while we're still awaiting an answer to the last one.
         if self.pending_slot().await.is_some() {
             return None;
         }
         let name = self.memory.profile_get("name").await.ok().flatten();
         if name.is_none() {
-            self.set_pending_slot(Some("name")).await;
-            return Some("Before we really get going — what should I call you?".to_string());
+            return Some(AskCandidate {
+                slot: Some("name".into()),
+                text: "Before we really get going — what should I call you?".to_string(),
+            });
         }
         let purpose = self.memory.profile_get("purpose").await.ok().flatten();
         if purpose.is_none() {
-            self.set_pending_slot(Some("purpose")).await;
-            return Some(format!(
-                "What would you most like me to help you with, {}? Knowing your main goal lets me be genuinely useful instead of generic.",
-                name.unwrap_or_default()
-            ));
+            return Some(AskCandidate {
+                slot: Some("purpose".into()),
+                text: format!(
+                    "What would you most like me to help you with, {}? Knowing your main goal lets me be genuinely useful instead of generic.",
+                    name.unwrap_or_default()
+                ),
+            });
         }
         // INTERESTS stage — actively learn the user's world (hobbies, what they follow, the people and
         // companies they care about) so grounding, gifts, and the entity-sim have real material. Asks one
@@ -1079,9 +1170,10 @@ impl super::ConversationEngine {
             .iter()
             .find(|(k, _)| !covered.iter().any(|c| c == k))
         {
-            self.set_pending_slot(Some(&format!("interest:{key}")))
-                .await;
-            return Some((*q).to_string());
+            return Some(AskCandidate {
+                slot: Some(format!("interest:{key}")),
+                text: (*q).to_string(),
+            });
         }
         // OPEN stage — purpose-grounded follow-ups, but taper once the brain knows enough about you.
         let enough: usize = std::env::var("YM_ASK_ENOUGH")
@@ -1106,7 +1198,34 @@ impl super::ConversationEngine {
         if known >= enough {
             return None;
         }
-        self.purpose_followup(&purpose.unwrap_or_default()).await
+        self.purpose_followup(&purpose.unwrap_or_default())
+            .await
+            .map(|text| AskCandidate { slot: None, text })
+    }
+
+    /// L3c: arm the question. Only a delivered (Telegram) or SHOWN (console) ask may arm it;
+    /// a queued, leased, expired or failed one never swallows an ordinary turn as its answer.
+    pub async fn commit_ask(&self, c: &AskCandidate) {
+        if let Some(slot) = &c.slot {
+            self.set_pending_slot(Some(slot)).await;
+        }
+    }
+
+    /// The knock for a caller that DISPLAYS SYNCHRONOUSLY (a console verb, a fixture): prepare,
+    /// commit, render — the commit and the display are one step. The Telegram poll loop does NOT
+    /// use this: it prepares, sends, and commits only after the API accepted the line.
+    pub async fn maybe_knock(&self) -> Option<String> {
+        let candidate = self.prepare_knock().await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        self.commit_knock(&candidate, now, "telegram").await;
+        Some(candidate.render())
+    }
+
+    /// The ask for a caller that displays synchronously: prepare, arm, return the line.
+    pub async fn proactive_ask(&self) -> Option<String> {
+        let candidate = self.prepare_ask().await?;
+        self.commit_ask(&candidate).await;
+        Some(candidate.text)
     }
 
     /// The in-flight get-to-know-you question, PERSISTED in the substrate. This was an in-memory
@@ -1239,18 +1358,6 @@ impl super::ConversationEngine {
     /// the millisecond happened not to tick over (see ledger E.P2).
     pub async fn note_proactive_sent(&self) -> String {
         let now = chrono::Utc::now().timestamp_millis();
-        let mut pend = self.proactive_pending().await;
-        pend.push(now);
-        // Bounded: the resolver retires entries within 90 minutes, so this holds a handful. The cap
-        // exists so a resolver outage cannot grow it without limit.
-        if pend.len() > 64 {
-            let cut = pend.len() - 64;
-            pend.drain(..cut);
-        }
-        self.set_proactive_pending(&pend).await;
-        // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
-        // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
-        // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
         let p_raw = self
             .memory
             .proactive_receptivity()
@@ -1259,43 +1366,269 @@ impl super::ConversationEngine {
             .flatten()
             .unwrap_or(0.5);
         let p = self.shrunk_judgment_p("engagement", p_raw).await;
-        self.judgment_log(
+        let r#ref = now.to_string();
+        self.commit_engagement(
             "proactive",
-            "engagement",
-            "recipient engages within 90m",
+            &r#ref,
+            "telegram",
+            now,
             p,
-            now + 90 * 60_000,
-            &now.to_string(),
+            "recipient engages within 90m",
         )
         .await;
-        now.to_string()
+        r#ref
+    }
+
+    /// L3c: ONE displayed line earns ONE engagement claim. The claim is keyed by a deterministic
+    /// ref (`<sent_ms>` for the legacy Telegram beats, `knock:<pkt>` for a knock, the marker's
+    /// ref for a console line) and this is idempotent by that ref: a second commit — a retry, a
+    /// reconciler pass after a crash, a duplicate acknowledgement — writes nothing and returns
+    /// false. `surface` chooses the calibration domain: `engagement` for Telegram (byte-compatible
+    /// with every existing claim) and `engagement-console` for the cockpit, so a surface shift
+    /// can never look like learning.
+    pub async fn commit_engagement(
+        &self,
+        source: &str,
+        r#ref: &str,
+        surface: &str,
+        sent_ms: i64,
+        p: f64,
+        claim: &str,
+    ) -> bool {
+        let _serial = self.engagement_lock.lock().await;
+        self.commit_engagement_locked(source, r#ref, surface, sent_ms, p, claim)
+            .await
+    }
+
+    /// The commit's body, run under the engagement lock by every caller. CONVERGENT: each
+    /// artifact is inspected and repaired on its own — a judgment row exists once by ref (the
+    /// ledger is the authority), the pending entry exists iff the claim is still ungraded — so a
+    /// retry after a crash between the writes finishes the job and never doubles it. Returns
+    /// true iff this call wrote the judgment row.
+    async fn commit_engagement_locked(
+        &self,
+        source: &str,
+        r#ref: &str,
+        surface: &str,
+        sent_ms: i64,
+        p: f64,
+        claim: &str,
+    ) -> bool {
+        let existing = self.judgment_row_for_ref(r#ref).await;
+        if let Some(row) = existing {
+            // The claim exists. Repair the pending entry only if the claim is still ungraded and
+            // the entry is missing (a crash between the pending write and the ledger write, or
+            // the reverse, both land here).
+            let graded = row.get("outcome").is_some_and(|o| !o.is_null());
+            if !graded {
+                let mut pend = self.proactive_pending().await;
+                if !pend.iter().any(|e| e.r#ref == r#ref) {
+                    pend.push(PendingSend {
+                        sent_ms,
+                        r#ref: r#ref.to_string(),
+                        surface: surface.to_string(),
+                    });
+                    self.set_proactive_pending(&pend).await;
+                }
+            }
+            return false;
+        }
+        let mut pend = self.proactive_pending().await;
+        if !pend.iter().any(|e| e.r#ref == r#ref) {
+            pend.push(PendingSend {
+                sent_ms,
+                r#ref: r#ref.to_string(),
+                surface: surface.to_string(),
+            });
+            // Bounded: the resolver retires entries within 90 minutes, so this holds a handful.
+            // The cap exists so a resolver outage cannot grow it without limit.
+            if pend.len() > 64 {
+                let cut = pend.len() - 64;
+                pend.drain(..cut);
+            }
+            self.set_proactive_pending(&pend).await;
+        }
+        let domain = if surface == "console" {
+            "engagement-console"
+        } else {
+            "engagement"
+        };
+        // JUDGMENT LEDGER: a proactive send IS a falsifiable prediction — "the recipient engages
+        // within the window". p = the learned engagement rate (improvable). Graded on resolve. This
+        // is the mandatory-eligibility auto-log (Terra's anti-gaming rule): no opt-in, no post-hoc p.
+        self.judgment_log(source, domain, claim, p, sent_ms + 90 * 60_000, r#ref)
+            .await;
+        true
+    }
+
+    /// The judgment row logged under `ref`, if any — the once-by-ref authority.
+    async fn judgment_row_for_ref(&self, r#ref: &str) -> Option<serde_json::Value> {
+        let led: Vec<serde_json::Value> = self
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        led.into_iter()
+            .find(|row| row.get("ref").and_then(|x| x.as_str()) == Some(r#ref))
+    }
+
+    /// L3c: the console surface's probability — the global receptivity estimate shrunk only
+    /// against console grades (cold-started from the global estimate when there are none).
+    pub async fn console_engagement_p(&self) -> f64 {
+        let p_raw = self
+            .memory
+            .proactive_receptivity()
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0.5);
+        self.shrunk_judgment_p("engagement-console", p_raw).await
+    }
+
+    /// L3c: commit the prediction an engaging notice carried, at the instant it was SHOWN, then
+    /// mark the outbox item complete. Under the engagement lock as one critical section, so the
+    /// web acknowledgement and the runner's reconciler cannot interleave. Convergent: the target
+    /// commit is once-by-ref, the completion receipt is idempotent, and a crash between the two
+    /// is finished by the next pass without a second row. Returns whether this call wrote the
+    /// judgment row.
+    pub async fn commit_shown_engagement(
+        &self,
+        notice_id: &str,
+        marker: &mind_spec::EngagementMarker,
+        shown_ms: u64,
+    ) -> bool {
+        let _serial = self.engagement_lock.lock().await;
+        let sent_ms = i64::try_from(shown_ms).unwrap_or(i64::MAX);
+        let wrote = match marker.kind {
+            mind_spec::NoticeKind::Knock => {
+                let pkt_id = marker
+                    .r#ref
+                    .strip_prefix("knock:")
+                    .unwrap_or("")
+                    .to_string();
+                let candidate = KnockCandidate {
+                    pkt_id,
+                    band: marker.band,
+                    p: marker.p(),
+                    eval_id: marker.eval_id.clone(),
+                    trigger: String::new(),
+                    title: String::new(),
+                    receptive: None,
+                };
+                self.commit_knock_locked(&candidate, sent_ms, "console")
+                    .await
+            }
+            mind_spec::NoticeKind::Digest => {
+                self.commit_engagement_locked(
+                    "proactive",
+                    &marker.r#ref,
+                    "console",
+                    sent_ms,
+                    marker.p(),
+                    "recipient engages within 90m",
+                )
+                .await
+            }
+            mind_spec::NoticeKind::Ask => {
+                let wrote = self
+                    .commit_engagement_locked(
+                        "proactive",
+                        &marker.r#ref,
+                        "console",
+                        sent_ms,
+                        marker.p(),
+                        "recipient engages within 90m",
+                    )
+                    .await;
+                if wrote {
+                    // The question is armed only now — a queued, leased or expired ask never
+                    // swallows an ordinary turn as its answer.
+                    let slot = marker.r#ref.strip_prefix("ask:").unwrap_or("");
+                    self.set_pending_slot(Some(slot)).await;
+                }
+                wrote
+            }
+            _ => return false,
+        };
+        // Durable completion only after the target converged (the row exists by ref).
+        if self.judgment_row_for_ref(&marker.r#ref).await.is_some() {
+            let _ = self.mark_engagement_committed(notice_id);
+        }
+        wrote
+    }
+
+    /// L3c: finish any shown-but-uncommitted marker (the durable outbox) — each runner beat and
+    /// at start. The outbox returns only items without a completion receipt, so a completed
+    /// item can never be replayed. Returns how many this pass committed.
+    pub async fn reconcile_shown_engagements(&self) -> usize {
+        let Ok(shown) = self.shown_engagements() else {
+            return 0;
+        };
+        let mut committed = 0usize;
+        for entry in shown {
+            if self
+                .commit_shown_engagement(&entry.notice_id, &entry.marker, entry.shown_ms)
+                .await
+            {
+                committed += 1;
+            }
+        }
+        committed
+    }
+
+    /// L3c: retire one pending ref after an explicit grade (the knock's reply), so the resolver
+    /// cannot grade it a second time.
+    pub(crate) async fn retire_pending_ref(&self, r#ref: &str) {
+        let _serial = self.engagement_lock.lock().await;
+        let pend = self.proactive_pending().await;
+        if pend.iter().any(|e| e.r#ref == r#ref) {
+            let still: Vec<PendingSend> = pend.into_iter().filter(|e| e.r#ref != r#ref).collect();
+            self.set_proactive_pending(&still).await;
+        }
     }
 
     /// Resolve the outstanding proactive send, if any. `via_user_turn`: the user just spoke —
     /// engaged iff within the window. Otherwise (tick path) only resolves STALE entries as ignored.
     pub async fn resolve_proactive(&self, via_user_turn: bool) {
+        let _serial = self.engagement_lock.lock().await;
         let pend = self.proactive_pending().await;
         if pend.is_empty() {
             return;
         }
         let now = chrono::Utc::now().timestamp_millis();
-        let mut still: Vec<i64> = Vec::new();
-        for sent_ms in pend {
-            let within = now - sent_ms <= 90 * 60_000;
+        let mut still: Vec<PendingSend> = Vec::new();
+        for entry in pend {
+            // Fail closed on a stamp the arithmetic cannot vouch for: negative, in the future, or
+            // so extreme the subtraction would overflow — it stays pending, graded by nobody.
+            let age = match now.checked_sub(entry.sent_ms) {
+                Some(age) if age >= 0 && entry.sent_ms >= 0 => age,
+                _ => {
+                    still.push(entry);
+                    continue;
+                }
+            };
+            let within = age <= 90 * 60_000;
+            // A knock is graded by its explicit reply (show it / later / mute) or, unanswered, by
+            // the stale path — never by an ordinary turn, which says nothing about the knock.
+            let knock = entry.r#ref.starts_with("knock:");
             // Decide every send that CAN be decided, not just the newest. A user turn answers each
             // outstanding beat whose window still contains it; a window that has run out answers
             // itself. Anything else is genuinely undecided and stays pending.
             let outcome = match (via_user_turn, within) {
-                (true, w) => Some(w),
-                (false, false) => Some(false),
+                (true, w) if !knock => Some(w),
+                (true, true) => None,
+                (_, false) => Some(false),
                 (false, true) => None,
             };
             match outcome {
                 Some(o) => {
-                    let _ = self.memory.record_proactive_outcome(sent_ms, o).await;
-                    self.judgment_grade(&sent_ms.to_string(), o).await;
+                    let _ = self.memory.record_proactive_outcome(entry.sent_ms, o).await;
+                    self.judgment_grade(&entry.r#ref, o).await;
                 }
-                None => still.push(sent_ms),
+                None => still.push(entry),
             }
         }
         self.set_proactive_pending(&still).await;
@@ -1303,7 +1636,10 @@ impl super::ConversationEngine {
 
     /// The outstanding proactive sends. Reads the legacy single-integer form too, so the upgrade
     /// does not drop the one send that happens to be in flight when the new binary starts.
-    async fn proactive_pending(&self) -> Vec<i64> {
+    /// L3c: typed and legacy-compatible. A bare number (the single-send form) or a number in the
+    /// array (the L3b-era list) reads as `{sent_ms, ref: "<sent_ms>", surface: "telegram"}`, which
+    /// is exactly the claim those sends were logged under; new entries are written typed.
+    async fn proactive_pending(&self) -> Vec<PendingSend> {
         let raw = self
             .memory
             .profile_get("proactive_pending")
@@ -1315,13 +1651,15 @@ impl super::ConversationEngine {
         if raw.is_empty() {
             return Vec::new();
         }
-        if let Ok(v) = serde_json::from_str::<Vec<i64>>(raw) {
-            return v;
+        if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+            return values.iter().filter_map(PendingSend::from_value).collect();
         }
-        raw.parse::<i64>().map(|n| vec![n]).unwrap_or_default()
+        raw.parse::<i64>()
+            .map(|n| vec![PendingSend::legacy(n)])
+            .unwrap_or_default()
     }
 
-    async fn set_proactive_pending(&self, v: &[i64]) {
+    async fn set_proactive_pending(&self, v: &[PendingSend]) {
         let s = if v.is_empty() {
             String::new()
         } else {

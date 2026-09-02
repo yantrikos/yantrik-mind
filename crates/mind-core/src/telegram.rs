@@ -3349,10 +3349,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             });
         }
 
-        // Resolve a STALE proactive send (past the 90-min window, no reply) as IGNORED — the world
-        // model learns dead zones from silence just as it learns receptive windows from replies.
-        conv.resolve_proactive(false).await;
-        conv.ledger_resolve(false).await;
+        // L3c: the stale resolvers (proactive claims past their 90-min window, the pace ledger's
+        // rows) have one owner — the process runner's housekeeping step — on every box.
 
         // L3a: the external-calendar refresh, the standing-lease sweep and the default-mode tick
         // are hosted by the process-hosted loop runner (`crate::loops`) on every box, not here.
@@ -3452,10 +3450,19 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
             if idle_ok {
                 let t0 = now_ms();
                 let mut knocked = false;
-                if let Some(msg) = conv.maybe_knock().await {
+                if let Some(candidate) = conv.prepare_knock().await {
+                    let msg = candidate.render();
                     if tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
                         eprintln!("[knock] calibrated knock delivered ({} chars)", msg.len());
-                        conv.note_proactive_sent().await;
+                        // L3c: one displayed line, one claim — the knock's own `knock:<pkt>`,
+                        // committed only now that the API accepted the send; a failed send earns
+                        // nothing and arms nothing. No second timestamp claim.
+                        conv.commit_knock(
+                            &candidate,
+                            i64::try_from(now_ms()).unwrap_or(i64::MAX),
+                            "telegram",
+                        )
+                        .await;
                         spoke = true;
                         knocked = true;
                     }
@@ -3646,9 +3653,14 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 let t0 = now_ms();
                 let ask_window = last_ask;
                 let mut asked = false;
-                if let Some(q) = conv.proactive_ask().await {
-                    if tg_send_mirrored(&conv, &api, chat, &q).await.is_ok() {
+                if let Some(candidate) = conv.prepare_ask().await {
+                    if tg_send_mirrored(&conv, &api, chat, &candidate.text)
+                        .await
+                        .is_ok()
+                    {
                         eprintln!("[ask] posed a get-to-know-you question");
+                        // L3c: the question is armed only after the send was accepted.
+                        conv.commit_ask(&candidate).await;
                         conv.note_proactive_sent().await;
                         asked = true;
                     }
@@ -4034,7 +4046,7 @@ mod tests {
     /// the seam is side-effect free: it reads presence and records — no await, no send.
     #[test]
     fn the_knock_keeps_its_paired_shadow_and_the_seam_has_no_side_effects() {
-        let knock = fn_body(PROACTIVE_SRC, "pub async fn maybe_knock(");
+        let knock = fn_body(PROACTIVE_SRC, "pub async fn prepare_knock(");
         assert!(
             knock.contains("self.record_world_shadow(now, \"knock-receptivity\")"),
             "the paired record keeps its label"

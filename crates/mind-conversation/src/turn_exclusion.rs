@@ -22,6 +22,9 @@ pub struct TurnExclusion {
     last_registration: std::sync::Mutex<(u64, &'static str)>,
     /// Which background pass holds admission right now: 0 none, else `BackgroundPass::code`.
     running_pass: AtomicU8,
+    /// L3c: the last MACHINE VIEW registration (the cockpit's polls), 0 until one happens.
+    /// A person's turn never writes it, so it can stand for "the cockpit is open".
+    last_view_ms: AtomicU64,
 }
 
 /// Held for the whole life of one turn. Dropping it (normally or by cancellation) releases it.
@@ -113,6 +116,7 @@ impl TurnExclusion {
             last_user_activity_ms: AtomicU64::new(now_ms),
             last_registration: std::sync::Mutex::new((now_ms, "boot")),
             running_pass: AtomicU8::new(0),
+            last_view_ms: AtomicU64::new(0),
         }
     }
 
@@ -151,6 +155,8 @@ impl TurnExclusion {
             self.last_user_activity_ms
                 .fetch_max(now_ms, Ordering::AcqRel)
         } else {
+            // A machine view: the idle clock stays, the view stamp moves.
+            self.last_view_ms.fetch_max(now_ms, Ordering::AcqRel);
             self.last_user_activity_ms.load(Ordering::Acquire)
         };
         TurnGuard {
@@ -200,6 +206,18 @@ impl TurnExclusion {
             return None;
         }
         Some(BackgroundPermit { owner: self })
+    }
+
+    /// L3c: the cockpit is present iff a machine view registered within the window — inclusive,
+    /// and never before the first view (a fresh process has no cockpit until one polls).
+    pub const CONSOLE_PRESENCE_WINDOW_MS: u64 = 90_000;
+    pub fn console_view_recent(&self, now_ms: u64) -> bool {
+        let last = self.last_view_ms.load(Ordering::Acquire);
+        // A stamp in the future (a clock that rolled back) is not presence.
+        last != 0 && last <= now_ms && now_ms - last <= Self::CONSOLE_PRESENCE_WINDOW_MS
+    }
+    pub fn last_view_ms(&self) -> u64 {
+        self.last_view_ms.load(Ordering::Acquire)
     }
 
     /// Which background pass holds admission, if any.
@@ -607,5 +625,42 @@ mod tests {
         assert!(x
             .try_admit_background(later, IDLE, BackgroundPass::Patterns)
             .is_some());
+    }
+
+    /// L3c: presence is the cockpit's own polling, nothing else. A machine view stamps it; a
+    /// person's turn on any surface does not; the window is inclusive; before the first view
+    /// there is no cockpit.
+    #[test]
+    fn console_presence_is_the_view_stamp_alone_and_the_window_is_inclusive() {
+        let x = TurnExclusion::starting_at(1_000);
+        assert!(
+            !x.console_view_recent(1_000),
+            "no cockpit before the first view"
+        );
+        {
+            let _person = x.begin_turn_on("telegram", 2_000);
+        }
+        assert!(
+            !x.console_view_recent(2_000),
+            "a person's turn is not a poll"
+        );
+        {
+            let _view = x.begin_view_on("cli:loops_json", 3_000);
+        }
+        assert_eq!(x.last_view_ms(), 3_000);
+        assert!(
+            !x.console_view_recent(2_999),
+            "a stamp in the future is not presence"
+        );
+        assert!(x.console_view_recent(3_000));
+        assert!(x.console_view_recent(3_000 + TurnExclusion::CONSOLE_PRESENCE_WINDOW_MS));
+        assert!(!x.console_view_recent(3_001 + TurnExclusion::CONSOLE_PRESENCE_WINDOW_MS));
+        // The stamp only moves forward, and a view never moves the idle clock.
+        let before = x.last_user_activity_ms();
+        {
+            let _view = x.begin_view_on("cli:horizons_json", 2_500);
+        }
+        assert_eq!(x.last_view_ms(), 3_000);
+        assert_eq!(x.last_user_activity_ms(), before);
     }
 }

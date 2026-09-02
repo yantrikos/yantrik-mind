@@ -109,9 +109,12 @@ fn a_lease_skips_live_leases_and_shown_rows_and_returns_after_expiry() {
         ]
     );
     // Acknowledge one; it never comes back, the other still does.
-    assert!(store
-        .ack_notice_shown(&a.notice_id, &again[0].lease_id, 71_000)
-        .unwrap());
+    assert!(
+        store
+            .ack_notice_shown(&a.notice_id, &again[0].lease_id, 71_000)
+            .unwrap()
+            .shown_now
+    );
     let rest = store.lease_notices("primary", 200_000, 60_000, 10).unwrap();
     assert_eq!(rest.len(), 1);
     assert_eq!(rest[0].notice_id, b.notice_id);
@@ -157,13 +160,19 @@ fn the_acknowledgement_needs_the_live_lease_and_is_idempotent_after() {
         .ack_notice_shown(&n.notice_id, &lease.lease_id, 12_001)
         .is_err());
     // Live lease: shown once.
-    assert!(store
+    let ack = store
         .ack_notice_shown(&n.notice_id, &lease.lease_id, 3_000)
-        .unwrap());
-    // Again with the same lease: already shown, idempotent false; a foreign lease is still Err.
-    assert!(!store
+        .unwrap();
+    assert!(ack.shown_now);
+    assert_eq!(ack.shown_ms, 3_000);
+    assert_eq!(ack.marker, None, "a plain notice carries no marker");
+    // Again with the same lease: already shown, idempotent, the ORIGINAL instant; a foreign lease
+    // is still Err.
+    let again = store
         .ack_notice_shown(&n.notice_id, &lease.lease_id, 3_001)
-        .unwrap());
+        .unwrap();
+    assert!(!again.shown_now);
+    assert_eq!(again.shown_ms, 3_000);
     assert!(store
         .ack_notice_shown(&n.notice_id, "0123456789abcdef", 3_002)
         .is_err());

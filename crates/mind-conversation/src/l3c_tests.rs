@@ -1,0 +1,561 @@
+//! L3c-1 — the engine's accounting for engagement on a box with no phone: one displayed line
+//! earns one claim, idempotent by ref; the knock and the ask commit only when delivered (Telegram)
+//! or shown (console); the shown receipt is a durable outbox the reconciler drains without
+//! duplicating or moving the clock; the resolver grades a knock only by its reply or its
+//! deadline; the console has its own calibration domain, cold-started from the global rate.
+use crate::proactive::KnockCandidate;
+use crate::*;
+use mind_inference::ScriptedLLM;
+use mind_memory::MemoryHandle;
+use mind_recipes::RecipeStore;
+use mind_spec::EngagementMarker;
+use yantrik_ml::LLMBackend;
+
+struct NoTools;
+#[async_trait::async_trait]
+impl RecipeHost for NoTools {
+    async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+        anyhow::bail!("no tools in this fixture")
+    }
+}
+
+fn harness() -> (ConversationEngine, Arc<RecipeStore>) {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(
+        Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+    let recipes =
+        RecipeEngine::new(pool.clone(), Arc::new(NoTools), "JARVIS").with_store(store.clone());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_recipes(Arc::new(recipes));
+    (conv, store)
+}
+
+async fn ledger_rows(conv: &ConversationEngine, r#ref: &str) -> Vec<serde_json::Value> {
+    let led: Vec<serde_json::Value> = conv
+        .memory
+        .profile_get("judgment_ledger")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    led.into_iter()
+        .filter(|r| r.get("ref").and_then(|x| x.as_str()) == Some(r#ref))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_line_earns_one_claim_and_a_repeat_commit_writes_nothing() {
+    let (conv, _store) = harness();
+    let now = chrono::Utc::now().timestamp_millis();
+    assert!(
+        conv.commit_engagement(
+            "proactive",
+            "digest:0123456789abcdef",
+            "console",
+            now,
+            0.4,
+            "recipient engages within 90m"
+        )
+        .await
+    );
+    assert!(
+        !conv
+            .commit_engagement(
+                "proactive",
+                "digest:0123456789abcdef",
+                "console",
+                now + 5,
+                0.9,
+                "recipient engages within 90m"
+            )
+            .await,
+        "same ref: nothing"
+    );
+    let rows = ledger_rows(&conv, "digest:0123456789abcdef").await;
+    assert_eq!(rows.len(), 1, "one claim");
+    assert_eq!(rows[0]["domain"].as_str(), Some("engagement-console"));
+    // The Telegram beat keeps its legacy ref and domain, byte-compatible.
+    let legacy_ref = conv.note_proactive_sent().await;
+    let rows = ledger_rows(&conv, &legacy_ref).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["domain"].as_str(), Some("engagement"));
+    assert!(conv.spoke_recently(60_000).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_pending_list_reads_legacy_forms_and_the_resolver_grades_each_ref_once() {
+    let (conv, _store) = harness();
+    let now = chrono::Utc::now().timestamp_millis();
+    // Legacy: a bare list of send instants, plus one typed knock entry that is still fresh.
+    let stale = now - 91 * 60_000;
+    let fresh = now - 5 * 60_000;
+    let raw = format!(
+        "[{stale}, {{\"sent_ms\":{fresh},\"ref\":\"knock:pkt1\",\"surface\":\"telegram\"}}, {{\"sent_ms\":{fresh},\"ref\":\"digest:0123456789abcdef\",\"surface\":\"console\"}}]"
+    );
+    conv.memory
+        .profile_set("proactive_pending", &raw)
+        .await
+        .unwrap();
+    // A user turn: the legacy beat is stale → ignored; the fresh digest → engaged; the knock is
+    // NOT graded by an ordinary turn and stays pending.
+    conv.resolve_proactive(true).await;
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(pend.contains("knock:pkt1"), "{pend}");
+    assert!(!pend.contains("digest:"), "{pend}");
+    assert!(!pend.contains(&stale.to_string()), "{pend}");
+    // The knock's explicit reply grades it and retires it; the resolver then has nothing.
+    conv.memory
+        .profile_set("knock_pending", "pkt1")
+        .await
+        .unwrap();
+    assert!(conv.knock_reply("later").await.is_some());
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(!pend.contains("knock:pkt1"), "{pend}");
+    // A knock left unanswered past its deadline is graded by the stale pass alone.
+    let old_knock = format!(
+        "[{{\"sent_ms\":{},\"ref\":\"knock:pkt2\",\"surface\":\"console\"}}]",
+        now - 91 * 60_000
+    );
+    conv.memory
+        .profile_set("proactive_pending", &old_knock)
+        .await
+        .unwrap();
+    conv.resolve_proactive(false).await;
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(pend.is_empty(), "{pend}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ask_arms_its_slot_only_when_committed_and_the_knock_commits_once() {
+    let (conv, _store) = harness();
+    // Prepare arms nothing; commit arms the slot.
+    let candidate = conv
+        .prepare_ask()
+        .await
+        .expect("a fresh mind has a name to ask for");
+    assert_eq!(candidate.slot.as_deref(), Some("name"));
+    assert!(!conv.has_pending_slot().await, "prepared, not armed");
+    conv.commit_ask(&candidate).await;
+    assert!(conv.has_pending_slot().await);
+    // The knock's commit is one claim, the day's cap, the reply slot and the disposition — once.
+    let c = KnockCandidate {
+        pkt_id: "pkt9".into(),
+        band: 75,
+        p: 0.61,
+        eval_id: "eval:1".into(),
+        trigger: "t".into(),
+        title: "x".into(),
+        receptive: Some(true),
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    assert!(conv.commit_knock(&c, now, "console").await);
+    assert!(
+        !conv.commit_knock(&c, now + 1, "console").await,
+        "same packet: nothing"
+    );
+    assert_eq!(ledger_rows(&conv, "knock:pkt9").await.len(), 1);
+    assert_eq!(
+        ledger_rows(&conv, "knock:pkt9").await[0]["domain"].as_str(),
+        Some("engagement-console")
+    );
+    assert_eq!(
+        conv.memory
+            .profile_get("knock_pending")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("pkt9")
+    );
+    assert!(conv
+        .memory
+        .profile_get("knock_last_date")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_shown_receipt_is_an_outbox_the_reconciler_drains_once_without_moving_the_clock() {
+    let (conv, _store) = harness();
+    let marker = EngagementMarker::digest_line("0123456789abcdef", 400).unwrap();
+    let now = ConversationEngine::now_ms();
+    let q = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Digest,
+            "digest line",
+            &marker,
+            now + 600_000,
+        )
+        .unwrap();
+    assert!(q.fresh);
+    // Queued commits nothing.
+    assert!(ledger_rows(&conv, "digest:0123456789abcdef")
+        .await
+        .is_empty());
+    assert_eq!(conv.reconcile_shown_engagements().await, 0);
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    assert_eq!(leased.len(), 1);
+    // Leased commits nothing either.
+    assert!(ledger_rows(&conv, "digest:0123456789abcdef")
+        .await
+        .is_empty());
+    // Shown: the durable receipt exists; the engine commit is a separate step (here: skipped,
+    // as a crash between the two would leave it).
+    let ack = conv
+        .ack_notice_shown(&q.notice_id, &leased[0].lease_id)
+        .unwrap();
+    assert!(ack.shown_now);
+    assert_eq!(ack.marker.as_ref(), Some(&marker));
+    // The reconciler finishes it exactly once, at the SHOWN instant.
+    assert_eq!(conv.reconcile_shown_engagements().await, 1);
+    assert_eq!(conv.reconcile_shown_engagements().await, 0);
+    let rows = ledger_rows(&conv, "digest:0123456789abcdef").await;
+    assert_eq!(rows.len(), 1);
+    let due = rows[0]["grade_due"].as_i64().unwrap_or(0);
+    assert_eq!(
+        due,
+        i64::try_from(ack.shown_ms).unwrap() + 90 * 60_000,
+        "{rows:?}"
+    );
+    // A repeated acknowledgement under the same lease returns the original instant and commits nothing new.
+    let again = conv
+        .ack_notice_shown(&q.notice_id, &leased[0].lease_id)
+        .unwrap();
+    assert!(!again.shown_now);
+    assert_eq!(again.shown_ms, ack.shown_ms);
+    assert!(
+        !conv
+            .commit_shown_engagement(&q.notice_id, &marker, again.shown_ms)
+            .await
+    );
+    assert_eq!(ledger_rows(&conv, "digest:0123456789abcdef").await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shown_ask_arms_its_slot_and_the_console_domain_cold_starts_from_the_global_rate() {
+    let (conv, _store) = harness();
+    let marker = EngagementMarker::ask("name", 400).unwrap();
+    let now = ConversationEngine::now_ms();
+    let q = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Ask,
+            "what should I call you?",
+            &marker,
+            now + 600_000,
+        )
+        .unwrap();
+    assert!(!conv.has_pending_slot().await, "queued does not arm");
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    assert!(!conv.has_pending_slot().await, "leased does not arm");
+    let ack = conv
+        .ack_notice_shown(&q.notice_id, &leased[0].lease_id)
+        .unwrap();
+    assert!(
+        conv.commit_shown_engagement(&q.notice_id, &marker, ack.shown_ms)
+            .await
+    );
+    assert!(conv.has_pending_slot().await, "shown arms");
+    // The console domain has no grades: the probability is the global estimate, clamped.
+    let p = conv.console_engagement_p().await;
+    assert!((0.05..=0.95).contains(&p));
+    // An engaging kind through the plain door is refused.
+    assert!(conv
+        .queue_notice(mind_observability::DeliveryKind::Knock, "knock")
+        .is_err());
+}
+
+/// Codex's concurrency amend: the commit is serialised against itself and against the resolver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_erase_a_commit() {
+    let (conv, _store) = harness();
+    let conv = Arc::new(conv);
+    let now = chrono::Utc::now().timestamp_millis();
+    // commit-vs-commit, many rounds: exactly one of each pair wins and exactly one row exists.
+    for i in 0..16u32 {
+        let r#ref = format!("digest:{:016x}", i);
+        let (a, b) = {
+            let c1 = conv.clone();
+            let c2 = conv.clone();
+            let r1 = r#ref.clone();
+            let r2 = r#ref.clone();
+            tokio::join!(
+                tokio::spawn(async move {
+                    c1.commit_engagement(
+                        "proactive",
+                        &r1,
+                        "console",
+                        now,
+                        0.4,
+                        "recipient engages within 90m",
+                    )
+                    .await
+                }),
+                tokio::spawn(async move {
+                    c2.commit_engagement(
+                        "proactive",
+                        &r2,
+                        "console",
+                        now,
+                        0.4,
+                        "recipient engages within 90m",
+                    )
+                    .await
+                })
+            )
+        };
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(a ^ b, "exactly one commit wins for {ref}");
+        assert_eq!(ledger_rows(&conv, &r#ref).await.len(), 1, "{ref}");
+    }
+    // commit-vs-resolve: a stale legacy beat is being resolved while a new ref commits; the new
+    // ref must survive in the pending list and later grade exactly once.
+    let stale = now - 91 * 60_000;
+    conv.memory
+        .profile_set("proactive_pending", &format!("[{stale}]"))
+        .await
+        .unwrap();
+    let new_ref = "digest:feedfeedfeedfeed".to_string();
+    {
+        let c1 = conv.clone();
+        let c2 = conv.clone();
+        let r = new_ref.clone();
+        let (x, y) = tokio::join!(
+            tokio::spawn(async move { c1.resolve_proactive(true).await }),
+            tokio::spawn(async move {
+                c2.commit_engagement(
+                    "proactive",
+                    &r,
+                    "console",
+                    now,
+                    0.4,
+                    "recipient engages within 90m",
+                )
+                .await
+            })
+        );
+        x.unwrap();
+        assert!(y.unwrap());
+    }
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        pend.contains(&new_ref),
+        "the fresh commit survived the resolver: {pend}"
+    );
+    assert!(
+        !pend.contains(&stale.to_string()),
+        "the stale beat was graded: {pend}"
+    );
+    // The next person turn grades the new ref once; a second pass has nothing.
+    conv.resolve_proactive(true).await;
+    let rows = ledger_rows(&conv, &new_ref).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"].as_i64(), Some(1), "{rows:?}");
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(pend.is_empty(), "{pend}");
+    conv.resolve_proactive(true).await;
+    assert_eq!(ledger_rows(&conv, &new_ref).await.len(), 1);
+}
+
+/// Codex's outbox amend: every crash point converges to one pending claim, one judgment row and
+/// one durable completion; a completed item never replays; the second reconcile pass is empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_crash_point_converges_to_one_claim_one_row_one_completion() {
+    let (conv, store) = harness();
+    let marker = EngagementMarker::digest_line("00000000000000aa", 400).unwrap();
+    let now = ConversationEngine::now_ms();
+    let q = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Digest,
+            "line a",
+            &marker,
+            now + 600_000,
+        )
+        .unwrap();
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    let ack = conv
+        .ack_notice_shown(&q.notice_id, &leased[0].lease_id)
+        .unwrap();
+    // Crash point 1: the pending entry was written, the judgment row was not.
+    conv.memory
+        .profile_set(
+            "proactive_pending",
+            &format!(
+                "[{{\"sent_ms\":{},\"ref\":\"digest:00000000000000aa\",\"surface\":\"console\"}}]",
+                ack.shown_ms
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        conv.commit_shown_engagement(&q.notice_id, &marker, ack.shown_ms)
+            .await,
+        "the row is written on retry"
+    );
+    assert_eq!(ledger_rows(&conv, "digest:00000000000000aa").await.len(), 1);
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert_eq!(
+        pend.matches("00000000000000aa").count(),
+        1,
+        "one pending entry: {pend}"
+    );
+    assert!(
+        store.shown_engagements("primary").unwrap().is_empty(),
+        "completed: not in the outbox"
+    );
+    // Crash point 2: the row exists but the completion receipt was never written.
+    let marker_b = EngagementMarker::digest_line("00000000000000bb", 400).unwrap();
+    let qb = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Digest,
+            "line b",
+            &marker_b,
+            now + 600_000,
+        )
+        .unwrap();
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    let ack_b = conv
+        .ack_notice_shown(&qb.notice_id, &leased[0].lease_id)
+        .unwrap();
+    conv.commit_engagement(
+        "proactive",
+        "digest:00000000000000bb",
+        "console",
+        ack_b.shown_ms as i64,
+        0.4,
+        "recipient engages within 90m",
+    )
+    .await;
+    assert_eq!(
+        store.shown_engagements("primary").unwrap().len(),
+        1,
+        "still in the outbox"
+    );
+    assert_eq!(conv.reconcile_shown_engagements().await, 0, "no second row");
+    assert_eq!(ledger_rows(&conv, "digest:00000000000000bb").await.len(), 1);
+    assert!(
+        store.shown_engagements("primary").unwrap().is_empty(),
+        "completion written by the reconciler"
+    );
+    assert_eq!(
+        conv.reconcile_shown_engagements().await,
+        0,
+        "second pass is empty"
+    );
+    // Crash point 3: the row exists AND was graded, the pending entry is gone — nothing is re-added.
+    conv.memory
+        .profile_set("proactive_pending", "")
+        .await
+        .unwrap();
+    conv.resolve_proactive(true).await;
+    let marker_c = EngagementMarker::digest_line("00000000000000cc", 400).unwrap();
+    let qc = conv
+        .queue_engaging_notice(
+            mind_observability::DeliveryKind::Digest,
+            "line c",
+            &marker_c,
+            now + 600_000,
+        )
+        .unwrap();
+    let leased = conv.lease_notices(60_000, 5).unwrap();
+    let ack_c = conv
+        .ack_notice_shown(&qc.notice_id, &leased[0].lease_id)
+        .unwrap();
+    assert!(
+        conv.commit_shown_engagement(&qc.notice_id, &marker_c, ack_c.shown_ms)
+            .await
+    );
+    conv.resolve_proactive(true).await; // graded engaged, pending emptied
+    assert!(
+        !conv
+            .commit_shown_engagement(&qc.notice_id, &marker_c, ack_c.shown_ms)
+            .await
+    );
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    assert!(
+        !pend.contains("00000000000000cc"),
+        "a graded claim is not re-armed: {pend}"
+    );
+    assert_eq!(ledger_rows(&conv, "digest:00000000000000cc").await.len(), 1);
+    // A committed item stays committed: the acknowledgement is still idempotent afterwards.
+    let again = conv
+        .ack_notice_shown(&qc.notice_id, &leased[0].lease_id)
+        .unwrap();
+    assert!(!again.shown_now);
+    assert_eq!(again.shown_ms, ack_c.shown_ms);
+}
+
+/// Codex's boundary: a future or extreme send stamp is graded by nobody and never counts as
+/// having spoken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn future_and_extreme_send_stamps_stay_pending_and_never_count_as_spoken() {
+    let (conv, _store) = harness();
+    let now = chrono::Utc::now().timestamp_millis();
+    let raw = format!(
+        "[{{\"sent_ms\":{},\"ref\":\"digest:0000000000000001\",\"surface\":\"console\"}},{{\"sent_ms\":{},\"ref\":\"digest:0000000000000002\",\"surface\":\"console\"}},{{\"sent_ms\":{},\"ref\":\"digest:0000000000000003\",\"surface\":\"console\"}},{{\"sent_ms\":-5,\"ref\":\"digest:0000000000000004\",\"surface\":\"console\"}}]",
+        now + 3_600_000,
+        i64::MIN,
+        i64::MAX
+    );
+    conv.memory
+        .profile_set("proactive_pending", &raw)
+        .await
+        .unwrap();
+    assert!(
+        !conv.spoke_recently(i64::MAX).await,
+        "a future stamp is not a send"
+    );
+    conv.resolve_proactive(true).await;
+    conv.resolve_proactive(false).await;
+    let pend = conv
+        .memory
+        .profile_get("proactive_pending")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    for r in [
+        "0000000000000001",
+        "0000000000000002",
+        "0000000000000003",
+        "0000000000000004",
+    ] {
+        assert!(pend.contains(r), "{r} stays pending: {pend}");
+    }
+}

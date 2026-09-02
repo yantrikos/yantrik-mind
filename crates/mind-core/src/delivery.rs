@@ -8,8 +8,8 @@
 //! keeps later, so it may not set `spoke`, place the proactive-sent mark or commit an engagement
 //! prediction (E.G1c's wall, made structural). Every call records exactly one typed `delivery`
 //! decision event: kind, outcome, receipt id, size — never the text.
-use crate::telegram::{in_quiet_hours_now, tg_send_mirrored};
-use mind_conversation::ConversationEngine;
+use crate::telegram::{in_quiet_hours_now, now_ms, tg_send_mirrored};
+use mind_conversation::{ConversationEngine, EngagementMarker};
 use mind_observability::{DeliveryKind, DeliveryOutcome, DeliveryTick};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -23,9 +23,16 @@ pub(crate) struct TelegramTarget {
 /// What one delivery did. `is_delivered` is true for Telegram acceptance alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Delivered {
-    TelegramAccepted { chars: usize },
-    ConsoleQueued { notice_id: String, fresh: bool },
+    TelegramAccepted {
+        chars: usize,
+    },
+    ConsoleQueued {
+        notice_id: String,
+        fresh: bool,
+    },
     Undelivered,
+    /// L3c: an engaging line with nobody there to see it — nothing queued, nothing spoken.
+    HeldNoPresence,
 }
 
 impl Delivered {
@@ -37,6 +44,7 @@ impl Delivered {
             Self::TelegramAccepted { .. } => DeliveryOutcome::TelegramAccepted,
             Self::ConsoleQueued { .. } => DeliveryOutcome::ConsoleQueued,
             Self::Undelivered => DeliveryOutcome::Undelivered,
+            Self::HeldNoPresence => DeliveryOutcome::HeldNoPresence,
         }
     }
 }
@@ -62,6 +70,72 @@ impl Delivery {
     /// runner's `chat_present`, so a headless box with a cockpit is not "no chat".
     pub(crate) fn has_surface(&self) -> bool {
         self.telegram_reachable() || self.conv.has_notice_queue()
+    }
+
+    /// L3c: the cockpit is open right now — a machine view polled within the presence window —
+    /// and there is a queue to put a line in.
+    pub(crate) fn console_present(&self) -> bool {
+        self.conv.has_notice_queue() && self.conv.turns().console_view_recent(now_ms())
+    }
+
+    /// L3c: someone can see a line NOW: a pinned chat, or an open cockpit. The engagement loops'
+    /// `chat_present`; a queue nobody is looking at is not presence.
+    pub(crate) fn has_presence(&self) -> bool {
+        self.telegram_reachable() || self.console_present()
+    }
+
+    /// L3c: deliver a line that PREDICTS engagement. Telegram when reachable outside quiet hours;
+    /// else the console queue ONLY while the cockpit is present, carrying the marker and a
+    /// show-by bound so it expires unshown rather than waiting hours; else held — nothing
+    /// queued, nothing spoken, one ledger record saying so. The prediction is never committed
+    /// here: a Telegram caller commits after the API accepted the send, the console commits at
+    /// `shown`.
+    pub(crate) async fn deliver_engaging(
+        &self,
+        kind: DeliveryKind,
+        text: &str,
+        marker: &EngagementMarker,
+        show_by_ms: u64,
+    ) -> Delivered {
+        let chars = text.chars().count();
+        let mut outcome = Delivered::HeldNoPresence;
+        if let Some(t) = &self.telegram {
+            let chat = t.active_chat.load(Ordering::Relaxed);
+            if chat != 0
+                && !in_quiet_hours_now()
+                && tg_send_mirrored(&self.conv, &t.api, chat, text)
+                    .await
+                    .is_ok()
+            {
+                outcome = Delivered::TelegramAccepted { chars };
+            }
+        }
+        if outcome == Delivered::HeldNoPresence && self.console_present() {
+            outcome = match self
+                .conv
+                .queue_engaging_notice(kind, text, marker, show_by_ms)
+            {
+                Ok(q) => Delivered::ConsoleQueued {
+                    notice_id: q.notice_id,
+                    fresh: q.fresh,
+                },
+                Err(error) => {
+                    eprintln!("[delivery] undelivered {}: {error}", kind.as_str());
+                    Delivered::Undelivered
+                }
+            };
+        }
+        let receipt_id = match &outcome {
+            Delivered::ConsoleQueued { notice_id, .. } => Some(notice_id.clone()),
+            _ => None,
+        };
+        self.conv.record_delivery(DeliveryTick {
+            kind,
+            outcome: outcome.ledger(),
+            receipt_id,
+            chars: u32::try_from(chars).unwrap_or(u32::MAX),
+        });
+        outcome
     }
 
     /// Deliver one line. Telegram first (reachable, outside quiet hours, accepted by the API);
@@ -116,9 +190,14 @@ mod tests {
         let body = &src[..src.find("#[cfg(test)]").unwrap()];
         assert_eq!(
             body.matches("tg_send_mirrored(").count(),
-            1,
-            "one send site"
+            2,
+            "two send sites: the plain door and the engaging one"
         );
+        // L3c: the engaging door never queues without presence and never commits a prediction.
+        let engaging = &body[body.find("pub(crate) async fn deliver_engaging(").unwrap()..];
+        assert!(engaging.contains("self.console_present()"));
+        assert!(!engaging.contains("commit_"), "the seam commits nothing");
+        assert!(engaging.contains("Delivered::HeldNoPresence"));
         assert!(body.contains("matches!(self, Self::TelegramAccepted { .. })"));
         assert!(
             !body.contains("note_proactive_sent"),
@@ -126,8 +205,8 @@ mod tests {
         );
         assert_eq!(
             body.matches("self.conv.record_delivery(").count(),
-            1,
-            "one ledger record per call"
+            2,
+            "one ledger record per call, in each door"
         );
         for other in [include_str!("loops.rs"), include_str!("web.rs")] {
             let prod = &other[..other.find("#[cfg(test)]").unwrap_or(other.len())];

@@ -72,6 +72,9 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        // L3c: engagement housekeeping first — the stale resolvers and the shown-marker outbox —
+        // so an unanswered claim closes on every box within a minute of its deadline.
+        state.last_housekeeping = run_housekeeping(&conv, state.last_housekeeping).await;
         // Serial, legacy order; no spawn.
         state.last_ics = run_ics(&conv, process_start_ms, state.last_ics).await;
         state.last_lease_sweep =
@@ -88,6 +91,8 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
 /// The timer states, owned by the runner task alone.
 #[derive(Default)]
 pub(crate) struct RunnerState {
+    /// L3c: the housekeeping step's own clock (≤ 60 s).
+    pub(crate) last_housekeeping: u64,
     pub(crate) last_ics: u64,
     pub(crate) last_lease_sweep: u64,
     pub(crate) last_resolve: u64,
@@ -100,6 +105,32 @@ pub(crate) struct RunnerState {
 
 /// L3b: "spoke" for the process host — a proactive line was SENT within this window.
 const SPOKE_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// L3c: the housekeeping cadence — the one process-hosted owner of the stale resolvers.
+const HOUSEKEEPING_PERIOD_MS: u64 = 60_000;
+
+/// L3c: engagement housekeeping, timer-only, speaks to nobody, calls no model. (1) The stale
+/// resolvers: an unanswered proactive claim resolves as ignored no later than its deadline plus
+/// this period; the pace ledger's rows the same way (E.P3's corrected rule). (2) The durable
+/// outbox: any shown-but-uncommitted engagement marker is committed at its shown instant.
+/// (3) Engaging notices past their show-by bound get their terminal receipt so the day's knock
+/// slot frees even when no cockpit returns. Not a loop opportunity: it has no gate to hold.
+pub(crate) async fn run_housekeeping(conv: &ConversationEngine, last: u64) -> u64 {
+    let now = now_ms();
+    if now.saturating_sub(last) < HOUSEKEEPING_PERIOD_MS {
+        return last;
+    }
+    conv.resolve_proactive(false).await;
+    conv.ledger_resolve(false).await;
+    let _ = conv.sweep_engaging_expiry();
+    let committed = conv.reconcile_shown_engagements().await;
+    if committed > 0 {
+        eprintln!(
+            "[housekeeping] committed {committed} shown engagement marker(s) from the outbox"
+        );
+    }
+    now
+}
 
 /// Prediction-resolver tick: grade any predictions whose deadline has passed against the current
 /// understanding, write the hit/miss into per-domain calibration, and surface each verdict
@@ -291,7 +322,9 @@ pub(crate) async fn run_patterns(
                     mind_observability::LoopOutcome::Surfaced
                 }
                 Delivered::ConsoleQueued { .. } => mind_observability::LoopOutcome::FoundQueued,
-                Delivered::Undelivered => mind_observability::LoopOutcome::FoundUndelivered,
+                Delivered::Undelivered | Delivered::HeldNoPresence => {
+                    mind_observability::LoopOutcome::FoundUndelivered
+                }
             }
         } else {
             mind_observability::LoopOutcome::NothingFound
@@ -545,7 +578,9 @@ mod tests {
         assert!(body.contains("MissedTickBehavior::Delay"));
         assert!(body.contains("RUNNER_STARTED.swap(true"));
         // Serial legacy order, no per-body spawn.
+        let h = body.find("run_housekeeping(").unwrap();
         let i = body.find("run_ics(").unwrap();
+        assert!(h < i, "housekeeping runs ahead of the loops");
         let l = body.find("run_lease_sweep(").unwrap();
         let r = body.find("run_resolve(").unwrap();
         let p = body.find("run_profile_refresh(").unwrap();
@@ -608,6 +643,11 @@ mod tests {
             "the mark sits inside the TelegramAccepted arm alone"
         );
         assert!(body.contains("chat_present: delivery.has_surface()"));
+        // L3c: the stale resolvers have exactly one owner and it is timer-bound to a minute.
+        assert_eq!(body.matches("conv.resolve_proactive(false)").count(), 1);
+        assert_eq!(body.matches("conv.ledger_resolve(false)").count(), 1);
+        assert!(body.contains("const HOUSEKEEPING_PERIOD_MS: u64 = 60_000;"));
+        assert_eq!(body.matches("conv.reconcile_shown_engagements(").count(), 1);
         // L3b (Codex's second pass): Patterns admits atomically under the turn exclusion, takes
         // the permit BEFORE its model call, holds it across the call and the delivery, and on
         // refusal records one held:idle-gate without advancing or marking.

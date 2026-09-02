@@ -4949,7 +4949,7 @@ bounded_enum! {
     HeldReason {
         IdleGate => "idle-gate", QuietHours => "quiet-hours", Receptivity => "receptivity",
         Disabled => "disabled", SpokeAlready => "spoke-already", NothingDue => "nothing-due",
-        NoChat => "no-chat", Budget => "budget",
+        NoChat => "no-chat", Budget => "budget", NoPresence => "no-presence",
     }
 }
 bounded_enum! {
@@ -4978,7 +4978,7 @@ bounded_enum! {
     /// L3b: what a loop handed to the delivery seam. A closed list; the text never rides here.
     DeliveryKind {
         Verdict => "verdict", ProfileRefresh => "profile-refresh", Pattern => "pattern",
-        HorizonTick => "horizon-tick",
+        HorizonTick => "horizon-tick", Knock => "knock", Digest => "digest", Ask => "ask",
     }
 }
 bounded_enum! {
@@ -4986,7 +4986,7 @@ bounded_enum! {
     /// console notice is a promise the cockpit still has to keep, and the journal is nowhere.
     DeliveryOutcome {
         TelegramAccepted => "telegram-accepted", ConsoleQueued => "console-queued",
-        Undelivered => "undelivered",
+        Undelivered => "undelivered", HeldNoPresence => "held-no-presence",
     }
 }
 
@@ -5072,7 +5072,11 @@ pub fn parse_delivery(e: &DecisionEvent) -> Option<ParsedDelivery> {
     // A console receipt id is exactly the store's shape: `notice:` + 64 lower-hex.
     if let Some(id) = e.object_id.as_deref() {
         let hex = id.strip_prefix("notice:")?;
-        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+        if hex.len() != 64
+            || !hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
             return None;
         }
     }
@@ -5090,6 +5094,8 @@ pub struct DeliveryLedgerRow {
     pub telegram_accepted: u32,
     pub console_queued: u32,
     pub undelivered: u32,
+    /// L3c: an engaging line held because nobody was there to see it; nothing was queued.
+    pub held_no_presence: u32,
     pub chars: u64,
 }
 
@@ -5123,6 +5129,7 @@ pub fn delivery_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) ->
             DeliveryOutcome::TelegramAccepted => row.telegram_accepted += 1,
             DeliveryOutcome::ConsoleQueued => row.console_queued += 1,
             DeliveryOutcome::Undelivered => row.undelivered += 1,
+            DeliveryOutcome::HeldNoPresence => row.held_no_presence += 1,
         }
         row.chars += u64::from(d.chars);
     }
@@ -5150,8 +5157,8 @@ pub fn render_delivery_ledger_at(events: &[DecisionEvent], now_ms: u64) -> Strin
     );
     for r in ledger.rows {
         out.push_str(&format!(
-            "  {:<16} telegram-accepted {:>3} · console-queued {:>3} · undelivered {:>3} · chars {}\n",
-            r.kind, r.telegram_accepted, r.console_queued, r.undelivered, r.chars
+            "  {:<16} telegram-accepted {:>3} · console-queued {:>3} · undelivered {:>3} · held-no-presence {:>3} · chars {}\n",
+            r.kind, r.telegram_accepted, r.console_queued, r.undelivered, r.held_no_presence, r.chars
         ));
     }
     out.push_str("Only telegram-accepted is delivered; a queued notice is a promise the cockpit keeps by acknowledging it.\n");

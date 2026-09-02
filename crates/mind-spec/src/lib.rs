@@ -43,7 +43,8 @@ pub mod horizon_replan;
 pub mod notice;
 pub use horizon_replan::{ReplanIdentity, ReplanMarker};
 pub use notice::{
-    bounded_notice_text, sha256_hex, NoticeEvent, NoticeKind, NoticeReceipt, NOTICE_MAX_CHARS,
+    bounded_notice_text, sha256_hex, EngagementMarker, NoticeEvent, NoticeKind, NoticeReceipt,
+    NOTICE_MAX_CHARS,
 };
 
 pub use capsule::{Capsule, Evidence, EvidenceRef, Observation, Progress, Uncertainty};

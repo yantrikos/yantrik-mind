@@ -998,12 +998,25 @@ fn handle(
                         return;
                     }
                     match conv.ack_notice_shown(id, lease) {
-                        Ok(shown) => send_json(
-                            &mut stream,
-                            "200 OK",
-                            "",
-                            &serde_json::json!({ "shown": shown }),
-                        ),
+                        Ok(ack) => {
+                            // L3c: the shown receipt is the durable record; the engagement
+                            // prediction is committed from its marker at the shown instant,
+                            // idempotently — a repeated acknowledgement commits nothing new.
+                            let committed = match &ack.marker {
+                                Some(marker) => rt.block_on(conv.commit_shown_engagement(
+                                    id,
+                                    marker,
+                                    ack.shown_ms,
+                                )),
+                                None => false,
+                            };
+                            send_json(
+                                &mut stream,
+                                "200 OK",
+                                "",
+                                &serde_json::json!({ "shown": ack.shown_now, "committed": committed }),
+                            )
+                        }
                         Err(_) => send(
                             &mut stream,
                             "409 Conflict",

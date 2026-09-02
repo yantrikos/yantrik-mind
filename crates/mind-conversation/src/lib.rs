@@ -96,9 +96,13 @@ mod ef2_door_tests;
 #[cfg(test)]
 mod l3b_tests;
 #[cfg(test)]
+mod l3c_tests;
+#[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
 pub mod turn_exclusion;
+/// L3c: the engagement marker, re-exported so the delivery seam can carry it.
+pub use mind_spec::EngagementMarker;
 
 /// E.AGI-A5: when this process started, fixed on first use (the engine constructor touches it),
 /// so "since this binary started" means one thing for the life of the process.
@@ -4910,6 +4914,8 @@ pub struct ConversationEngine {
     /// the real engine wires one beside its DB via `with_recorder`. It OBSERVES — every
     /// authoritative store stays exactly that.
     recorder: Arc<mind_observability::DecisionLog>,
+    /// L3c: serialises every engagement commit and every pending-list read-modify-write.
+    engagement_lock: tokio::sync::Mutex<()>,
     /// E.G1: the LIVE world model — world-state-v1.1 finally seeing the world it models.
     /// One presence event ingested per handled turn (data the turn already holds, nothing
     /// more); consulted ONLY in shadow — no decision path reads it (source-guarded).
@@ -5055,6 +5061,7 @@ impl ConversationEngine {
             packs_path: None,
             attestor: None,
             recorder: Arc::new(mind_observability::DecisionLog::disabled()),
+            engagement_lock: tokio::sync::Mutex::new(()),
             // E.G1: 30-minute presence freshness — a "user was here" older than that reads
             // Stale, which is exactly the epistemic honesty the shadow exists to measure.
             // E.G1b: a REAL purpose gate from day one — only a proactive-serving purpose may read
@@ -5487,6 +5494,11 @@ impl ConversationEngine {
             }
             mind_observability::DeliveryKind::Pattern => mind_spec::NoticeKind::Pattern,
             mind_observability::DeliveryKind::HorizonTick => mind_spec::NoticeKind::HorizonTick,
+            mind_observability::DeliveryKind::Knock
+            | mind_observability::DeliveryKind::Digest
+            | mind_observability::DeliveryKind::Ask => {
+                anyhow::bail!("an engaging line needs a marker: use queue_engaging_notice")
+            }
         };
         // Keyed on the BOUNDED text, so raw variants that render identically are one notice.
         let day = now / 86_400_000;
@@ -5507,9 +5519,51 @@ impl ConversationEngine {
         self.notice_engine()?
             .lease_notices(Self::NOTICE_OPERATOR, Self::now_ms(), lease_ms, limit)
     }
-    pub fn ack_notice_shown(&self, notice_id: &str, lease_id: &str) -> anyhow::Result<bool> {
+    pub fn ack_notice_shown(
+        &self,
+        notice_id: &str,
+        lease_id: &str,
+    ) -> anyhow::Result<mind_recipes::NoticeAck> {
         self.notice_engine()?
             .ack_notice_shown(notice_id, lease_id, Self::now_ms())
+    }
+    /// L3c: queue an ENGAGING line with its marker; it expires unshown after `show_by_ms`.
+    pub fn queue_engaging_notice(
+        &self,
+        kind: mind_observability::DeliveryKind,
+        text: &str,
+        marker: &mind_spec::EngagementMarker,
+        show_by_ms: u64,
+    ) -> anyhow::Result<mind_recipes::QueuedNotice> {
+        let now = Self::now_ms();
+        let notice_kind = match kind {
+            mind_observability::DeliveryKind::Knock => mind_spec::NoticeKind::Knock,
+            mind_observability::DeliveryKind::Digest => mind_spec::NoticeKind::Digest,
+            mind_observability::DeliveryKind::Ask => mind_spec::NoticeKind::Ask,
+            _ => anyhow::bail!("only knock, digest and ask are engaging"),
+        };
+        let key = format!("{}:{}", notice_kind.as_str(), marker.r#ref);
+        self.notice_engine()?.queue_engaging_notice(
+            Self::NOTICE_OPERATOR,
+            notice_kind,
+            text,
+            &key,
+            marker,
+            show_by_ms,
+            now,
+        )
+    }
+    pub fn sweep_engaging_expiry(&self) -> anyhow::Result<usize> {
+        self.notice_engine()?
+            .sweep_engaging_expiry(Self::NOTICE_OPERATOR, Self::now_ms())
+    }
+    pub fn shown_engagements(&self) -> anyhow::Result<Vec<mind_recipes::ShownEngagement>> {
+        self.notice_engine()?
+            .shown_engagements(Self::NOTICE_OPERATOR)
+    }
+    pub fn mark_engagement_committed(&self, notice_id: &str) -> anyhow::Result<bool> {
+        self.notice_engine()?
+            .mark_engagement_committed(notice_id, Self::now_ms())
     }
     pub fn notice_queue_depth(&self) -> anyhow::Result<(usize, usize)> {
         self.notice_engine()?

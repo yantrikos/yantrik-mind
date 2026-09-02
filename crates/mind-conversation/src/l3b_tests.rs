@@ -70,9 +70,11 @@ async fn a_queued_notice_is_deduped_per_day_and_never_counts_as_spoken() {
     let leased = conv.lease_notices(60_000, 10).unwrap();
     assert_eq!(leased.len(), 2);
     assert_eq!(leased[0].notice_id, a.notice_id, "oldest first");
-    assert!(conv
-        .ack_notice_shown(&leased[0].notice_id, &leased[0].lease_id)
-        .unwrap());
+    assert!(
+        conv.ack_notice_shown(&leased[0].notice_id, &leased[0].lease_id)
+            .unwrap()
+            .shown_now
+    );
     assert_eq!(conv.notice_queue_depth().unwrap(), (1, 1));
     let history = conv.notice_history(10).unwrap();
     assert_eq!(history.len(), 2);

@@ -17,7 +17,8 @@ pub mod store;
 use mind_spec::ReplanAcquisition;
 use store::HorizonFailureReason;
 pub use store::{
-    ActiveHorizonRecord, LeasedNotice, NoticeHistoryEntry, QueuedNotice, RecipeStore, RunRecord,
+    ActiveHorizonRecord, LeasedNotice, NoticeAck, NoticeHistoryEntry, QueuedNotice, RecipeStore,
+    RunRecord, ShownEngagement,
 };
 
 const HORIZON_RECIPE_RUN_PREFIX: &str = "horizon-segment:";
@@ -854,9 +855,42 @@ impl RecipeEngine {
         notice_id: &str,
         lease_id: &str,
         now_ms: u64,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<NoticeAck> {
         self.notice_store()?
             .ack_notice_shown(notice_id, lease_id, now_ms)
+    }
+    /// L3c: queue an engaging notice with its marker and show-by bound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_engaging_notice(
+        &self,
+        operator_id: &str,
+        kind: mind_spec::NoticeKind,
+        text: &str,
+        dedupe_key: &str,
+        marker: &mind_spec::EngagementMarker,
+        show_by_ms: u64,
+        now_ms: u64,
+    ) -> anyhow::Result<QueuedNotice> {
+        self.notice_store()?.queue_engaging_notice(
+            operator_id,
+            kind,
+            text,
+            dedupe_key,
+            marker,
+            show_by_ms,
+            now_ms,
+        )
+    }
+    pub fn sweep_engaging_expiry(&self, operator_id: &str, now_ms: u64) -> anyhow::Result<usize> {
+        self.notice_store()?
+            .sweep_engaging_expiry(operator_id, now_ms)
+    }
+    pub fn shown_engagements(&self, operator_id: &str) -> anyhow::Result<Vec<ShownEngagement>> {
+        self.notice_store()?.shown_engagements(operator_id)
+    }
+    pub fn mark_engagement_committed(&self, notice_id: &str, now_ms: u64) -> anyhow::Result<bool> {
+        self.notice_store()?
+            .mark_engagement_committed(notice_id, now_ms)
     }
     pub fn notice_history(
         &self,
@@ -2706,6 +2740,8 @@ mod ef2_tests;
 mod ef3_tests;
 #[cfg(test)]
 mod l3b_tests;
+#[cfg(test)]
+mod l3c_tests;
 
 #[cfg(test)]
 mod tests {

@@ -311,3 +311,40 @@ async fn a_routing_answer_within_budget_is_used_and_nothing_is_reported() {
         "nothing to report when the router answered in time"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_executor_box_runs_the_job_even_when_the_classifier_names_another_kind() {
+    // THE REGRESSION, from a graded run. The benchmark brief classifies as `code`; the harness
+    // configures only the page executor. Before this test, moving the executor check ahead of
+    // routing made the mind refuse — with a 200, no job, no model call and no error — where it had
+    // previously done the work. `route()` has always collapsed a one-option box to that option, and
+    // the floor has to do the same.
+    let brief = std::fs::read_to_string("../mind-evals/fixtures/cb2n/briefs/T1.txt")
+        .or_else(|_| std::fs::read_to_string("crates/mind-evals/fixtures/cb2n/briefs/T1.txt"))
+        .expect("the T1 brief");
+    let brief = brief.trim();
+    assert_eq!(
+        crate::delegate::classify(brief),
+        "code",
+        "the premise of this test: the brief classifies to a kind the fixture cannot run"
+    );
+
+    let f = fixture(false, std::time::Duration::from_millis(300)); // page executor only
+    let reply = f.conv.delegate_cmd(&format!("cb2-t1: {brief}")).await;
+    assert!(
+        !reply.contains("isn't configured"),
+        "a box with one executor must use it rather than refuse: {reply}"
+    );
+    let rows = board(&f.mem).await;
+    assert_eq!(rows.len(), 1, "the job must exist: {rows:?}");
+    assert_eq!(
+        rows[0]["kind"], "page",
+        "it runs on the only executor there is"
+    );
+    assert_eq!(
+        f.calls.load(Ordering::Relaxed),
+        0,
+        "and still no routing call, because there was nothing to choose between"
+    );
+    f.release();
+}

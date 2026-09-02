@@ -1490,11 +1490,25 @@ impl super::ConversationEngine {
         // anything, and routing may only REFINE the kind afterwards, under a deadline. A first
         // version of this change bounded the wait but still wrote the row afterwards — the comment
         // claimed one thing and the code did another, which review caught.
-        let floor = classify(&task);
         let runnable_kind = |k: &str| match k {
             "code" => self.coder.is_some(),
             "page" => self.recipes.is_some(),
             _ => self.researcher.is_some(),
+        };
+        // THE FLOOR MUST BE A KIND THIS BOX CAN RUN.
+        //
+        // `route()` has always collapsed a single-executor box to that executor before anything else
+        // — with one option there is nothing to choose. Moving the executor check ahead of routing
+        // (E.PORT1-B) accidentally dropped that: the classifier's answer was checked instead, so a
+        // box with only the page executor refused a brief that classifies as `code`, returned a
+        // refusal with a 200, and created no job at all. A graded leg found it within twenty minutes
+        // — it produced no model request, no board row and no error, which is the same silence
+        // E.PORT1-B exists to abolish, arriving through the door the fix itself opened.
+        let available = self.available_kinds();
+        let floor = if available.len() == 1 {
+            available[0]
+        } else {
+            classify(&task)
         };
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
         if !runnable_kind(floor) {

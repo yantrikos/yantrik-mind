@@ -25,6 +25,14 @@ Eighteen background cadences live as independent `last_x` timers inside one func
 (`telegram.rs`, the poll loop). Two more run in the headless heartbeat. None of them knows about the
 others.
 
+**Correction (2026-09-02, L1d finding):** the table above was every loop that had a name, not every
+loop the mind runs. A source census of the poll body found sixteen more proactive speakers with no
+loop id and no ledger record — the morning briefing, foresight, the evening look-ahead, event prep,
+anticipate, the birthday then-and-now, the dream note, forge, work watch, work radar, book ask,
+event ask, the support nudge, gift scout, the weekly report and the news digests; eleven claim
+engagement, nine run detached. They are ledgered by L1d (two rows: synchronous, then detached with
+a two-phase lifecycle) before any of them moves.
+
 ## 2. The diagnosis — five faults, one cause
 
 1. **Timers, not choices.** Whatever gate fires first, runs. ARCH5 §C already found the

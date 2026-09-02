@@ -23,4 +23,14 @@ except Exception:
   if [ "$FAILED" = "${EXPECT[$f]}" ]; then RES=agree; else RES=DISAGREE; BAD=1; fi
   echo "$f: $RES failed=[$FAILED] expected=[${EXPECT[$f]}]"
 done
+S=$(mktemp -d /tmp/cb2-tree-self-XXXX)
+mkfifo "$S/pipe"
+TREE=$(timeout -k 1 5 python3 "$FIX/tools/tree_hash.py" "$S"); TREE_RC=$?
+timeout -k 1 5 bash "$FIX/run/check.sh" t3 "$S" "$S/verdict.json" "$S/excerpts.txt" >/dev/null 2>&1; CHECK_RC=$?
+rm -rf "$S"
+if [ $TREE_RC -eq 0 ] && [ $CHECK_RC -eq 2 ] && echo "$TREE" | grep -Eq '^[0-9a-f]{64} files=0 bytes=0 symlinks=0 specials=1$'; then
+  echo "tree_special: agree detected=1 checker_refused=true"
+else
+  echo "tree_special: DISAGREE tree_rc=$TREE_RC checker_rc=$CHECK_RC tree=[$TREE]"; BAD=1
+fi
 exit $BAD

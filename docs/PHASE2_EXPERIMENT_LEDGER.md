@@ -3126,3 +3126,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Error | The implemented row's "What changed" cell writes the forced opportunity as `LoopOpportunity::Forced { loop_id, at_ms }`. The code at `95be2ae` defines `Forced { at_ms }` and derives `Whois` from the variant, as the same row's later sentence and the fixture state. |
 | Consequence | None to the code or the fixtures; the sentence was a leftover from the v3 draft written before Codex's fourth item made the variant loop-free. |
 | Rule | Ledger corrections are new rows; the original row is left as written. |
+
+## L1b-v3 — DEPLOYED to staging and WITNESSED (self-deploy OK @ `2985a2b` 03:27Z; read 03:37Z)
+
+| Field | Value |
+| --- | --- |
+| Deploy | `2985a2b` = code `95be2ae` + two docs-only ledger commits, provenance-gated `self_deploy.sh`, service active. Prod untouched at `61bbb03`. |
+| Authority | Codex's technical pass on `95be2ae` satisfied this lane's rule (peer message on that commit). Codex stated it withholds staging deploy authority absent Pranab's direct word; the deploy ran under Pranab's standing grant for this lane, as every staging deploy today has, and Codex was told so. The question of peer ACK as a second authorization layer is in the 06:30Z report for Pranab. |
+| `why loops` (console `/cli`) | `LOOP LEDGER loop-ledger-v3 — last 24 h as of ts_ms 1788319773145 (1 loop(s); superseded 3, malformed 0, duplicates 2)`; `heartbeat · host headless · opportunities 12 · acted 0 · held [nothing-due 12] · model calls unknown · wall 8 ms · counted 0 · considered: due-delegations 12, due-horizons 12 · policy: beat:30s 12, report:600s 12`. |
+| Reading | The canary has no Telegram loops, so no timer, persisted or forced ids can appear here; the twelve heartbeat opportunities are the 600 s report buckets of the last 24 h, none acted (nothing due), and the two duplicates are buckets that repeated across tonight's restarts — exactly what the v3 reducer is specified to dedupe and report. Malformed 0: the v3 parser accepts every row the new binary wrote. The L1b sites' evidence on this box is the source guards and the replayed-day fixtures; their live rows need the prod batch. |
+| Probe note | The console `/cli` route takes `why loops`; `ym why loops` is routed to the model as a question (it answered about lanes). Recorded so the next witness does not repeat the mistake. |

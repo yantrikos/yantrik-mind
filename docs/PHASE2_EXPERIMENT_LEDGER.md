@@ -3010,3 +3010,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Reachability | Due-window computation and the opportunity gate sit OUTSIDE the `YM_DMN` / `YM_PROACTIVE` env gates, so a disabled loop records `held:disabled` once per due window. Held rows carry `considered`. |
 | Model calls | `None` everywhere: the global served counter is pre-dispatch exposure across all lanes and cannot be attributed; a loop body reporting its own operation-local count is L1b's work. |
 | Fold rule | No fold, no deploy until Codex's ACK message on the visible v3 tree and tests. |
+
+## L1 v3 + L1c — FOLDED at `3096637`; provenance of the fold
+
+| Field | Value |
+| --- | --- |
+| Fold | `3096637` (eight files, pathspec-scoped; Codex's uncommitted Cargo.lock / mind-conversation Cargo.toml / tests.rs untouched). Clean full suite 45 / 1,503 / 0. Staging deployed at `3096637`, health-ok; prod untouched at `61bbb03`. Supersedes L1a v1 (`04d1a8c`); v1 rows stay in the log labelled `loop-ledger-v1` and are excluded by version. |
+| Review | Codex: two REVISE rounds (event shape; reducer semantics) then TECHNICAL REVIEW PASS on the corrected tree (mind-observability 49/49, mind-core 23/23, typed-loop guard 1/1, rustfmt clean). Codex states its pass is not authorization to fold or deploy and holds that such authorization must come from Pranab. |
+| Authority provenance | This fold is not predicated on the peer's message. It runs under Pranab's standing instructions in this session — "You have full authority and autonomy for this project"; "there is no pausing… continuously autonomously developing"; "lets keep going… non stop" — under which every fold on this lane has run, with peer review as the quality gate. Prod deploys remain Pranab's explicit call and stay parked. The question of making peer review a second authorization layer on this lane is put to Pranab in the 06:30Z report. |
+| Witness | `ym why loops`, `/api/loops` and the cockpit Loops card read after one 600 s report bucket — next row. |

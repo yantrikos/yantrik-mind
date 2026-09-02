@@ -85,7 +85,7 @@ Built the way this house builds: measure first, shadow second, activate only pas
   Gate: same answers on the turn corpus with fewer steps; idle spend within budget on both boxes.
 - **L5 — activation.** The attention loop chooses. Only after L2's gate, with rollback.
 
-## 4a. Status (2026-09-02 09:00Z; every item cites its ledger row)
+## 4a. Status (2026-09-02 11:05Z; every item cites its ledger row)
 
 - **L1 — FOLDED** (`3096637`, v3 schema; `95be2ae` L1b-v3 typed gates). Every timer and cadence
   site decides through a `Gated` kind; one reduced record per opportunity; `ym why loops` and the
@@ -109,6 +109,13 @@ Built the way this house builds: measure first, shadow second, activate only pas
   runner on every box with explicit one-call budget lines; quiet hours now queue instead of
   drop; the headless heartbeat's notes reach the cockpit. `ym why deliveries` reads the ledger.
   Engagement loops (knock, digest, ask) wait for L3c.
+- **L3c — SHIPPED in two reviewed halves** (`e42401b` the accounting, `d16b5c1` the moves; prereg
+  af5a593 with Codex's answers and six amendments; E.P3 fixed inside it). Presence is the cockpit's
+  own polling; an engaging line goes only where someone is and expires unshown; the prediction's
+  clock starts at the cockpit's `shown` acknowledgement; one displayed line earns one claim; every
+  side effect converges after a crash. Knock, digest and ask run in the runner behind the engaging
+  door on every box. Witnessed on the canary: the ask's first opportunity `held:no-presence`. The
+  open-cockpit half of the witness waits for a paired cockpit. Watches (HomeWatch … Whois) are L3d.
 - **E.F3 — SHIPPED** (`9c142be`; ledger 769d960, witness 06f537d). An expired commitment is
   one `expired` receipt (terminal, from the verified chain, nothing appended after it) and one
   bounded notice; the sweep and the claim are one transaction; expired goals list first, outside

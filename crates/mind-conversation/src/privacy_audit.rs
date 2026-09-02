@@ -828,8 +828,14 @@ mod tests {
                     .and_then(|x| x.to_str())
                     .unwrap_or("")
                     .to_string();
-                // tests may call chat() freely — they carry no real household data.
-                if base == "tests.rs" || base == "privacy_audit.rs" || base == "l4_0_tests.rs" {
+                // Tests may call chat() freely — they carry no real household data. Listed by
+                // basename ONE BY ONE rather than by a `*_tests.rs` pattern, so a new file has to be
+                // added deliberately and a production file can never be exempted by being named
+                // like a test.
+                if matches!(
+                    base.as_str(),
+                    "tests.rs" | "privacy_audit.rs" | "l4_0_tests.rs" | "eport1b_tests.rs"
+                ) {
                     continue;
                 }
                 // CRATE-RELATIVE, so a decision about one crate's `lib.rs` cannot speak for
@@ -987,7 +993,7 @@ mod tests {
                 // literal words "hello"/"x"; a test file, exempt like tests.rs.
                 if matches!(
                     path.file_name().and_then(|name| name.to_str()),
-                    Some("privacy_audit.rs" | "tests.rs" | "l4_0_tests.rs")
+                    Some("privacy_audit.rs" | "tests.rs" | "l4_0_tests.rs" | "eport1b_tests.rs")
                 ) {
                     continue;
                 }

@@ -3156,3 +3156,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Fixture before code (v9) | A crash-point harness interrupts the reducer at every boundary — before the transaction, after the append but before commit, after commit, and on re-entry after each — and asserts at every point: exactly one integrity receipt for the goal; job status terminal failed once committed and unchanged thereafter; Retry refused; a second reducer run produces no new receipt and no state change; re-entry compares against the stored prefix digest, not a digest that includes the integrity receipt. |
 | Kill (v6–v9 additions) | A `REPLAN_STARTED` whose attempt is not exactly prior + 1; two open markers; a `REPLANNED` / `FAILED` whose attempt has no open marker; a retry acquisition without the bound Retry control receipt; any transition out of an integrity-failed goal other than a future preregistered reconciliation; an integrity receipt and a failed job row that do not land in one transaction. |
 | Lane | Receipt shape ACKed by Codex (03:27Z). Code on my lane; Codex reviews the frozen seam; nothing deploys on this row. |
+
+## L1b-v3 witness row — correction row (docs-only; clock)
+
+| Field | Value |
+| --- | --- |
+| Error | The witness row header says deploy 03:27Z and read 03:37Z. The box's evolution log records `2026-09-02T03:24:23Z | deploy | DEPLOYED | 2985a2b health-ok` (service restarted 03:24:16Z), and the readout's own `ts_ms 1788319773145` is 03:29:33Z. The header times were written from my clock, not the evidence. |
+| Consequence | None to the numbers; the aggregate is stamped by its own ts_ms. Rule for the next witness: take times from the box's log and the readout's ts_ms, never from the session clock. |
+| Rule | Ledger corrections are new rows; the original row is left as written. |

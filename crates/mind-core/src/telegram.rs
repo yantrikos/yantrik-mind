@@ -1984,6 +1984,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut gate_knock = mind_observability::OpportunityGate::default();
     let mut gate_digest = mind_observability::OpportunityGate::default();
     let mut gate_ask = mind_observability::OpportunityGate::default();
+    let mut gate_patterns = mind_observability::OpportunityGate::default();
+    let mut gate_member_beat = mind_observability::OpportunityGate::default();
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
@@ -2264,14 +2266,19 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(120);
             let now = now_ms();
             if now.saturating_sub(last_home_watch) >= period * 1000 {
+                let hw_window = last_home_watch;
+                let hw_t0 = now_ms();
+                let mut hw_items: u32 = 0;
                 last_home_watch = now;
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for alert in conv.home_watch().await {
+                        hw_items += 1;
                         let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
                     }
                     // Bills due soon (deduped once per month) ride the same cadence.
                     for note in conv.bill_watch().await {
+                        hw_items += 1;
                         let _ = tg_send_mirrored(&conv, &api, chat, &note).await;
                     }
                     // Tracked news: when a topic is DUE for a digest (fresh developments + paced, state
@@ -2290,6 +2297,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         });
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::HomeWatch,
+                            process_start_ms,
+                            key: hw_window,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::DueDelegations])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(hw_items)
+                    .wall_ms(now_ms().saturating_sub(hw_t0)),
+                );
             }
         }
 
@@ -2304,12 +2326,30 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(3600);
             let now = now_ms();
             if now.saturating_sub(last_resolve) >= period * 1000 {
+                let rs_t0 = now_ms();
                 let chat = active_chat.load(Ordering::Relaxed);
+                let mut verdicts: u32 = 0;
                 for verdict in conv.resolve_predictions(false).await {
+                    verdicts += 1;
                     if chat != 0 && !in_quiet_hours_now() {
                         let _ = tg_send_mirrored(&conv, &api, chat, &verdict).await;
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Resolve,
+                            process_start_ms,
+                            key: last_resolve,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::Beliefs])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(verdicts)
+                    .wall_ms(now_ms().saturating_sub(rs_t0)),
+                );
                 last_resolve = now;
             }
         }
@@ -2325,7 +2365,10 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(259_200);
             let now = now_ms();
             if now.saturating_sub(last_profile) >= period * 1000 {
+                let pr_t0 = now_ms();
+                let mut refreshed: u32 = 0;
                 if let Some(update) = conv.refresh_profile().await {
+                    refreshed = 1;
                     let chat = active_chat.load(Ordering::Relaxed);
                     if chat != 0 && !in_quiet_hours_now() {
                         let _ = tg_send_mirrored(
@@ -2337,6 +2380,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         .await;
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::ProfileRefresh,
+                            process_start_ms,
+                            key: last_profile,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::Beliefs])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(refreshed)
+                    .wall_ms(now_ms().saturating_sub(pr_t0)),
+                );
                 last_profile = now;
             }
         }
@@ -2351,6 +2409,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(43_200);
             let now = now_ms();
             if now.saturating_sub(last_family) >= period * 1000 {
+                let fm_t0 = now_ms();
+                let mut nudges: u32 = 0;
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     // Birthdays deserve LEAD TIME to plan/shop — a 21-day window was too conservative
@@ -2360,11 +2420,27 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(28);
                     for nudge in conv.family_date_nudges(window).await {
+                        nudges += 1;
                         if tg_send_mirrored(&conv, &api, chat, &nudge).await.is_ok() {
                             conv.note_proactive_sent().await;
                         }
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Family,
+                            process_start_ms,
+                            key: last_family,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(nudges)
+                    .wall_ms(now_ms().saturating_sub(fm_t0)),
+                );
                 last_family = now;
             }
         }
@@ -2436,9 +2512,12 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(21_600);
             let now = now_ms();
             if now.saturating_sub(last_followup) >= period * 1000 {
+                let fu_t0 = now_ms();
+                let mut followups: u32 = 0;
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for nudge in conv.deadline_followups().await {
+                        followups += 1;
                         if tg_send_mirrored(&conv, &api, chat, &nudge).await.is_ok() {
                             conv.note_proactive_sent().await;
                         }
@@ -2454,6 +2533,21 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         }
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::FollowUp,
+                            process_start_ms,
+                            key: last_followup,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(followups)
+                    .wall_ms(now_ms().saturating_sub(fu_t0)),
+                );
                 last_followup = now;
             }
         }
@@ -2488,12 +2582,30 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(43_200);
             let now = now_ms();
             if now.saturating_sub(last_pricewatch) >= period * 1000 {
+                let pw_t0 = now_ms();
+                let mut alerts: u32 = 0;
                 let chat = active_chat.load(Ordering::Relaxed);
                 if chat != 0 && !in_quiet_hours_now() {
                     for alert in conv.check_price_watches().await {
+                        alerts += 1;
                         let _ = tg_send_mirrored(&conv, &api, chat, &alert).await;
                     }
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::PriceWatch,
+                            process_start_ms,
+                            key: last_pricewatch,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::Beliefs])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(alerts)
+                    .wall_ms(now_ms().saturating_sub(pw_t0)),
+                );
                 last_pricewatch = now;
             }
         }
@@ -2831,13 +2943,49 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // delivered to THEIR own chat (owner-keyed end to end). Quiet-hours respected.
         {
             let now = now_ms();
-            if now.saturating_sub(last_member_beat) >= 120_000 && !in_quiet_hours_now() {
+            let mb_due = now.saturating_sub(last_member_beat) >= 120_000;
+            if mb_due && !in_quiet_hours_now() {
+                let mb_t0 = now_ms();
+                let mut beats_sent: u32 = 0;
                 for (chat, text) in conv.member_beats().await {
                     if tg_send_mirrored(&conv, &api, chat, &text).await.is_ok() {
+                        beats_sent += 1;
                         eprintln!("[member] beat delivered to {chat}");
                     }
                 }
+                gate_member_beat.mark(last_member_beat);
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::MemberBeat,
+                            process_start_ms,
+                            key: last_member_beat,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(120)])
+                    .count(beats_sent)
+                    .wall_ms(now_ms().saturating_sub(mb_t0)),
+                );
                 last_member_beat = now;
+            } else if mb_due {
+                if let Some(window) = gate_member_beat.take_window(
+                    mind_observability::LoopId::MemberBeat,
+                    process_start_ms,
+                    last_member_beat,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::HeldReason::QuietHours,
+                        )
+                        .considered(&[mind_observability::ConsideredSignal::FollowUps])
+                        .policy(&[mind_observability::LoopPolicy::Cadence(120)]),
+                    );
+                }
             }
         }
 
@@ -2911,10 +3059,26 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(21_600);
             let now = now_ms();
             if now.saturating_sub(last_ics) >= period * 1000 {
+                let ics_t0 = now_ms();
                 let n = conv.refresh_ics().await;
                 if n > 0 {
                     eprintln!("[calendar] refreshed {n} external event(s)");
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Ics,
+                            process_start_ms,
+                            key: last_ics,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::DueDelegations])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(n as u32)
+                    .wall_ms(now_ms().saturating_sub(ics_t0)),
+                );
                 last_ics = now;
             }
         }
@@ -2928,9 +3092,27 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .unwrap_or(60);
             let now = now_ms();
             if now.saturating_sub(last_lease_sweep) >= period * 1000 {
+                let ls_t0 = now_ms();
+                let mut swept: u32 = 0;
                 for line in conv.sweep_leases().await {
+                    swept += 1;
                     eprintln!("{line}");
                 }
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::LeaseSweep,
+                            process_start_ms,
+                            key: last_lease_sweep,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        mind_observability::LoopOutcome::Ran,
+                    )
+                    .considered(&[mind_observability::ConsideredSignal::DueDelegations])
+                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
+                    .count(swept)
+                    .wall_ms(now_ms().saturating_sub(ls_t0)),
+                );
                 last_lease_sweep = now;
             }
         }
@@ -3361,14 +3543,23 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(172_800);
-            if !spoke
-                && std::env::var("YM_PATTERNS")
-                    .map(|v| v != "off")
-                    .unwrap_or(true)
-                && idle_ok
-                && now.saturating_sub(last_patterns) >= pat_secs * 1000
-            {
+            let patterns_on = std::env::var("YM_PATTERNS")
+                .map(|v| v != "off")
+                .unwrap_or(true);
+            let patterns_due = now.saturating_sub(last_patterns) >= pat_secs * 1000;
+            let pat_considered = [
+                mind_observability::ConsideredSignal::Beliefs,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let pat_policy = [
+                mind_observability::LoopPolicy::Cadence(pat_secs),
+                mind_observability::LoopPolicy::Idle(idle_secs),
+            ];
+            if !spoke && patterns_on && idle_ok && patterns_due {
+                let pat_t0 = now_ms();
+                let pat_window = last_patterns;
                 let msg = conv.find_patterns().await;
+                let mut surfaced = false;
                 if msg.starts_with('\u{1f4a1}')
                     && tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok()
                 {
@@ -3377,8 +3568,54 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                         msg.len()
                     );
                     conv.note_proactive_sent().await;
+                    surfaced = true;
                 }
                 last_patterns = now; // reset cadence whether or not it found one
+                gate_patterns.mark(pat_window);
+                conv.record_loop_tick(
+                    mind_observability::LoopTick::acted(
+                        mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::Patterns,
+                            process_start_ms,
+                            key: pat_window,
+                        },
+                        mind_observability::LoopHost::Telegram,
+                        if surfaced {
+                            mind_observability::LoopOutcome::Surfaced
+                        } else {
+                            mind_observability::LoopOutcome::NothingFound
+                        },
+                    )
+                    .considered(&pat_considered)
+                    .policy(&pat_policy)
+                    .wall_ms(now_ms().saturating_sub(pat_t0)),
+                );
+            } else if patterns_due {
+                if let Some(window) = gate_patterns.take_window(
+                    mind_observability::LoopId::Patterns,
+                    process_start_ms,
+                    last_patterns,
+                ) {
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::held(
+                            window,
+                            mind_observability::LoopHost::Telegram,
+                            if !patterns_on {
+                                mind_observability::HeldReason::Disabled
+                            } else if spoke {
+                                mind_observability::HeldReason::SpokeAlready
+                            } else if chat == 0 {
+                                mind_observability::HeldReason::NoChat
+                            } else if quiet_now {
+                                mind_observability::HeldReason::QuietHours
+                            } else {
+                                mind_observability::HeldReason::IdleGate
+                            },
+                        )
+                        .considered(&pat_considered)
+                        .policy(&pat_policy),
+                    );
+                }
             }
         }
     }
@@ -3476,6 +3713,16 @@ mod tests {
             "LoopId::Knock",
             "LoopId::Digest",
             "LoopId::Ask",
+            "LoopId::Patterns",
+            "LoopId::HomeWatch",
+            "LoopId::Resolve",
+            "LoopId::ProfileRefresh",
+            "LoopId::Family",
+            "LoopId::FollowUp",
+            "LoopId::PriceWatch",
+            "LoopId::MemberBeat",
+            "LoopId::Ics",
+            "LoopId::LeaseSweep",
         ] {
             assert!(
                 poll.contains(&format!("loop_id: mind_observability::{id},")),

@@ -1906,7 +1906,9 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
                 links.push(be);
                 labels.push(spec);
             }
-            None => eprintln!("[brain] YM_PRIMARY_BRAIN={spec:?} — unknown provider or missing key; ignored"),
+            None => eprintln!(
+                "[brain] YM_PRIMARY_BRAIN={spec:?} — unknown provider or missing key; ignored"
+            ),
         }
     }
     for (provider, model) in order {
@@ -2285,13 +2287,22 @@ mod privacy_tests {
             "https://integrate.api.nvidia.com/v1"
         );
         // blank override falls back; '-' maps to '_' in the variable name
-        assert_eq!(resolve_provider_base("ollama-cloud", "https://ollama.com/v1", env), "https://ollama.com/v1");
-        assert_eq!(resolve_provider_base("groq", "https://api.groq.com/openai/v1", env), "https://api.groq.com/openai/v1");
+        assert_eq!(
+            resolve_provider_base("ollama-cloud", "https://ollama.com/v1", env),
+            "https://ollama.com/v1"
+        );
+        assert_eq!(
+            resolve_provider_base("groq", "https://api.groq.com/openai/v1", env),
+            "https://api.groq.com/openai/v1"
+        );
     }
 
     #[test]
     fn primary_brain_spec_is_trimmed_and_blank_is_none() {
-        assert_eq!(primary_brain_spec(|_| Some("  nim:z-ai/glm-5.2 ".into())), Some("nim:z-ai/glm-5.2".to_string()));
+        assert_eq!(
+            primary_brain_spec(|_| Some("  nim:z-ai/glm-5.2 ".into())),
+            Some("nim:z-ai/glm-5.2".to_string())
+        );
         assert_eq!(primary_brain_spec(|_| Some("   ".into())), None);
         assert_eq!(primary_brain_spec(|_| None), None);
     }

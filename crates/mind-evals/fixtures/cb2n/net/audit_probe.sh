@@ -10,10 +10,13 @@ for NET in cb2net cb2egress; do
   A=$(docker network inspect $NET --format '{{len .Containers}}' 2>/dev/null || echo 0)
   [ "$A" = 0 ] || { echo "refusing: $NET has $A attached container(s)"; exit 2; }
 done
-STRAY=(-I DOCKER-USER 1 -s 172.30.1.0/24 -d 8.8.8.8 -p tcp --dport 443 -j ACCEPT)
-cleanup() { iptables -D DOCKER-USER -s 172.30.1.0/24 -d 8.8.8.8 -p tcp --dport 443 -j ACCEPT 2>/dev/null; }
+# The seeded rule is a /32 HOST rule. The purge loop in cb2net.sh matches only the /24 forms and
+# the CB2-EGRESS jump, so this one SURVIVES the rebuild and reaches the audit, which is the point:
+# a /24 rule would simply be remediated and the probe would prove nothing about the audit.
+STRAY=(-s 172.30.1.9/32 -d 8.8.8.8 -p tcp --dport 443 -j ACCEPT)
+cleanup() { while iptables -C DOCKER-USER "${STRAY[@]}" 2>/dev/null; do iptables -D DOCKER-USER "${STRAY[@]}" || break; done; }
 trap cleanup EXIT
-iptables "${STRAY[@]}" || { echo "could not seed the stray rule"; exit 2; }
+iptables -I DOCKER-USER 1 "${STRAY[@]}" || { echo "could not seed the stray rule"; exit 2; }
 OUT=$(bash "$HERE/net/cb2net.sh" 2>&1); RC=$?
 cleanup
 if [ $RC -eq 0 ]; then echo "AUDIT DID NOT FIRE: cb2net.sh accepted a stray DOCKER-USER rule"; exit 1; fi

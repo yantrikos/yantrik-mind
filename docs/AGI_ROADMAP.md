@@ -66,7 +66,7 @@ this table's point of view however much code exists.*
 | Procedure learning | DEFINED/TESTED | Banked approaches and skills exist and are recallable; **no evidence any banked procedure was ever reused to a better outcome.** |
 | Cross-domain transfer | ABSENT | Never tested. No held-out domain split exists. |
 | Tool learning from contracts | ABSENT as a measured capability | The mind is *given* schemas and now held to them (E.PK2e); it has never been scored on an unseen tool. |
-| Long-horizon agency | **ACTIVE for durable single-segment completion; replanning unproven** | E.F1–E.F1e: a durable goal survived restarts, woke on schedule, executed one bounded read-only segment, and COMPLETED with the answer actually delivered to the home channel; every lifecycle hop is a hash-chained receipt, and the chain was verified cryptographically by the peer (E.F1e). Repeated live with the label residual closed ("Total number of pending tasks: 0."). §0's criterion — maintain AND replan across sessions — is not met: no replan has ever run. |
+| Long-horizon agency | **ACTIVE for durable completion WITH one replan within budget** | E.F1–E.F1e: a durable goal survived restarts, woke on schedule, executed one bounded read-only segment, and COMPLETED with the answer delivered; every lifecycle hop a hash-chained receipt, verified cryptographically by the peer. E.F2 (`588a8fe`, witnessed on staging 2026-09-02 04:43Z, ledger `68c587b`): a goal declared with one assumption observed it changed, parked with a claimable carrier, replanned on the next heartbeat through the same read-only validator, and COMPLETED with `replans 1` on its outcome receipt — the receipt chain the prereg wrote down, live, with a real planner. §0's criterion — maintain AND replan across sessions — is met for one declared assumption and one replan; multi-assumption goals, replan budgets above one, and reconciliation of a malformed lifecycle remain unbuilt (terminal by design). |
 | Causal reasoning | ABSENT | Prediction exists for tool success only (a Beta posterior over one tool's track record); no action-effect model. |
 | Calibrated uncertainty | PARTIAL, ACTIVE | Brier scored on tool-success predictions (E.T1). Never scored on answers, and E.P2 is the standing warning about what a good-looking calibration number can hide. |
 | Multi-agent cooperation | ACTIVE, partially measured | E.AGI-I0 found 16/152 experiment rows (~10.5%) recording a second-agent defect catch after the author's own gates were green. This is a one-directional lower bound with coordination costs recorded, not a controlled solo comparison; reverse-direction attribution and quality/cost lift remain unmeasured. |
@@ -74,7 +74,7 @@ this table's point of view however much code exists.*
 
 **The honest summary (revised 2026-09-02).** What is genuinely ACTIVE and witnessed is
 *instrumentation*: memory, recording, attribution, walls, attachment — and now one durable
-single-segment goal carried to a delivered completion with receipts (no replan yet). What is BENCHMARKED and *reachable in shadow*
+goal carried to a delivered completion with receipts, including one replan after a declared assumption changed (E.F2). What is BENCHMARKED and *reachable in shadow*
 is *judgement*: the world model is fed live and consulted at every knock evaluation, the executive
 has shadowed five real opportunities; neither has decided anything. What is ABSENT is *generality*:
 transfer, tool learning, causality — and routing a free-form question about the mind itself, which

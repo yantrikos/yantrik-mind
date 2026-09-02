@@ -1819,6 +1819,11 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
         _ => return None,
     };
     let key = configured_api_key(key_env)?;
+    // Containment hook (E.CB2-N): `YM_PROVIDER_BASE_URL_<PROVIDER>` re-points one provider at a
+    // local counting proxy that holds the real key; the process itself then only needs a
+    // placeholder key. The provider name is the one written in the spec, upper-cased, '-' → '_'.
+    let base = resolve_provider_base(provider, base, |name| std::env::var(name).ok());
+    let base = base.as_str();
     let model = if model.is_empty() {
         default_model.to_string()
     } else {
@@ -1835,6 +1840,24 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
             Some(key),
             model,
         )) as Arc<dyn LLMBackend>)
+    }
+}
+
+/// The base URL for `provider`: `YM_PROVIDER_BASE_URL_<PROVIDER>` when set to a non-empty value
+/// (trimmed, trailing '/' dropped), else `default`. Pure: the lookup is injected so tests never
+/// touch process env.
+pub fn resolve_provider_base(
+    provider: &str,
+    default: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> String {
+    let var = format!(
+        "YM_PROVIDER_BASE_URL_{}",
+        provider.trim().to_uppercase().replace('-', "_")
+    );
+    match lookup(&var).map(|v| v.trim().trim_end_matches('/').to_owned()) {
+        Some(v) if !v.is_empty() => v,
+        _ => default.to_owned(),
     }
 }
 
@@ -2224,6 +2247,27 @@ mod privacy_tests {
             role.has_private_lane(),
             "role pools must retain fail-closed privacy routing"
         );
+    }
+
+    #[test]
+    fn provider_base_override_is_per_provider_and_pure() {
+        let env = |name: &str| match name {
+            "YM_PROVIDER_BASE_URL_NIM" => Some(" http://172.30.0.2:8080/v1/ ".to_string()),
+            "YM_PROVIDER_BASE_URL_OLLAMA_CLOUD" => Some("   ".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_provider_base("nim", "https://integrate.api.nvidia.com/v1", env),
+            "http://172.30.0.2:8080/v1"
+        );
+        // an alias spelled differently is a different variable: no silent cross-over
+        assert_eq!(
+            resolve_provider_base("nvidia", "https://integrate.api.nvidia.com/v1", env),
+            "https://integrate.api.nvidia.com/v1"
+        );
+        // blank override falls back; '-' maps to '_' in the variable name
+        assert_eq!(resolve_provider_base("ollama-cloud", "https://ollama.com/v1", env), "https://ollama.com/v1");
+        assert_eq!(resolve_provider_base("groq", "https://api.groq.com/openai/v1", env), "https://api.groq.com/openai/v1");
     }
 
     /// THE LEAK-PROOF INVARIANT (sol 019f8287): for a Private-grounded turn, ZERO bytes reach a cloud

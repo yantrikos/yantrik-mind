@@ -1,0 +1,97 @@
+"""E.CB2 Mind driver v3 — runs INSIDE the cb2-mind container. Waits for the console, pairs with
+the instance's own code, submits ONE delegation, polls every 10 s, stops at done/failed, on the
+proxy's cap (429 from request 9 → the job fails or is cancelled here) or at 1800 s (the instance
+is killed). Declared output → /state/artifact (RESULT.md + files added under the web dir);
+receipt → /state/receipt.json, counts only, closed-schema accounting fail-closed."""
+import json, os, pathlib, shutil, signal, subprocess, sys, time, urllib.request, http.cookiejar
+T = sys.argv[1]; COUNT_DIR = sys.argv[2]
+BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800; CAP = 8
+FIX = pathlib.Path("/fixtures")
+cj = http.cookiejar.CookieJar(); op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+
+
+def call(method, path, body=None, timeout=60):
+    req = urllib.request.Request(BASE + path, method=method, data=(json.dumps(body).encode() if body is not None else None),
+                                 headers={"Content-Type": "application/json", "x-ym-web": "cb2-harness"})
+    with op.open(req, timeout=timeout) as r:
+        return r.status, r.read().decode("utf-8", "replace")
+
+
+def spend_rows():
+    """Closed schema, fail-closed: a row that is not a v1 inference_call with verdict in
+    served|failed|refused and a numeric attempts:<n> is counted as malformed (disqualifying)."""
+    p = STATE / "mind.db.decisions.jsonl"; req = att = bad = 0
+    if not p.exists():
+        return 0, 0, 0
+    for line in open(p, encoding="utf-8"):
+        try:
+            ev = json.loads(line).get("event", {})
+        except Exception:
+            bad += 1; continue
+        if ev.get("kind") != "inference_call":
+            continue
+        try:
+            assert ev.get("evaluator_id") == "inference-ledger-v1" and ev.get("verdict") in ("served", "failed", "refused")
+            n = int(str(ev.get("outcome", "")).split("attempts:")[1])
+        except Exception:
+            bad += 1; continue
+        req += 1; att += n
+    return req, att, bad
+
+
+def proxy_count():
+    try:
+        d = json.load(open(os.path.join(COUNT_DIR, "requests.json")))
+        return d.get("model_requests", -1), d.get("refused_over_cap", -1)
+    except Exception:
+        return -1, -1
+
+
+# wait for the console
+for _ in range(60):
+    try:
+        urllib.request.urlopen(BASE + "/", timeout=3); break
+    except urllib.error.HTTPError:
+        break
+    except Exception:
+        time.sleep(1)
+code = (STATE / "web-pairing.code").read_text().strip()
+st, _ = call("POST", "/api/pair", {"code": code, "name": "cb2-harness"}); print("pair:", st)
+brief = (FIX / "briefs" / f"{T}.txt").read_text(encoding="utf-8").strip()
+before = set(p for p in (STATE / "public").rglob("*") if p.is_file())
+name = f"cb2-{T.lower()}"; t0 = time.time(); started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+st, _ = call("POST", "/api/agent", {"name": name, "task": brief}); print("submit:", st)
+status, result, cancel = "running", "", None
+while True:
+    time.sleep(10)
+    if time.time() - t0 > WALL:
+        cancel = "timeout"; break
+    try:
+        _, out = call("GET", "/api/tasks"); jobs = json.loads(out)
+        jobs = jobs if isinstance(jobs, list) else (jobs.get("jobs") or jobs.get("delegations") or [])
+    except Exception:
+        jobs = []
+    mine = [j for j in jobs if isinstance(j, dict) and j.get("name") == name]
+    if mine:
+        status = mine[-1].get("status", "?"); result = mine[-1].get("result") or ""
+        if status in ("done", "failed"):
+            break
+if cancel:
+    status = f"cancelled:{cancel}"
+    try:
+        os.kill(1, signal.SIGKILL)   # the container's PID 1 is the mind
+    except Exception:
+        pass
+finished = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()); wall = round(time.time() - t0, 1)
+art = STATE / "artifact"; art.mkdir(exist_ok=True)
+(art / "RESULT.md").write_text(result, encoding="utf-8")
+added = [p for p in (STATE / "public").rglob("*") if p.is_file() and p not in before]
+for p in added:
+    dst = art / p.relative_to(STATE / "public"); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, dst)
+req, att, bad = spend_rows(); pm, pr = proxy_count()
+receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
+           "files_added": len(added), "result_bytes": len(result.encode("utf-8")),
+           "ledger_requests": req, "ledger_attempts": att, "ledger_malformed": bad,
+           "proxy_model_requests": pm, "proxy_refused_over_cap": pr,
+           "disqualified": bad > 0 or pm > CAP or cancel is not None}
+(STATE / "receipt.json").write_text(json.dumps(receipt, indent=1)); print(json.dumps(receipt))

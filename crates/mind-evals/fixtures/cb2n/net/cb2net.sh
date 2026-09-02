@@ -60,7 +60,7 @@ EXPECT="$EXPECT$(printf -- '-A CB2-EGRESS -s 172.30.1.0/24 -j DROP')"
 GOT=$(iptables -S CB2-EGRESS)
 [ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
 [ "$(iptables -S DOCKER-USER | sed -n 2p)" = "-A DOCKER-USER -j CB2-EGRESS" ] || { echo "CONTAINMENT NOT PROVEN: the CB2-EGRESS jump is not the first DOCKER-USER rule"; iptables -S DOCKER-USER; exit 1; }
-[ "$(iptables -S DOCKER-USER | grep -c -- '172\\.30\\.')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- '172\\.30\\.'; exit 1; }
+[ "$(iptables -S DOCKER-USER | grep -c -- '172\.30\.')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- '172\.30\.'; exit 1; }
 for BR in $BR_WORK $BR_EGRESS; do
   iptables -C INPUT -i $BR -j DROP 2>/dev/null || iptables -I INPUT 1 -i $BR -j DROP
   iptables -C INPUT -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT

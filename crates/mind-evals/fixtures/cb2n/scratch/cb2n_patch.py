@@ -153,6 +153,32 @@ sys.exit(0 if (d.get('void') is True and d.get('disqualified') is False and d.ge
   echo "rerun: ${sys} $t first receipt was void; prior outputs preserved as *_void1"
 }
 """)
+new("net/audit_probe.sh", """#!/bin/bash
+# Does the containment audit actually FAIL when it should? Seeds a stray DOCKER-USER rule naming our
+# subnet, runs net/cb2net.sh, and requires it to refuse with the stray-rule message; then removes the
+# stray rule, runs it again, and requires it to pass. A fail-closed check that cannot be seen failing
+# is not evidence (the first version of this audit shipped with a grep pattern that matched nothing).
+# Root, on the box, between runs only: it edits iptables and refuses if anything is attached.
+set -u
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+for NET in cb2net cb2egress; do
+  A=$(docker network inspect $NET --format '{{len .Containers}}' 2>/dev/null || echo 0)
+  [ "$A" = 0 ] || { echo "refusing: $NET has $A attached container(s)"; exit 2; }
+done
+STRAY=(-I DOCKER-USER 1 -s 172.30.1.0/24 -d 8.8.8.8 -p tcp --dport 443 -j ACCEPT)
+cleanup() { iptables -D DOCKER-USER -s 172.30.1.0/24 -d 8.8.8.8 -p tcp --dport 443 -j ACCEPT 2>/dev/null; }
+trap cleanup EXIT
+iptables "${STRAY[@]}" || { echo "could not seed the stray rule"; exit 2; }
+OUT=$(bash "$HERE/net/cb2net.sh" 2>&1); RC=$?
+cleanup
+if [ $RC -eq 0 ]; then echo "AUDIT DID NOT FIRE: cb2net.sh accepted a stray DOCKER-USER rule"; exit 1; fi
+echo "$OUT" | grep -q "CONTAINMENT NOT PROVEN" || { echo "AUDIT FIRED FOR THE WRONG REASON (rc=$RC):"; echo "$OUT" | tail -5; exit 1; }
+echo "with a stray rule: refused (rc=$RC) — $(echo "$OUT" | grep -m1 "CONTAINMENT NOT PROVEN")"
+OUT2=$(bash "$HERE/net/cb2net.sh" 2>&1); RC2=$?
+[ $RC2 -eq 0 ] || { echo "AUDIT IS NOT REPEATABLE: a clean run failed (rc=$RC2):"; echo "$OUT2" | tail -5; exit 1; }
+echo "$OUT2" | grep -q "containment proven" || { echo "clean run did not print containment proven"; exit 1; }
+echo "without it: proven (rc=0). audit probe PASS"
+""")
 new("scratch/rederive.sh", """#!/bin/bash
 # Exact re-derivation check: copy the frozen cb2 tree, apply the recorded patch, diff against this
 # tree (the shipped Hermes archive is excluded: it is never committed). Exit non-zero on any diff.
@@ -266,7 +292,7 @@ EXPECT="$EXPECT$(printf -- \'-A CB2-EGRESS -s 172.30.1.0/24 -j DROP\')"
 GOT=$(iptables -S CB2-EGRESS)
 [ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
 [ "$(iptables -S DOCKER-USER | sed -n 2p)" = "-A DOCKER-USER -j CB2-EGRESS" ] || { echo "CONTAINMENT NOT PROVEN: the CB2-EGRESS jump is not the first DOCKER-USER rule"; iptables -S DOCKER-USER; exit 1; }
-[ "$(iptables -S DOCKER-USER | grep -c -- \'172\\\\.30\\\\.\')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- \'172\\\\.30\\\\.\'; exit 1; }
+[ "$(iptables -S DOCKER-USER | grep -c -- \'172\\.30\\.\')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- \'172\\.30\\.\'; exit 1; }
 '''),
     # the DROP and the established-ACCEPT now live INSIDE CB2-EGRESS, in a verified order; leaving
     # these two in DOCKER-USER would put unaudited rules above the jump
@@ -424,10 +450,12 @@ rw("net/captest_client.py", [
 
 # ── MANIFEST: both profiles described without contradiction ──────────────────────────────────
 rw("MANIFEST.json", [
+    ('"proxy_start": "fail-closed: the leg aborts (receipt status proxy-not-ready, disqualified) unless the proxy started',
+     '"proxy_start": "fail-closed and PRE-INVOCATION: the leg aborts with a receipt of status proxy-not-ready, void true and disqualified false (nothing was graded, and the one declared rerun applies) unless the proxy started'),
     ('  "id": "E.CB2",\n  "version": 3,\n',
      '  "id": "E.CB2-N",\n  "version": 4,\n  "derived_from": "fixtures/cb2 at d4febe6 (the frozen Qwen reading; untouched) by the recorded patch scratch/cb2n_patch.py; scratch/rederive.sh proves the tree re-derives exactly",\n  "profiles": "profiles/<name>.profile, loaded by run/profile.sh (CB2_PROFILE, default qwen) THROUGH an immutable run state ($OUT/run_state.json: profile, upstream, resolved IPv4 addresses, first address, resolution time, model) written by the first loader call of a run and consumed unchanged by the network script, the proxy, both legs, the smokes and the cap test. qwen = the v3 reading unchanged: owned gateway 192.168.4.203, no key injection, the Mind on its local lane. nim (E.CB2-N) = upstream integrate.api.nvidia.com, its addresses resolved once (allowlisted EXCLUSIVELY: the network script fails closed if any other ACCEPT for the egress subnet survives), the key file (uid 10002, mode 0400) mounted read-only into the PROXY container only and injected as the Authorization header on every forward, placeholder keys in both work containers, one model for both systems (z-ai/glm-5.2), the Mind via YM_PRIMARY_BRAIN=nim:<model> with all six YM_ROLE_* equal to it behind YM_PROVIDER_BASE_URL_NIM (brain gate: env + boot log, fail closed). Key-leak scans hand the key FILE to grep as a pattern file (the key and its prefix never enter a variable, log or receipt); any hit in a work container\'s env, home, state, raw log or artifact disqualifies. Model identity: every model id tallied from SUCCESSFUL responses must equal the profile model, and at least one must exist, or the leg is disqualified (when not void). VOID = a TYPED proxy receipt showing an upstream 429/5xx on a model request or a transport/TLS failure (a failed upstream body read included; a client disconnect is counted separately and is not): infrastructure, never a disqualification by itself. A MISSING OR MALFORMED receipt is not that evidence: it is an independent disqualification. Cap evidence (a refusal, or accepted > cap) is independent too and stands whatever the upstream was doing; the Mind driver splits its own reasons the same way, independent (missing/malformed proxy receipt, a refusal, over-cap, a malformed ledger row) against dependent (the wall). A void leg preserves its first receipt and outputs as *_void1 and may be rerun exactly once, and only when it is PURELY void (void true, disqualified false, dq_independent false); a second void refuses. Other 4xx are the request errors of the caller: counted (upstream_client_errors), neither void nor rerun. A proxy that cannot come up writes a pre-invocation receipt with void true and disqualified false: nothing was graded. Egress policy lives in its own iptables chain CB2-EGRESS, flushed and rebuilt every run and jumped to from DOCKER-USER position 1 (established/related, one ACCEPT per resolved address on tcp/443, then DROP); the audit compares that chain rule for rule against the expected policy and fails closed on any difference, on a jump that is not first, or on any surviving DOCKER-USER rule naming the subnets. Each profile uses its own output root (/root/cb2n/out-qwen, /root/cb2n/out-nim), and every receipt carries the path and SHA-256 of the run state.",\n'),
     ('ACCEPT 172.30.1.0/24 → 192.168.4.203 tcp/443, DROP 172.30.1.0/24 → any.',
-     'ACCEPT 172.30.1.0/24 → each address in the run state tcp/443 (qwen: 192.168.4.203; nim: the resolved integrate.api.nvidia.com addresses) and NOTHING else — any other ACCEPT for that subnet fails the script —, DROP 172.30.1.0/24 → any.'),
+     'the egress policy is NOT a set of loose DOCKER-USER rules but a dedicated chain CB2-EGRESS, flushed and rebuilt every run and reached by ONE jump inserted at DOCKER-USER position 1; its rules in order are ACCEPT established/related → 172.30.1.0/24, then one ACCEPT 172.30.1.0/24 → <address> tcp/443 per address in the run state (qwen: 192.168.4.203; nim: the resolved integrate.api.nvidia.com addresses), then DROP 172.30.1.0/24 → any. The audit fails closed unless the chain matches that policy rule for rule, the jump is the FIRST DOCKER-USER rule, and no other DOCKER-USER rule names either subnet; net/audit_probe.sh proves the last of those by seeding a stray rule and requiring the audit to reject it.'),
     ('forwards every request verbatim (streaming included) to 192.168.4.203:443 with Host aig.mycluster.cyou;',
      'forwards every request verbatim (streaming included) to the run state\'s upstream by hostname (qwen: aig.mycluster.cyou at 192.168.4.203; nim: integrate.api.nvidia.com at its resolved address, Authorization injected from the proxy-only key file) over hostname-verified TLS;'),
     ('YM_LOCAL_OLLAMA_URL = the run\'s proxy, YM_PRIVATE_PROVIDERS=YM_HOUSEHOLD_PROVIDERS=ollama-local, no cloud keys,',
@@ -437,7 +465,7 @@ rw("MANIFEST.json", [
     ('"model": {"id": "qwen3.8:27b-q4_K_M", "endpoint": "https://aig.mycluster.cyou (192.168.4.203), reached only through the run\'s proxy", "rule": "the only model either system can reach — enforced by the network and the proxy, not by configuration"}',
      '"model": {"by_profile": {"qwen": "qwen3.8:27b-q4_K_M at https://aig.mycluster.cyou (192.168.4.203)", "nim": "z-ai/glm-5.2 at https://integrate.api.nvidia.com (addresses resolved once into the run state)"}, "endpoint": "reached only through the run\'s proxy", "rule": "the only model either system can reach — enforced by the network and the proxy, not by configuration; identical for both systems within a reading, checked from the successful responses\' model ids"}'),
     ('"invalidation": "a leg is disqualified on any refusal, a missing or malformed proxy receipt, tls_hostname_verified != true, upstream_errors > 0, any symlink or special filesystem node in the artifact, a non-zero driver exit, or the wall",',
-     '"invalidation": "INDEPENDENT violations always disqualify: any refusal, a missing or malformed proxy receipt, tls_hostname_verified != true, a key-leak hit, any symlink or special filesystem node in the artifact, a download/install line, a failed brain gate, more calls than the cap. An upstream 429/5xx on a model request or a transport/TLS failure VOIDS the leg instead (infrastructure, one declared same-leg rerun). DEPENDENT violations — a non-zero exit (the wall included), a receipt failing its typed shape, a successful response whose model id differs from the profile model or no successful response at all — disqualify only when the leg is not void.",'),
+     '"invalidation": "Three outcomes, never mixed. INDEPENDENT violations always disqualify: an untyped or missing proxy receipt (receipt_valid false), a refusal or accepted > cap in that receipt, more calls than the cap in the own log of the agent, a download or install line, a key-leak hit, a symlink or special filesystem node, a failed capture, a failed brain gate, and the independent reasons the Mind driver reports (missing or malformed proxy receipt, a refusal seen, accepted > cap, a malformed ledger row). VOID (infrastructure, not the agent): a typed receipt showing an upstream 429/5xx on a model request or a transport/TLS failure, and a proxy that could not start at all (pre-invocation: void true, disqualified false, nothing graded). DEPENDENT violations disqualify ONLY when the leg is not void: a non-zero exit including the wall, the agreement checks on the proxy receipt (1 <= accepted <= cap, refused 0, tls_hostname_verified true, accepted == the calls in the own log of the agent), and model identity.",'),
     ('"downloads_installs": "impossible by network (internal network, no DNS, proxy forwards only to the gateway);',
      '"downloads_installs": "impossible by network (internal network, no DNS, proxy forwards only to the run state\'s upstream);'),
     ('"cost": {"both": "the proxy\'s model_requests per run (the same meter for both systems)",',

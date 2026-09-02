@@ -54,30 +54,32 @@ this table's point of view however much code exists.*
 |---|---|---|
 | Persistent episodic/semantic memory | ACTIVE | Single-owner actor over yantrikdb; E.1 measured its scheduling (interactive read 65.5 ms → 7.3 ms under load). Continuity across sessions is used every day but has **no held-out measurement** — see Phase B. |
 | Hash-chained decision record | ACTIVE | E.4: 8/8 chain/tamper/reopen tests; `ym why <trace>` reconstructs a run from persisted evidence. Doctrine 3's cheap form is built on it. |
-| Closed learning chain (tool calls) | ACTIVE, reachable | E.L1 (prediction → outcome → Brier), E.T1 (trace tree), **E.R2** — which found it recording on a loop production does not run, and fixed it. The reachability doctrine was paid for here. |
+| Closed learning chain (tool calls) | ACTIVE, reachable, **window-named** | E.L1 (prediction → outcome → Brier), E.T1 (trace tree), **E.R2** — which found it recording on a loop production does not run, and fixed it. E.AGI-A2 stamped goal identity live; E.AGI-A5 made the completeness gate name its window (since this binary started, or an auditor's `since=`), because a log that spans binaries let an older one hide or flatter the running one. Staging all-time 65/80 (81%); prod 0/200 on its pre-stamping binary. |
 | Outcome attribution | ACTIVE | Six-way `Outcome` (Ok / Empty / Denied / Unavailable / **Malformed** / error) with one write site; E.PK2b→E.PK2e pinned the planner-vs-tool boundary and proved on the live loop that a refused call feeds no bandit and leaks no value. |
 | Abstention | SHADOWED | E.PK3's coverage router abstains by floor and by margin; it decides nothing yet. Elsewhere abstention exists as refusal, not as a chosen alternative to answering (Phase D). |
-| Self-observation | ACTIVE, outcome-audited but inaccurate | Instrument panel, `ym why`, two-witness pack stats (E.PK2). E.MQ1–E.MQ3 scored spoken capability claims: the first audit was killed at 7/10 scoreable, and the clean-subject deterministic prompt still returned 2/10 wrong verbatim answers. The self-model gap is measured; it is not closed. |
+| Self-observation | ACTIVE for matched questions; **unsolved for paraphrases** | Instrument panel, `ym why`, two-witness pack stats (E.PK2). E.MQ1–E.MQ3 showed a generative answer path cannot be trusted with the mind's own capabilities; E.MQ4 made the answer an architectural property — a typed claim registry rendered verbatim, `ym claims`, provenance-stamped. Routing free-form questions to a claim was then killed four times on sealed sets (lexicon 2/10, E.MQ5 LLM 7/10 + 3 misroutes, E.MQ6 singleton shortlist 5/20 + 2 wrong): truthful when the question matches the registry's words, silent otherwise. |
 | Expertise routing | SHADOWED | E.PK3: 35/38 agreement, 12/12 abstention on a pre-registered labelled set; live it has ranked correctly and incorrectly, both recorded. It has never chosen anything. |
 | Expertise attachment (leases) | ACTIVE (operator-driven) | E.PK4: grant → mount → a live turn that used the leased row (0.635, both witnesses agreeing) → expiry swept in ~20 s. Efficacy explicitly not claimed. |
-| Bounded planning | BENCHMARKED | Executive EX1–EX4: 26/37 pre-registered decisions representable (E.EX4-R2). One decision reached the live path in shadow (E.EX4-LIVE-A) and **decided nothing**. |
-| Temporal/world model | BENCHMARKED | world-state-v1.1 frozen: 9/9 oracles, ~78 metamorphic transitions, a 65-event adversarial month (E.W7-b, E.W7-c, E.W8). Never wired to a live decision. |
+| Bounded planning | BENCHMARKED, shadowed live (n = 5) | Executive EX1–EX4: 26/37 pre-registered decisions representable (E.EX4-R2). On prod the shadow has seen 5 opportunities (5 sent by the legacy gate, 5/5 agreement, 2 engaged / 3 ignored) — shadow-consistent evidence, not proof, and the disagreement that would justify switching is the one the design cannot observe (E.D2/E.D4). Decides nothing. |
+| Temporal/world model | BENCHMARKED, **reachable in shadow** | world-state-v1.1 frozen: 9/9 oracles, ~78 metamorphic transitions, a 65-event adversarial month (E.W7-b, E.W7-c, E.W8). Now fed live (E.G1/E.G1b: PRIMARY turns ingest presence behind the purpose gate) and consulted in shadow at every knock evaluation and, on a headless box, every 10 min (E.G1c — the first cut lived inside a Telegram-only gate and never fired; the cadence was witnessed to the millisecond). Each knock evaluation now ends in a joinable disposition event (E.G2a). It has still decided nothing, and the paired agreement table (E.G2) waits for a Telegram box. |
 | Safety walls (harm gate, egress, purpose, scope) | ACTIVE | Deterministic, structured-field-only; E.PK4 proved a hostile pack's constitution moves none of them (72 purpose combinations, 8 egress classes, 3 intents, byte-identical). |
 | Procedure learning | DEFINED/TESTED | Banked approaches and skills exist and are recallable; **no evidence any banked procedure was ever reused to a better outcome.** |
 | Cross-domain transfer | ABSENT | Never tested. No held-out domain split exists. |
 | Tool learning from contracts | ABSENT as a measured capability | The mind is *given* schemas and now held to them (E.PK2e); it has never been scored on an unseen tool. |
-| Long-horizon agency | ABSENT | No goal has been carried across sessions with checkpoints, replans and a completion measurement. |
+| Long-horizon agency | **ACTIVE, first instance** | E.F1–E.F1e: a durable goal survived restarts, woke on schedule, executed a bounded read-only segment, and COMPLETED with the answer actually delivered to the home channel; every lifecycle hop is a hash-chained receipt, and the chain was verified cryptographically by the peer (E.F1e). Repeated live with the label residual closed ("Total number of pending tasks: 0."). One goal, one segment, no replan yet — first instance, not generality. |
 | Causal reasoning | ABSENT | Prediction exists for tool success only (a Beta posterior over one tool's track record); no action-effect model. |
 | Calibrated uncertainty | PARTIAL, ACTIVE | Brier scored on tool-success predictions (E.T1). Never scored on answers, and E.P2 is the standing warning about what a good-looking calibration number can hide. |
 | Multi-agent cooperation | ACTIVE, partially measured | E.AGI-I0 found 16/152 experiment rows (~10.5%) recording a second-agent defect catch after the author's own gates were green. This is a one-directional lower bound with coordination costs recorded, not a controlled solo comparison; reverse-direction attribution and quality/cost lift remain unmeasured. |
 | Safe self-improvement | DEFINED | A self-build lane exists with an epistemic gate (E.C1) and two-tier fitness grading; no promotion has ever been blinded, and none has been scored against a hidden holdout. |
 
-**The honest summary.** What is genuinely ACTIVE and witnessed is *instrumentation*: memory,
-recording, attribution, walls, and now attachment. What is BENCHMARKED but not reachable is
-*judgement*: the world model and the executive. What is ABSENT is *generality*: transfer, tool
-learning, long horizons, causality. The gap between "this mind has a world model" and "this mind
-has ever used a world model to decide anything" is the whole distance this roadmap has to cross,
-and naming it is the first deliverable.
+**The honest summary (revised 2026-09-02).** What is genuinely ACTIVE and witnessed is
+*instrumentation*: memory, recording, attribution, walls, attachment — and now one long-horizon
+goal carried to a delivered completion with receipts. What is BENCHMARKED and *reachable in shadow*
+is *judgement*: the world model is fed live and consulted at every knock evaluation, the executive
+has shadowed five real opportunities; neither has decided anything. What is ABSENT is *generality*:
+transfer, tool learning, causality — and routing a free-form question about the mind itself, which
+four sealed sets killed. The gap between "this mind has a world model" and "this mind has ever used
+a world model to decide anything" is now a measured gap with a join key, not a named one.
 
 ## 3. The closed learning chain: what is asked vs what is recorded
 

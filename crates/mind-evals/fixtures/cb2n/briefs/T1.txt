@@ -1,0 +1,8 @@
+Build a lead-generation landing page for a boutique bookkeeping service for Indian small businesses, with a contact form that saves leads to a local JSON file and a /dashboard page that shows total leads, leads per day for the last 14 days, and the five most recent leads, computed from that file.
+
+Contract (required, vendor-neutral):
+- Provide `run.sh` in the project root that starts the site on http://0.0.0.0:8123 (any language; no package downloads at run time).
+- The landing page is served at `/`. Its form has the id `cb2-lead-form` and fields named `name`, `email`, `phone`, `business`, `message`, and a submit button.
+- Leads are stored in `data/leads.json` as a JSON array of objects with exactly the keys `name`, `email`, `phone`, `business`, `message`, `created_at` (ISO-8601 UTC, e.g. 2026-09-02T14:05:00Z). A submission appends exactly one object.
+- `/dashboard` renders the numbers AND embeds them as `<script id="cb2-dashboard" type="application/json">{"total": <int>, "per_day": {"YYYY-MM-DD": <int>, ... 14 entries}, "recent": ["<name>", ... 5 names, newest first]}</script>`.
+- "Leads per day for the last 14 days" means 14 UTC calendar-day bins ending on the UTC date of the newest lead in the file (inclusive), every bin present even when zero.

@@ -1,0 +1,6 @@
+Build a personal website for a software engineer named Arjun Mehta: home, projects (four), writing (three posts), contact. Make it look like a real designer made it.
+
+Contract (required, vendor-neutral):
+- Static files only, entry `index.html` in the project root; no build step; no external network resources (fonts, scripts, images must be local or inline).
+- `index.html` contains `<section id="projects">` with at least four `<article>` elements, `<section id="writing">` with at least three `<article>` elements (each linking to its post page or containing the post), and `<section id="contact">` with a `mailto:` link or a form.
+- Every relative link resolves to a file in the project.

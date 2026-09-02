@@ -1,0 +1,10 @@
+Build a command-line task tracker in Python: add, list, done, and a 'today' view; tasks persist to a file; include tests and make them pass.
+
+Contract (required, vendor-neutral):
+- Entry point `tracker.py` in the project root, Python 3.13 standard library only (tests may use pytest).
+- `python tracker.py add "<text>"` prints `added #<id>` where ids start at 1 and increase.
+- `python tracker.py list` prints one line per task, in id order: `#<id> [ ] <text>` for open tasks and `#<id> [x] <text>` for done tasks.
+- `python tracker.py done <id>` prints `done #<id>`.
+- `python tracker.py today` prints, in the same line format, the open tasks added on the current UTC date.
+- Tasks persist in `tasks.json` in the current working directory as a JSON array; every command runs as its own process.
+- Tests live in files named `test_*.py` in the project root and pass under `python -m pytest -q`.

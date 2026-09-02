@@ -811,6 +811,45 @@ impl super::ConversationEngine {
         self.recorder.record(ev);
     }
 
+    /// L1 (ARCH7): one record per background-loop ITERATION, acted or skipped, so the mind's idle
+    /// time is in its decision record. Aggregates and reasons only — never content. `host` names
+    /// who ran the loop (`telegram` / `headless`), `cadence_secs` the timer it obeyed, `outcome`
+    /// what it did (`sent-digest`, `dreamed:reconcile`, `nothing-due`, …) and `skipped` why it
+    /// did not run (`idle-gate`, `quiet-hours`, `cadence`, `budget`, `disabled`). Read by nothing
+    /// on any decision path: it is the loop ledger, not a gate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_loop_tick(
+        &self,
+        loop_id: &str,
+        host: &str,
+        cadence_secs: u64,
+        outcome: &str,
+        skipped: Option<&str>,
+        model_calls: u32,
+        wall_ms: u64,
+    ) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut ev =
+            mind_observability::DecisionEvent::new(&format!("loop-{loop_id}-{now}"), "loop_tick");
+        ev.actor = Some(format!("loop:{loop_id}"));
+        ev.lane = Some("primary".into());
+        ev.goal_id = Some(format!("loop:{loop_id}"));
+        ev.trigger = Some(host.to_string());
+        ev.context_fingerprint = Some(mind_observability::opaque_id(
+            "loop-cadence",
+            &cadence_secs.to_string(),
+        ));
+        ev.chosen = Some(outcome.to_string());
+        ev.verdict = Some(match skipped {
+            Some(reason) => format!("skipped:{reason}"),
+            None => "acted".to_string(),
+        });
+        ev.model_calls = Some(model_calls);
+        ev.latency_ms = Some(wall_ms);
+        ev.evaluator_id = Some("loop-ledger-v1".into());
+        self.recorder.record(ev);
+    }
+
     /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
     /// of the contract holds: proof-carrying prepared work exists, its trigger was OBSERVED or TOLD,
     /// the recipient looks receptive, and the predicted engagement clears the bar for a speakable

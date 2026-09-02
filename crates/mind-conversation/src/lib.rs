@@ -7784,6 +7784,10 @@ impl ConversationEngine {
                 }
                 // E.AGI-A5: the same gate, both windows named — all-time beside "since this
                 // binary started" — so stratigraphy from an older binary cannot hide the current one.
+                // L1 (ARCH7): the loop ledger — the mind's idle time, one line per loop.
+                if prefix == "loops" {
+                    return verified_report(mind_observability::render_loop_ledger);
+                }
                 if prefix == "chains since-start" || prefix.starts_with("chains since=") {
                     return match self.recorder.read_all_verified() {
                         Ok(events) => {

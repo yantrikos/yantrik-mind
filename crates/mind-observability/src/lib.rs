@@ -4897,3 +4897,158 @@ mod sec1b_boundary {
         );
     }
 }
+
+// ───────────────────────────── L1 (ARCH7): the loop ledger ─────────────────────────────
+
+/// Aggregate view of one background loop over a window: how often it ran, what it did, why it
+/// skipped, and what it spent. Reasons and counts only — a `loop_tick` event carries no content.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoopLedgerRow {
+    pub loop_id: String,
+    pub hosts: std::collections::BTreeSet<String>,
+    pub ticks: usize,
+    pub acted: usize,
+    pub skipped: std::collections::BTreeMap<String, usize>,
+    pub outcomes: std::collections::BTreeMap<String, usize>,
+    pub model_calls: u64,
+    pub wall_ms: u64,
+    pub first_ts_ms: u64,
+    pub last_ts_ms: u64,
+}
+
+/// The loop ledger over the events whose `ts_ms` falls inside `[since_ms, until_ms]`.
+pub fn loop_ledger(events: &[DecisionEvent], since_ms: u64, until_ms: u64) -> Vec<LoopLedgerRow> {
+    let mut rows: std::collections::BTreeMap<String, LoopLedgerRow> = Default::default();
+    for e in events
+        .iter()
+        .filter(|e| e.kind == "loop_tick" && e.ts_ms >= since_ms && e.ts_ms <= until_ms)
+    {
+        let id = e
+            .goal_id
+            .as_deref()
+            .and_then(|g| g.strip_prefix("loop:"))
+            .unwrap_or("unknown")
+            .to_string();
+        let row = rows.entry(id.clone()).or_insert_with(|| LoopLedgerRow {
+            loop_id: id,
+            first_ts_ms: e.ts_ms,
+            ..Default::default()
+        });
+        row.ticks += 1;
+        if let Some(h) = e.trigger.as_deref() {
+            row.hosts.insert(h.to_string());
+        }
+        match e.verdict.as_deref() {
+            Some("acted") => row.acted += 1,
+            Some(v) => {
+                let reason = v.strip_prefix("skipped:").unwrap_or(v).to_string();
+                *row.skipped.entry(reason).or_insert(0) += 1;
+            }
+            None => *row.skipped.entry("unlabelled".into()).or_insert(0) += 1,
+        }
+        if let Some(c) = e.chosen.as_deref() {
+            *row.outcomes.entry(c.to_string()).or_insert(0) += 1;
+        }
+        row.model_calls += u64::from(e.model_calls.unwrap_or(0));
+        row.wall_ms += e.latency_ms.unwrap_or(0);
+        row.first_ts_ms = row.first_ts_ms.min(e.ts_ms);
+        row.last_ts_ms = row.last_ts_ms.max(e.ts_ms);
+    }
+    rows.into_values().collect()
+}
+
+/// `ym why loops`: the last 24 hours of the mind's idle time, one line per loop.
+pub fn render_loop_ledger(events: &[DecisionEvent]) -> String {
+    let until = events.iter().map(|e| e.ts_ms).max().unwrap_or(0);
+    let since = until.saturating_sub(24 * 60 * 60 * 1000);
+    let rows = loop_ledger(events, since, until);
+    if rows.is_empty() {
+        return "No loop ticks recorded yet — the loop ledger fills as background loops run."
+            .into();
+    }
+    let mut out = format!(
+        "LOOP LEDGER — last 24 h ({} loop(s); window ends at ts_ms {until})\n",
+        rows.len()
+    );
+    for r in rows {
+        let skipped: Vec<String> = r.skipped.iter().map(|(k, v)| format!("{k} {v}")).collect();
+        let outcomes: Vec<String> = r
+            .outcomes
+            .iter()
+            .filter(|(k, _)| !k.is_empty())
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        out.push_str(&format!(
+            "  {:<18} host {:<9} ticks {:>4} · acted {:>3} · skipped [{}] · model calls {} · wall {} ms\n      outcomes: {}\n",
+            r.loop_id,
+            r.hosts.iter().cloned().collect::<Vec<_>>().join("+"),
+            r.ticks,
+            r.acted,
+            skipped.join(", "),
+            r.model_calls,
+            r.wall_ms,
+            if outcomes.is_empty() { "—".to_string() } else { outcomes.join(", ") }
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod loop_ledger_tests {
+    use super::*;
+
+    fn tick(
+        id: &str,
+        host: &str,
+        verdict: &str,
+        chosen: &str,
+        ts: u64,
+        calls: u32,
+    ) -> DecisionEvent {
+        let mut e = DecisionEvent::new(&format!("loop-{id}-{ts}"), "loop_tick");
+        e.ts_ms = ts;
+        e.goal_id = Some(format!("loop:{id}"));
+        e.actor = Some(format!("loop:{id}"));
+        e.trigger = Some(host.into());
+        e.verdict = Some(verdict.into());
+        e.chosen = Some(chosen.into());
+        e.model_calls = Some(calls);
+        e.latency_ms = Some(7);
+        e
+    }
+
+    #[test]
+    fn the_ledger_counts_ticks_acts_skips_and_spend_per_loop_inside_the_window() {
+        const B: u64 = 200_000_000_000; // a real epoch-ish base so "24 h earlier" is meaningful
+        let events = vec![
+            tick(
+                "dmn",
+                "telegram",
+                "acted",
+                "dreamed:reconcile",
+                B + 1_000,
+                1,
+            ),
+            tick("dmn", "telegram", "skipped:idle-gate", "", B + 2_000, 0),
+            tick("dmn", "telegram", "skipped:idle-gate", "", B + 3_000, 0),
+            tick("knock", "headless", "skipped:no-packets", "", B + 3_500, 0),
+            tick("dmn", "telegram", "acted", "dreamed:associate", 1_000, 1), // days before the window
+        ];
+        let rows = loop_ledger(&events, B + 500, B + 4_000);
+        assert_eq!(rows.len(), 2);
+        let dmn = rows.iter().find(|r| r.loop_id == "dmn").unwrap();
+        assert_eq!((dmn.ticks, dmn.acted), (3, 1));
+        assert_eq!(dmn.skipped.get("idle-gate"), Some(&2));
+        assert_eq!(dmn.model_calls, 1);
+        assert_eq!(dmn.wall_ms, 21);
+        assert_eq!((dmn.first_ts_ms, dmn.last_ts_ms), (B + 1_000, B + 3_000));
+        let knock = rows.iter().find(|r| r.loop_id == "knock").unwrap();
+        assert!(knock.hosts.contains("headless"));
+        let text = render_loop_ledger(&events);
+        assert!(text.contains("dmn") && text.contains("idle-gate 2") && text.contains("knock"));
+        assert!(
+            !text.contains("dreamed:associate"),
+            "outside the 24 h window from the newest tick"
+        );
+    }
+}

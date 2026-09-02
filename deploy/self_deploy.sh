@@ -19,6 +19,22 @@ export PATH="/usr/local/bin:/root/.cargo/bin:$PATH"
 # Own target dir: sharing one with other source trees makes cargo thrash on path fingerprints.
 export CARGO_TARGET_DIR="$CLONE/target"
 
+# Replace an executable by renaming a fully written sibling over it. Truncating an executable in
+# place fails with ETXTBSY when any stale scratch process still maps the old inode, even after the
+# systemd unit has stopped. Atomic rename lets those processes finish on the old inode while the
+# service starts from the new one; it also prevents a partial binary from ever occupying $BIN.
+replace_binary() {
+  local source=$1 target=$2 staged
+  staged=$(mktemp "${target}.next.XXXXXX") || return 1
+  if install -m 0755 "$source" "$staged" \
+      && chown yantrikmind:yantrikmind "$staged" \
+      && mv -f "$staged" "$target"; then
+    return 0
+  fi
+  rm -f "$staged"
+  return 1
+}
+
 if [ ! -d "$CLONE/.git" ]; then
   git clone -q https://github.com/yantrikos/yantrik-mind.git "$CLONE"
 fi
@@ -81,11 +97,12 @@ if [ "$BUILT_COMMIT" != "$COMMIT_FULL" ]; then
 fi
 echo "==> self-deploy: binary provenance verified ($BUILT_COMMIT)"
 
-# stop -> cp -> start (NEVER cp over a running binary — Text file busy).
+# Stop the managed service, preserve a rollback image, then atomically rename the new executable
+# into place. Other scratch processes may still map the previous inode; they must not strand the
+# deployment or expose a partially copied binary.
 systemctl stop yantrik-mind
-cp "$BIN" "$BIN.prev" 2>/dev/null || true
-cp "$CARGO_TARGET_DIR/release/mind-core" "$BIN"
-chown yantrikmind:yantrikmind "$BIN"
+[ ! -f "$BIN" ] || replace_binary "$BIN" "$BIN.prev"
+replace_binary "$CARGO_TARGET_DIR/release/mind-core" "$BIN"
 systemctl start yantrik-mind
 sleep 6
 
@@ -94,6 +111,7 @@ sleep 6
 # (owner-only file in the state dir). The daemon creates it before the endpoint starts listening.
 CONSOLE_TOKEN_FILE="${YM_STATE_DIR:-/var/lib/yantrik-mind}/console.token"
 CONSOLE_TOKEN="$(cat "$CONSOLE_TOKEN_FILE" 2>/dev/null || true)"
+E2E_RC=0
 if printf "now" | curl -s -m 20 -H "Authorization: Bearer ${CONSOLE_TOKEN}" --data-binary @- http://127.0.0.1:8077/cli | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
   echo "$(date -u +%FT%TZ) | deploy | DEPLOYED | $COMMIT health-ok" >> "$EVLOG"
   echo "==> self-deploy OK @ $COMMIT"
@@ -102,16 +120,19 @@ if printf "now" | curl -s -m 20 -H "Authorization: Bearer ${CONSOLE_TOKEN}" --da
   # multi-step task died at step one. Unit suites were green throughout. So the deploy also asks
   # whether the mind can still FINISH things, and records the answer next to the deploy line.
   if [ -x "$CLONE/deploy/e2e_check.sh" ] || [ -f "$CLONE/deploy/e2e_check.sh" ]; then
-    E2E=$(YM_E2E_HOST=localhost YM_E2E_KEY=/root/.ssh/id_ed25519 bash "$CLONE/deploy/e2e_check.sh" 2>&1 | tail -1)
-    echo "$(date -u +%FT%TZ) | deploy | E2E | $COMMIT $E2E" >> "$EVLOG"
-    echo "==> e2e: $E2E"
+    if E2E=$(YM_E2E_HOST=localhost YM_E2E_KEY=/root/.ssh/id_ed25519 bash "$CLONE/deploy/e2e_check.sh" 2>&1 | tail -1); then
+      E2E_RC=0
+    else
+      E2E_RC=$?
+    fi
+    echo "$(date -u +%FT%TZ) | deploy | E2E | $COMMIT rc=$E2E_RC $E2E" >> "$EVLOG"
+    echo "==> e2e: rc=$E2E_RC $E2E"
   fi
 else
   echo "==> HEALTH PROBE FAILED — rolling back to previous binary"
   systemctl stop yantrik-mind || true
   if [ -f "$BIN.prev" ]; then
-    cp "$BIN.prev" "$BIN"
-    chown yantrikmind:yantrikmind "$BIN"
+    replace_binary "$BIN.prev" "$BIN"
   fi
   systemctl start yantrik-mind || true
   echo "$(date -u +%FT%TZ) | deploy | ROLLED-BACK | $COMMIT health probe failed" >> "$EVLOG"
@@ -158,3 +179,11 @@ if [ ! -f /var/lib/yantrik-mind/immune/immune_trials.jsonl ]; then
 fi
 echo "$(date -u +%FT%TZ) | deploy | COMPONENTS | immune+observatory synced @ $COMMIT" >> "$EVLOG"
 set -e
+
+# A completion-check failure keeps the deploy command red, but only after the fail-soft companion
+# sync has run and the exact E2E summary has been persisted. The core binary remains installed:
+# rollback is reserved for the deterministic local health gate above, not external-service noise.
+if [ "$E2E_RC" -ne 0 ]; then
+  echo "==> self-deploy completed with E2E failures (rc=$E2E_RC); health-valid binary remains active"
+  exit "$E2E_RC"
+fi

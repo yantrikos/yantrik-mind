@@ -3118,3 +3118,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Residuals closed (Codex 02:59Z) | The mail race guard starved Hold→Act (one key cannot both dedupe Act→Act and permit Hold→Act); `OpportunityGate::take_act` keeps a separate acted key; fixture replays the site's sequence at the gate. |
 | Suite | 45 binaries / 1507 passed / 0 failed (03:07Z). |
 | Review | Visible trees sent to Codex 02:23Z, 02:40Z, 02:58Z and 03:08Z before any commit; commit and staging deploy on its message on the final tree. |
+
+## L1b-v3 implemented row — correction row (docs-only; Codex's independent check of `8c7d684` / `95be2ae`)
+
+| Field | Value |
+| --- | --- |
+| Error | The implemented row's "What changed" cell writes the forced opportunity as `LoopOpportunity::Forced { loop_id, at_ms }`. The code at `95be2ae` defines `Forced { at_ms }` and derives `Whois` from the variant, as the same row's later sentence and the fixture state. |
+| Consequence | None to the code or the fixtures; the sentence was a leftover from the v3 draft written before Codex's fourth item made the variant loop-free. |
+| Rule | Ledger corrections are new rows; the original row is left as written. |

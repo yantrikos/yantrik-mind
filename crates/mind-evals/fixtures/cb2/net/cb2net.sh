@@ -29,7 +29,12 @@ ensure_net() {  # name subnet internal(true|false)
 ensure_net cb2net 172.30.0.0/24 true
 ensure_net cb2egress 172.30.1.0/24 false
 # superseded rules for the work subnet (harness v2 gave it forwarded egress; it has none now)
-while iptables -S DOCKER-USER | grep -q "172.30.0.0/24"; do R=$(iptables -S DOCKER-USER | grep "172.30.0.0/24" | head -1 | sed 's/^-A //'); iptables -D DOCKER-USER $R; done
+for _ in 1 2 3 4 5 6 7 8; do
+  N=$(iptables -L DOCKER-USER --line-numbers -n | grep "172.30.0.0/24" | head -1 | awk '{print $1}')
+  [ -z "$N" ] && break
+  iptables -D DOCKER-USER "$N" || { echo "could not delete superseded rule $N"; exit 1; }
+done
+iptables -L DOCKER-USER -n | grep -q "172.30.0.0/24" && { echo "superseded rules remain"; exit 1; }
 BR_WORK="br-$(docker network inspect cb2net --format '{{.Id}}' | cut -c1-12)"
 BR_EGRESS="br-$(docker network inspect cb2egress --format '{{.Id}}' | cut -c1-12)"
 iptables -C DOCKER-USER -s 172.30.1.0/24 -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -j DROP

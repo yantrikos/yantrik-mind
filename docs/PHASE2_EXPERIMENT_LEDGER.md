@@ -3628,3 +3628,30 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | --- | --- |
 | Renders (Codex, sanitized) | `why spend since-start` on the 915d132 process: no requests for the current process; superseded 0; malformed 0; other-process rows excluded 0 (none inside the process's own window yet); tokens absent. `why spend 1h`: the prior epoch still — DMN 3 served requests / 3 attempts / 31 064 ms wall; tokens absent. Same binary, same log, the two views disagree exactly at the deploy boundary — the distinction L4-0c was built for. |
 | Beside my derived read (15:15:34Z) | The log-derived counts (hour: 3 rows across two earlier processes; since-start: 0) agree with the renders. L4-0b heartbeat/ask evidence remains absent in the new process. |
+
+## E.F3 — witness: three natural expiries on one box day, each with its same-second notice (box clock, read 17:35:26Z)
+| Field | Value |
+| --- | --- |
+| Expiries (`mind_horizon_lifecycle`, event=expired) | goal 1a055fa26bf at 08:00:47Z; goal 1a05dcf6f8c at 16:46:34Z; goal 1a05de066a8 at 17:05:04Z; goal 1a05df5c263 at 17:28:04Z (predicted 17:27Z on the preregistration; the tick period explains the minute). |
+| Notices (`mind_notices`, kind=horizon_tick) | 16:46:34Z, 17:05:04Z, 17:28:04Z — one per expiry, same second, 98 chars each. |
+| Delivery rows (decision log, since 16:40Z) | 3 × delivery / undelivered / console-queued — staging has no Telegram token, so the notice queues for the console; the loop's own step is not the missing piece. |
+| Reading | Three unassisted expiries in a row, each noticed in the same second. The E.F3 prior ("the horizon loop expires without a nudge") holds on staging; the delivery leg still awaits the staging Telegram token or the prod word. |
+
+## E.CB2 — harness frozen, live-proved and approved (Codex APPROVE 17:11Z box clock)
+| Field | Value |
+| --- | --- |
+| Harness commits after the prereg row | c9b26c9, 999e514, 6c082f0, c73b0f1, 4f2a774, e122f07, 525c1d6, 2f01dfa, 7712ee4, 2e86460, f4fcb94, ab2fba5, d4febe6 (Codex: tree-hash hardening). The graded run uses d4febe6 exactly; the box tree at /root/cb2/fixtures is the LF git archive of that commit. |
+| Six Codex reviews, all resolved | every POST capped except the one observed metadata probe; strict typed receipts; exact tree-hash pattern; fixed proxy IPs under `--dns 127.0.0.1`; TLS hostname verification self-check; interface-scoped INPUT DROP; validate-before-copy in the checker; lstat and specials in the tree hash with a bounded FIFO probe. |
+| Live proofs on .95 (counts only) | containment TCP probes both sides pass; TLS verified; cap test accepted 8 / refused 1 / attempted 9 / upstream_errors 0; Mind boot+pair smoke pass; Hermes smoke 1 == 1; seven self-tests agree (t1/t2/t3 pass+fail with exact failed-check sets, plus tree_special). Codex reproduced these independently on the box via the deploy key before approving. |
+| Wart, fix deferred until after the sequence | the harness sets YM_CTL_PORT=8078 while YM_FRAME_PORT also defaults to 8078; with no frame token the frame listener is disabled, so no task path was altered (Codex confirmed in source). |
+
+## E.CB2 — Qwen reading: sequence halted by its own rule after leg 2 (box clock; Codex receipt verification pending)
+| Field | Value |
+| --- | --- |
+| Model | qwen3.8:27b-q4_K_M on the owned gateway, both systems, through the counting proxy (cap 8 requests / 1800 s / 1 invocation per leg). |
+| Leg 1 — mind T1 | 17:11:59Z → 17:12:34Z: rc 0, status failed, wall 31.2 s, files_added 0, result 153 bytes; ledger requests 2 / attempts 2 / malformed 0; proxy accepted 2 / refused 0; TLS true; capture_ok true; receipt sha256 prefix 018c1e696790c3f7; not disqualified. Cause, from its own result text: the page path handed `publish_page` a 968-char fragment with no `<html>`/`<body>` and the tool refused it — the single-shot prior, exactly. Checker rc 1, verdict 1842cdcd31b1fafe (all T1 checks fail on an empty tree). |
+| Leg 2 — hermes T1 | 17:12:37Z → 17:42:42Z: rc 124 at the 1800 s wall; proxy accepted 7 / refused 0 / upstream_errors 0; six completed API calls in its own log, the seventh in flight at the wall; four files, 24 688 bytes on disk; download_or_install_lines 0; proxy_receipt_ok false (7 ≠ 6, the timed-out branch); tree 2960cd6b4c6c36f5b9a83319ab652ddd812c461897d5ca7227693f48394fd952 files=4 bytes=24688 symlinks=0; receipt 49b657035d9af7a9; **disqualified** (timeout). No checker run on a disqualified artifact. |
+| Sequence | halted at 17:42:42Z by the orchestrator's rule (first disqualified receipt stops everything); networks empty after both legs (0/0); no containers left. T2 and T3: not_run for both systems. |
+| Result table (per the row's own rule) | T1: mind failed (honest, 31 s, 2 requests); hermes disqualified (wall, 7 requests). T2, T3: not_run / not_run. No winner. `not_run` is neither a loss nor a win. |
+| What the reading says | The confound decided the leg before either agent could: the local 27B streams a Hermes-sized completion in minutes, and Hermes spent its whole wall on seven calls without finishing. The mind's failure is real and its own (the single-shot page path). Neither fact says which agent builds a better lead dashboard. |
+| Then | (1) Codex verifies receipts, hashes and cleanup on the box before this row's numbers are treated as final; discrepancies land as a new row. (2) A second reading on NVIDIA NIM, proposed by Pranab ("You can use nvidia NIM to make things quick?"), is its own preregistered row (E.CB2-N): same briefs (same sha256s), same harness commit, same containment; the proxy's upstream becomes the NIM endpoint with the key held by the proxy container alone and injected on forward, the egress allowlist becomes the NIM host's addresses resolved at run start and recorded in the receipt, and both systems use the same NIM model. The model was never switched mid-sequence. (3) The page-path fix (through the coder + critic loop) stays its own row, after the NIM reading, on the same briefs. |

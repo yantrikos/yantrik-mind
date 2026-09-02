@@ -20,8 +20,11 @@ iptables -I DOCKER-USER 1 "${STRAY[@]}" || { echo "could not seed the stray rule
 OUT=$(bash "$HERE/net/cb2net.sh" 2>&1); RC=$?
 cleanup
 if [ $RC -eq 0 ]; then echo "AUDIT DID NOT FIRE: cb2net.sh accepted a stray DOCKER-USER rule"; exit 1; fi
-echo "$OUT" | grep -q "CONTAINMENT NOT PROVEN" || { echo "AUDIT FIRED FOR THE WRONG REASON (rc=$RC):"; echo "$OUT" | tail -5; exit 1; }
-echo "with a stray rule: refused (rc=$RC) — $(echo "$OUT" | grep -m1 "CONTAINMENT NOT PROVEN")"
+STRAY_MSG="CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"
+# the EXACT message, not any refusal: a generic match once accepted a run that failed for an unrelated
+# reason (a malformed expected-policy string), which is how a broken audit passed for a broken reason.
+echo "$OUT" | grep -qF "$STRAY_MSG" || { echo "AUDIT FIRED FOR THE WRONG REASON (rc=$RC):"; echo "$OUT" | tail -8; exit 1; }
+echo "with a stray rule: refused (rc=$RC), with the exact stray-rule message"
 OUT2=$(bash "$HERE/net/cb2net.sh" 2>&1); RC2=$?
 [ $RC2 -eq 0 ] || { echo "AUDIT IS NOT REPEATABLE: a clean run failed (rc=$RC2):"; echo "$OUT2" | tail -5; exit 1; }
 echo "$OUT2" | grep -q "containment proven" || { echo "clean run did not print containment proven"; exit 1; }

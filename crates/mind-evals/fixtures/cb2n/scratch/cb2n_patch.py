@@ -172,8 +172,8 @@ iptables -I DOCKER-USER 1 "${STRAY[@]}" || { echo "could not seed the stray rule
 OUT=$(bash "$HERE/net/cb2net.sh" 2>&1); RC=$?
 cleanup
 if [ $RC -eq 0 ]; then echo "AUDIT DID NOT FIRE: cb2net.sh accepted a stray DOCKER-USER rule"; exit 1; fi
-echo "$OUT" | grep -q "CONTAINMENT NOT PROVEN" || { echo "AUDIT FIRED FOR THE WRONG REASON (rc=$RC):"; echo "$OUT" | tail -5; exit 1; }
-echo "with a stray rule: refused (rc=$RC) — $(echo "$OUT" | grep -m1 "CONTAINMENT NOT PROVEN")"
+STRAY_MSG="CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"\n# the EXACT message, not any refusal: a generic match once accepted a run that failed for an unrelated\n# reason (a malformed expected-policy string), which is how a broken audit passed for a broken reason.\necho "$OUT" | grep -qF "$STRAY_MSG" || { echo "AUDIT FIRED FOR THE WRONG REASON (rc=$RC):"; echo "$OUT" | tail -8; exit 1; }
+echo "with a stray rule: refused (rc=$RC), with the exact stray-rule message"
 OUT2=$(bash "$HERE/net/cb2net.sh" 2>&1); RC2=$?
 [ $RC2 -eq 0 ] || { echo "AUDIT IS NOT REPEATABLE: a clean run failed (rc=$RC2):"; echo "$OUT2" | tail -5; exit 1; }
 echo "$OUT2" | grep -q "containment proven" || { echo "clean run did not print containment proven"; exit 1; }
@@ -286,9 +286,10 @@ for _ in $(seq 1 32); do
 done
 iptables -I DOCKER-USER 1 -j CB2-EGRESS
 # FAIL CLOSED: the chain must be EXACTLY the expected policy, in order, and the jump must be first.
-EXPECT=$(printf -- \'-N CB2-EGRESS\\n-A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\\n\')
-for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT$(printf -- \'-A CB2-EGRESS -s 172.30.1.0/24 -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\\n\' "$IP")"; done
-EXPECT="$EXPECT$(printf -- \'-A CB2-EGRESS -s 172.30.1.0/24 -j DROP\')"
+NL=$\'\\n\'   # command substitution STRIPS trailing newlines, so the expected policy is joined explicitly
+EXPECT="-N CB2-EGRESS${NL}-A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
+for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT${NL}-A CB2-EGRESS -s 172.30.1.0/24 -d $IP/32 -p tcp -m tcp --dport 443 -j ACCEPT"; done
+EXPECT="$EXPECT${NL}-A CB2-EGRESS -s 172.30.1.0/24 -j DROP"
 GOT=$(iptables -S CB2-EGRESS)
 [ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
 [ "$(iptables -S DOCKER-USER | sed -n 2p)" = "-A DOCKER-USER -j CB2-EGRESS" ] || { echo "CONTAINMENT NOT PROVEN: the CB2-EGRESS jump is not the first DOCKER-USER rule"; iptables -S DOCKER-USER; exit 1; }

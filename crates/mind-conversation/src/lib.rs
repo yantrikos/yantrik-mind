@@ -92,6 +92,8 @@ pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
 #[cfg(test)]
 mod chains_window_tests;
 #[cfg(test)]
+mod ef2_door_tests;
+#[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
 
@@ -7406,11 +7408,30 @@ impl ConversationEngine {
                     return "(recipe engine unavailable)".to_string();
                 };
                 let goal = goal.trim();
+                // E.F2: `… assuming <key>=<value>` declares ONE assumption the segment must
+                // observe; if it changes, the goal parks and replans once within its budget.
+                // Without the suffix the door is byte-identical to before (None is passed).
+                let (goal, assumption) = match goal.rsplit_once(" assuming ") {
+                    Some((head, declared)) => match declared.split_once('=') {
+                        Some((key, value)) => (
+                            head.trim(),
+                            Some((key.trim().to_string(), value.trim().to_string())),
+                        ),
+                        None => {
+                            return "Declare the assumption as `assuming key=value` (key: lowercase letters and underscores; value up to 120 characters).".to_string();
+                        }
+                    },
+                    None => (goal, None),
+                };
+                let declared = assumption.is_some();
                 let now = Self::now_ms();
                 match recipes
-                    .schedule_read_only_horizon(goal, delay_ms, now)
+                    .schedule_read_only_horizon_assuming(goal, delay_ms, now, assumption)
                     .await
                 {
+                    Ok(goal_id) if declared => format!(
+                        "🧭 Long-horizon goal scheduled [{goal_id}] — one durable, audited read-only segment will run after {delay}, observing your declared assumption; if it has changed, the goal replans once, read-only, within its budget."
+                    ),
                     Ok(goal_id) => format!(
                         "🧭 Long-horizon goal scheduled [{goal_id}] — one durable, audited read-only segment will run after {delay}. Writes and self-replanning are disabled."
                     ),
@@ -9168,6 +9189,7 @@ WINDOW: all-time, latest 200
         lines.push("ym trading-agent shadow|paper|status|off   always-on US-market desk (gradeable shadow views or sandbox orders; never live)".to_string());
         lines.push("ym trading-cockpit       one read-only view of all desks, execution boundaries, readiness, and realized evidence".to_string());
         lines.push("ym horizon 15m|2h|3d :: <goal>   durable delayed read-only goal; crash-safe, receipt-backed, no writes".to_string());
+        lines.push("ym horizon 15m :: <goal> assuming <key>=<value>   the same, observing ONE declared assumption; if it changed, the goal replans once, read-only, within budget".to_string());
         lines.push("ym horizons              verified active durable goals, wake times, gates, and consumed budgets".to_string());
         lines.push("ym horizon history <goal-id>   verified active, completion, and operator-control receipts".to_string());
         lines.push("ym horizon pause|resume|retry|cancel <goal-id>   atomic operator control with durable receipts".to_string());

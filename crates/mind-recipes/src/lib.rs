@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub mod store;
+use mind_spec::ReplanAcquisition;
 use store::HorizonFailureReason;
 pub use store::{ActiveHorizonRecord, RecipeStore, RunRecord};
 
@@ -404,9 +405,34 @@ pub struct StandingRun {
 ///
 /// Only read/reason/validate/render recipe steps are accepted. The unattended scheduler cannot
 /// execute `Act`, notify a user, wait recursively, ask a question, or let a recipe rewrite itself.
+/// E.F2: what a queued horizon job is. A `Segment` runs a bounded read-only recipe; a
+/// `Replan` carrier holds a parked goal's place in the queue so the scheduler can claim it,
+/// reduce its lifecycle, and author a revised plan — it carries no steps and no tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizonJobKind {
+    #[default]
+    Segment,
+    Replan {
+        /// Opaque identity of the assumption that drifted (see `mind_spec::assumption_id`).
+        assumption_id: String,
+        /// The plan revision this replan will produce.
+        target_revision: u32,
+    },
+}
+
+/// The reserved observation variable for a declared assumption (E.F2): written by the planner's
+/// first read step and by nothing else, so no later step can overwrite it before comparison.
+pub fn reserved_observation_var(key: &str) -> String {
+    format!("__assume_{key}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizonJob {
     pub goal_id: String,
+    /// E.F2: segment or replan carrier. Absent in older rows = segment.
+    #[serde(default)]
+    pub kind: HorizonJobKind,
     /// Stable id used as the HorizonRun action id and the retry/deduplication key.
     pub segment_id: String,
     pub recipe: Recipe,
@@ -420,7 +446,7 @@ pub struct HorizonJob {
 }
 
 impl HorizonJob {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         let valid_id = |value: &str| {
             !value.is_empty()
                 && value.len() <= 128
@@ -428,6 +454,28 @@ impl HorizonJob {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
                 })
         };
+        if let HorizonJobKind::Replan {
+            assumption_id,
+            target_revision,
+        } = &self.kind
+        {
+            // A carrier runs nothing: no steps, no tools, no observations. It is claimable so
+            // the replan branch has a scheduler work item to hold under one claim.
+            if !valid_id(&self.goal_id)
+                || !valid_id(&self.segment_id)
+                || !valid_id(&self.recipe.id)
+                || !self.recipe.steps.is_empty()
+                || !self.assumption_vars.is_empty()
+                || self.complete_on_success
+                || self.cost_units != 0
+                || *target_revision == 0
+                || assumption_id.len() != 16
+                || !assumption_id.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                anyhow::bail!("invalid replan carrier");
+            }
+            return Ok(());
+        }
         let recipe_bytes = serde_json::to_vec(&self.recipe)?;
         if !valid_id(&self.goal_id)
             || !valid_id(&self.segment_id)
@@ -547,6 +595,8 @@ impl HorizonJob {
 pub enum HorizonTickState {
     Advanced,
     AwaitingReplan,
+    /// E.F2: a revised plan was validated, applied and scheduled.
+    Replanned,
     Completed,
     Failed,
 }
@@ -563,6 +613,33 @@ pub struct HorizonTickOutcome {
 }
 
 const MAX_HORIZON_RESULT_CHARS: usize = 1_000;
+
+/// E.F2: the carrier's identity for a parked run — the first unaddressed change's opaque
+/// assumption id and the revision the replan will produce.
+fn replan_target(run: &HorizonRun) -> (String, u32) {
+    let key = run
+        .assumption_changes
+        .iter()
+        .find(|change| change.addressed_by_revision.is_none())
+        .map(|change| change.key.as_str())
+        .unwrap_or("");
+    (
+        mind_spec::assumption_id(key),
+        run.plan_revision.saturating_add(1),
+    )
+}
+
+/// A bounded, content-free name for a step, for the run's plan strings.
+fn step_kind(step: &RecipeStep) -> &'static str {
+    match step {
+        RecipeStep::Tool { .. } => "read",
+        RecipeStep::Think { .. } => "think",
+        RecipeStep::ThinkCited { .. } => "think-cited",
+        RecipeStep::Validate { .. } => "validate",
+        RecipeStep::Render { .. } => "render",
+        _ => "other",
+    }
+}
 
 fn horizon_result(steps: &[RecipeStep], vars: &HashMap<String, Value>) -> Option<String> {
     let output_var = steps.iter().rev().find_map(|step| match step {
@@ -885,8 +962,30 @@ GOAL: GOAL_HERE"#;
         delay_ms: u64,
         now_ms: u64,
     ) -> anyhow::Result<String> {
+        self.schedule_read_only_horizon_assuming(objective, delay_ms, now_ms, None)
+            .await
+    }
+
+    /// E.F2: the same door with one declared assumption. With `assuming`, the goal is minted with
+    /// room for one more segment and one replan, the assumption is declared on the run, and the
+    /// planner's first read step is bound to the reserved observation variable. Without it, this
+    /// is byte-identical to `schedule_read_only_horizon` (fixture).
+    pub async fn schedule_read_only_horizon_assuming(
+        &self,
+        objective: &str,
+        delay_ms: u64,
+        now_ms: u64,
+        assumption: Option<(String, String)>,
+    ) -> anyhow::Result<String> {
         if self.store.is_none() {
             anyhow::bail!("horizon scheduling requires durable storage");
+        }
+        if let Some((key, value)) = &assumption {
+            let key_ok = (1..=32).contains(&key.len())
+                && key.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+            if !key_ok || value.is_empty() || value.len() > 120 {
+                anyhow::bail!("horizon assumption is outside the bounded contract");
+            }
         }
         let objective = objective.trim();
         const MIN_DELAY_MS: u64 = 60_000;
@@ -903,96 +1002,39 @@ GOAL: GOAL_HERE"#;
             .plan(objective, now_ms)
             .await
             .ok_or_else(|| anyhow::anyhow!("planner did not produce a recipe"))?;
-        let mut steps = Vec::new();
-        let mut has_read = false;
-        for step in authored {
-            let bounded = match step {
-                RecipeStep::Tool {
-                    tool_name,
-                    args,
-                    store_as,
-                    ..
-                } => {
-                    has_read = true;
-                    RecipeStep::Tool {
-                        tool_name,
-                        args,
-                        store_as,
-                        on_error: ErrorAction::Fail,
-                    }
-                }
-                RecipeStep::Think {
-                    prompt,
-                    store_as,
-                    max_tokens,
-                    think,
-                    ..
-                } => RecipeStep::Think {
-                    prompt,
-                    store_as,
-                    max_tokens,
-                    think,
-                    on_error: ErrorAction::Fail,
-                },
-                RecipeStep::ThinkCited {
-                    prompt,
-                    store_as,
-                    source_vars,
-                    ..
-                } => RecipeStep::ThinkCited {
-                    prompt,
-                    store_as,
-                    source_vars,
-                    on_error: ErrorAction::Fail,
-                },
-                RecipeStep::Validate {
-                    input_var,
-                    store_as,
-                } => RecipeStep::Validate {
-                    input_var,
-                    store_as,
-                },
-                RecipeStep::Render {
-                    input_var,
-                    store_as,
-                    format,
-                } => RecipeStep::Render {
-                    input_var,
-                    store_as,
-                    format,
-                },
-                // The live scheduler owns user-visible lifecycle notices. A planner-authored Notify
-                // cannot bypass that controlled channel, so the conventional final Notify is dropped.
-                RecipeStep::Notify { .. } => continue,
-                RecipeStep::AskUser { .. }
-                | RecipeStep::Act { .. }
-                | RecipeStep::JumpIf { .. }
-                | RecipeStep::WaitUntil { .. }
-                | RecipeStep::WaitForCondition { .. }
-                | RecipeStep::Schedule { .. } => {
-                    anyhow::bail!(
-                        "the proposed horizon plan was not a linear read-only observation"
-                    );
-                }
-            };
-            steps.push(bounded);
-        }
-        if !has_read || steps.is_empty() || steps.len() > 16 {
-            anyhow::bail!("horizon plan requires one bounded audited read");
+        let mut steps = bound_read_only_steps(authored)?;
+        let mut assumption_vars = BTreeMap::new();
+        let mut assumptions = BTreeMap::new();
+        if let Some((key, value)) = &assumption {
+            // PREFLIGHT, before anything is persisted: the reserved observation must be bound
+            // to the first read step or the door refuses with the observation code.
+            let var = reserved_observation_var(key);
+            bind_reserved_observation(&mut steps, &var).map_err(|_| {
+                anyhow::anyhow!(
+                    "assumption_observation_failed: no read step can observe the assumption"
+                )
+            })?;
+            assumption_vars.insert(key.clone(), var);
+            assumptions.insert(key.clone(), value.clone());
         }
 
         let suffix = format!("{:x}", now_ms);
         let goal_id = format!("goal:horizon:{suffix}");
         let cost_units = steps.len() as u64;
+        let (max_actions, max_replans, max_cost_units) = if assumption.is_some() {
+            (2, 1, cost_units.saturating_mul(2).saturating_add(1))
+        } else {
+            (1, 0, cost_units)
+        };
         let mut run = HorizonRun::start(
             goal_id.clone(),
             objective,
             vec!["Execute one delayed, audited read-only recipe segment".into()],
-            BTreeMap::new(),
+            assumptions,
             mind_spec::HorizonBudget {
-                max_actions: 1,
-                max_replans: 0,
-                max_cost_units: cost_units,
+                max_actions,
+                max_replans,
+                max_cost_units,
                 max_elapsed_ms: delay_ms.saturating_add(24 * 60 * 60 * 1_000),
             },
             now_ms,
@@ -1000,13 +1042,14 @@ GOAL: GOAL_HERE"#;
         .map_err(|error| anyhow::anyhow!("horizon goal rejected: {error:?}"))?;
         let job = HorizonJob {
             goal_id: goal_id.clone(),
+            kind: HorizonJobKind::Segment,
             segment_id: "segment:1".into(),
             recipe: Recipe {
                 id: format!("horizon-recipe:{suffix}"),
                 name: format!("horizon: {objective}"),
                 steps,
             },
-            assumption_vars: BTreeMap::new(),
+            assumption_vars,
             wake_at_ms,
             cost_units,
             complete_on_success: true,
@@ -1014,7 +1057,172 @@ GOAL: GOAL_HERE"#;
         self.schedule_horizon_segment(&mut run, job, now_ms)?;
         Ok(goal_id)
     }
+}
 
+/// Keep only a linear read / reason / validate / render plan from what the planner proposed,
+/// fail-closed on every step, with at least one audited read (the door's rule, shared with the
+/// E.F2 replan branch so a revised plan is bounded exactly like a first one).
+fn bound_read_only_steps(authored: Vec<RecipeStep>) -> anyhow::Result<Vec<RecipeStep>> {
+    let mut steps = Vec::new();
+    let mut has_read = false;
+    for step in authored {
+        let bounded = match step {
+            RecipeStep::Tool {
+                tool_name,
+                args,
+                store_as,
+                ..
+            } => {
+                has_read = true;
+                RecipeStep::Tool {
+                    tool_name,
+                    args,
+                    store_as,
+                    on_error: ErrorAction::Fail,
+                }
+            }
+            RecipeStep::Think {
+                prompt,
+                store_as,
+                max_tokens,
+                think,
+                ..
+            } => RecipeStep::Think {
+                prompt,
+                store_as,
+                max_tokens,
+                think,
+                on_error: ErrorAction::Fail,
+            },
+            RecipeStep::ThinkCited {
+                prompt,
+                store_as,
+                source_vars,
+                ..
+            } => RecipeStep::ThinkCited {
+                prompt,
+                store_as,
+                source_vars,
+                on_error: ErrorAction::Fail,
+            },
+            RecipeStep::Validate {
+                input_var,
+                store_as,
+            } => RecipeStep::Validate {
+                input_var,
+                store_as,
+            },
+            RecipeStep::Render {
+                input_var,
+                store_as,
+                format,
+            } => RecipeStep::Render {
+                input_var,
+                store_as,
+                format,
+            },
+            // The live scheduler owns user-visible lifecycle notices. A planner-authored Notify
+            // cannot bypass that controlled channel, so the conventional final Notify is dropped.
+            RecipeStep::Notify { .. } => continue,
+            RecipeStep::AskUser { .. }
+            | RecipeStep::Act { .. }
+            | RecipeStep::JumpIf { .. }
+            | RecipeStep::WaitUntil { .. }
+            | RecipeStep::WaitForCondition { .. }
+            | RecipeStep::Schedule { .. } => {
+                anyhow::bail!("the proposed horizon plan was not a linear read-only observation");
+            }
+        };
+        steps.push(bounded);
+    }
+    if !has_read || steps.is_empty() || steps.len() > 16 {
+        anyhow::bail!("horizon plan requires one bounded audited read");
+    }
+    Ok(steps)
+}
+
+/// E.F2: bind the reserved observation variable to the planner's FIRST read step by renaming
+/// that step's output and rewriting every later reference to it. Nothing else ever writes the
+/// reserved name. Fails when the plan has no read step.
+fn bind_reserved_observation(steps: &mut [RecipeStep], var: &str) -> anyhow::Result<()> {
+    let first = steps
+        .iter()
+        .position(|step| matches!(step, RecipeStep::Tool { .. }))
+        .ok_or_else(|| anyhow::anyhow!("no read step"))?;
+    let old = match &mut steps[first] {
+        RecipeStep::Tool { store_as, .. } => std::mem::replace(store_as, var.to_string()),
+        _ => unreachable!("position found a Tool step"),
+    };
+    // Nothing else may write the reserved name: a later step whose output is the reserved
+    // variable would overwrite the observation before it is compared.
+    let collides = steps.iter().skip(first + 1).any(|step| match step {
+        RecipeStep::Tool { store_as, .. }
+        | RecipeStep::Think { store_as, .. }
+        | RecipeStep::ThinkCited { store_as, .. }
+        | RecipeStep::Validate { store_as, .. }
+        | RecipeStep::Render { store_as, .. } => store_as == var,
+        _ => false,
+    });
+    if collides {
+        anyhow::bail!("a later step writes the reserved observation variable");
+    }
+    let placeholder = format!("{{{{{old}}}}}");
+    let replacement = format!("{{{{{var}}}}}");
+    let rename = |name: &mut String| {
+        if *name == old {
+            *name = var.to_string();
+        }
+    };
+    // Rewrite references in dataflow order: a step reads the first read's output until some
+    // later step REDEFINES the old name; from that step on, `{{old}}` means the new definition
+    // and is left alone. The shadowing step's own inputs still read the first read.
+    for step in steps.iter_mut().skip(first + 1) {
+        let shadows = match step {
+            RecipeStep::Tool { args, store_as, .. } => {
+                let text = serde_json::to_string(args)?;
+                if text.contains(&placeholder) {
+                    *args = serde_json::from_str(&text.replace(&placeholder, &replacement))?;
+                }
+                *store_as == old
+            }
+            RecipeStep::Think {
+                prompt, store_as, ..
+            } => {
+                *prompt = prompt.replace(&placeholder, &replacement);
+                *store_as == old
+            }
+            RecipeStep::ThinkCited {
+                prompt,
+                source_vars,
+                store_as,
+                ..
+            } => {
+                *prompt = prompt.replace(&placeholder, &replacement);
+                source_vars.iter_mut().for_each(rename);
+                *store_as == old
+            }
+            RecipeStep::Validate {
+                input_var,
+                store_as,
+            }
+            | RecipeStep::Render {
+                input_var,
+                store_as,
+                ..
+            } => {
+                rename(input_var);
+                *store_as == old
+            }
+            _ => false,
+        };
+        if shadows {
+            break;
+        }
+    }
+    Ok(())
+}
+
+impl RecipeEngine {
     /// Read-only operator view of every active durable goal. All checkpoint and queue fields are
     /// independently validated by the store before they are surfaced.
     pub fn list_horizons(&self, now_ms: u64) -> anyhow::Result<Vec<HorizonView>> {
@@ -1179,6 +1387,180 @@ GOAL: GOAL_HERE"#;
     /// No recipe-authored wait, notification, outward action, or replan can enter this lane. Each
     /// successful read/reason segment is committed to the HorizonRun ledger before its queue row is
     /// removed; changed assumptions park the goal for an explicit bounded replan.
+    /// E.F2: one replan attempt on a claimed carrier, in the frozen order — acquire (reducer,
+    /// one transaction), budget before any planner call, author, bound, bind the reserved
+    /// observation, validate, `HorizonRun::replan`, then checkpoint + next segment + `replanned`
+    /// + `scheduled` in one transaction. Every failure closes the attempt atomically with its
+    /// bounded code; budget exhaustion and lifecycle mismatch are terminal.
+    async fn replan_horizon(
+        &self,
+        store: &Arc<RecipeStore>,
+        run: &mut HorizonRun,
+        job: &HorizonJob,
+        assumption_id: &str,
+        target_revision: u32,
+        now_ms: u64,
+    ) -> HorizonTickOutcome {
+        // The replanned checkpoint must post-date the parked one (the store refuses a different
+        // digest at the same instant), so the branch runs on the goal's logical clock.
+        let now_ms = now_ms.max(run.last_checkpoint_ms.saturating_add(1));
+        let goal_id = job.goal_id.clone();
+        let outcome = |state: HorizonTickState, error: Option<String>| HorizonTickOutcome {
+            goal_id: goal_id.clone(),
+            state,
+            receipt: None,
+            result: None,
+            error,
+        };
+        let checkpoint_sha256 = match store.active_checkpoint_sha256(&goal_id) {
+            Ok(Some(sha)) => sha,
+            Ok(None) => {
+                let _ = store.fail_horizon_job(
+                    &goal_id,
+                    HorizonFailureReason::CheckpointValidation,
+                    now_ms,
+                );
+                return outcome(
+                    HorizonTickState::Failed,
+                    Some("replan carrier has no active checkpoint".into()),
+                );
+            }
+            Err(error) => {
+                let _ = store.fail_horizon_job(
+                    &goal_id,
+                    HorizonFailureReason::StatePersistence,
+                    now_ms,
+                );
+                return outcome(HorizonTickState::Failed, Some(error.to_string()));
+            }
+        };
+        let attempt = match store.acquire_replan(
+            &goal_id,
+            now_ms,
+            &checkpoint_sha256,
+            assumption_id,
+            target_revision,
+        ) {
+            Ok(ReplanAcquisition::Initial { attempt })
+            | Ok(ReplanAcquisition::Resume { attempt })
+            | Ok(ReplanAcquisition::Retry { attempt }) => attempt,
+            Ok(ReplanAcquisition::Blocked(block)) => {
+                return outcome(
+                    HorizonTickState::Failed,
+                    Some(format!("replan lifecycle blocked: {block:?}")),
+                );
+            }
+            Err(error) => {
+                let _ = store.fail_horizon_job(
+                    &goal_id,
+                    HorizonFailureReason::StatePersistence,
+                    now_ms,
+                );
+                return outcome(HorizonTickState::Failed, Some(error.to_string()));
+            }
+        };
+        let close = |reason: HorizonFailureReason, error: String| {
+            let persisted = store.fail_replan_attempt(&goal_id, reason, attempt, now_ms);
+            outcome(
+                HorizonTickState::Failed,
+                Some(match persisted {
+                    Ok(true) => error,
+                    Ok(false) => format!("{error}; replan lifecycle blocked at closure"),
+                    Err(persist) => format!("{error}; then: {persist}"),
+                }),
+            )
+        };
+        // Budget BEFORE any planner call: an exhausted budget spends nothing and is terminal.
+        if run.plan_revision >= run.budget.max_replans {
+            return close(
+                HorizonFailureReason::ReplanBudgetExhausted,
+                "replan budget exhausted".into(),
+            );
+        }
+        let Some(change) = run
+            .assumption_changes
+            .iter()
+            .find(|change| change.addressed_by_revision.is_none())
+            .cloned()
+        else {
+            return close(
+                HorizonFailureReason::ReplanValidation,
+                "no unaddressed assumption change".into(),
+            );
+        };
+        let brief = format!(
+            "{}\nASSUMPTION CHANGED: {} was expected to be {:?} but was observed as {:?}. Revise the plan for the observed value.",
+            run.objective, change.key, change.previous, change.observed
+        );
+        let Some(authored) = self.plan(&brief, now_ms).await else {
+            return close(
+                HorizonFailureReason::ReplanPlanner,
+                "planner did not produce a revised recipe".into(),
+            );
+        };
+        let mut steps = match bound_read_only_steps(authored) {
+            Ok(steps) => steps,
+            Err(error) => return close(HorizonFailureReason::ReplanValidation, error.to_string()),
+        };
+        let var = reserved_observation_var(&change.key);
+        if bind_reserved_observation(&mut steps, &var).is_err() {
+            return close(
+                HorizonFailureReason::ReplanValidation,
+                "revised plan has no read step to observe the assumption".into(),
+            );
+        }
+        let segment_no = run.actions.len() + 1;
+        let next = HorizonJob {
+            goal_id: goal_id.clone(),
+            kind: HorizonJobKind::Segment,
+            segment_id: format!("segment:{segment_no}"),
+            recipe: Recipe {
+                id: format!("horizon-recipe:r{target_revision}"),
+                name: format!("horizon (revised): {}", run.objective),
+                steps: steps.clone(),
+            },
+            assumption_vars: BTreeMap::from([(change.key.clone(), var)]),
+            wake_at_ms: now_ms,
+            cost_units: steps.len() as u64,
+            complete_on_success: true,
+        };
+        if let Err(error) = next.validate() {
+            return close(HorizonFailureReason::ReplanValidation, error.to_string());
+        }
+        let plan: Vec<String> = steps
+            .iter()
+            .map(|step| format!("revision {target_revision}: {}", step_kind(step)))
+            .collect();
+        if let Err(error) = run.replan(plan) {
+            let reason = match error {
+                mind_spec::HorizonError::BudgetExceeded => {
+                    HorizonFailureReason::ReplanBudgetExhausted
+                }
+                _ => HorizonFailureReason::ReplanValidation,
+            };
+            return close(reason, format!("horizon replan rejected: {error:?}"));
+        }
+        let checkpoint = match run.checkpoint(now_ms) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                return close(
+                    HorizonFailureReason::StatePersistence,
+                    format!("horizon checkpoint rejected: {error:?}"),
+                )
+            }
+        };
+        match store.commit_replan(&checkpoint, &next, assumption_id, attempt, target_revision) {
+            Ok(true) => outcome(HorizonTickState::Replanned, None),
+            // The chain did not have exactly this attempt open: the store wrote the terminal
+            // integrity outcome and the replanned checkpoint never landed.
+            Ok(false) => outcome(
+                HorizonTickState::Failed,
+                Some("replan lifecycle blocked at commit".into()),
+            ),
+            Err(error) => close(HorizonFailureReason::StatePersistence, error.to_string()),
+        }
+    }
+
     pub async fn resume_due_horizons(&self, now_ms: u64) -> Vec<HorizonTickOutcome> {
         let Some(store) = &self.store else {
             return Vec::new();
@@ -1256,6 +1638,26 @@ GOAL: GOAL_HERE"#;
                 continue;
             }
             if run.status == HorizonStatus::AwaitingReplan {
+                if let HorizonJobKind::Replan {
+                    assumption_id,
+                    target_revision,
+                } = &job.kind
+                {
+                    // E.F2: the claimed carrier is the replan branch's work item.
+                    let outcome = self
+                        .replan_horizon(
+                            store,
+                            &mut run,
+                            &job,
+                            assumption_id,
+                            *target_revision,
+                            now_ms,
+                        )
+                        .await;
+                    outcomes.push(outcome);
+                    continue;
+                }
+                // A goal parked before E.F2 (no carrier): drop the stale segment row as before.
                 match store.finish_horizon_job(&job.goal_id) {
                     Ok(()) => outcomes.push(HorizonTickOutcome {
                         goal_id: job.goal_id.clone(),
@@ -1377,11 +1779,38 @@ GOAL: GOAL_HERE"#;
             }
 
             if drifted {
+                // E.F2 parking: the goal keeps a claimable place in the queue — a replan carrier
+                // for the first unaddressed change — and the park is one transaction with its
+                // receipt. Values never leave the run; the receipt carries an opaque id.
+                let (assumption_id, target_revision) = replan_target(&run);
+                let carrier = HorizonJob {
+                    goal_id: job.goal_id.clone(),
+                    kind: HorizonJobKind::Replan {
+                        assumption_id: assumption_id.clone(),
+                        target_revision,
+                    },
+                    segment_id: format!("replan:{target_revision}"),
+                    recipe: Recipe {
+                        id: format!("horizon-replan:{target_revision}"),
+                        name: "replan carrier".into(),
+                        steps: Vec::new(),
+                    },
+                    assumption_vars: BTreeMap::new(),
+                    wake_at_ms: segment_ms,
+                    cost_units: 0,
+                    complete_on_success: false,
+                };
                 let persisted = run
                     .checkpoint(segment_ms)
                     .map_err(|error| anyhow::anyhow!("horizon checkpoint rejected: {error:?}"))
-                    .and_then(|checkpoint| store.save_horizon_checkpoint(&checkpoint))
-                    .and_then(|()| store.finish_horizon_job(&job.goal_id));
+                    .and_then(|checkpoint| {
+                        store.park_horizon_for_replan(
+                            &checkpoint,
+                            &carrier,
+                            segment_ms,
+                            &assumption_id,
+                        )
+                    });
                 match persisted {
                     Ok(()) => outcomes.push(HorizonTickOutcome {
                         goal_id: job.goal_id.clone(),
@@ -2201,6 +2630,9 @@ pub fn morning_briefing() -> Recipe {
 }
 
 #[cfg(test)]
+mod ef2_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use mind_inference::ScriptedLLM;
@@ -2491,6 +2923,7 @@ mod tests {
 
     fn horizon_job(goal_id: &str, complete_on_success: bool, wake_at_ms: u64) -> HorizonJob {
         HorizonJob {
+            kind: HorizonJobKind::Segment,
             goal_id: goal_id.into(),
             segment_id: "observe-1".into(),
             recipe: Recipe {
@@ -2911,7 +3344,22 @@ mod tests {
         assert_eq!(persisted.status, HorizonStatus::AwaitingReplan);
         assert_eq!(persisted.actions.len(), 1);
         assert_eq!(persisted.assumption_changes.len(), 1);
-        assert!(engine.resume_due_horizons(start + 1).await.is_empty());
+        // E.F2: parking leaves a claimable replan carrier. With a planner that authors nothing
+        // the one attempt closes as `replan_planner_failed` (retryable) and the goal stays
+        // parked with its checkpoint intact; nothing is claimable after that.
+        let next = engine.resume_due_horizons(start + 1).await;
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].state, HorizonTickState::Failed);
+        assert!(next[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("planner")));
+        let parked = store
+            .load_horizon("goal:drift", start + 2)
+            .unwrap()
+            .expect("the parked goal keeps its checkpoint");
+        assert_eq!(parked.status, HorizonStatus::AwaitingReplan);
+        assert!(engine.resume_due_horizons(start + 2).await.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

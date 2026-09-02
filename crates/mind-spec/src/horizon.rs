@@ -149,6 +149,16 @@ pub enum HorizonLifecycleEvent {
     WakeStarted,
     Failed,
     Completed,
+    /// E.F2: a segment observed a declared assumption changing; the goal parked and left a
+    /// claimable replan carrier in the queue.
+    AwaitingReplan,
+    /// E.F2: the replan branch took the claimed carrier for one numbered attempt.
+    ReplanStarted,
+    /// E.F2: the revised plan was validated and applied; a `scheduled` receipt follows in the
+    /// same transaction.
+    Replanned,
+    /// E.F2: the lifecycle chain had a shape the reducer cannot authorise; terminal.
+    ReplanIntegrityFailed,
 }
 
 impl HorizonLifecycleEvent {
@@ -159,8 +169,76 @@ impl HorizonLifecycleEvent {
             Self::WakeStarted => "wake_started",
             Self::Failed => "failed",
             Self::Completed => "completed",
+            Self::AwaitingReplan => "awaiting_replan",
+            Self::ReplanStarted => "replan_started",
+            Self::Replanned => "replanned",
+            Self::ReplanIntegrityFailed => "replan_integrity_failed",
         }
     }
+}
+
+/// E.F2: what a replan-related lifecycle receipt carries beyond the queue transition. Never a
+/// key or a value: the assumption is an opaque digest, the attempt a receipt ordinal, the chain
+/// digest the malformed prefix an integrity failure was detected on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplanDetail {
+    /// First 16 hex characters of SHA-256 over the assumption key; joins to the local run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumption_id: Option<String>,
+    /// The attempt ordinal (count of prior `replan_started` receipts + 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    /// The plan revision this attempt produces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_revision: Option<u32>,
+    /// Digest of the malformed chain prefix (integrity failures only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_digest: Option<String>,
+}
+
+impl ReplanDetail {
+    pub fn awaiting(assumption_id: String) -> Self {
+        Self {
+            assumption_id: Some(assumption_id),
+            attempt: None,
+            target_revision: None,
+            chain_digest: None,
+        }
+    }
+    pub fn started(assumption_id: String, attempt: u32, target_revision: u32) -> Self {
+        Self {
+            assumption_id: Some(assumption_id),
+            attempt: Some(attempt),
+            target_revision: Some(target_revision),
+            chain_digest: None,
+        }
+    }
+    pub fn attempt_only(attempt: u32) -> Self {
+        Self {
+            assumption_id: None,
+            attempt: Some(attempt),
+            target_revision: None,
+            chain_digest: None,
+        }
+    }
+    pub fn integrity(chain_digest: String) -> Self {
+        Self {
+            assumption_id: None,
+            attempt: None,
+            target_revision: None,
+            chain_digest: Some(chain_digest),
+        }
+    }
+    fn valid_assumption_id(&self) -> bool {
+        self.assumption_id
+            .as_deref()
+            .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+}
+
+/// E.F2: the opaque, bounded identity a receipt carries for an assumption key.
+pub fn assumption_id(key: &str) -> String {
+    sha256(key.as_bytes())[..16].to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +254,9 @@ pub struct HorizonLifecycleReceipt {
     /// Present only for `failed`; callers expose only their typed, bounded reason vocabulary.
     pub failure_reason: Option<String>,
     pub previous_receipt_sha256: Option<String>,
+    /// E.F2: present only on replan-related events (and on an attempt-scoped `failed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replan: Option<ReplanDetail>,
     pub receipt_sha256: String,
 }
 
@@ -191,6 +272,33 @@ impl HorizonLifecycleReceipt {
         failure_reason: Option<String>,
         previous_receipt_sha256: Option<String>,
     ) -> Result<Self, HorizonError> {
+        Self::issue_with_replan(
+            goal_id,
+            event,
+            occurred_at_ms,
+            state_sha256,
+            previous_queue_status,
+            next_queue_status,
+            failure_reason,
+            previous_receipt_sha256,
+            None,
+        )
+    }
+
+    /// E.F2: issue a receipt that carries replan detail. Receipts without detail digest exactly
+    /// as before the amendment, so existing chains verify unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_with_replan(
+        goal_id: impl Into<String>,
+        event: HorizonLifecycleEvent,
+        occurred_at_ms: Millis,
+        state_sha256: Option<String>,
+        previous_queue_status: Option<String>,
+        next_queue_status: Option<String>,
+        failure_reason: Option<String>,
+        previous_receipt_sha256: Option<String>,
+        replan: Option<ReplanDetail>,
+    ) -> Result<Self, HorizonError> {
         let mut receipt = Self {
             goal_id: goal_id.into(),
             event,
@@ -200,6 +308,7 @@ impl HorizonLifecycleReceipt {
             next_queue_status,
             failure_reason,
             previous_receipt_sha256,
+            replan,
             receipt_sha256: String::new(),
         };
         if !receipt.valid_transition() {
@@ -240,32 +349,95 @@ impl HorizonLifecycleReceipt {
         {
             return false;
         }
+        let replan = self.replan.as_ref();
+        let no_replan = replan.is_none();
         match self.event {
             HorizonLifecycleEvent::Scheduled => {
-                self.state_sha256.is_some()
+                no_replan
+                    && self.state_sha256.is_some()
                     && self.previous_queue_status.is_none()
                     && self.next_queue_status.as_deref() == Some("pending")
                     && self.failure_reason.is_none()
             }
-            HorizonLifecycleEvent::Recovered => {
+            // E.F2 — parking: the running segment job becomes a pending replan carrier.
+            HorizonLifecycleEvent::AwaitingReplan => {
+                self.state_sha256.is_some()
+                    && self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.as_deref() == Some("pending")
+                    && self.failure_reason.is_none()
+                    && replan.is_some_and(|d| {
+                        d.valid_assumption_id()
+                            && d.attempt.is_none()
+                            && d.target_revision.is_none()
+                            && d.chain_digest.is_none()
+                    })
+            }
+            // E.F2 — acquisition: the claimed carrier stays running under one numbered attempt.
+            HorizonLifecycleEvent::ReplanStarted => {
+                self.state_sha256.is_some()
+                    && self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.as_deref() == Some("running")
+                    && self.failure_reason.is_none()
+                    && replan.is_some_and(|d| {
+                        d.valid_assumption_id()
+                            && d.attempt.is_some_and(|a| a >= 1)
+                            && d.target_revision.is_some_and(|r| r >= 1)
+                            && d.chain_digest.is_none()
+                    })
+            }
+            // E.F2 — success: the carrier is consumed; `scheduled` follows in the same transaction.
+            HorizonLifecycleEvent::Replanned => {
+                self.state_sha256.is_some()
+                    && self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.is_none()
+                    && self.failure_reason.is_none()
+                    && replan.is_some_and(|d| {
+                        d.valid_assumption_id()
+                            && d.attempt.is_some_and(|a| a >= 1)
+                            && d.target_revision.is_some_and(|r| r >= 1)
+                            && d.chain_digest.is_none()
+                    })
+            }
+            // E.F2 — integrity: terminal, no attempt, the malformed prefix's digest.
+            HorizonLifecycleEvent::ReplanIntegrityFailed => {
                 self.previous_queue_status.as_deref() == Some("running")
+                    && self.next_queue_status.as_deref() == Some("failed")
+                    && self.failure_reason.as_deref() == Some("replan_lifecycle_mismatch")
+                    && replan.is_some_and(|d| {
+                        d.assumption_id.is_none()
+                            && d.attempt.is_none()
+                            && d.target_revision.is_none()
+                            && d.chain_digest.as_deref().is_some_and(valid_sha256)
+                    })
+            }
+            HorizonLifecycleEvent::Recovered => {
+                no_replan
+                    && self.previous_queue_status.as_deref() == Some("running")
                     && self.next_queue_status.as_deref() == Some("pending")
                     && self.failure_reason.is_none()
             }
             HorizonLifecycleEvent::WakeStarted => {
-                self.previous_queue_status.as_deref() == Some("pending")
+                no_replan
+                    && self.previous_queue_status.as_deref() == Some("pending")
                     && self.next_queue_status.as_deref() == Some("running")
                     && self.failure_reason.is_none()
             }
             HorizonLifecycleEvent::Failed => {
-                self.previous_queue_status.as_deref() == Some("running")
+                // An attempt-scoped failure (E.F2) carries only the attempt it closes.
+                replan.is_none_or(|d| {
+                    d.attempt.is_some_and(|a| a >= 1)
+                        && d.assumption_id.is_none()
+                        && d.target_revision.is_none()
+                        && d.chain_digest.is_none()
+                }) && self.previous_queue_status.as_deref() == Some("running")
                     && self.next_queue_status.as_deref() == Some("failed")
                     && self.failure_reason.is_some()
                     && (self.state_sha256.is_some()
                         || self.failure_reason.as_deref() == Some("checkpoint_validation_failed"))
             }
             HorizonLifecycleEvent::Completed => {
-                self.state_sha256.is_some()
+                no_replan
+                    && self.state_sha256.is_some()
                     && self.previous_queue_status.as_deref() == Some("running")
                     && self.next_queue_status.is_none()
                     && self.failure_reason.is_none()
@@ -779,7 +951,17 @@ fn lifecycle_digest(receipt: &HorizonLifecycleReceipt) -> String {
         &receipt.previous_receipt_sha256,
     ))
     .expect("horizon lifecycle receipt tuple is serializable");
-    sha256(&payload)
+    match &receipt.replan {
+        // Receipts without replan detail digest exactly as before E.F2.
+        None => sha256(&payload),
+        Some(detail) => {
+            let mut bytes = payload;
+            bytes.extend_from_slice(
+                &serde_json::to_vec(detail).expect("replan detail is serializable"),
+            );
+            sha256(&bytes)
+        }
+    }
 }
 
 fn valid_queue_status(status: &str) -> bool {

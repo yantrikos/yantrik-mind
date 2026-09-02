@@ -618,6 +618,7 @@ let tasksTimer = null;
 function columnFor(kind, status) {
   const s = String(status || "").toLowerCase();
   if (s.includes("fail")) return "needs";
+  if (s.includes("awaiting")) return "needs";
   if (kind === "order") return "scheduled";
   if (s.includes("run") || s.includes("active")) return "running";
   if (s.includes("pending") || s.includes("scheduled") || s.includes("sleep")) return "scheduled";

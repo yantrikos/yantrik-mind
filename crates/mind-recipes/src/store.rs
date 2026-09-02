@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use mind_spec::{
-    GoalCheckpoint, HorizonControlAction, HorizonControlReceipt, HorizonLifecycleEvent,
-    HorizonLifecycleReceipt, HorizonRun, OutcomeReceipt,
+    reduce_replan, GoalCheckpoint, HorizonControlAction, HorizonControlReceipt,
+    HorizonLifecycleEvent, HorizonLifecycleReceipt, HorizonRun, OutcomeReceipt, ReplanAcquisition,
+    ReplanBlock, ReplanDetail, ReplanIdentity,
 };
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
@@ -39,9 +40,26 @@ pub(crate) enum HorizonFailureReason {
     ActionLedger,
     AssumptionObservation,
     StatePersistence,
+    /// E.F2: the revised plan failed `HorizonJob::validate` (retryable).
+    ReplanValidation,
+    /// E.F2: `plan_revision >= max_replans` at acquisition (terminal).
+    ReplanBudgetExhausted,
+    /// E.F2: the planner call was lost, errored or produced nothing (retryable).
+    ReplanPlanner,
+    /// E.F2: the lifecycle chain had a shape the reducer cannot authorise (terminal).
+    ReplanLifecycleMismatch,
 }
 
 impl HorizonFailureReason {
+    /// E.F2: failures the operator retry control refuses. A retry cannot change the plan
+    /// revision or the budget, and cannot repair a malformed chain; only a future preregistered
+    /// control could.
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::ReplanBudgetExhausted | Self::ReplanLifecycleMismatch
+        )
+    }
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::CheckpointValidation => "checkpoint_validation_failed",
@@ -52,6 +70,10 @@ impl HorizonFailureReason {
             Self::ActionLedger => "action_ledger_failed",
             Self::AssumptionObservation => "assumption_observation_failed",
             Self::StatePersistence => "state_persistence_failed",
+            Self::ReplanValidation => "replan_validation_failed",
+            Self::ReplanBudgetExhausted => "replan_budget_exhausted",
+            Self::ReplanPlanner => "replan_planner_failed",
+            Self::ReplanLifecycleMismatch => mind_spec::REPLAN_LIFECYCLE_MISMATCH,
         }
     }
 
@@ -81,6 +103,16 @@ const HORIZON_FAILURE_CODES: &[&str] = &[
     HorizonFailureReason::ActionLedger.as_str(),
     HorizonFailureReason::AssumptionObservation.as_str(),
     HorizonFailureReason::StatePersistence.as_str(),
+    HorizonFailureReason::ReplanValidation.as_str(),
+    HorizonFailureReason::ReplanBudgetExhausted.as_str(),
+    HorizonFailureReason::ReplanPlanner.as_str(),
+    HorizonFailureReason::ReplanLifecycleMismatch.as_str(),
+];
+
+/// E.F2: the codes the operator retry control refuses (see `HorizonFailureReason::is_terminal`).
+const TERMINAL_HORIZON_FAILURE_CODES: &[&str] = &[
+    HorizonFailureReason::ReplanBudgetExhausted.as_str(),
+    HorizonFailureReason::ReplanLifecycleMismatch.as_str(),
 ];
 
 fn bounded_failure_reason(raw: Option<&str>) -> String {
@@ -347,13 +379,24 @@ impl RecipeStore {
     /// the durable goal backwards. `HorizonRun::resume` validates both the digest and the state
     /// invariants before any bytes reach SQLite.
     pub fn save_horizon_checkpoint(&self, checkpoint: &GoalCheckpoint) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::save_checkpoint_tx(&tx, checkpoint)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The checkpoint upsert inside a caller-owned transaction (E.F2 parks and replans in one
+    /// transaction with their queue and lifecycle writes).
+    fn save_checkpoint_tx(
+        tx: &rusqlite::Transaction<'_>,
+        checkpoint: &GoalCheckpoint,
+    ) -> anyhow::Result<()> {
         HorizonRun::resume(checkpoint, checkpoint.created_at_ms)
             .map_err(|error| anyhow::anyhow!("invalid horizon checkpoint: {error:?}"))?;
         let checkpoint_json = serde_json::to_string(checkpoint)?;
         let created_ms = i64::try_from(checkpoint.created_at_ms)
             .map_err(|_| anyhow::anyhow!("horizon checkpoint timestamp is out of range"))?;
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
         let existing: Option<(i64, String)> = tx
             .query_row(
                 "SELECT created_ms,state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
@@ -386,7 +429,6 @@ impl RecipeStore {
                 created_ms
             ],
         )?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -544,6 +586,23 @@ impl RecipeStore {
                 if previous_status.as_deref() != Some("failed") {
                     anyhow::bail!("only a failed horizon goal can be retried");
                 }
+                // E.F2: a terminal replan failure cannot be retried — a retry can change
+                // neither the plan revision nor the budget, and cannot repair a malformed
+                // lifecycle chain. The goal needs a preregistered reconciliation, not a retry.
+                let failure_code: Option<String> = tx
+                    .query_row(
+                        "SELECT error FROM mind_horizon_jobs WHERE goal_id=?1",
+                        [goal_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if failure_code
+                    .as_deref()
+                    .is_some_and(|code| TERMINAL_HORIZON_FAILURE_CODES.contains(&code))
+                {
+                    anyhow::bail!("terminal horizon failure is not retryable");
+                }
                 // Retry restores only scheduler eligibility. Revalidate the signed checkpoint and
                 // elapsed-time budget at the operator's current clock; never rewrite either one.
                 HorizonRun::resume(&checkpoint, now_ms)
@@ -643,6 +702,13 @@ impl RecipeStore {
         goal_id: &str,
     ) -> anyhow::Result<Vec<HorizonLifecycleReceipt>> {
         let conn = self.conn.lock().unwrap();
+        Self::load_lifecycle_on(&conn, goal_id)
+    }
+
+    fn load_lifecycle_on(
+        conn: &rusqlite::Connection,
+        goal_id: &str,
+    ) -> anyhow::Result<Vec<HorizonLifecycleReceipt>> {
         let mut stmt = conn.prepare(
             "SELECT event,receipt_json,receipt_sha256
              FROM mind_horizon_lifecycle WHERE goal_id=?1 ORDER BY id",
@@ -659,11 +725,13 @@ impl RecipeStore {
                 || receipt.receipt_sha256 != stored_sha256
                 || receipt.previous_receipt_sha256 != previous_sha256
                 || !receipt.verify()
-                || (receipt.event == HorizonLifecycleEvent::Failed
-                    && !receipt
-                        .failure_reason
-                        .as_deref()
-                        .is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason)))
+                || (matches!(
+                    receipt.event,
+                    HorizonLifecycleEvent::Failed | HorizonLifecycleEvent::ReplanIntegrityFailed
+                ) && !receipt
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason)))
             {
                 anyhow::bail!("horizon lifecycle receipt chain failed validation");
             }
@@ -684,8 +752,35 @@ impl RecipeStore {
         next_queue_status: Option<&str>,
         failure_reason: Option<&str>,
     ) -> anyhow::Result<HorizonLifecycleReceipt> {
-        if event == HorizonLifecycleEvent::Failed
-            && !failure_reason.is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason))
+        Self::append_horizon_lifecycle_replan(
+            tx,
+            goal_id,
+            event,
+            occurred_at_ms,
+            state_sha256,
+            previous_queue_status,
+            next_queue_status,
+            failure_reason,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_horizon_lifecycle_replan(
+        tx: &rusqlite::Transaction<'_>,
+        goal_id: &str,
+        event: HorizonLifecycleEvent,
+        occurred_at_ms: u64,
+        state_sha256: Option<&str>,
+        previous_queue_status: Option<&str>,
+        next_queue_status: Option<&str>,
+        failure_reason: Option<&str>,
+        replan: Option<ReplanDetail>,
+    ) -> anyhow::Result<HorizonLifecycleReceipt> {
+        if matches!(
+            event,
+            HorizonLifecycleEvent::Failed | HorizonLifecycleEvent::ReplanIntegrityFailed
+        ) && !failure_reason.is_some_and(|reason| HORIZON_FAILURE_CODES.contains(&reason))
         {
             anyhow::bail!("unbounded horizon lifecycle failure reason");
         }
@@ -709,7 +804,7 @@ impl RecipeStore {
         } else {
             None
         };
-        let receipt = HorizonLifecycleReceipt::issue(
+        let receipt = HorizonLifecycleReceipt::issue_with_replan(
             goal_id,
             event,
             occurred_at_ms,
@@ -718,6 +813,7 @@ impl RecipeStore {
             next_queue_status.map(str::to_string),
             failure_reason.map(str::to_string),
             previous_receipt_sha256,
+            replan,
         )
         .map_err(|error| anyhow::anyhow!("horizon lifecycle receipt rejected: {error:?}"))?;
         let receipt_json = serde_json::to_string(&receipt)?;
@@ -740,6 +836,540 @@ impl RecipeStore {
 
     /// Atomically replace an active checkpoint with an immutable, verified completion receipt.
     /// A different receipt for the same goal can never overwrite the first terminal outcome.
+    /// E.F2 parking, one transaction: the AwaitingReplan checkpoint, the running segment job
+    /// replaced by a pending replan carrier, and the `awaiting_replan` receipt. Nothing here can
+    /// land without the rest.
+    pub(crate) fn park_horizon_for_replan(
+        &self,
+        checkpoint: &GoalCheckpoint,
+        carrier: &HorizonJob,
+        now_ms: u64,
+        assumption_id: &str,
+    ) -> anyhow::Result<()> {
+        carrier.validate()?;
+        if carrier.goal_id != checkpoint.goal_id {
+            anyhow::bail!("replan carrier identity mismatch");
+        }
+        let carrier_json = serde_json::to_string(carrier)?;
+        let wake_ms = i64::try_from(carrier.wake_at_ms)
+            .map_err(|_| anyhow::anyhow!("horizon wake timestamp is out of range"))?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::save_checkpoint_tx(&tx, checkpoint)?;
+        let changed = tx.execute(
+            "UPDATE mind_horizon_jobs SET job_json=?2,wake_ms=?3,status='pending',error=NULL
+             WHERE goal_id=?1 AND status='running'",
+            rusqlite::params![checkpoint.goal_id, carrier_json, wake_ms],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("horizon parking did not match one running job");
+        }
+        Self::append_horizon_lifecycle_replan(
+            &tx,
+            &checkpoint.goal_id,
+            HorizonLifecycleEvent::AwaitingReplan,
+            now_ms,
+            Some(&checkpoint.state_sha256),
+            Some("running"),
+            Some("pending"),
+            None,
+            Some(ReplanDetail::awaiting(assumption_id.to_string())),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The queued job for a goal with its scheduler status and bounded failure code, if any.
+    pub fn queued_horizon_job(
+        &self,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<(HorizonJob, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT job_json,status,error FROM mind_horizon_jobs WHERE goal_id=?1",
+                [goal_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        match row {
+            Some((job_json, status, error)) => {
+                let job: HorizonJob = serde_json::from_str(&job_json)?;
+                Ok(Some((
+                    job,
+                    status,
+                    error.map(|e| bounded_failure_reason(Some(&e))),
+                )))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Test-only: put a queued job back to `running`, modelling a stale in-flight claimant that
+    /// re-enters after the integrity transaction committed. Production has no such path.
+    #[cfg(test)]
+    pub(crate) fn force_job_running_for_test(&self, goal_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_horizon_jobs SET status='running' WHERE goal_id=?1",
+            [goal_id],
+        )?;
+        Ok(())
+    }
+
+    /// The active checkpoint's digest, the value every receipt on this goal must carry.
+    pub(crate) fn active_checkpoint_sha256(&self, goal_id: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                [goal_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// E.F2 acquisition, one transaction: reduce the verified chain, decide the branch, and write
+    /// exactly what that branch writes — `replan_started(attempt)` for an initial or bound retry
+    /// acquisition, nothing for a crash resumption, and for any other shape the terminal
+    /// integrity failure (receipt + failed job together; idempotent on re-entry).
+    pub(crate) fn acquire_replan(
+        &self,
+        goal_id: &str,
+        now_ms: u64,
+        checkpoint_sha256: &str,
+        assumption_id: &str,
+        target_revision: u32,
+    ) -> anyhow::Result<ReplanAcquisition> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // The frozen acquisition reads its own evidence inside the transaction: the active
+        // checkpoint must be AwaitingReplan with this digest, and the running job must be a
+        // replan carrier with exactly the identity the caller claims. Nothing here is trusted
+        // from the caller.
+        let stored: Option<(String, String)> = tx
+            .query_row(
+                "SELECT checkpoint_json,state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                [goal_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((checkpoint_json, stored_sha256)) = stored else {
+            anyhow::bail!("replan acquisition found no active checkpoint");
+        };
+        if stored_sha256 != checkpoint_sha256 {
+            anyhow::bail!("replan acquisition checkpoint digest mismatch");
+        }
+        let checkpoint: GoalCheckpoint = serde_json::from_str(&checkpoint_json)?;
+        let run = HorizonRun::resume(&checkpoint, checkpoint.created_at_ms)
+            .map_err(|error| anyhow::anyhow!("replan checkpoint failed validation: {error:?}"))?;
+        let awaiting = run.status == mind_spec::HorizonStatus::AwaitingReplan;
+        let running: Option<(String, String)> = tx
+            .query_row(
+                "SELECT job_json,status FROM mind_horizon_jobs WHERE goal_id=?1",
+                [goal_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((job_json, job_status)) = running else {
+            anyhow::bail!("replan acquisition found no queued job");
+        };
+        if job_status != "running" {
+            anyhow::bail!("replan acquisition requires the claimed carrier to be running");
+        }
+        let job: HorizonJob = serde_json::from_str(&job_json)?;
+        let carrier_matches = matches!(
+            &job.kind,
+            crate::HorizonJobKind::Replan {
+                assumption_id: stored_id,
+                target_revision: stored_revision,
+            } if stored_id == assumption_id && *stored_revision == target_revision
+        );
+        let receipts = Self::load_lifecycle_on(&tx, goal_id)?;
+        let chain = reduce_replan(&receipts);
+        // Branch C's binding: the latest control receipt is a retry against THIS checkpoint
+        // digest, failed -> pending, issued at or after the latest attempt-scoped failure.
+        let last_failed_ms = receipts
+            .iter()
+            .rev()
+            .find(|r| r.event == HorizonLifecycleEvent::Failed)
+            .map(|r| r.occurred_at_ms);
+        let latest_control: Option<(String, String, i64)> = tx
+            .query_row(
+                "SELECT action,receipt_json,occurred_ms FROM mind_horizon_controls
+                 WHERE goal_id=?1 ORDER BY id DESC LIMIT 1",
+                [goal_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let retry_bound = match (latest_control, last_failed_ms) {
+            (Some((action, receipt_json, occurred_ms)), Some(failed_ms)) if action == "retry" => {
+                let receipt: HorizonControlReceipt = serde_json::from_str(&receipt_json)?;
+                receipt.verify()
+                    && receipt.goal_id == goal_id
+                    && receipt.checkpoint_sha256 == checkpoint_sha256
+                    && receipt.previous_queue_status.as_deref() == Some("failed")
+                    && receipt.next_queue_status.as_deref() == Some("pending")
+                    && u64::try_from(occurred_ms).unwrap_or(0) >= failed_ms
+            }
+            _ => false,
+        };
+        let expected = ReplanIdentity {
+            assumption_id: assumption_id.to_string(),
+            target_revision,
+        };
+        let acquisition = if chain.integrity_failed.is_some() {
+            // Terminal already: nothing about the carrier can reopen it.
+            ReplanAcquisition::Blocked(ReplanBlock::IntegrityAlreadyFailed)
+        } else if carrier_matches {
+            chain.acquire(awaiting, &expected, retry_bound)
+        } else {
+            // The claimed carrier is not the one the caller names: a shape the chain cannot
+            // authorise, handled exactly like any other mismatch.
+            ReplanAcquisition::Blocked(ReplanBlock::Mismatch {
+                chain_digest: chain.prefix_digest.clone(),
+            })
+        };
+        match &acquisition {
+            ReplanAcquisition::Initial { attempt } | ReplanAcquisition::Retry { attempt } => {
+                Self::append_horizon_lifecycle_replan(
+                    &tx,
+                    goal_id,
+                    HorizonLifecycleEvent::ReplanStarted,
+                    now_ms,
+                    Some(checkpoint_sha256),
+                    Some("running"),
+                    Some("running"),
+                    None,
+                    Some(ReplanDetail::started(
+                        assumption_id.to_string(),
+                        *attempt,
+                        target_revision,
+                    )),
+                )?;
+            }
+            ReplanAcquisition::Resume { .. } => {}
+            ReplanAcquisition::Blocked(ReplanBlock::IntegrityAlreadyFailed) => {
+                // Re-entry after the integrity receipt exists, recognised ONLY by the stored
+                // digest equalling the digest of the prefix before it: the job goes back to
+                // failed with the same code and no second receipt is written. A stored digest
+                // that does not match is not a re-entry — still terminal, still nothing more
+                // written; the caller sees a distinct block and never a retryable failure.
+                let acquisition =
+                    if chain.integrity_failed.as_deref() == Some(chain.prefix_digest.as_str()) {
+                        acquisition
+                    } else {
+                        ReplanAcquisition::Blocked(ReplanBlock::IntegrityRecordMismatch)
+                    };
+                tx.execute(
+                    "UPDATE mind_horizon_jobs SET status='failed',error=?2
+                     WHERE goal_id=?1 AND status='running'",
+                    rusqlite::params![goal_id, mind_spec::REPLAN_LIFECYCLE_MISMATCH],
+                )?;
+                tx.commit()?;
+                return Ok(acquisition);
+            }
+            ReplanAcquisition::Blocked(block) => {
+                // Mismatch, an unbound retry, or a claim the caller should never have made:
+                // terminal integrity failure, receipt and failed job in this one transaction.
+                let chain_digest = match block {
+                    ReplanBlock::Mismatch { chain_digest } => chain_digest.clone(),
+                    _ => chain.prefix_digest.clone(),
+                };
+                Self::write_integrity_failure_tx(
+                    &tx,
+                    goal_id,
+                    now_ms,
+                    checkpoint_sha256,
+                    chain_digest,
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(acquisition)
+    }
+
+    /// The terminal integrity outcome, inside a caller-owned transaction: the running job goes
+    /// to failed with the mismatch code and exactly one `replan_integrity_failed` receipt
+    /// carrying the malformed prefix's digest is appended. Never called when the chain already
+    /// carries an integrity receipt.
+    fn write_integrity_failure_tx(
+        tx: &rusqlite::Transaction<'_>,
+        goal_id: &str,
+        now_ms: u64,
+        checkpoint_sha256: &str,
+        chain_digest: String,
+    ) -> anyhow::Result<()> {
+        let changed = tx.execute(
+            "UPDATE mind_horizon_jobs SET status='failed',error=?2
+             WHERE goal_id=?1 AND status='running'",
+            rusqlite::params![goal_id, mind_spec::REPLAN_LIFECYCLE_MISMATCH],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("replan integrity failure did not match one running job");
+        }
+        Self::append_horizon_lifecycle_replan(
+            tx,
+            goal_id,
+            HorizonLifecycleEvent::ReplanIntegrityFailed,
+            now_ms,
+            Some(checkpoint_sha256),
+            Some("running"),
+            Some("failed"),
+            Some(mind_spec::REPLAN_LIFECYCLE_MISMATCH),
+            Some(ReplanDetail::integrity(chain_digest)),
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: put a queued job to `failed` with a code, modelling the state the scheduler
+    /// leaves after a closed attempt when a fixture drove the store directly.
+    #[cfg(test)]
+    pub(crate) fn force_job_failed_for_test(
+        &self,
+        goal_id: &str,
+        code: &str,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_horizon_jobs SET status='failed',error=?2 WHERE goal_id=?1",
+            rusqlite::params![goal_id, code],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: append a `replan_started` marker with an arbitrary attempt, to model a chain
+    /// that is malformed (a skipped ordinal) or has a newer open attempt.
+    #[cfg(test)]
+    pub(crate) fn append_started_for_test(
+        &self,
+        goal_id: &str,
+        now_ms: u64,
+        assumption_id: &str,
+        attempt: u32,
+        target_revision: u32,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let sha: String = tx.query_row(
+            "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+            [goal_id],
+            |row| row.get(0),
+        )?;
+        Self::append_horizon_lifecycle_replan(
+            &tx,
+            goal_id,
+            HorizonLifecycleEvent::ReplanStarted,
+            now_ms,
+            Some(&sha),
+            Some("running"),
+            Some("running"),
+            None,
+            Some(ReplanDetail::started(
+                assumption_id.to_string(),
+                attempt,
+                target_revision,
+            )),
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Test-only: append an integrity receipt with an arbitrary digest, to model a chain whose
+    /// stored integrity record disagrees with its prefix.
+    #[cfg(test)]
+    pub(crate) fn append_integrity_for_test(
+        &self,
+        goal_id: &str,
+        now_ms: u64,
+        chain_digest: String,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let sha: String = tx.query_row(
+            "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+            [goal_id],
+            |row| row.get(0),
+        )?;
+        Self::write_integrity_failure_tx(&tx, goal_id, now_ms, &sha, chain_digest)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// E.F2 success, one transaction: the replanned (Active) checkpoint, the carrier row rewritten
+    /// into the validated next segment, then `replanned` and `scheduled`.
+    pub(crate) fn commit_replan(
+        &self,
+        checkpoint: &GoalCheckpoint,
+        next: &HorizonJob,
+        assumption_id: &str,
+        attempt: u32,
+        target_revision: u32,
+    ) -> anyhow::Result<bool> {
+        next.validate()?;
+        if next.goal_id != checkpoint.goal_id {
+            anyhow::bail!("replanned segment identity mismatch");
+        }
+        let job_json = serde_json::to_string(next)?;
+        let wake_ms = i64::try_from(next.wake_at_ms)
+            .map_err(|_| anyhow::anyhow!("horizon wake timestamp is out of range"))?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // A success closure may close only the currently open marker with this attempt and
+        // this identity. The chain is reduced HERE, in the transaction, before anything is
+        // written; any other shape is the terminal integrity outcome, and the replanned
+        // checkpoint never lands.
+        let receipts = Self::load_lifecycle_on(&tx, &checkpoint.goal_id)?;
+        let chain = reduce_replan(&receipts);
+        let expected = ReplanIdentity {
+            assumption_id: assumption_id.to_string(),
+            target_revision,
+        };
+        let open = chain.open_markers();
+        let closes_the_open_marker = chain.integrity_failed.is_none()
+            && !chain.malformed
+            && matches!(open.as_slice(), [m] if m.attempt == attempt && m.identity == expected);
+        if !closes_the_open_marker {
+            if chain.integrity_failed.is_none() {
+                let stored_sha256: String = tx.query_row(
+                    "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                    [&checkpoint.goal_id],
+                    |row| row.get(0),
+                )?;
+                Self::write_integrity_failure_tx(
+                    &tx,
+                    &checkpoint.goal_id,
+                    checkpoint.created_at_ms,
+                    &stored_sha256,
+                    chain.prefix_digest.clone(),
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE mind_horizon_jobs SET status='failed',error=?2
+                     WHERE goal_id=?1 AND status='running'",
+                    rusqlite::params![checkpoint.goal_id, mind_spec::REPLAN_LIFECYCLE_MISMATCH],
+                )?;
+            }
+            tx.commit()?;
+            return Ok(false);
+        }
+        Self::save_checkpoint_tx(&tx, checkpoint)?;
+        let changed = tx.execute(
+            "UPDATE mind_horizon_jobs SET job_json=?2,wake_ms=?3,status='pending',error=NULL
+             WHERE goal_id=?1 AND status='running'",
+            rusqlite::params![checkpoint.goal_id, job_json, wake_ms],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("horizon replan did not match one running carrier");
+        }
+        let detail = ReplanDetail::started(assumption_id.to_string(), attempt, target_revision);
+        Self::append_horizon_lifecycle_replan(
+            &tx,
+            &checkpoint.goal_id,
+            HorizonLifecycleEvent::Replanned,
+            checkpoint.created_at_ms,
+            Some(&checkpoint.state_sha256),
+            Some("running"),
+            None,
+            None,
+            Some(detail),
+        )?;
+        Self::append_horizon_lifecycle(
+            &tx,
+            &checkpoint.goal_id,
+            HorizonLifecycleEvent::Scheduled,
+            checkpoint.created_at_ms,
+            Some(&checkpoint.state_sha256),
+            None,
+            Some("pending"),
+            None,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// E.F2: close one attempt with a bounded failure — receipt and failed job in one transaction,
+    /// idempotent when the chain already closed that attempt.
+    pub(crate) fn fail_replan_attempt(
+        &self,
+        goal_id: &str,
+        reason: HorizonFailureReason,
+        attempt: u32,
+        occurred_at_ms: u64,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let receipts = Self::load_lifecycle_on(&tx, goal_id)?;
+        let chain = reduce_replan(&receipts);
+        if chain.integrity_failed.is_some() {
+            // Terminal already: nothing is appended after an integrity receipt.
+            tx.execute(
+                "UPDATE mind_horizon_jobs SET status='failed',error=?2
+                 WHERE goal_id=?1 AND status='running'",
+                rusqlite::params![goal_id, mind_spec::REPLAN_LIFECYCLE_MISMATCH],
+            )?;
+            tx.commit()?;
+            return Ok(false);
+        }
+        // Idempotent re-entry ONLY on a well-formed chain whose latest marker is this very
+        // attempt, already closed, with nothing open after it. A stale closure arriving after a
+        // newer attempt opened, or any malformed chain, is not a re-entry.
+        let open = chain.open_markers();
+        let already_closed_latest = !chain.malformed
+            && open.is_empty()
+            && chain
+                .markers
+                .last()
+                .is_some_and(|m| m.attempt == attempt && m.closed_by_success.is_some());
+        if already_closed_latest {
+            tx.commit()?;
+            return Ok(true);
+        }
+        let checkpoint_sha256: Option<String> = tx
+            .query_row(
+                "SELECT state_sha256 FROM mind_horizon_checkpoints WHERE goal_id=?1",
+                [goal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        // A failure closure may close only the currently open marker with this attempt.
+        if chain.malformed || !matches!(open.as_slice(), [m] if m.attempt == attempt) {
+            let Some(sha) = checkpoint_sha256.as_deref() else {
+                anyhow::bail!("replan attempt failure found no active checkpoint");
+            };
+            Self::write_integrity_failure_tx(
+                &tx,
+                goal_id,
+                occurred_at_ms,
+                sha,
+                chain.prefix_digest.clone(),
+            )?;
+            tx.commit()?;
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE mind_horizon_jobs SET status='failed',error=?2
+             WHERE goal_id=?1 AND status='running'",
+            rusqlite::params![goal_id, reason.as_str()],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("replan attempt failure did not match one running job");
+        }
+        Self::append_horizon_lifecycle_replan(
+            &tx,
+            goal_id,
+            HorizonLifecycleEvent::Failed,
+            occurred_at_ms,
+            checkpoint_sha256.as_deref(),
+            Some("running"),
+            Some("failed"),
+            Some(reason.as_str()),
+            Some(ReplanDetail::attempt_only(attempt)),
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn finish_horizon(&self, run: &HorizonRun, receipt: &OutcomeReceipt) -> anyhow::Result<()> {
         if !receipt.verify_state(run) {
             anyhow::bail!("outcome receipt does not match the completed horizon state");
@@ -1048,6 +1678,7 @@ mod horizon_tests {
     use mind_spec::{ActionTrace, HorizonBudget, HorizonRun};
 
     use super::*;
+    use crate::HorizonJobKind;
 
     fn run(start: u64) -> HorizonRun {
         HorizonRun::start(
@@ -1122,6 +1753,7 @@ mod horizon_tests {
         let original_budget = original.budget;
         let checkpoint = original.checkpoint(start + 10).unwrap();
         let job = HorizonJob {
+            kind: HorizonJobKind::Segment,
             goal_id: original.goal_id.clone(),
             segment_id: "observe-once".into(),
             recipe: crate::Recipe {
@@ -1250,6 +1882,7 @@ mod horizon_tests {
         let mut original = run(start);
         let checkpoint = original.checkpoint(start + 10).unwrap();
         let job = HorizonJob {
+            kind: HorizonJobKind::Segment,
             goal_id: original.goal_id.clone(),
             segment_id: "observe-once".into(),
             recipe: crate::Recipe {
@@ -1385,6 +2018,7 @@ mod horizon_tests {
         let mut original = run(start);
         let checkpoint = original.checkpoint(start + 10).unwrap();
         let job = HorizonJob {
+            kind: HorizonJobKind::Segment,
             goal_id: original.goal_id.clone(),
             segment_id: "observe-once".into(),
             recipe: crate::Recipe {

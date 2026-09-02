@@ -39,14 +39,20 @@ pub mod control;
 pub mod coverage;
 pub mod goal;
 pub mod horizon;
+pub mod horizon_replan;
+pub use horizon_replan::{ReplanIdentity, ReplanMarker};
 
 pub use capsule::{Capsule, Evidence, EvidenceRef, Observation, Progress, Uncertainty};
 pub use control::{Controller, Decision, Limits, ReasonCode, StepOutcome};
 pub use goal::{Budget, CompletionCriteria, Contract, GoalSpec, OutputContract, Verdict};
+pub use horizon::{assumption_id, ReplanDetail};
 pub use horizon::{
     ActionTrace, Assumption, AssumptionChange, GoalCheckpoint, HorizonBudget, HorizonControlAction,
     HorizonControlReceipt, HorizonError, HorizonLifecycleEvent, HorizonLifecycleReceipt,
     HorizonRun, HorizonStatus, OutcomeReceipt,
+};
+pub use horizon_replan::{
+    reduce_replan, ReplanAcquisition, ReplanBlock, ReplanChain, REPLAN_LIFECYCLE_MISMATCH,
 };
 
 /// A number the runtime did not measure.

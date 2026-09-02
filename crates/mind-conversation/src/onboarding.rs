@@ -1206,6 +1206,10 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     "↻ Long-horizon goal {} paused safely: a declared assumption changed and the plan needs review.",
                     outcome.goal_id
                 )),
+                mind_recipes::HorizonTickState::Replanned => notifications.push(format!(
+                    "↻ Long-horizon goal {} replanned within its budget: a declared assumption changed and a revised read-only segment is scheduled.",
+                    outcome.goal_id
+                )),
                 mind_recipes::HorizonTickState::Completed => {
                     notifications.push(horizon_completion_notification(&outcome));
                 }

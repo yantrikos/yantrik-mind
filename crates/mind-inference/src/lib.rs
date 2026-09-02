@@ -2047,22 +2047,30 @@ pub enum ModelCheck {
 
 /// Check each route's model against its provider's catalogue. `fetch` takes (base_url, provider) and
 /// returns the served model ids; it is a parameter so the tests need no network. One fetch per
-/// distinct base URL, not per route.
+/// distinct provider/base-URL pair, not per route. Provider identity is part of the key because one
+/// containment proxy URL may front multiple providers with different credentials and catalogues.
 pub fn verify_models(
     plan: &[RoleRoute],
     mut fetch: impl FnMut(&str, &str) -> Result<Vec<String>, String>,
 ) -> Vec<ModelCheck> {
-    let mut cache: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
+    let mut cache: Vec<(String, String, Result<Vec<String>, String>)> = Vec::new();
     plan.iter()
         .map(|r| {
             if r.status != SpecStatus::Configured {
                 return ModelCheck::NotApplicable;
             }
-            if !cache.iter().any(|(b, _)| b == &r.base_url) {
+            if !cache
+                .iter()
+                .any(|(b, p, _)| b == &r.base_url && p == &r.provider)
+            {
                 let got = fetch(&r.base_url, &r.provider);
-                cache.push((r.base_url.clone(), got));
+                cache.push((r.base_url.clone(), r.provider.clone(), got));
             }
-            match cache.iter().find(|(b, _)| b == &r.base_url).map(|(_, g)| g) {
+            match cache
+                .iter()
+                .find(|(b, p, _)| b == &r.base_url && p == &r.provider)
+                .map(|(_, _, g)| g)
+            {
                 Some(Ok(ids)) => {
                     if ids.iter().any(|i| i == &r.model) {
                         ModelCheck::Served
@@ -2735,6 +2743,31 @@ mod privacy_tests {
             out.contains("fail at request time"),
             "the report must say what happens, not just that something is wrong: {out}"
         );
+    }
+
+    #[test]
+    fn providers_sharing_a_proxy_do_not_share_a_catalogue_cache_entry() {
+        let e = env(&[
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b"),
+            ("YM_ROLE_VERIFY", "groq:llama-3.3-70b-versatile"),
+            ("NVIDIA_API_KEY", "k"),
+            ("GROQ_API_KEY", "k"),
+            ("YM_PROVIDER_BASE_URL_NIM", "http://127.0.0.1:8080/v1"),
+            ("YM_PROVIDER_BASE_URL_GROQ", "http://127.0.0.1:8080/v1"),
+        ]);
+        let plan = role_plan(e);
+        let mut fetched = Vec::new();
+        let checks = verify_models(&plan, |_base, provider| {
+            fetched.push(provider.to_string());
+            Ok(match provider {
+                "nim" => vec!["openai/gpt-oss-120b".to_string()],
+                "groq" => vec!["llama-3.3-70b-versatile".to_string()],
+                other => panic!("unexpected provider {other}"),
+            })
+        });
+
+        assert_eq!(fetched, ["nim", "groq"]);
+        assert_eq!(checks, [ModelCheck::Served, ModelCheck::Served]);
     }
 
     #[test]

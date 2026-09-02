@@ -944,6 +944,14 @@ impl super::ConversationEngine {
         self.recorder.record(tick.to_event(now));
     }
 
+    /// L1d: a detached speaker's TERMINAL record, written once by its deterministic identity
+    /// (`loop-<opportunity id>:terminal`) through the recorder's once-by-id write, so a retry
+    /// after any crash cannot write it twice.
+    pub fn record_loop_tick_once(&self, tick: mind_observability::LoopTick) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let _ = self.recorder.record_once(tick.to_event(now));
+    }
+
     /// L3b: one record per delivery decision — kind, outcome, receipt id, size; never the text.
     pub fn record_delivery(&self, tick: mind_observability::DeliveryTick) {
         let now = chrono::Utc::now().timestamp_millis() as u64;

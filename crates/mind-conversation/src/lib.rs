@@ -94,6 +94,8 @@ mod chains_window_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
+mod l1d_tests;
+#[cfg(test)]
 mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;

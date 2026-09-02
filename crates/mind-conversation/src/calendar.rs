@@ -312,6 +312,53 @@ impl super::ConversationEngine {
     /// PRE-EVENT PREP, part 1 (cheap): calendar events starting within the lead window
     /// (YM_PREP_LEAD_MIN, default 90) that haven't been prepped — marked immediately (persisted)
     /// so each event preps exactly once, restart-safe. The poll loop composes+sends detached.
+    /// L1d: the loop ledger's key for one event-prep opportunity — the EXACT persisted key
+    /// (`title|start ms`, the one `events_prepped` stores), digested: two events starting at
+    /// the same instant stay two opportunities.
+    pub fn event_prep_key(title: &str, when_ms: i64) -> u64 {
+        mind_observability::opportunity_key_digest(&format!("{title}|{when_ms}"))
+    }
+
+    /// L1d: the events that WOULD need prep now, read without marking anything — the ledger's
+    /// opportunities (one per event, keyed by its start). `events_needing_prep` stays the act.
+    pub async fn events_needing_prep_preview(&self) -> Vec<(String, i64)> {
+        let lead_min: i64 = std::env::var("YM_PREP_LEAD_MIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(90);
+        let now = local_now().timestamp_millis();
+        let evs = self.load_calendar().await;
+        let prepped: Vec<String> = self
+            .memory
+            .profile_get("events_prepped")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut due = Vec::new();
+        let mut listed: std::collections::HashSet<String> = Default::default();
+        for e in &evs {
+            let Some(ms) = e.get("when_ms").and_then(|x| x.as_i64()) else {
+                continue;
+            };
+            let Some(title) = e.get("title").and_then(|x| x.as_str()) else {
+                continue;
+            };
+            let key = format!("{title}|{ms}");
+            let locally_done = self.prepped_local.lock().unwrap().contains(&key);
+            if ms > now
+                && ms - now <= lead_min * 60_000
+                && !prepped.contains(&key)
+                && !locally_done
+                && listed.insert(key)
+            {
+                due.push((title.to_string(), ms));
+            }
+        }
+        due
+    }
+
     pub async fn events_needing_prep(&self) -> Vec<(String, i64)> {
         let lead_min: i64 = std::env::var("YM_PREP_LEAD_MIN")
             .ok()

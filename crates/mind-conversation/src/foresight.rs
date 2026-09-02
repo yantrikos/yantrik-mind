@@ -1628,6 +1628,29 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
     /// GUARANTEED daily touches, so the presence is felt, not exception-only. Persisted by date
     /// (restart-safe) + a rotation cursor. Returns the subject; the poll loop runs the (slow)
     /// forecast detached.
+    /// L1d: foresight's due read WITHOUT the rotation-and-mark side effects — `Some(local day
+    /// number)` from the foresight hour until today's forecast has gone out.
+    pub async fn foresight_window_open(&self) -> Option<u64> {
+        let now = local_now();
+        let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);
+        let start: u32 = std::env::var("YM_FORESIGHT_HOUR")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(13);
+        if hour < start {
+            return None;
+        }
+        let today = now.format("%Y-%m-%d").to_string();
+        let last = self
+            .memory
+            .profile_get("foresight_last_date")
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        (last != today).then(|| (now.timestamp_millis() / 86_400_000).max(0) as u64)
+    }
+
     pub async fn foresight_due(&self) -> Option<String> {
         let now = local_now();
         let hour: u32 = now.format("%H").to_string().parse().unwrap_or(0);

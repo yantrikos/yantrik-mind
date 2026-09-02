@@ -2007,6 +2007,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut gate_bookask = mind_observability::OpportunityGate::default();
     let mut gate_eventask = mind_observability::OpportunityGate::default();
     let mut gate_support = mind_observability::OpportunityGate::default();
+    // L1d-B: the nine detached speakers' opportunity gates.
+    let mut gate_fs = mind_observability::OpportunityGate::default();
+    let mut gate_eventprep = mind_observability::OpportunityGate::default();
+    let mut gate_thennow = mind_observability::OpportunityGate::default();
+    let mut gate_fg = mind_observability::OpportunityGate::default();
+    let mut gate_ww = mind_observability::OpportunityGate::default();
+    let mut gate_wr = mind_observability::OpportunityGate::default();
+    let mut gate_gs = mind_observability::OpportunityGate::default();
+    let mut gate_wk = mind_observability::OpportunityGate::default();
+    let mut gate_newsdigest = mind_observability::OpportunityGate::default();
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
@@ -2344,16 +2354,74 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     // PERSISTED so restarts don't swallow updates), research it into a full CROSS-DOMAIN
                     // situation brief (news × live oil/markets × the user's portfolio) and send it. The
                     // ~15s brief runs detached so it never stalls the poll loop.
-                    for topic in conv.news_digests_due().await {
+                    // L1d-B: each due topic is its own `news-digest` opportunity (keyed by the
+                    // topic's pre-act last-sent instant), recorded `delegated` at the spawn; the
+                    // task writes the terminal with the send result. HomeWatch's own count is
+                    // unchanged.
+                    let nd_considered = [mind_observability::ConsideredSignal::Beliefs];
+                    let nd_policy = [
+                        mind_observability::LoopPolicy::Cadence(
+                            std::env::var("YM_NEWS_DIGEST_HOURS")
+                                .ok()
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(6)
+                                * 3600,
+                        ),
+                        mind_observability::LoopPolicy::Budget(
+                            mind_observability::BudgetKind::ModelOneCall,
+                        ),
+                    ];
+                    // The act itself returns the topic with the last-sent stamp it read BEFORE
+                    // advancing it: the exact pre-act key, never a synthesised one.
+                    for (topic, nd_last_ms) in conv.news_digests_due_keyed().await {
                         hw_items += 1;
+                        // Opaque per-item key: topic AND pre-act stamp, so shared stamps never
+                        // collide.
+                        let nd_key = mind_conversation::ConversationEngine::news_digest_key(
+                            &topic, nd_last_ms,
+                        );
+                        let nd_opp = mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::NewsDigest,
+                            process_start_ms,
+                            key: nd_key,
+                        };
+                        gate_newsdigest.mark(nd_key);
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                nd_opp,
+                                mind_observability::LoopHost::Telegram,
+                                mind_observability::LoopOutcome::Delegated,
+                            )
+                            .phase(mind_observability::LoopPhase::Delegated)
+                            .considered(&nd_considered)
+                            .policy(&nd_policy),
+                        );
                         let (c, api2) = (conv.clone(), api.clone());
                         tokio::spawn(async move {
+                            let nd_t0 = now_ms();
                             // Learn-by-comparing: recall the held understanding, fetch fresh, and surface
                             // the DELTA ("since I last checked…") rather than re-briefing from scratch.
                             let update = c.evolve_understanding(&topic).await;
-                            if tg_send(&api2, chat, &update).await.is_ok() {
+                            let sent = tg_send(&api2, chat, &update).await.is_ok();
+                            if sent {
                                 c.note_proactive_sent().await;
                             }
+                            c.record_loop_tick_once(
+                                mind_observability::LoopTick::acted(
+                                    nd_opp,
+                                    mind_observability::LoopHost::Telegram,
+                                    if sent {
+                                        mind_observability::LoopOutcome::Ran
+                                    } else {
+                                        mind_observability::LoopOutcome::FoundUndelivered
+                                    },
+                                )
+                                .phase(mind_observability::LoopPhase::Terminal)
+                                .considered(&nd_considered)
+                                .policy(&nd_policy)
+                                .count(u32::from(sent))
+                                .wall_ms(now_ms().saturating_sub(nd_t0)),
+                            );
                         });
                     }
                 }
@@ -2547,18 +2615,116 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // foresight_due() self-gates (afternoon window + persisted once-per-date + rotation cursor);
         // the forecast itself takes a minute-plus, so it runs detached and never stalls the poll loop.
         {
+            // L1d-B: the daily forecast — one opportunity per local day from the foresight hour; the subject rotation stays inside `foresight_due`.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() {
-                if let Some(subject) = conv.foresight_due().await {
-                    let (c, api2) = (conv.clone(), api.clone());
-                    tokio::spawn(async move {
-                        let msg = c.foresee(&subject).await;
-                        if tg_send(&api2, chat, &msg).await.is_ok() {
-                            eprintln!("[foresight] sent the daily proactive forecast on {subject}");
-                            c.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            // Captured ONCE so the key and the open read can never disagree.
+            let fs_window = conv.foresight_window_open().await;
+            let fs_key: u64 = fs_window.unwrap_or(0);
+            let fs_open = fs_window.is_some();
+            let fs_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                fs_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+            );
+            let fs_considered = [mind_observability::ConsideredSignal::Beliefs];
+            let fs_policy = [
+                mind_observability::LoopPolicy::Cadence(86400),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match fs_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    let fs_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::Foresight,
+                        process_start_ms,
+                        key: fs_key,
+                    };
+                    gate_fs.mark(fs_key);
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            fs_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&fs_considered)
+                        .policy(&fs_policy),
+                    );
+                    match conv.foresight_due().await {
+                        None => {
+                            // The day was marked with no subject to forecast: the lifecycle
+                            // closes here — the terminal written at once under the same identity,
+                            // so no lone `delegated` outlives an act that spawned nothing.
+                            conv.record_loop_tick_once(
+                                mind_observability::LoopTick::acted(
+                                    fs_opp,
+                                    mind_observability::LoopHost::Telegram,
+                                    mind_observability::LoopOutcome::NothingToSay,
+                                )
+                                .phase(mind_observability::LoopPhase::Terminal)
+                                .considered(&fs_considered)
+                                .policy(&fs_policy)
+                                .count(0),
+                            );
                         }
-                    });
+                        Some(subject) => {
+                            let (c, api2) = (conv.clone(), api.clone());
+                            tokio::spawn(async move {
+                                let fs_t0 = now_ms();
+                                let msg = c.foresee(&subject).await;
+                                let sent = tg_send(&api2, chat, &msg).await.is_ok();
+                                if sent {
+                                    eprintln!(
+                                    "[foresight] sent the daily proactive forecast on {subject}"
+                                );
+                                    c.note_proactive_sent().await;
+                                }
+                                c.record_loop_tick_once(
+                                    mind_observability::LoopTick::acted(
+                                        fs_opp,
+                                        mind_observability::LoopHost::Telegram,
+                                        if sent {
+                                            mind_observability::LoopOutcome::Ran
+                                        } else {
+                                            mind_observability::LoopOutcome::FoundUndelivered
+                                        },
+                                    )
+                                    .phase(mind_observability::LoopPhase::Terminal)
+                                    .considered(&fs_considered)
+                                    .policy(&fs_policy)
+                                    .count(u32::from(sent))
+                                    .wall_ms(now_ms().saturating_sub(fs_t0)),
+                                );
+                            });
+                        }
+                    }
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_fs.take_window(
+                        mind_observability::LoopId::Foresight,
+                        process_start_ms,
+                        fs_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&fs_considered)
+                            .policy(&fs_policy),
+                        );
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2727,19 +2893,98 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // once per event (persisted) by events_needing_prep; composition is LLM+weather so it runs
         // detached. Quiet-gated like every outward surface.
         {
+            // L1d-B: pre-event prep — one opportunity per event (keyed by its start); the
+            // preview reads without marking, `events_needing_prep` marks and is the act.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() {
-                for (title, ms) in conv.events_needing_prep().await {
-                    let (c, api2) = (conv.clone(), api.clone());
-                    tokio::spawn(async move {
-                        if let Some(msg) = c.compose_event_prep(&title, ms).await {
-                            if tg_send(&api2, chat, &msg).await.is_ok() {
-                                eprintln!("[prep] sent pre-event prep for {title}");
-                                c.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let ep_considered = [mind_observability::ConsideredSignal::DueDelegations];
+            let ep_policy = [mind_observability::LoopPolicy::Budget(
+                mind_observability::BudgetKind::ModelOneCall,
+            )];
+            let ep_pending = conv.events_needing_prep_preview().await;
+            let ep_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                !ep_pending.is_empty(),
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+            );
+            match ep_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    for (title, ms) in conv.events_needing_prep().await {
+                        // The exact persisted event key, digested — never the start alone.
+                        let ep_key =
+                            mind_conversation::ConversationEngine::event_prep_key(&title, ms);
+                        let ep_opp = mind_observability::LoopOpportunity::Window {
+                            loop_id: mind_observability::LoopId::EventPrep,
+                            process_start_ms,
+                            key: ep_key,
+                        };
+                        gate_eventprep.mark(ep_key);
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                ep_opp,
+                                mind_observability::LoopHost::Telegram,
+                                mind_observability::LoopOutcome::Delegated,
+                            )
+                            .phase(mind_observability::LoopPhase::Delegated)
+                            .considered(&ep_considered)
+                            .policy(&ep_policy),
+                        );
+                        let (c, api2) = (conv.clone(), api.clone());
+                        tokio::spawn(async move {
+                            let ep_t0 = now_ms();
+                            // Three outcomes, never collapsed: nothing composed, sent, or
+                            // composed and rejected by Telegram.
+                            let mut sent = false;
+                            let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                            if let Some(msg) = c.compose_event_prep(&title, ms).await {
+                                if tg_send(&api2, chat, &msg).await.is_ok() {
+                                    eprintln!("[prep] sent pre-event prep for {title}");
+                                    c.note_proactive_sent().await;
+                                    sent = true;
+                                    outcome = mind_observability::LoopOutcome::Ran;
+                                } else {
+                                    outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                                }
                             }
-                        }
-                    });
+                            c.record_loop_tick_once(
+                                mind_observability::LoopTick::acted(
+                                    ep_opp,
+                                    mind_observability::LoopHost::Telegram,
+                                    outcome,
+                                )
+                                .phase(mind_observability::LoopPhase::Terminal)
+                                .considered(&ep_considered)
+                                .policy(&ep_policy)
+                                .count(u32::from(sent))
+                                .wall_ms(now_ms().saturating_sub(ep_t0)),
+                            );
+                        });
+                    }
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    for (title, ms) in &ep_pending {
+                        if let Some(window) = gate_eventprep.take_window(
+                            mind_observability::LoopId::EventPrep,
+                            process_start_ms,
+                            mind_conversation::ConversationEngine::event_prep_key(title, *ms),
+                        ) {
+                            conv.record_loop_tick(
+                                mind_observability::LoopTick::held(
+                                    window,
+                                    mind_observability::LoopHost::Telegram,
+                                    reason,
+                                )
+                                .considered(&ep_considered)
+                                .policy(&ep_policy),
+                            );
+                        }
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -2962,20 +3207,78 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
 
         // Birthday mornings: the then-and-now pair fires itself, once per person per year.
         {
+            // L1d-B: the birthday then-and-now — recorded `delegated` with NO terminal outcome:
+            // the pair is queued for the shared outbound photo queue and nothing here can vouch
+            // for its delivery (the accounting-gap row). The block's own behaviour is unchanged.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() {
-                if let Some((name, key)) = conv.birthday_thennow_due().await {
-                    let _ = conv
-                        .then_now_run(
-                            &name,
-                            Some(format!("🎂 Happy birthday, {name} — look how far.")),
-                            None,
-                        )
-                        .await;
-                    conv.birthday_thennow_mark(&key).await;
-                    conv.note_proactive_sent().await;
-                    eprintln!("[thennow] birthday pair queued for {name}");
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            let tn_due = conv.birthday_thennow_due().await;
+            // The identity is the persisted due key (person:year), digested — never a clock
+            // day: same-day birthdays stay distinct and a local day crossing two UTC days
+            // stays one opportunity.
+            let tn_key: u64 = tn_due
+                .as_ref()
+                .map(|(_, key)| mind_observability::opportunity_key_digest(key))
+                .unwrap_or(0);
+            let tn_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                tn_due.is_some(),
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet,
+                },
+            );
+            let tn_considered = [mind_observability::ConsideredSignal::FollowUps];
+            let tn_policy = [mind_observability::LoopPolicy::Cadence(86_400)];
+            match tn_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    if let Some((name, key)) = tn_due {
+                        gate_thennow.mark(tn_key);
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::acted(
+                                mind_observability::LoopOpportunity::Window {
+                                    loop_id: mind_observability::LoopId::ThenNow,
+                                    process_start_ms,
+                                    key: tn_key,
+                                },
+                                mind_observability::LoopHost::Telegram,
+                                mind_observability::LoopOutcome::Delegated,
+                            )
+                            .phase(mind_observability::LoopPhase::Delegated)
+                            .considered(&tn_considered)
+                            .policy(&tn_policy),
+                        );
+                        let _ = conv
+                            .then_now_run(
+                                &name,
+                                Some(format!("🎂 Happy birthday, {name} — look how far.")),
+                                None,
+                            )
+                            .await;
+                        conv.birthday_thennow_mark(&key).await;
+                        conv.note_proactive_sent().await;
+                        eprintln!("[thennow] birthday pair queued for {name}");
+                    }
                 }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_thennow.take_window(
+                        mind_observability::LoopId::ThenNow,
+                        process_start_ms,
+                        tn_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&tn_considered)
+                            .policy(&tn_policy),
+                        );
+                    }
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -3071,18 +3374,122 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // FORGE: advance the active venture one stage per due-tick (treasury-metered inside).
         // Stage reports go to the active chat — the owner watches the product take shape live.
         {
+            // L1d-B: forge — a venture stage every ≥ 15 min regardless of chat; the report goes
+            // to the chat when one exists, and the terminal carries the send result.
             let chat = active_chat.load(Ordering::Relaxed);
-            if conv.forge_due().await {
-                let conv_f = conv.clone();
-                let api_f = api.clone();
-                tokio::spawn(async move {
-                    if let Some(report) = conv_f.forge_tick(false).await {
-                        eprintln!("[forge] {}", report.replace('\n', " | "));
-                        if chat != 0 {
-                            let _ = tg_send_mirrored(&conv_f, &api_f, chat, &report).await;
+            let now = now_ms();
+            // The opportunity is the exact target the act would consume: the first active
+            // venture's id + stage + pre-act updated_ms, digested. DEVIATION (ledgered): the
+            // gate opens only when THAT venture has cooled — under the legacy pair (`forge_due`
+            // = any active cooled, `forge_tick` = the first active) a fresh first venture could
+            // be re-run because a later venture was due; it cannot now.
+            let fg_target = conv.forge_due_target().await;
+            let fg_key: u64 = fg_target
+                .as_ref()
+                .map(|(id, stage, up)| {
+                    mind_observability::opportunity_key_digest(&format!("{id}:{stage}:{up}"))
+                })
+                .unwrap_or(0);
+            // ONE read decides: the target exists and is itself cooled.
+            let fg_open = fg_target.is_some();
+            let fg_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                fg_open,
+                mind_observability::Presence {
+                    chat_present: true,
+                    quiet: false,
+                },
+            );
+            let fg_considered = [mind_observability::ConsideredSignal::Packets];
+            let fg_policy = [
+                mind_observability::LoopPolicy::Cadence(900),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match fg_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    // Attempt keying: the first act under this key is keyed by it; a repeat
+                    // before the task has moved the stamp is its own attempt keyed by its
+                    // instant — every attempt visible, no terminal collapsed under `record_once`.
+                    let fg_first = gate_fg.take_act(fg_key);
+                    let fg_key = if fg_first { fg_key } else { now };
+                    let fg_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::Forge,
+                        process_start_ms,
+                        key: fg_key,
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            fg_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&fg_considered)
+                        .policy(&fg_policy),
+                    );
+                    let fg_expect = fg_target.clone().unwrap_or_default();
+                    let conv_f = conv.clone();
+                    let api_f = api.clone();
+                    tokio::spawn(async move {
+                        let fg_t0 = now_ms();
+                        let c = conv_f;
+                        let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                        let mut sent = 0u32;
+                        // The act revalidates the target: a venture that moved is not consumed.
+                        if let Some(report) = c
+                            .forge_tick_for(
+                                false,
+                                Some((fg_expect.0.as_str(), fg_expect.1.as_str(), fg_expect.2)),
+                            )
+                            .await
+                        {
+                            eprintln!("[forge] {}", report.replace('\n', " | "));
+                            outcome = mind_observability::LoopOutcome::Ran;
+                            if chat != 0 {
+                                // The send result is carried by the terminal record now.
+                                if tg_send_mirrored(&c, &api_f, chat, &report).await.is_ok() {
+                                    sent = 1;
+                                } else {
+                                    outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                                }
+                            }
                         }
+                        c.record_loop_tick_once(
+                            mind_observability::LoopTick::acted(
+                                fg_opp,
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .phase(mind_observability::LoopPhase::Terminal)
+                            .considered(&fg_considered)
+                            .policy(&fg_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(fg_t0)),
+                        );
+                    });
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_fg.take_window(
+                        mind_observability::LoopId::Forge,
+                        process_start_ms,
+                        fg_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&fg_considered)
+                            .policy(&fg_policy),
+                        );
                     }
-                });
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -3128,42 +3535,206 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // WORKOPS: paced field-scan of the owner's actual projects (registry-driven, not
         // conversation-derived). Speaks only when the field moved. Detached; treasury-gated.
         {
+            // L1d-B: work_watch — its persisted due read, then the task; the terminal carries the send result.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() && conv.work_watch_due().await {
-                let conv2 = conv.clone();
-                let api2 = api.clone();
-                tokio::spawn(async move {
-                    match conv2.work_watch_run().await {
-                        Some(msg) => {
-                            if tg_send_mirrored(&conv2, &api2, chat, &msg).await.is_ok() {
-                                conv2.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            // One state read supplies the key AND the cadence line — the EFFECTIVE period
+            // the due rule consults.
+            let (ww_key, ww_period_ms) = conv.work_watch_state().await;
+            let ww_open = conv.work_watch_due().await;
+            let ww_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                ww_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: quiet,
+                },
+            );
+            let ww_considered = [mind_observability::ConsideredSignal::Beliefs];
+            let ww_policy = [
+                mind_observability::LoopPolicy::Cadence(ww_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match ww_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    // Attempt keying: the first act under this key is keyed by it; a repeat
+                    // before the task has moved the stamp is its own attempt keyed by its
+                    // instant — every attempt visible, no terminal collapsed under `record_once`.
+                    let ww_first = gate_ww.take_act(ww_key);
+                    let ww_key = if ww_first { ww_key } else { now };
+                    let ww_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::WorkWatch,
+                        process_start_ms,
+                        key: ww_key,
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            ww_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&ww_considered)
+                        .policy(&ww_policy),
+                    );
+                    let c = conv.clone();
+                    let api2 = api.clone();
+                    tokio::spawn(async move {
+                        let ww_t0 = now_ms();
+                        let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                        let mut sent = 0u32;
+                        if let Some(msg) = c.work_watch_run().await {
+                            if tg_send_mirrored(&c, &api2, chat, &msg).await.is_ok() {
+                                c.note_proactive_sent().await;
                                 eprintln!("[workops] field-scan delivered");
+                                sent = 1;
+                                outcome = mind_observability::LoopOutcome::Ran;
+                            } else {
+                                outcome = mind_observability::LoopOutcome::FoundUndelivered;
                             }
+                        } else {
+                            eprintln!("[workops] pass complete — silent (no field movement)");
                         }
-                        None => eprintln!("[workops] pass complete — silent (no field movement)"),
+                        c.record_loop_tick_once(
+                            mind_observability::LoopTick::acted(
+                                ww_opp,
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .phase(mind_observability::LoopPhase::Terminal)
+                            .considered(&ww_considered)
+                            .policy(&ww_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(ww_t0)),
+                        );
+                    });
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_ww.take_window(
+                        mind_observability::LoopId::WorkWatch,
+                        process_start_ms,
+                        ww_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&ww_considered)
+                            .policy(&ww_policy),
+                        );
                     }
-                });
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
         // WORK RADAR: autonomous research on whatever the user is actively working on (derived
         // from their own recent turns). Speaks only when the research changed stored beliefs.
         {
+            // L1d-B: work_radar — its persisted due read, then the task; the terminal carries the send result.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() && conv.work_radar_due().await {
-                let conv2 = conv.clone();
-                let api2 = api.clone();
-                tokio::spawn(async move {
-                    match conv2.work_radar_run().await {
-                        Some(msg) => {
-                            if tg_send_mirrored(&conv2, &api2, chat, &msg).await.is_ok() {
-                                conv2.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            // One state read supplies the key AND the cadence line — the EFFECTIVE period
+            // the due rule consults.
+            let (wr_key, wr_period_ms) = conv.work_radar_state().await;
+            let wr_open = conv.work_radar_due().await;
+            let wr_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                wr_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: quiet,
+                },
+            );
+            let wr_considered = [mind_observability::ConsideredSignal::Beliefs];
+            let wr_policy = [
+                mind_observability::LoopPolicy::Cadence(wr_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match wr_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    // Attempt keying: the first act under this key is keyed by it; a repeat
+                    // before the task has moved the stamp is its own attempt keyed by its
+                    // instant — every attempt visible, no terminal collapsed under `record_once`.
+                    let wr_first = gate_wr.take_act(wr_key);
+                    let wr_key = if wr_first { wr_key } else { now };
+                    let wr_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::WorkRadar,
+                        process_start_ms,
+                        key: wr_key,
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            wr_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&wr_considered)
+                        .policy(&wr_policy),
+                    );
+                    let c = conv.clone();
+                    let api2 = api.clone();
+                    tokio::spawn(async move {
+                        let wr_t0 = now_ms();
+                        let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                        let mut sent = 0u32;
+                        if let Some(msg) = c.work_radar_run().await {
+                            if tg_send_mirrored(&c, &api2, chat, &msg).await.is_ok() {
+                                c.note_proactive_sent().await;
                                 eprintln!("[radar] autonomous work research delivered");
+                                sent = 1;
+                                outcome = mind_observability::LoopOutcome::Ran;
+                            } else {
+                                outcome = mind_observability::LoopOutcome::FoundUndelivered;
                             }
+                        } else {
+                            eprintln!("[radar] pass complete — silent (no belief change)");
                         }
-                        None => eprintln!("[radar] pass complete — silent (no belief change)"),
+                        c.record_loop_tick_once(
+                            mind_observability::LoopTick::acted(
+                                wr_opp,
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .phase(mind_observability::LoopPhase::Terminal)
+                            .considered(&wr_considered)
+                            .policy(&wr_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(wr_t0)),
+                        );
+                    });
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_wr.take_window(
+                        mind_observability::LoopId::WorkRadar,
+                        process_start_ms,
+                        wr_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&wr_considered)
+                            .policy(&wr_policy),
+                        );
                     }
-                });
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -3539,22 +4110,110 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // gift intelligence while there's still shipping time. Daily-capped, quiet-gated, detached
         // (12 vision reads take minutes and must never stall the poll loop).
         {
+            // L1d-B: gift — its persisted due read, then the task; the terminal carries the send result.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0
-                && !in_quiet_hours_now()
-                && conv.gift_scout_due().await
-                && conv.proactive_receptivity_ok().await
-            {
-                let c = conv.clone();
-                let api2 = api.clone();
-                tokio::spawn(async move {
-                    if let Some(msg) = c.gift_scout_run().await {
-                        if tg_send(&api2, chat, &msg).await.is_ok() {
-                            eprintln!("[gift] proactive gift intel delivered");
-                            c.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            // One state read supplies the key AND the cadence line — the EFFECTIVE period
+            // the due rule consults.
+            let (gs_key, gs_period_ms) = conv.gift_scout_state().await;
+            let gs_open = conv.gift_scout_due().await;
+            let gs_receptive =
+                gs_open && chat != 0 && !quiet && conv.proactive_receptivity_ok().await;
+            let gs_gate = mind_observability::Gated::window_receptive(
+                now,
+                gs_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: quiet,
+                },
+                gs_receptive,
+            );
+            let gs_considered = [
+                mind_observability::ConsideredSignal::Beliefs,
+                mind_observability::ConsideredSignal::Receptivity,
+            ];
+            let gs_policy = [
+                mind_observability::LoopPolicy::Cadence(gs_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ReceptivityGate,
+                ),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match gs_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    // Attempt keying: the first act under this key is keyed by it; a repeat
+                    // before the task has moved the stamp is its own attempt keyed by its
+                    // instant — every attempt visible, no terminal collapsed under `record_once`.
+                    let gs_first = gate_gs.take_act(gs_key);
+                    let gs_key = if gs_first { gs_key } else { now };
+                    let gs_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::GiftScout,
+                        process_start_ms,
+                        key: gs_key,
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            gs_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&gs_considered)
+                        .policy(&gs_policy),
+                    );
+                    let c = conv.clone();
+                    let api2 = api.clone();
+                    tokio::spawn(async move {
+                        let gs_t0 = now_ms();
+                        let mut outcome = mind_observability::LoopOutcome::NothingToSay;
+                        let mut sent = 0u32;
+                        if let Some(msg) = c.gift_scout_run().await {
+                            if tg_send(&api2, chat, &msg).await.is_ok() {
+                                c.note_proactive_sent().await;
+                                eprintln!("[gift] proactive gift intel delivered");
+                                sent = 1;
+                                outcome = mind_observability::LoopOutcome::Ran;
+                            } else {
+                                outcome = mind_observability::LoopOutcome::FoundUndelivered;
+                            }
                         }
+                        c.record_loop_tick_once(
+                            mind_observability::LoopTick::acted(
+                                gs_opp,
+                                mind_observability::LoopHost::Telegram,
+                                outcome,
+                            )
+                            .phase(mind_observability::LoopPhase::Terminal)
+                            .considered(&gs_considered)
+                            .policy(&gs_policy)
+                            .count(sent)
+                            .wall_ms(now_ms().saturating_sub(gs_t0)),
+                        );
+                    });
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_gs.take_window(
+                        mind_observability::LoopId::GiftScout,
+                        process_start_ms,
+                        gs_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&gs_considered)
+                            .policy(&gs_policy),
+                        );
                     }
-                });
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -3815,17 +4474,99 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         // WEEKLY SELF-REPORT: the mind reviews its own week — scoreboard, absorbed corrections,
         // and the pacing policies it changes as a result (the learning-ledger loop, closed).
         {
+            // L1d-B: the weekly self-report — seven days, morning window; the terminal carries the send result.
             let chat = active_chat.load(Ordering::Relaxed);
-            if chat != 0 && !in_quiet_hours_now() && conv.report_due().await {
-                let c = conv.clone();
-                let api2 = api.clone();
-                tokio::spawn(async move {
-                    let msg = c.self_report(true).await;
-                    if tg_send(&api2, chat, &msg).await.is_ok() {
-                        eprintln!("[report] weekly self-report delivered");
-                        c.note_proactive_sent().await;
+            let now = now_ms();
+            let quiet = in_quiet_hours_now();
+            // One state read supplies the key AND the cadence line — the EFFECTIVE period
+            // the due rule consults.
+            let (wk_key, wk_period_ms) = conv.report_state().await;
+            let wk_open = conv.report_due().await;
+            let wk_gate = mind_observability::Gated::window_chat_quiet(
+                now,
+                wk_open,
+                mind_observability::Presence {
+                    chat_present: chat != 0,
+                    quiet: quiet,
+                },
+            );
+            let wk_considered = [mind_observability::ConsideredSignal::Beliefs];
+            let wk_policy = [
+                mind_observability::LoopPolicy::Cadence(wk_period_ms / 1000),
+                mind_observability::LoopPolicy::Budget(
+                    mind_observability::BudgetKind::ModelOneCall,
+                ),
+            ];
+            match wk_gate.decide() {
+                mind_observability::GateDecision::Act => {
+                    // The opportunity id is minted BEFORE the spawn; `delegated` is recorded at
+                    // the spawn; the task writes its one terminal record by that id.
+                    // Attempt keying: the first act under this key is keyed by it; a repeat
+                    // before the task has moved the stamp is its own attempt keyed by its
+                    // instant — every attempt visible, no terminal collapsed under `record_once`.
+                    let wk_first = gate_wk.take_act(wk_key);
+                    let wk_key = if wk_first { wk_key } else { now };
+                    let wk_opp = mind_observability::LoopOpportunity::Window {
+                        loop_id: mind_observability::LoopId::WeeklyReport,
+                        process_start_ms,
+                        key: wk_key,
+                    };
+                    conv.record_loop_tick(
+                        mind_observability::LoopTick::acted(
+                            wk_opp,
+                            mind_observability::LoopHost::Telegram,
+                            mind_observability::LoopOutcome::Delegated,
+                        )
+                        .phase(mind_observability::LoopPhase::Delegated)
+                        .considered(&wk_considered)
+                        .policy(&wk_policy),
+                    );
+                    let c = conv.clone();
+                    let api2 = api.clone();
+                    tokio::spawn(async move {
+                        let wk_t0 = now_ms();
+                        let msg = c.self_report(true).await;
+                        let sent = tg_send(&api2, chat, &msg).await.is_ok();
+                        if sent {
+                            eprintln!("[report] weekly self-report delivered");
+                            c.note_proactive_sent().await;
+                        }
+                        c.record_loop_tick_once(
+                            mind_observability::LoopTick::acted(
+                                wk_opp,
+                                mind_observability::LoopHost::Telegram,
+                                if sent {
+                                    mind_observability::LoopOutcome::Ran
+                                } else {
+                                    mind_observability::LoopOutcome::FoundUndelivered
+                                },
+                            )
+                            .phase(mind_observability::LoopPhase::Terminal)
+                            .considered(&wk_considered)
+                            .policy(&wk_policy)
+                            .count(u32::from(sent))
+                            .wall_ms(now_ms().saturating_sub(wk_t0)),
+                        );
+                    });
+                }
+                mind_observability::GateDecision::Hold(reason) => {
+                    if let Some(window) = gate_wk.take_window(
+                        mind_observability::LoopId::WeeklyReport,
+                        process_start_ms,
+                        wk_key,
+                    ) {
+                        conv.record_loop_tick(
+                            mind_observability::LoopTick::held(
+                                window,
+                                mind_observability::LoopHost::Telegram,
+                                reason,
+                            )
+                            .considered(&wk_considered)
+                            .policy(&wk_policy),
+                        );
                     }
-                });
+                }
+                mind_observability::GateDecision::NotDue => {}
             }
         }
 
@@ -3953,6 +4694,15 @@ mod tests {
         let poll = &poll_all[..poll_all.find("#[cfg(test)]").unwrap_or(poll_all.len())];
         let headless = fn_body(SELF_SRC, "pub async fn run_headless(");
         for id in [
+            "LoopId::Foresight",
+            "LoopId::EventPrep",
+            "LoopId::ThenNow",
+            "LoopId::Forge",
+            "LoopId::WorkWatch",
+            "LoopId::WorkRadar",
+            "LoopId::GiftScout",
+            "LoopId::WeeklyReport",
+            "LoopId::NewsDigest",
             "LoopId::Briefing",
             "LoopId::Evening",
             "LoopId::Anticipate",
@@ -3995,6 +4745,118 @@ mod tests {
                 block.contains("Gated::window_chat_quiet(")
                     || block.contains("Gated::window_receptive("),
                 "{tag} decides through a window gate"
+            );
+        }
+        // L1d-B: each detached speaker records `delegated` BEFORE its spawn and its task writes
+        // the terminal once — checked in the task body, not lexically over the block. The
+        // then-and-now is delegated with no terminal (the accounting-gap row) and spawns nothing.
+        for (tag, id) in [
+            ("[foresight]", "LoopId::Foresight"),
+            ("[prep]", "LoopId::EventPrep"),
+            ("[forge]", "LoopId::Forge"),
+            ("[workops]", "LoopId::WorkWatch"),
+            ("[radar]", "LoopId::WorkRadar"),
+            ("[gift]", "LoopId::GiftScout"),
+            ("[report]", "LoopId::WeeklyReport"),
+        ] {
+            let at = poll.find(tag).unwrap_or_else(|| panic!("{tag}"));
+            let start = poll[..at].rfind("\n        {\n").unwrap();
+            let end = at + poll[at..].find("\n        }\n").unwrap();
+            let block = &poll[start..end];
+            assert!(block.contains(id), "{tag} records under its own id");
+            let delegated = block
+                .find("LoopPhase::Delegated")
+                .unwrap_or_else(|| panic!("{tag} delegated"));
+            let spawn = block
+                .find("tokio::spawn(")
+                .unwrap_or_else(|| panic!("{tag} spawns"));
+            assert!(
+                delegated < spawn,
+                "{tag} records delegated before the spawn"
+            );
+            let task = &block[spawn..];
+            assert!(
+                task.contains("record_loop_tick_once("),
+                "{tag} task writes its terminal once"
+            );
+            assert!(
+                task.contains("LoopPhase::Terminal"),
+                "{tag} task marks the terminal phase"
+            );
+        }
+        {
+            let at = poll.find("[thennow]").unwrap();
+            let start = poll[..at].rfind("\n        {\n").unwrap();
+            let end = at + poll[at..].find("\n        }\n").unwrap();
+            let block = &poll[start..end];
+            assert!(
+                block.contains("LoopPhase::Delegated") && !block.contains("LoopPhase::Terminal")
+            );
+            assert!(!block.contains("tokio::spawn("));
+        }
+        {
+            let at = poll.find("LoopId::NewsDigest").unwrap();
+            let after = &poll[at..];
+            let spawn = after.find("tokio::spawn(").unwrap();
+            assert!(after[..spawn].contains("LoopPhase::Delegated"));
+            assert!(after[spawn..spawn + 2500].contains("record_loop_tick_once("));
+        }
+        // L1d-B amendments (Codex): the evidence invariants, checked in source.
+        let block_of = |tag: &str| {
+            let at = poll.find(tag).unwrap_or_else(|| panic!("{tag}"));
+            let start = poll[..at].rfind("\n        {\n").unwrap();
+            let end = at + poll[at..].find("\n        }\n").unwrap();
+            poll[start..end].to_string()
+        };
+        // forge: the opportunity is the exact target and the act revalidates it.
+        let forge = block_of("[forge]");
+        assert!(forge.contains("conv.forge_due_target().await"));
+        assert!(!forge.contains("forge_due()"), "one read decides");
+        let forge_task = &forge[forge.find("tokio::spawn(").unwrap()..];
+        assert!(forge_task.contains("fg_expect.0.as_str(), fg_expect.1.as_str(), fg_expect.2"));
+        assert!(!forge.contains("forge_last_stage_ms"));
+        // event-prep and news: opaque per-item keys, never a bare start or stamp.
+        assert_eq!(block_of("[prep]").matches("event_prep_key(").count(), 2);
+        assert!(!block_of("[prep]").contains("ms.max("));
+        // then-now: identity from the persisted due key, never a clock day.
+        let thennow = block_of("[thennow]");
+        assert!(thennow.contains("opportunity_key_digest(key)"));
+        assert!(!thennow.contains("/ 86_400_000"));
+        // news: the act supplies the pre-advance key; nothing synthesises 0.
+        let news_at = poll.find("LoopId::NewsDigest").unwrap();
+        let news = &poll[news_at - 1200..news_at + 400];
+        assert!(news.contains("conv.news_digests_due_keyed().await"));
+        let news_flat: String = news.split_whitespace().collect();
+        assert!(news_flat.contains("news_digest_key(&topic,nd_last_ms"));
+        assert!(!news.contains("news_digest_topics_due"));
+        assert!(!news.contains("unwrap_or(0)"));
+        // event-prep: a composed line whose send failed is found-undelivered.
+        let prep = block_of("[prep]");
+        let prep_task = &prep[prep.find("tokio::spawn(").unwrap()..];
+        assert!(prep_task.contains("LoopOutcome::FoundUndelivered"));
+        // foresight: the window is read once.
+        let foresight = block_of("[foresight]");
+        assert_eq!(foresight.matches("foresight_window_open()").count(), 1);
+        // one state read per loop feeds both the key and the cadence line.
+        for (tag, state, v) in [
+            ("[workops]", "work_watch_state()", "ww"),
+            ("[radar]", "work_radar_state()", "wr"),
+            ("[gift]", "gift_scout_state()", "gs"),
+            ("[report]", "report_state()", "wk"),
+        ] {
+            let b = block_of(tag);
+            assert!(b.contains(state), "{tag} reads its state");
+            assert!(
+                b.contains(&format!("Cadence({v}_period_ms / 1000)")),
+                "{tag} cadence from state"
+            );
+            assert!(
+                !b.contains("profile_stamp_ms("),
+                "{tag} no separate stamp read"
+            );
+            assert!(
+                b.contains(&format!("take_act({v}_key)")),
+                "{tag} attempt keying"
             );
         }
         // Only the typed constructors exist: no struct literal, no string loop ids.

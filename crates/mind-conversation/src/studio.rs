@@ -1315,6 +1315,13 @@ impl super::ConversationEngine {
         {
             return false;
         }
+        let (last, period_ms) = self.gift_scout_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: gift-scout's persisted cadence state — (last run ms, EFFECTIVE period ms with the
+    /// `gift` domain pace applied); the photo-source clause stays in `gift_scout_due`.
+    pub async fn gift_scout_state(&self) -> (u64, u64) {
         let period_ms: i64 = std::env::var("YM_GIFTSCOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -1329,7 +1336,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     /// Someone's day within 25 days and no fresh study → run gift intelligence unprompted. The

@@ -350,6 +350,13 @@ impl super::ConversationEngine {
         if !(8..=11).contains(&now.hour()) {
             return false;
         }
+        let (last, period_ms) = self.report_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: the weekly report's persisted cadence state — (last run ms, period ms); the
+    /// morning-window clause stays in `report_due`.
+    pub async fn report_state(&self) -> (u64, u64) {
         let last: i64 = self
             .memory
             .profile_get("report_last")
@@ -358,7 +365,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= 7 * 86_400_000
+        (last.max(0) as u64, 7 * 86_400_000)
     }
 
     /// Study-all continuation: names with an unmet taste target and a free guard — the poll loop

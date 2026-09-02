@@ -10,6 +10,13 @@ impl super::ConversationEngine {
         if !(8..=22).contains(&h) {
             return false;
         }
+        let (last, period_ms) = self.work_radar_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: work-radar's persisted cadence state — (last run ms, EFFECTIVE period ms); the
+    /// waking-hours clause stays in `work_radar_due`.
+    pub async fn work_radar_state(&self) -> (u64, u64) {
         let period_ms = (std::env::var("YM_RADAR_HOURS")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -23,7 +30,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     /// One radar pass. Returns Some(message) only when research revised beliefs; None = silence
@@ -942,9 +949,52 @@ impl super::ConversationEngine {
             .unwrap_or(false)
     }
 
+    /// L1d: ONE exact due target from ONE read — the venture the next stage would consume
+    /// (the first active one) with its stage and updated ms, returned only when THAT venture
+    /// has cooled ≥ 15 min. Side-effect-free. The loop ledger keys the opportunity on it and
+    /// the act revalidates all three before any draw or effect.
+    ///
+    /// Deviation from the legacy pair (`forge_due` = ANY active venture cooled, `forge_tick` =
+    /// the FIRST active venture): a fresh first venture can no longer be re-run because a later
+    /// venture is due. Ledgered.
+    pub async fn forge_due_target(&self) -> Option<(String, String, i64)> {
+        let all = self.forge_load().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        all.as_object()?
+            .iter()
+            .find(|(_, v)| {
+                let st = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+                st != "shipped" && st != "killed"
+            })
+            .and_then(|(k, v)| {
+                let up = v.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+                (now - up > 900_000).then(|| {
+                    (
+                        k.clone(),
+                        v.get("stage")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        up,
+                    )
+                })
+            })
+    }
+
     /// Advance the active venture by exactly ONE stage. Returns the stage report (None = idle).
     /// `manual` bypasses the treasury (owner pushed it); autonomous ticks draw from the envelope.
     pub async fn forge_tick(&self, manual: bool) -> Option<String> {
+        self.forge_tick_for(manual, None).await
+    }
+
+    /// L1d: the stage advance against an EXPECTED target `(id, stage, updated ms)` — `None`
+    /// (nothing consumed, no draw, no write) unless the first active venture is exactly the one
+    /// the opportunity was minted for, at the same stage and stamp.
+    pub async fn forge_tick_for(
+        &self,
+        manual: bool,
+        expect: Option<(&str, &str, i64)>,
+    ) -> Option<String> {
         let mut all = self.forge_load().await;
         let id = all
             .as_object()?
@@ -954,6 +1004,14 @@ impl super::ConversationEngine {
                 st != "shipped" && st != "killed"
             })
             .map(|(k, _)| k.clone())?;
+        if let Some((e_id, e_stage, e_up)) = expect {
+            let v = &all[&id];
+            let stage = v.get("stage").and_then(|x| x.as_str()).unwrap_or("");
+            let up = v.get("updated_ms").and_then(|x| x.as_i64()).unwrap_or(0);
+            if e_id != id || e_stage != stage || e_up != up {
+                return None;
+            }
+        }
         if !manual {
             // Dry-day latch: say "envelope dry" ONCE, then stay silent until tomorrow — without
             // this the poll loop re-fired the dry message every tick (live chat-flood incident).
@@ -2275,6 +2333,14 @@ impl super::ConversationEngine {
         if !(8..=22).contains(&h) {
             return false;
         }
+        let (last, period_ms) = self.work_watch_state().await;
+        chrono::Utc::now().timestamp_millis() - last as i64 >= period_ms as i64
+    }
+
+    /// L1d: work-watch's persisted cadence state — (last run ms, EFFECTIVE period ms), the
+    /// one read both the gate and the ledger's cadence line consult; the waking-hours clause
+    /// stays in `work_watch_due`.
+    pub async fn work_watch_state(&self) -> (u64, u64) {
         let period_ms = (std::env::var("YM_WORKOPS_HOURS")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -2288,7 +2354,7 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        chrono::Utc::now().timestamp_millis() - last >= period_ms
+        (last.max(0) as u64, period_ms.max(0) as u64)
     }
 
     /// One WorkOps pass: research-revise the next project in the rotation; surface only on change.

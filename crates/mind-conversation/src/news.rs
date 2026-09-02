@@ -270,6 +270,26 @@ impl super::ConversationEngine {
     /// topic (YM_NEWS_DIGEST_HOURS, default 6h) so it's analytical UPDATES, not a per-headline flood.
     /// The poll loop turns each due topic into a full cross-domain `news_brief` (news × live markets).
     pub async fn news_digests_due(&self) -> Vec<String> {
+        self.news_digests_due_keyed()
+            .await
+            .into_iter()
+            .map(|(topic, _)| topic)
+            .collect()
+    }
+
+    /// L1d: the loop ledger's key for one news-digest item — an opaque digest of the topic AND
+    /// its pre-act stamp, so two topics sharing a stamp (both 0 on a first run) never mint one
+    /// opportunity, and one topic's successive digests never share one.
+    pub fn news_digest_key(topic: &str, pre_act_last_ms: u64) -> u64 {
+        mind_observability::opportunity_key_digest(&format!(
+            "news-digest:{topic}:{pre_act_last_ms}"
+        ))
+    }
+
+    /// L1d: the act with its evidence — each due topic paired with the topic's last-sent ms
+    /// READ BEFORE this call advanced it, so the loop ledger's opportunity key is the exact
+    /// pre-act stamp and never a synthesised value.
+    pub async fn news_digests_due_keyed(&self) -> Vec<(String, u64)> {
         let Some(news) = &self.news else {
             return Vec::new();
         };
@@ -338,7 +358,7 @@ impl super::ConversationEngine {
                 }
                 state[topic] = serde_json::json!({ "seen": seen_vec, "last_ms": now });
                 *self.last_news_topic.lock().unwrap() = Some(topic.clone());
-                due.push(topic.clone());
+                due.push((topic.clone(), last_ms));
             }
             // else: fresh stays UNSEEN (so the next pace window still fires) or there's nothing new.
         }

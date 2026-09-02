@@ -197,10 +197,12 @@ const FIND_VERBS: &[&str] = &[
 /// tools only, and came back with six links.
 ///
 /// A LONGER table is the same defect with a further-away boundary — it would miss the next phrasing
-/// instead of this one. So this function is no longer the decision: `route` asks the model, which
-/// has no vocabulary limit, and falls back here only when there is no model or its answer is
-/// unusable. What a table CAN do well is be instant, free, and predictable, which is exactly what a
-/// fallback should be.
+/// instead of this one. What a table CAN do well is be instant, free and predictable.
+///
+/// E.PORT1-B changed this function's standing, and review caught the doc still describing the old
+/// one. It is no longer a fallback the model overrules: its answer — constrained to the executors
+/// this box actually has — is what goes on the board BEFORE any model is asked. A router answer
+/// inside the budget may only refine it, and on a one-executor box no model is asked at all.
 pub fn classify(task: &str) -> &'static str {
     let tl = task.to_lowercase();
     // Strip the polite wrapper so the leading verb is the real one.
@@ -1375,6 +1377,10 @@ impl super::ConversationEngine {
             .await;
 
         let prompt = crate::import_skill::instruction_prompt(instructions, Some(target));
+        // E.PORT1-B: a banked-skill delegation is reached from delegate_cmd, so its calls belong
+        // to the same opportunity. Review found this spawn left out while the three kind branches
+        // carried it — the accounting would have been right for three paths and wrong for a fourth.
+        let opportunity = mind_inference::current_opportunity();
         let (q, jobs, mem) = (
             self.notify_queue.clone(),
             self.bg_jobs.clone(),
@@ -1382,7 +1388,7 @@ impl super::ConversationEngine {
         );
         let (id2, name2, task2) = (id.clone(), sk.name.clone(), task.clone());
         let trace = format!("skill:{}:{}", sk.name, id);
-        tokio::spawn(async move {
+        tokio::spawn(in_opportunity(opportunity.clone(), async move {
             // The flight trace first, so a run that dies still says what it was.
             scratch_note(&mem, &id2, &format!("trace: {trace}")).await;
             scratch_note(&mem, &id2, &format!("task: {task2}")).await;
@@ -1482,7 +1488,7 @@ impl super::ConversationEngine {
             .await;
             q.lock().unwrap().push(msg);
             jobs.fetch_sub(1, Ordering::Relaxed);
-        });
+        }));
         format!(
             "📥 Running \"{}\" on the board (job {id}) — {}. I'll bring back the deliverable; `ym jobs` shows it working.",
             sk.name,
@@ -2236,7 +2242,10 @@ impl super::ConversationEngine {
             let checkpoint = spec.checkpoint.clone();
             let attempt = spec.attempt;
             let undo_for_job = undo.clone();
-            tokio::spawn(async move {
+            // A resumed job is the same work as the original delegation; its coder and critic calls
+            // belong to whatever opportunity asked for the resume.
+            let opportunity = mind_inference::current_opportunity();
+            tokio::spawn(in_opportunity(opportunity.clone(), async move {
                 scratch_note(
                     &memory,
                     &id,
@@ -2386,7 +2395,7 @@ impl super::ConversationEngine {
                 scratch_note(&memory, &id, &format!("resume attempt {attempt}: {status}")).await;
                 queue.lock().unwrap().push(message);
                 jobs.fetch_sub(1, Ordering::Relaxed);
-            });
+            }));
             return format!(
                 "↻ Resuming [{receipt_id}] from {} in its isolated artifact workspace (attempt {}). Up to {resume_rounds} recovery round(s) will run, with a fresh critic and rollback preserved as {undo}.",
                 spec.checkpoint, spec.attempt,

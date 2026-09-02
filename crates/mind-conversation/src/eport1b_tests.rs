@@ -195,7 +195,7 @@ async fn the_job_is_on_the_board_while_the_routing_call_is_still_blocked() {
         cv.notify_all();
     }
     let reply = call.await.expect("delegate_cmd finished");
-    assert!(!reply.contains("isn't configured"), "{reply}");
+    assert!(!reply.contains("configured"), "{reply}");
     assert!(
         calls.load(Ordering::Relaxed) >= 1,
         "the routing call really was made"
@@ -216,7 +216,7 @@ async fn the_acknowledgement_is_bounded_by_the_routing_budget() {
         elapsed < std::time::Duration::from_secs(3),
         "acknowledgement took {elapsed:?} against a 300 ms budget and a provider that never answers"
     );
-    assert!(!reply.contains("isn't configured"), "{reply}");
+    assert!(!reply.contains("configured"), "{reply}");
     assert!(
         ROUTE_BUDGET >= std::time::Duration::from_secs(5),
         "the production budget stays a human-scale wait, not a millisecond one"
@@ -422,7 +422,7 @@ async fn an_abandoned_routing_call_is_counted_where_a_test_can_see_it() {
     let before = crate::delegate::route_timeouts();
     let f = fixture(true, std::time::Duration::from_millis(200));
     let reply = f.conv.delegate_cmd("pagejob: build a portfolio page").await;
-    assert!(!reply.contains("isn't configured"), "{reply}");
+    assert!(!reply.contains("configured"), "{reply}");
     // `>=`, not `==`: the counter is process-global by design (an operator wants the number for the
     // process, not for one call), and another test in this file abandons a routing call on its own
     // thread. An exact delta was flaky — it failed on 2 of 10 full-suite runs in review — and a

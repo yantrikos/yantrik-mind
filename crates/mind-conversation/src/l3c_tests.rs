@@ -360,18 +360,53 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
         .await
         .unwrap()
         .unwrap_or_default();
-    assert!(
-        pend.contains(&new_ref),
-        "the fresh commit survived the resolver: {pend}"
+    // THE ORDER IS THE SCHEDULER'S, AND BOTH ORDERS ARE CORRECT.
+    //
+    // This asserted only one of them and failed about one run in four. Both tasks take the same
+    // engagement lock, so they are serialised, but which wins is not ours to choose. Resolve first:
+    // the stale beat grades, the pending list empties, the commit lands, and `new_ref` is pending.
+    // Commit first: `new_ref` is pending when the resolver runs, and a resolver invoked BY A USER
+    // TURN answers every beat whose window still contains it — a beat committed microseconds
+    // earlier is inside its window, so it grades immediately and correctly. The property the code
+    // actually guarantees is that the fresh commit is never LOST: it is either still pending, or
+    // already graded exactly once. That is what this now asserts.
+    //
+    // Diagnosed by review after the flake was recorded rather than re-run until green.
+    let claim = ledger_rows(&conv, &new_ref).await;
+    assert_eq!(
+        claim.len(),
+        1,
+        "the commit wrote exactly one claim row whatever the order: {claim:?}"
     );
+    // The claim row exists from the moment of commit with a null outcome; GRADED means that outcome
+    // is filled in. Conflating the two is how the first attempt at this fix failed.
+    let graded = claim[0]["outcome"].as_i64().is_some();
+    assert!(
+        pend.contains(&new_ref) || graded,
+        "the fresh commit was lost: not pending and not graded (pending {pend}, row {claim:?})"
+    );
+    if graded {
+        assert_eq!(
+            claim[0]["outcome"].as_i64(),
+            Some(1),
+            "a beat graded inside its own window is a hit: {claim:?}"
+        );
+    }
     assert!(
         !pend.contains(&stale.to_string()),
         "the stale beat was graded: {pend}"
     );
-    // The next person turn grades the new ref once; a second pass has nothing.
+    // The next person turn grades the new ref if it is still pending, and a further pass has
+    // nothing to do. Either way the ref is graded EXACTLY ONCE across the whole test: that is the
+    // property, and it holds under both orderings above.
+    conv.resolve_proactive(true).await;
     conv.resolve_proactive(true).await;
     let rows = ledger_rows(&conv, &new_ref).await;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows.len(),
+        1,
+        "graded exactly once, whatever the order: {rows:?}"
+    );
     assert_eq!(rows[0]["outcome"].as_i64(), Some(1), "{rows:?}");
     let pend = conv
         .memory

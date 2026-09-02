@@ -3123,9 +3123,12 @@ mod privacy_tests {
     #[test]
     fn the_endpoints_that_need_the_nonstandard_field_are_not_wrapped() {
         // Review finding: the table this wraps contains `ollama` and `ollama-cloud`, which IGNORE
-        // `think` and for which the non-standard value is the only thing that suppresses the
-        // preamble. Wrapping them would have quietly undone a measured improvement on the CLOUD
-        // Ollama lane while the ledger row spoke only about the local one.
+        // `think` on the compat path and for which the non-standard value is the only thing that
+        // suppresses the preamble. Wrapping them would apply a fix for "the provider REJECTS this"
+        // to a provider that needs it. (The 10 s → 0.9 s figure often quoted for this belongs to the
+        // LOCAL native endpoint; no measurement of ollama.com/v1 exists. A later review found that
+        // retraction made in the production comment and the ledger but not here — the same false
+        // claim, twenty lines away.)
         assert!(provider_is_ollama_compatible("ollama"));
         assert!(provider_is_ollama_compatible("ollama-cloud"));
         for strict in [
@@ -3187,10 +3190,13 @@ mod privacy_tests {
             .expect("its body");
         for line in table.lines() {
             let line = line.trim();
-            if let Some(arms) = line
-                .strip_suffix(" => (")
-                .or_else(|| line.strip_suffix(" => ("))
-            {
+            // Match the arrow ANYWHERE in the line, not a line that ENDS with it. Two of the
+            // table's arms are single-line — including `"ollama-cloud" | "ollama" => (...)`, the
+            // very pair this test exists to protect — so the suffix form skipped exactly the
+            // entries that mattered, and a new single-line provider would have landed on the strict
+            // path unseen. (The `or_else` it replaces had two byte-identical branches: dead code
+            // that read as if it handled the second shape.)
+            if let Some(arms) = line.split_once(" => ").map(|(a, _)| a) {
                 for name in arms.split('|') {
                     let name = name.trim().trim_matches('"');
                     if name.is_empty() || name == "_" {

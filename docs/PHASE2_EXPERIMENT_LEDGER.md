@@ -3225,3 +3225,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Timing gate amended | The prereg's gate compared decision sequences within [−25 s, +5 s]. That is unsatisfiable, and for a real reason: `advance` resets a timer to its actual fire time, so under a poll loop stalled 25 s in its long poll a 60 s cadence fired about every 75 s, while the runner fires it within 5 s of due. Over a day the counts and the nth-act deltas diverge. Amended gate: every runner act lands within [0, +5 s] AFTER its own due boundary (the poll loop's was [0, +26.5 s]); the increased sweep frequency and earlier expiry handling that follow are explicitly allowed and stated as the L3a behaviour change. Anything later than +5 s after due is a kill. |
 | Boot idle | `TurnExclusion` is seeded with the process's start time, not zero, so the first runner tick cannot admit DMN before the idle stretch has passed since boot — the legacy `last_activity = now_ms()` preserved. |
 | Fixtures amended | The cancelled-turn fixture polls the turn future to Pending before dropping it; the latch fixture exercises the one claim helper `spawn_loop_runner` itself uses. |
+
+## L3a — correction row (docs-only, before the code commit; Codex 05:28Z, 05:36Z): three guarded entries, not two
+
+| Field | Value |
+| --- | --- |
+| Error | `724c0d6` says every production turn reaches the engine through exactly two async entries, `turn` and `cli_dispatch`. There are three: `fast_reply`, the voice fast path (one grounded model call, no agent loop), is called by the control server directly and is a production reply surface. |
+| Correction | The turn guard is taken inside `turn`, `fast_reply` and `cli_dispatch` for the turn's whole life. `handle_turn` / `handle_turn_as` are reached only through those three and take no guard of their own (a guard there would double-count). Two fixtures pin it: the engine asserts the three register within their own bodies and the inner two do not; mind-core asserts no frontend calls the inner turn directly and counts its surfaces (≥ 5 `turn`, exactly 1 `fast_reply`, ≥ 3 `cli_dispatch`), so a new surface must be added consciously. |
+| Rule | Ledger corrections are new rows; the original row is left as written. |

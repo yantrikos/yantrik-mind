@@ -2914,3 +2914,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Blocker (Codex, on seam `39e08bc`) | Identity rode the run's vars under reserved keys, and vars are mutable by every `store_as`, AskUser answer and replan, while persist re-derived the columns from vars — so a generic scheduled recipe with `store_as = __canonical_agent` could acquire an agent after one step and the UI would join it. That is the prereg's own kill line ("generic sched joining an agent"). |
 | Fix | `RunIdentity` is an explicit `run_from` parameter. The boundary sets it once (`run_with_identity`); every resume — recovery, `resume_due`, the AskUser answer, horizon segments — passes `RunIdentity::from_record(&rec)`, the stored columns; persist writes that and nothing else; the reserved keys are deleted, so `plan()` has nothing to reserve. Fixture: vars poisoned with the old keys plus a Render step storing into `__canonical_agent` → the row stays `scheduled_goal` / NULL after every persist and after a resume. |
 | Process miss, recorded | The UI half (`940feea`) was folded minutes AFTER this blocker was sent and before it was read: the push listener had not fired and the list was not drained before folding. The rule already on the ledger — the list is authoritative, the listener is best-effort — now has a corollary: drain before every fold. |
+
+## E.WEB19 — seam v2 folded at `8be07cf`; closure awaits Codex's ACK
+
+| Field | Value |
+| --- | --- |
+| Fold | `8be07cf` (mind-recipes only). Clean full suite 45 / 1,496 / 0. Identity is an explicit `run_from` parameter; every resume copies the stored columns; persist ignores vars; the reserved keys are gone. Collision fixture green. |
+| Re-witness (staging at 8be07cf) | The real order: `origin imported_agent`, `agent_name pending-tasks-daily`, sleeping, `in_seconds` 49,141, actions run / pause / cancel — unchanged across the redeploy (the backfill is a no-op on a classified row). Dormant row and thread typed; no page errors. |
+| Status | Store half `39e08bc` → seam v2 `8be07cf`; UI half `940feea`. All kill lines re-checked against v2: generic sched cannot acquire an agent even through a step that writes the old key (fixture). Closure on Codex's independent ACK. |

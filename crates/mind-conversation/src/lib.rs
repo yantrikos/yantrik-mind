@@ -102,6 +102,10 @@ mod l4_0_tests;
 pub mod spend;
 /// L4-0: the loop host wraps a model-calling act so its spend rows carry the opportunity id.
 pub use mind_inference::within_opportunity;
+// The publish-page predicates live in mind-recipes so the `publish_page` tool and the page recipe's
+// repair guard are the SAME check (E.CB2-F). Re-exported under their original names: every call
+// site here is unchanged, and there is one definition to keep honest.
+pub(crate) use mind_recipes::{extract_document, is_complete_html, looks_like_html};
 #[cfg(test)]
 mod l3b_tests;
 #[cfg(test)]
@@ -4128,57 +4132,6 @@ fn now_str() -> String {
 
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
 /// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
-/// Did the model finish writing this document, or did it run out of budget mid-tag?
-///
-/// `looks_like_html` asks whether the text STARTS like HTML, which a truncated document also does.
-/// This asks whether it ENDS — the only cheap signal that generation completed.
-fn is_complete_html(s: &str) -> bool {
-    let l = s.trim_end().to_lowercase();
-    l.ends_with("</html>") || l.ends_with("</body>")
-}
-
-/// Unwrap a ```fence around a document, if there is one. Returns the input untouched otherwise.
-fn strip_code_fence(s: &str) -> &str {
-    let t = s.trim();
-    let Some(rest) = t.strip_prefix("```") else {
-        return t;
-    };
-    // Drop the language tag on the opening line, then the closing fence.
-    let body = match rest.find('\n') {
-        Some(i) => &rest[i + 1..],
-        None => return t,
-    };
-    body.rsplit_once("```")
-        .map(|(before, _)| before)
-        .unwrap_or(body)
-        .trim()
-}
-
-/// The DOCUMENT out of a reply that also contains chat around it.
-///
-/// Asked for "the HTML and nothing else", the model still opened with "The best approach is to use a
-/// platform like Framer or Figma… Here is the complete document:". That sentence was published with
-/// the page and rendered as loose text floating above the header — the one thing on the site that was
-/// obviously not designed. Prompting harder is not a fix, because it only has to fail once.
-///
-/// So: keep from the first `<!doctype`/`<html` to the last `</html>`, and drop whatever surrounds it.
-fn extract_document(s: &str) -> &str {
-    let t = strip_code_fence(s);
-    let low = t.to_ascii_lowercase();
-    let start = low
-        .find("<!doctype")
-        .or_else(|| low.find("<html"))
-        .unwrap_or(0);
-    let end = low
-        .rfind("</html>")
-        .map(|i| i + "</html>".len())
-        .unwrap_or(t.len());
-    if end > start {
-        t[start..end].trim()
-    } else {
-        t
-    }
-}
 
 fn publish_html(name_hint: &str, html: &str) -> Option<String> {
     let safe: String = name_hint
@@ -4209,16 +4162,6 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
     let base =
         std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
     Some(format!("{base}/{safe}.html"))
-}
-
-/// Does this reply look like a raw HTML page the model dumped (instead of publishing it)?
-fn looks_like_html(s: &str) -> bool {
-    let l = s.to_lowercase();
-    l.contains("<!doctype")
-        || l.contains("<html")
-        || l.contains("<table")
-        || (l.contains("<div") && l.contains("</div>"))
-        || (l.contains("<body") && l.contains("</body>"))
 }
 
 /// Result of fetching a just-published page back off the web server.

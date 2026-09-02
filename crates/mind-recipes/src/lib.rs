@@ -268,12 +268,14 @@ pub enum Condition {
         var: String,
         substring: String,
     },
-    /// The var holds a COMPLETE HTML document — it starts as one and closes `</html>`.
+    /// The var holds something `publish_page` would ACCEPT (see `is_publishable_document`).
     ///
     /// Exists because `VarContains { "</html>" }` is satisfied by prose that merely MENTIONS the
     /// closing tag, and the step this guards (author a page) fails precisely by returning prose
     /// about a page instead of the page (E.CB2 leg 1: 968 characters, no `<html>`, no `<body>`).
-    VarIsHtmlDocument {
+    /// It is deliberately the PUBLISH predicate and not a stricter one of its own: a guard that
+    /// disagreed with the tool would either repair a publishable draft or skip a doomed one.
+    VarIsPublishableDocument {
         var: String,
     },
     Not {
@@ -281,15 +283,85 @@ pub enum Condition {
     },
 }
 
-/// Is this text one complete HTML document? Deterministic and deliberately strict: it must OPEN as
-/// a document (a doctype or an `<html>` tag before any prose) and CLOSE with `</html>`. A fragment,
-/// a truncated document and a reply discussing HTML all fail. Never used to weaken a check — only
-/// to decide whether a repair round is worth one model call.
-pub fn is_html_document(s: &str) -> bool {
+/// ── The publishability predicate ─────────────────────────────────────────────────────────────
+///
+/// ONE definition, shared by the `publish_page` tool and by the recipe guard that decides whether a
+/// draft needs a repair round. Two definitions would be worse than none: a guard STRICTER than the
+/// tool spends a model call repairing a draft that would have published (a fenced document, a
+/// document with a chatty preamble, a page ending `</body>`), and a guard LOOSER than the tool skips
+/// the repair on a draft the tool then refuses. Both were live risks in review.
+///
+/// These four functions moved here from the conversation crate unchanged; that crate re-exports
+/// them, so the tool and the guard cannot drift apart.
+
+/// Unwrap a ```fence around a document, if there is one. Returns the input untouched otherwise.
+pub fn strip_code_fence(s: &str) -> &str {
     let t = s.trim();
+    let Some(rest) = t.strip_prefix("```") else {
+        return t;
+    };
+    // Drop the language tag on the opening line, then the closing fence.
+    let body = match rest.find('\n') {
+        Some(i) => &rest[i + 1..],
+        None => return t,
+    };
+    body.rsplit_once("```")
+        .map(|(before, _)| before)
+        .unwrap_or(body)
+        .trim()
+}
+
+/// Does this reply look like a raw HTML page the model dumped (instead of publishing it)?
+pub fn looks_like_html(s: &str) -> bool {
+    let l = s.to_lowercase();
+    l.contains("<!doctype")
+        || l.contains("<html")
+        || l.contains("<table")
+        || (l.contains("<div") && l.contains("</div>"))
+        || (l.contains("<body") && l.contains("</body>"))
+}
+
+/// Did the model finish writing this document, or did it run out of budget mid-tag?
+///
+/// `looks_like_html` asks whether the text STARTS like HTML, which a truncated document also does.
+/// This asks whether it ENDS — the only cheap signal that generation completed.
+pub fn is_complete_html(s: &str) -> bool {
+    let l = s.trim_end().to_lowercase();
+    l.ends_with("</html>") || l.ends_with("</body>")
+}
+
+/// The DOCUMENT out of a reply that also contains chat around it.
+///
+/// Asked for "the HTML and nothing else", the model still opened with "The best approach is to use a
+/// platform like Framer or Figma… Here is the complete document:". That sentence was published with
+/// the page and rendered as loose text floating above the header — the one thing on the site that was
+/// obviously not designed. Prompting harder is not a fix, because it only has to fail once.
+///
+/// So: keep from the first `<!doctype`/`<html` to the last `</html>`, and drop whatever surrounds it.
+pub fn extract_document(s: &str) -> &str {
+    let t = strip_code_fence(s);
     let low = t.to_ascii_lowercase();
-    let opens = low.starts_with("<!doctype html") || low.starts_with("<html");
-    opens && low.trim_end().ends_with("</html>")
+    let start = low
+        .find("<!doctype")
+        .or_else(|| low.find("<html"))
+        .unwrap_or(0);
+    let end = low
+        .rfind("</html>")
+        .map(|i| i + "</html>".len())
+        .unwrap_or(t.len());
+    if end > start {
+        t[start..end].trim()
+    } else {
+        t
+    }
+}
+
+/// EXACTLY what `publish_page` will accept: the same extraction, then the same two checks, in the
+/// same order. True means "publishing this raw draft would succeed"; false means it would be
+/// refused. The guard in the page recipe is this function and nothing else.
+pub fn is_publishable_document(raw: &str) -> bool {
+    let doc = extract_document(raw);
+    looks_like_html(doc) && is_complete_html(doc)
 }
 
 impl Condition {
@@ -305,10 +377,10 @@ impl Condition {
                 .get(var)
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| s.contains(substring.as_str())),
-            Self::VarIsHtmlDocument { var } => vars
+            Self::VarIsPublishableDocument { var } => vars
                 .get(var)
                 .and_then(|v| v.as_str())
-                .is_some_and(is_html_document),
+                .is_some_and(is_publishable_document),
             Self::Not { inner } => !inner.evaluate(vars),
         }
     }
@@ -2779,7 +2851,7 @@ mod l3c_tests;
 
 #[cfg(test)]
 mod ecb2f_document_condition {
-    use super::{is_html_document, Condition};
+    use super::{is_publishable_document, Condition};
     use std::collections::HashMap;
 
     const REAL: &str = "<!doctype html>
@@ -2787,39 +2859,44 @@ mod ecb2f_document_condition {
 ";
 
     #[test]
-    fn only_a_complete_document_passes() {
-        assert!(is_html_document(REAL), "a real page");
+    fn the_predicate_accepts_exactly_what_the_publish_tool_accepts() {
+        // The tool extracts the document first, then asks whether it opens and closes like one.
+        // These four cases are the ones a STRICTER guard would have got wrong: each publishes today,
+        // so each must skip the repair round rather than spend a model call on it.
+        assert!(is_publishable_document(REAL), "a real page");
         assert!(
-            is_html_document("  <html><body>hi</body></html>  "),
-            "leading/trailing space is fine"
-        );
-        // THE OBSERVED FAILURE (E.CB2 leg 1): prose where a document was asked for.
-        assert!(
-            !is_html_document("Here is the page you asked for. It has a hero and four cards."),
-            "prose"
-        );
-        assert!(
-            !is_html_document("<!doctype html><html><body><h1>x</h1>"),
-            "truncated: never closes"
-        );
-        assert!(
-            !is_html_document("<div class=\"card\">a fragment</div>"),
-            "a fragment is not a document"
-        );
-        // The reason this predicate exists rather than a substring test.
-        assert!(
-            !is_html_document("Remember to end the file with </html> when you write it."),
-            "prose that MENTIONS the closing tag"
-        );
-        assert!(
-            !is_html_document(
+            is_publishable_document(
                 "```html
 <html><body>x</body></html>
 ```"
             ),
-            "still fenced: the caller unwraps before publishing, not here"
+            "a fenced document publishes: the tool unwraps the fence"
         );
-        assert!(!is_html_document(""), "empty");
+        assert!(
+            is_publishable_document(
+                "Sure! Here is the page:
+<!doctype html><html><body>x</body></html>
+Hope it helps."
+            ),
+            "a chatty preamble publishes: the tool extracts the document out of it"
+        );
+        assert!(
+            is_publishable_document("<html><body><h1>x</h1></body>"),
+            "a page ending </body> publishes: is_complete_html accepts that ending"
+        );
+
+        // And the failure the repair round exists for.
+        assert!(
+            !is_publishable_document(
+                "Here is the page you asked for. It has a hero and four cards."
+            ),
+            "prose where a document was asked for: the E.CB2 leg-1 failure"
+        );
+        assert!(
+            !is_publishable_document("<!doctype html><html><body><h1>x</h1>"),
+            "truncated: opens but never closes"
+        );
+        assert!(!is_publishable_document(""), "empty");
     }
 
     #[test]
@@ -2831,7 +2908,7 @@ mod ecb2f_document_condition {
             serde_json::json!("a description of a page"),
         );
         vars.insert("number".to_string(), serde_json::json!(7));
-        let c = |v: &str| Condition::VarIsHtmlDocument { var: v.to_string() };
+        let c = |v: &str| Condition::VarIsPublishableDocument { var: v.to_string() };
         assert!(c("page").evaluate(&vars));
         assert!(!c("prose").evaluate(&vars));
         assert!(

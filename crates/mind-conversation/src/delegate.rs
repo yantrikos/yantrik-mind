@@ -376,12 +376,12 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
             // `</html>`), so a draft that is already a page skips the repair and the run is
             // byte-identical to before — the extra call is spent only on runs that would have failed.
             RecipeStep::JumpIf {
-                condition: Condition::VarIsHtmlDocument { var: "page".into() },
+                condition: Condition::VarIsPublishableDocument { var: "page".into() },
                 target_step: 4,
             },
             RecipeStep::Think {
                 prompt: format!(
-                    "Your previous attempt at this page did not come back as a document, so it cannot                      be published. Here is what you produced:
+                    "{rules}Your previous attempt at this page did not come back as a document, so it cannot                      be published. Here is what you produced:
 
 {{{{page}}}}
 
@@ -1458,7 +1458,12 @@ impl super::ConversationEngine {
             let pack_rules = self.memory.pack_context().await.ok().flatten();
             tokio::spawn(async move {
                 scratch_note(&mem, &id2, &format!("task: {task2}")).await;
-                scratch_note(&mem, &id2, "chain: research → author → publish").await;
+                scratch_note(
+                    &mem,
+                    &id2,
+                    "chain: research → author → repair-if-needed → publish",
+                )
+                .await;
                 let out = engine
                     .run_with(
                         &page_recipe(&name2, &task2, pack_rules.as_deref()),

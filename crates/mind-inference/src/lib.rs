@@ -1961,6 +1961,75 @@ pub fn role_plan(lookup: impl Fn(&str) -> Option<String> + Copy) -> Vec<RoleRout
     out
 }
 
+/// A base URL with everything that can carry a secret removed: userinfo, query and fragment.
+///
+/// The rendered plan is console output and goes into reports. An operator override is free-form —
+/// `https://user:token@host/v1`, or a signed `?key=…` — so printing it verbatim would turn a
+/// diagnostic into a credential disclosure. The RUNTIME fetch still uses the real URL; only what is
+/// shown is reduced to scheme, host, port and path.
+pub fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("", url),
+    };
+    // authority ends at the first '/', '?' or '#'
+    let end = rest
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    // userinfo is everything before the LAST '@' in the authority
+    let host = match authority.rsplit_once('@') {
+        Some((_userinfo, h)) => h,
+        None => authority,
+    };
+    let path = tail.split(['?', '#']).next().unwrap_or("").to_string();
+    let host = if authority.contains('@') {
+        format!("{host} (userinfo removed)")
+    } else {
+        host.to_string()
+    };
+    let query_note = if tail.contains('?') || tail.contains('#') {
+        " (query removed)"
+    } else {
+        ""
+    };
+    if scheme.is_empty() {
+        format!("{host}{path}{query_note}")
+    } else {
+        format!("{scheme}://{host}{path}{query_note}")
+    }
+}
+
+/// Redact any URL-looking token inside a free-text reason.
+///
+/// `verify_models` takes the fetcher as a parameter, so the reason string is not always the one
+/// `fetch_model_catalogue` builds — a caller's fetcher (or a future library) may echo the URL it was
+/// given. The renderer therefore does not trust the text it is handed: anything containing `://` is
+/// reduced the same way a base URL is. Defence in depth, and the canary test covers this path.
+pub fn sanitize_reason(reason: &str) -> String {
+    reason
+        .split_whitespace()
+        .map(|tok| {
+            if tok.contains("://") {
+                let trailing: String = tok
+                    .chars()
+                    .rev()
+                    .take_while(|c| matches!(c, '.' | ',' | ')' | ';' | ':'))
+                    .collect();
+                let core = &tok[..tok.len() - trailing.len()];
+                format!(
+                    "{}{}",
+                    redact_url(core),
+                    trailing.chars().rev().collect::<String>()
+                )
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Whether the provider serves the model a route names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelCheck {
@@ -2045,13 +2114,22 @@ pub fn render_role_plan(plan: &[RoleRoute], checks: Option<&[ModelCheck]>) -> St
                  so calls on this route fail at request time"
             ),
             Some(ModelCheck::Unreachable { why }) => {
-                format!("UNVERIFIED — the catalogue could not be read ({why})")
+                format!(
+                    "UNVERIFIED — the catalogue could not be read ({})",
+                    sanitize_reason(why)
+                )
             }
             Some(ModelCheck::NotApplicable) => "not checked — this route builds nothing".to_string(),
         };
         out.push_str(&format!(
             "{} = {}\n  provider {} · model {} · base {}\n  {}\n  {}\n",
-            r.var, r.spec, r.provider, model, r.base_url, status, check
+            r.var,
+            r.spec,
+            r.provider,
+            model,
+            redact_url(&r.base_url),
+            status,
+            check
         ));
     }
     out.push_str(
@@ -2070,11 +2148,16 @@ pub fn fetch_model_catalogue(base_url: &str, provider: &str) -> Result<Vec<Strin
     if let Some(key) = configured_api_key(key_env) {
         req = req.set("Authorization", &format!("Bearer {key}"));
     }
+    // ureq's Display for an error embeds the URL it was called with, and that URL may carry an
+    // operator's credential. The reason is built from the error's KIND instead, which never does.
     let body: serde_json::Value = req
         .call()
-        .map_err(|e| format!("{e}").chars().take(120).collect::<String>())?
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("provider answered HTTP {code}"),
+            ureq::Error::Transport(t) => format!("transport failure ({})", t.kind()),
+        })?
         .into_json()
-        .map_err(|e| format!("unparseable catalogue: {e}"))?;
+        .map_err(|_| "the catalogue response was not readable JSON".to_string())?;
     let ids: Vec<String> = body
         .get("data")
         .and_then(|d| d.as_array())
@@ -2709,6 +2792,69 @@ mod privacy_tests {
             Ok(vec!["openai/gpt-oss-120b".to_string()])
         });
         assert_eq!(seen, "http://172.30.0.2:8080/v1");
+    }
+
+    #[test]
+    fn a_rendered_url_never_carries_a_credential() {
+        // Review finding: an operator override is free-form, so the effective base URL can hold
+        // userinfo or a signed query. The plan is console output and lands in reports; printing it
+        // verbatim would turn a diagnostic into a credential disclosure.
+        const CANARY: &str = "s3cr3t-canary-value";
+        for raw in [
+            format!("https://user:{CANARY}@api.example.com/v1"),
+            format!("https://api.example.com/v1?key={CANARY}"),
+            format!("https://api.example.com/v1#{CANARY}"),
+            format!("http://{CANARY}@10.0.0.1:8080/v1?token={CANARY}"),
+        ] {
+            let shown = redact_url(&raw);
+            assert!(
+                !shown.contains(CANARY),
+                "redaction leaked the canary: {raw} -> {shown}"
+            );
+            assert!(
+                shown.contains("api.example.com") || shown.contains("10.0.0.1"),
+                "redaction must still name the host: {raw} -> {shown}"
+            );
+        }
+        // an ordinary URL is shown as it is, minus nothing
+        assert_eq!(
+            redact_url("https://integrate.api.nvidia.com/v1"),
+            "https://integrate.api.nvidia.com/v1"
+        );
+        assert_eq!(
+            redact_url("http://172.30.0.2:8080/v1"),
+            "http://172.30.0.2:8080/v1"
+        );
+    }
+
+    #[test]
+    fn the_whole_report_is_free_of_the_credential_in_an_override() {
+        // The end-to-end version of the check: a canary in BOTH userinfo and query, carried through
+        // role_plan into the rendered report, with the model check unreachable so the error path is
+        // exercised too. Zero hits anywhere in the output.
+        const CANARY: &str = "s3cr3t-canary-value";
+        let override_url = format!("https://u:{CANARY}@proxy.internal/v1?token={CANARY}");
+        let pairs: Vec<(&str, String)> = vec![
+            ("YM_ROLE_CHAT", "nim:openai/gpt-oss-120b".to_string()),
+            ("NVIDIA_API_KEY", "k".to_string()),
+            ("YM_PROVIDER_BASE_URL_NIM", override_url.clone()),
+        ];
+        let lookup = |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        let plan = role_plan(lookup);
+        assert_eq!(
+            plan[0].base_url, override_url,
+            "the RUNTIME url is unchanged; only the rendering is reduced"
+        );
+        let checks = verify_models(&plan, |_b, _p| {
+            // an error text that echoes the URL, which is exactly what ureq's Display does
+            Err(format!("failed to fetch {override_url}"))
+        });
+        let out = render_role_plan(&plan, Some(&checks));
+        assert!(
+            !out.contains(CANARY),
+            "the report disclosed the canary:\n{out}"
+        );
+        assert!(out.contains("proxy.internal"), "{out}");
     }
 
     #[test]

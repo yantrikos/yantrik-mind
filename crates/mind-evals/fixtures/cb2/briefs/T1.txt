@@ -1,0 +1,1 @@
+Build a lead-generation landing page for a boutique bookkeeping service for Indian small businesses, with a contact form that saves leads to a local JSON file and a /dashboard page that shows total leads, leads per day for the last 14 days, and the five most recent leads, computed from that file.

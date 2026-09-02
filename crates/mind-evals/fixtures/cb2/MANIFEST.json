@@ -1,0 +1,54 @@
+{
+  "id": "E.CB2",
+  "standing": "three-task exploratory bakeoff; NOT a superiority claim under competitive benchmark v1 (24 paired trials)",
+  "systems": {
+    "mind": {
+      "binary": "the deployed staging mind-core (ledger tip at run time; provenance recorded in the run receipt)",
+      "host": "192.168.4.95 (staging canary), scratch instance at /var/lib/ym-cb2, never /var/lib/yantrik-mind",
+      "ports": {"pages": 8099, "console_api": 8091, "ctl": 8078},
+      "env": {
+        "YM_LOCAL_OLLAMA_URL": "https://aig.mycluster.cyou",
+        "YM_LOCAL_OLLAMA_MODEL": "qwen3.8:27b-q4_K_M",
+        "YM_PRIVATE_PROVIDERS": "ollama-local",
+        "YM_HOUSEHOLD_PROVIDERS": "ollama-local",
+        "YM_INFER_PERMITS": "2",
+        "YM_DMN": "off", "YM_PROACTIVE": "off", "YM_PATTERNS": "off", "YM_HOME_WATCH": "off",
+        "no cloud keys present": true, "no Telegram token": true, "no code executor (YM_CODER_*) configured": true
+      },
+      "invocation": "one POST /api/agent {name, task} per task through the paired scratch console; the delegate router chooses the executor",
+      "python": "3.13.5"
+    },
+    "hermes": {
+      "install": "Hermes Agent v0.14.0 (2026.5.16), local install at %LOCALAPPDATA%/hermes/hermes-agent",
+      "host": "the Windows workstation (this session's machine)",
+      "home": "an isolated HERMES_HOME profile (config.yaml: provider custom, base_url https://aig.mycluster.cyou/v1, model qwen3.8:27b-q4_K_M)",
+      "toolsets": "file,terminal,code_execution (no web, browser, memory, skills, delegation, image_gen, tts, cronjob, messaging)",
+      "invocation": "one `hermes chat -Q -t file,terminal,code_execution -q \"Work only inside the current directory (<dir>). <brief>\"` per task, cwd = a fresh empty directory",
+      "node": "v24.19.0"
+    }
+  },
+  "model": {"id": "qwen3.8:27b-q4_K_M", "endpoint": "https://aig.mycluster.cyou (owned lane; OpenAI-compatible /v1 for Hermes)", "rule": "the only model either system may reach; a task not built on it is reported as not built"},
+  "caps": {
+    "top_level_invocations_per_system_per_task": 1,
+    "wall_clock_seconds": 1800,
+    "model_requests_hard_cap": 8,
+    "cap_enforcement": "Hermes: --max-turns is not exposed on this version; the harness counts `API call #n` lines in the profile's agent.log and DISQUALIFIES a run that exceeded 8 requests. Mind: the delegate path's own budget; the harness counts the scratch instance's inference_call rows and disqualifies the same way.",
+    "manual_edits": "none; the artifact directory is read-only from the moment the invocation exits or the job reports done/failed (a snapshot copy is hashed then)",
+    "network": "denied except loopback and the pinned owned Qwen endpoint — Hermes by toolset exclusion (no web/browser tools); Mind by configuration (no cloud keys, no web-search URL, YM_SEARXNG_URL unset). Package downloads or installs during a run disqualify it (Hermes terminal tool may attempt pip/npm; the checker refuses any run whose transcript shows a download).",
+    "downloads_installs": "forbidden"
+  },
+  "briefs": {"T1": "briefs/T1.txt", "T2": "briefs/T2.txt", "T3": "briefs/T3.txt", "sha256": "receipts/briefs.sha256 (T1 5a31beab…, T2 3312cdf4…, T3 212a5cfd…)"},
+  "seed": {"file": "seed/leads.json", "semantics": "seed/expected.json — 20 leads, UTC calendar days, 14 bins 2026-08-20..2026-09-02 inclusive, 'today' fixed at 2026-09-02Z, most-recent by created_at", "placement": "T1 only: before the T1 check the harness copies seed/leads.json OVER the artifact's leads file (the file the artifact writes to, found by the checker as the JSON file its form appends to); the dashboard must then show expected.json's numbers"},
+  "output_dir_contract": {"hermes": "everything under the fresh working directory", "mind": "everything the job wrote under the scratch instance's YM_WEB_DIR (/var/lib/ym-cb2/public) plus any workdir the delegate reports, copied out after done/failed", "tree_hash": "tools/tree_hash.py — SHA-256 over (relative path, bytes) of every regular file sorted by path, excluding .git, __pycache__, node_modules, .pytest_cache, *.pyc, .DS_Store, Thumbs.db and the harness's own receipts"},
+  "checks": {
+    "browser": "Playwright 1.62.1, chromium headless shell 1223, viewport 1280x800, 10 s load timeout, console errors captured",
+    "T1": "checks/check_web.mjs t1: page loads with 0 console errors; every same-origin link resolves; form found (>=2 inputs + submit) and submitting appends exactly one record to the leads JSON; /dashboard (or dashboard.html) shows total == expected.total, the five_most_recent names, and the 14 per-day counts (numbers scraped from page text; a miss lists the scraped numbers for the grader)",
+    "T2": "checks/check_web.mjs t2: page loads with 0 console errors; every same-origin link resolves; text/DOM contains a projects section with >=4 items, a writing section with >=3 items, a reachable contact section (heuristics stated in the script; the grader reads the artifact too)",
+    "T3": "checks/check_t3.py: in a fresh copy — tests discovered and run (pytest if present else unittest), all pass; the CLI entry found (tracker.py|task.py|tasks.py|main.py|cli.py or a pyproject script) and `add`, `list`, `done`, `today` each exit 0 with sensible output on a fresh store; persistence verified across two processes"
+  },
+  "viewer_test": "Pranab, blind: per task, artifacts A/B (shuffled by Codex, who holds the label map outside the repo), fifteen seconds each, a forced pick; labels unsealed only after the pick is on the ledger",
+  "cost": {"mind": "inference_call rows of the scratch instance (requests, attempts, wall) — tokens absent", "hermes": "API call lines from its agent.log for the session (calls, provider-reported in/out tokens, latency)", "comparable": "requests/attempts only; tokens reported for Hermes with the caveat that the mind's are absent; wall time NOT compared (different hosts)"},
+  "environment_confound": "The Mind leg runs on the staging box; Hermes runs on the Windows workstation. Same-host execution is not available today. Wall time is recorded per leg and never compared. The model endpoint is the same for both.",
+  "receipts": "run/receipts/*.json per system per task: start/finish UTC, wall, status, request counts, tree hash, artifact byte count; no artifact text",
+  "kill": ["a brief edited per system", "a label unsealed before the pick", "a check softened after a failure", "a run on the live mind.db", "any artifact edited by hand", "any run that downloaded or installed packages", "any run over 8 model requests or 1800 s"]
+}

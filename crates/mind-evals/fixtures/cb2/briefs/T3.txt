@@ -1,0 +1,1 @@
+Build a command-line task tracker in Python: add, list, done, and a 'today' view; tasks persist to a file; include tests and make them pass.

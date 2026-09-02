@@ -703,7 +703,16 @@ pub(crate) async fn run_engagement(
         let ask_window = st.last_ask;
         let mut outcome = LoopOutcome::NothingToAsk;
         let mut ask_held_no_presence = false;
-        if let Some(candidate) = conv.prepare_ask().await {
+        // L4-0b: the ask's opportunity, minted ONCE here and reused for the loop row below; the
+        // composition's model calls (purpose follow-up) carry it on their spend rows.
+        let window = mind_observability::LoopOpportunity::Window {
+            loop_id: LoopId::Ask,
+            process_start_ms,
+            key: ask_window,
+        };
+        if let Some(candidate) =
+            mind_conversation::within_opportunity(window.id(), conv.prepare_ask()).await
+        {
             // The marker's probability is the console domain's; it is read only when the line is
             // queued for the cockpit (a Telegram send commits under its own domain).
             let p = conv.console_engagement_p().await;
@@ -739,11 +748,6 @@ pub(crate) async fn run_engagement(
         }
         st.last_ask = now; // reset cadence whether or not it asked
         st.gate_ask.mark(ask_window);
-        let window = mind_observability::LoopOpportunity::Window {
-            loop_id: LoopId::Ask,
-            process_start_ms,
-            key: ask_window,
-        };
         conv.record_loop_tick(if ask_held_no_presence {
             mind_observability::LoopTick::held(
                 window,
@@ -1127,6 +1131,21 @@ mod tests {
             !body.contains("inference"),
             "no model call from the runner itself"
         );
+        // L4-0b: the ask's opportunity is constructed ONCE, before `prepare_ask`, and the loop
+        // row reuses that value; the model-capable act runs inside it.
+        let flat: String = body.split_whitespace().collect();
+        assert_eq!(
+            flat.matches("loop_id:LoopId::Ask,process_start_ms,key:ask_window,")
+                .count(),
+            1,
+            "one Ask act opportunity"
+        );
+        assert!(flat.contains("within_opportunity(window.id(),conv.prepare_ask())"));
+        let ask_opp = body.find("key: ask_window,").unwrap();
+        let ask_call = body.find("conv.prepare_ask(").unwrap();
+        assert!(ask_opp < ask_call, "minted before the act");
+        // The five model-capable acts each run inside their own opportunity; nothing else does.
+        assert_eq!(body.matches("within_opportunity(").count(), 5);
         assert!(
             !body.contains("chat_grounded"),
             "no model call from the runner itself"

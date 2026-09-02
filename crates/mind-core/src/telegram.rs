@@ -1847,7 +1847,17 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
             }
             beats = beats.wrapping_add(1);
             let t0 = now_ms();
-            let notes = ticker.tick_delegations().await;
+            // L4-0b: this beat's opportunity, minted ONCE before the act and reused byte-identically
+            // for the loop row below, so a 30 s boundary can never split a spend row from its loop.
+            let hb_opportunity = mind_observability::LoopOpportunity::Bucket {
+                loop_id: mind_observability::LoopId::Heartbeat,
+                n: mind_observability::OpportunityGate::bucket(t0, 30),
+            };
+            let notes = mind_conversation::within_opportunity(
+                hb_opportunity.id(),
+                ticker.tick_delegations(),
+            )
+            .await;
             for note in &notes {
                 eprintln!("[headless-tick] {note}");
             }
@@ -1873,10 +1883,7 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
             if !notes.is_empty() {
                 ticker.record_loop_tick(
                     mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Bucket {
-                            loop_id: mind_observability::LoopId::Heartbeat,
-                            n: mind_observability::OpportunityGate::bucket(hb_now, 30),
-                        },
+                        hb_opportunity,
                         mind_observability::LoopHost::Headless,
                         mind_observability::LoopOutcome::Delegations,
                     )
@@ -4724,6 +4731,21 @@ mod tests {
             );
         }
         assert!(headless.contains("loop_id: mind_observability::LoopId::Heartbeat,"));
+        // L4-0b: the beat's opportunity is constructed ONCE, before the act, and the loop row
+        // reuses that value — never a second bucket read after the act.
+        let headless_flat: String = headless.split_whitespace().collect();
+        assert_eq!(
+            headless_flat
+                .matches("loop_id:mind_observability::LoopId::Heartbeat,n:")
+                .count(),
+            1,
+            "one Heartbeat act opportunity"
+        );
+        assert!(headless_flat.contains("bucket(t0,30)"));
+        assert!(!headless_flat.contains("bucket(hb_now,30)"));
+        assert!(headless_flat
+            .contains("within_opportunity(hb_opportunity.id(),ticker.tick_delegations()"));
+        assert!(headless_flat.contains("LoopTick::acted(hb_opportunity,"));
         // L1d-A: the seven synchronous speakers record in the block that sends; the guard is
         // per block, not lexical over the whole body.
         for (tag, id) in [
@@ -4885,8 +4907,10 @@ mod tests {
             headless.contains("gate_heartbeat.take_bucket(")
                 && headless.contains("LoopPolicy::Report(600)")
         );
+        // L4-0b: the beat's bucket is read at the beat's start (`t0`), before the act, so the
+        // spend rows and the loop row share one identity; still one opportunity per beat.
         assert!(
-            headless.contains("OpportunityGate::bucket(hb_now, 30)"),
+            headless.contains("OpportunityGate::bucket(t0, 30)"),
             "acts are per beat"
         );
         // Every timer / cadence site calls the constructor of its kind — a kind can only be

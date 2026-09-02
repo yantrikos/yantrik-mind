@@ -4930,8 +4930,9 @@ bounded_enum! {
     }
 }
 bounded_enum! {
-    /// Who ran the loop.
-    LoopHost { Telegram => "telegram", Headless => "headless" }
+    /// Who ran the loop: the Telegram poll loop, the headless heartbeat, or (L3a) the
+    /// process-hosted runner that runs on every box. The executor, never the delivery surface.
+    LoopHost { Telegram => "telegram", Headless => "headless", Process => "process" }
 }
 bounded_enum! {
     /// What a loop did when it acted. Counts ride in `outcome` as `count:<n>`; no content ever.
@@ -5073,7 +5074,10 @@ impl LoopOpportunity {
     }
 }
 
-pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v3";
+/// L3a bumped v3 → v4 for the `process` host (a bounded-enum addition is a schema change by this
+/// ledger's own rule). v3 rows stay in the log and read as superseded by version, never malformed.
+pub const LOOP_LEDGER_VERSION: &str = "loop-ledger-v4";
+pub const LOOP_LEDGER_V3: &str = "loop-ledger-v3";
 
 /// One loop tick. Fields are private: the only way to build one is from the typed parts, so the
 /// log can never receive free text under this kind.
@@ -5486,6 +5490,29 @@ impl OpportunityGate {
 #[cfg(test)]
 mod loop_ledger_tests {
     use super::*;
+
+    /// L3a: the v3 → v4 migration. A v3 row is superseded by version, never malformed; a v4 row
+    /// hosted by the process parses; a row with a host the enum does not know is malformed.
+    #[test]
+    fn v3_rows_are_superseded_never_malformed_and_the_process_host_parses() {
+        let w = LoopOpportunity::Window {
+            loop_id: LoopId::Ics,
+            process_start_ms: 7,
+            key: 0,
+        };
+        let mut v3 = LoopTick::acted(w, LoopHost::Telegram, LoopOutcome::Ran).to_event(10);
+        v3.evaluator_id = Some(LOOP_LEDGER_V3.into());
+        let v4 = LoopTick::acted(w, LoopHost::Process, LoopOutcome::Ran).to_event(11);
+        let mut unknown = LoopTick::acted(w, LoopHost::Process, LoopOutcome::Ran).to_event(12);
+        unknown.trigger = Some("mainframe".into());
+        let ledger = loop_ledger(&[v3, v4, unknown], 20, 100);
+        assert_eq!(ledger.superseded, 1, "the v3 row is superseded by version");
+        assert_eq!(ledger.malformed, 1, "an unknown host is malformed");
+        assert_eq!(ledger.loops.len(), 1);
+        assert!(ledger.loops[0].hosts.contains("process"));
+        assert_eq!(LoopHost::parse("process"), Some(LoopHost::Process));
+        assert_eq!(LoopHost::parse("mainframe"), None);
+    }
 
     fn ev(t: LoopTick, ts: u64) -> DecisionEvent {
         t.to_event(ts)

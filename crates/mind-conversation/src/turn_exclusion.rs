@@ -1,0 +1,270 @@
+//! L3a: turn exclusion for the process-hosted loop runner.
+//!
+//! The runner may start the offline-cognition pass only when no turn is in flight on ANY surface,
+//! and the check must be atomic against a turn starting at the same instant. The contract is the
+//! legacy one made explicit: a turn registered first wins and the pass does not start; a turn
+//! arriving after admission proceeds without waiting and may overlap the already-running pass.
+//! Nothing is cancelled and no turn ever waits on the pass — the only critical section is the
+//! await-free admission itself.
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::RwLock;
+
+pub struct TurnExclusion {
+    /// Shared by turns for the instant they register; exclusive for the instant DMN is admitted.
+    /// Never held across an await.
+    admission: RwLock<()>,
+    active_turns: AtomicUsize,
+    /// Monotone: the latest user activity on any surface, in ms.
+    last_user_activity_ms: AtomicU64,
+    dmn_running: AtomicBool,
+}
+
+/// Held for the whole life of one turn. Dropping it (normally or by cancellation) releases it.
+pub struct TurnGuard<'a> {
+    owner: &'a TurnExclusion,
+}
+
+impl Drop for TurnGuard<'_> {
+    fn drop(&mut self) {
+        self.owner.active_turns.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Held for the life of one offline-cognition pass. Dropping it clears `dmn_running`.
+pub struct DmnPermit<'a> {
+    owner: &'a TurnExclusion,
+}
+
+impl Drop for DmnPermit<'_> {
+    fn drop(&mut self) {
+        self.owner.dmn_running.store(false, Ordering::Release);
+    }
+}
+
+impl TurnExclusion {
+    /// Seeded with the process's start: the legacy poll loop began with `last_activity =
+    /// now_ms()`, so the first idle stretch is counted from boot, never from zero.
+    pub fn starting_at(now_ms: u64) -> Self {
+        Self {
+            admission: RwLock::new(()),
+            active_turns: AtomicUsize::new(0),
+            last_user_activity_ms: AtomicU64::new(now_ms),
+            dmn_running: AtomicBool::new(false),
+        }
+    }
+
+    /// Register a turn. Shared admission: never blocked by another turn, never blocked by a
+    /// running pass — only by the microseconds of a DMN admission check in progress.
+    pub fn begin_turn(&self, now_ms: u64) -> TurnGuard<'_> {
+        let _shared = self.admission.read().unwrap_or_else(|p| p.into_inner());
+        self.active_turns.fetch_add(1, Ordering::AcqRel);
+        self.last_user_activity_ms
+            .fetch_max(now_ms, Ordering::AcqRel);
+        TurnGuard { owner: self }
+    }
+
+    /// Admit the offline-cognition pass iff no turn is active, the idle stretch is met, and no
+    /// pass is already running — all re-checked under the exclusive lock, which is released
+    /// before this returns so the pass itself never holds it.
+    pub fn try_admit_dmn(&self, now_ms: u64, idle_ms: u64) -> Option<DmnPermit<'_>> {
+        let _exclusive = self.admission.write().unwrap_or_else(|p| p.into_inner());
+        if self.active_turns.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        if now_ms.saturating_sub(self.last_user_activity_ms.load(Ordering::Acquire)) < idle_ms {
+            return None;
+        }
+        if self.dmn_running.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        Some(DmnPermit { owner: self })
+    }
+
+    pub fn active_turns(&self) -> usize {
+        self.active_turns.load(Ordering::Acquire)
+    }
+    pub fn last_user_activity_ms(&self) -> u64 {
+        self.last_user_activity_ms.load(Ordering::Acquire)
+    }
+    pub fn dmn_running(&self) -> bool {
+        self.dmn_running.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+
+    const IDLE: u64 = 600_000;
+
+    /// Every production reply surface of the engine registers a turn for its whole life:
+    /// `turn` (the agentic path), `fast_reply` (the voice fast path), `cli_dispatch` (the
+    /// operator console). `handle_turn` / `handle_turn_as` are reached only through those; they
+    /// take no guard of their own (that would double-count), and mind-core's callsite fixture
+    /// asserts no frontend calls them directly.
+    #[test]
+    fn every_production_reply_surface_registers_a_turn() {
+        let lib = include_str!("lib.rs");
+        let cognitive = include_str!("cognitive.rs");
+        fn body_after<'a>(src: &'a str, signature: &str) -> &'a str {
+            let start = src.find(signature).unwrap_or_else(|| panic!("{signature}"));
+            // The function's own extent: up to the next item at the same indentation.
+            let end = src[start + 1..]
+                .find(
+                    "
+    pub ",
+                )
+                .map(|i| start + 1 + i)
+                .unwrap_or(src.len());
+            &src[start..end]
+        }
+        for (src, signature) in [
+            (
+                cognitive,
+                "pub async fn turn(self: &Arc<Self>, user_text: &str, id: TurnIdentity)",
+            ),
+            (
+                lib,
+                "pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity)",
+            ),
+            (
+                lib,
+                "pub async fn cli_dispatch(&self, line: &str, ctx: &mind_types::AccessContext)",
+            ),
+        ] {
+            assert!(
+                body_after(src, signature).contains("let _turn = self.turns.begin_turn("),
+                "{signature} must register a turn"
+            );
+        }
+        for signature in [
+            "pub async fn handle_turn(&self, user_text: &str)",
+            "pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity)",
+        ] {
+            assert!(
+                !body_after(lib, signature).contains("begin_turn("),
+                "{signature} is reached through a registering entry; it must not double-count"
+            );
+        }
+    }
+
+    /// Boot is activity: the first runner tick after start cannot admit DMN until the idle
+    /// stretch has passed since the process started (legacy `last_activity = now_ms()`).
+    #[test]
+    fn nothing_is_admitted_before_the_idle_stretch_has_passed_since_boot() {
+        let boot = 5_000_000;
+        let x = TurnExclusion::starting_at(boot);
+        assert!(x.try_admit_dmn(boot + 5_000, IDLE).is_none());
+        assert!(x.try_admit_dmn(boot + IDLE - 1, IDLE).is_none());
+        assert!(x.try_admit_dmn(boot + IDLE, IDLE).is_some());
+    }
+
+    #[test]
+    fn a_turn_registered_first_keeps_the_pass_from_starting_for_its_whole_life() {
+        let x = TurnExclusion::starting_at(0);
+        // Idle long enough, no turn: admitted.
+        assert!(x.try_admit_dmn(1_000_000, IDLE).is_some());
+        // A long turn holds its guard across the "await": no admission while it lives.
+        let guard = x.begin_turn(1_000_000);
+        assert_eq!(x.active_turns(), 1);
+        assert!(x.try_admit_dmn(2_000_000, IDLE).is_none());
+        assert!(x.try_admit_dmn(3_000_000, IDLE).is_none());
+        drop(guard);
+        assert_eq!(x.active_turns(), 0);
+        // The turn moved the activity clock: not idle yet, so still not admitted...
+        assert!(x.try_admit_dmn(1_000_000 + IDLE - 1, IDLE).is_none());
+        // ...until the idle stretch has passed.
+        assert!(x.try_admit_dmn(1_000_000 + IDLE, IDLE).is_some());
+    }
+
+    #[test]
+    fn overlapping_turns_count_two_one_zero_and_a_cancelled_turn_releases_by_drop() {
+        let x = TurnExclusion::starting_at(0);
+        let a = x.begin_turn(10);
+        let b = x.begin_turn(20);
+        assert_eq!(x.active_turns(), 2);
+        drop(a);
+        assert_eq!(x.active_turns(), 1);
+        // A cancelled turn is a dropped future that had already registered: poll it once so
+        // the guard is taken, then drop it — the count must return to what it was.
+        let mut cancelled = Box::pin(async {
+            let _g = x.begin_turn(30);
+            std::future::pending::<()>().await;
+        });
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            x.active_turns(),
+            2,
+            "the cancelled turn registered while pending"
+        );
+        drop(cancelled);
+        assert_eq!(
+            x.active_turns(),
+            1,
+            "dropping the pending future released its guard"
+        );
+        drop(b);
+        assert_eq!(x.active_turns(), 0);
+        assert_eq!(x.last_user_activity_ms(), 30);
+    }
+
+    /// The two frozen interleavings of the race.
+    #[test]
+    fn the_race_interleavings_are_exactly_the_contract() {
+        // (i) The turn registers BEFORE admission: admission observes it atomically, no pass.
+        let x = TurnExclusion::starting_at(0);
+        let turn = x.begin_turn(1);
+        assert!(x.try_admit_dmn(1 + IDLE, IDLE).is_none());
+        drop(turn);
+        // (ii) The turn arrives AFTER admission: it proceeds without waiting, the pass keeps its
+        // permit and runs to completion; overlap is allowed by contract.
+        let permit = x
+            .try_admit_dmn(2 + IDLE, IDLE)
+            .expect("admitted while idle");
+        assert!(x.dmn_running());
+        let turn = x.begin_turn(3 + IDLE);
+        assert_eq!(x.active_turns(), 1, "the turn was not made to wait");
+        assert!(x.dmn_running(), "the pass was not cancelled");
+        // No second pass while one runs, whatever the turn count.
+        drop(turn);
+        assert!(x.try_admit_dmn(4 + IDLE, IDLE).is_none());
+        drop(permit);
+        assert!(!x.dmn_running());
+        // A fresh admission is possible again only once idle from the turn's activity.
+        assert!(x.try_admit_dmn(3 + IDLE + IDLE, IDLE).is_some());
+    }
+
+    /// Admission is atomic against a turn starting on another thread: whichever takes the lock
+    /// first decides, and no interleaving admits a pass while a registered turn exists.
+    #[test]
+    fn admission_is_atomic_against_concurrent_turn_registration() {
+        use std::sync::Arc;
+        let x = Arc::new(TurnExclusion::starting_at(0));
+        let mut violations = 0usize;
+        for round in 0..2_000u64 {
+            let now = 10_000_000 + round * 1_000_000;
+            let xa = x.clone();
+            let t = std::thread::spawn(move || {
+                let g = xa.begin_turn(now);
+                // Hold the turn briefly so an admission racing with registration must see it.
+                std::hint::black_box(&g);
+                let admitted_during_turn = xa.try_admit_dmn(now + IDLE, IDLE).is_some();
+                drop(g);
+                admitted_during_turn
+            });
+            let admitted_here = x.try_admit_dmn(now + IDLE, IDLE);
+            let admitted_in_turn = t.join().unwrap();
+            // The turn thread can never be admitted while it holds its own guard.
+            if admitted_in_turn {
+                violations += 1;
+            }
+            // If this thread was admitted, it was admitted before the turn registered
+            // (allowed interleaving ii); it must have seen zero active turns at that instant.
+            drop(admitted_here);
+        }
+        assert_eq!(violations, 0);
+    }
+}

@@ -96,6 +96,7 @@ mod ef2_door_tests;
 #[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
+pub mod turn_exclusion;
 
 /// E.AGI-A5: when this process started, fixed on first use (the engine constructor touches it),
 /// so "since this binary started" means one thing for the life of the process.
@@ -4973,6 +4974,8 @@ pub struct ConversationEngine {
     /// A weak handle to the Arc this engine lives in, set by `turn()` — the bounded loop's bus
     /// needs an owned handle, and `handle_turn_as` only has `&self`.
     self_ref: Mutex<std::sync::Weak<ConversationEngine>>,
+    /// L3a: turn exclusion for the process-hosted loop runner (see `turn_exclusion`).
+    turns: turn_exclusion::TurnExclusion,
     /// What the mind last answered (head only), so the NEXT user message can grade it — the
     /// turn-level reward channel. See `grade_previous_turn`.
     last_turn_answer: Mutex<Option<String>>,
@@ -5088,6 +5091,7 @@ impl ConversationEngine {
                 .unwrap_or(true),
             cognition_force: None,
             self_ref: Mutex::new(std::sync::Weak::new()),
+            turns: turn_exclusion::TurnExclusion::starting_at(Self::now_ms()),
             last_turn_answer: Mutex::new(None),
             turn_packs: Mutex::new(Vec::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
@@ -5451,6 +5455,11 @@ impl ConversationEngine {
     pub fn with_runtime(mut self, runtime: Arc<dyn ActionRuntime>) -> Self {
         self.runtime = Some(runtime);
         self
+    }
+
+    /// L3a: the turn-exclusion primitive the process-hosted loop runner admits DMN through.
+    pub fn turns(&self) -> &turn_exclusion::TurnExclusion {
+        &self.turns
     }
 
     /// Wire the recipe engine (citation-validated, adaptive workflows).
@@ -6694,6 +6703,8 @@ impl ConversationEngine {
         if !ctx.is_operator() {
             return "(the ym console requires operator authorization)".to_string();
         }
+        // L3a: an operator turn is a turn on a surface; held for the dispatch's whole life.
+        let _turn = self.turns.begin_turn(Self::now_ms());
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
@@ -12596,6 +12607,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
     /// memory and appends the transcript (background consolidation catches it later). Short, spoken,
     /// no markdown. Falls back to a graceful line rather than erroring mid-conversation.
     pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        // L3a: the voice fast path is a production reply surface; it registers like every turn.
+        let _turn = self.turns.begin_turn(Self::now_ms());
         // ── TIER 0: arithmetic, before any model call. ──────────────────────────────────────────
         //
         // Found live on 2026-08-11: asked "what is 17 times 23?" over the fast path, the mind

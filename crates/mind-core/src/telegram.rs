@@ -501,7 +501,7 @@ fn in_quiet_hours_now() -> bool {
     is_quiet_hour(hour, start, end)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1820,6 +1820,10 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
     for line in conv.reconcile_leases().await {
         eprintln!("{line}");
     }
+    // L3a: the process-hosted loop runner starts once per process, on every box — AFTER lease
+    // reconciliation, because its first tick is immediate and the lease sweep must never race
+    // the restart reconciliation.
+    crate::loops::spawn_loop_runner(conv.clone());
     // The horizon/recipe heartbeat (E.STG2). In telegram mode the poll loop ticks delegations
     // between updates; headless had no beat at all, and a due durable goal sat "due now" for eight
     // hours on staging. Same tick, journal instead of chat: receipts persist in SQLite either way.
@@ -1973,14 +1977,12 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     // tick (rehearse/reconcile/associate). Tracked inline on the poll loop so it never competes with a
     // live turn and needs no extra task. Disabled with YM_DMN=off.
     let mut last_activity = now_ms();
-    let mut last_dmn = 0u64;
     // L1 (ARCH7) v3: one opportunity gate per loop. An opportunity is the loop's own due window
     // (keyed by the legacy timer it obeys, plus this process's start so restarts never collide)
     // or, for the knock, one idle stretch. A held state records once per opportunity; an act
     // records under the same id and marks it; the ledger reduces to one row per opportunity.
     // Legacy timers are untouched.
     let process_start_ms = now_ms();
-    let mut gate_dmn = mind_observability::OpportunityGate::default();
     let mut gate_knock = mind_observability::OpportunityGate::default();
     let mut gate_digest = mind_observability::OpportunityGate::default();
     let mut gate_ask = mind_observability::OpportunityGate::default();
@@ -2001,13 +2003,15 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
-    let mut last_ics = 0u64; // external-calendar (ICS) refresh cadence
-    let mut last_lease_sweep = 0u64; // standing-lease expiry sweep (ARCH-6 P.4)
-                                     // Leases, reconciled BEFORE the first turn is served: a restart drops transient mounts, and a
-                                     // lease that expired while the mind was down must not come back attached (P.4a).
+                                  // Leases, reconciled BEFORE the first turn is served: a restart drops transient mounts, and a
+                                  // lease that expired while the mind was down must not come back attached (P.4a).
     for line in conv.reconcile_leases().await {
         eprintln!("{line}");
     }
+    // L3a: the process-hosted loop runner starts once per process, on every box — AFTER lease
+    // reconciliation, because its first tick is immediate and the lease sweep must never race
+    // the restart reconciliation.
+    crate::loops::spawn_loop_runner(conv.clone());
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     let mut last_member_beat = 0u64; // member reminders + briefs cadence
     loop {
@@ -3433,159 +3437,8 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         conv.resolve_proactive(false).await;
         conv.ledger_resolve(false).await;
 
-        // External-calendar refresh: re-pull the read-only ICS feed if one is connected. Paced
-        // (YM_ICS_SECS, default 6h); no chat gating — it only updates stored events, sends nothing.
-        {
-            let period: u64 = std::env::var("YM_ICS_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(21_600);
-            let now = now_ms();
-            let ics_gate = mind_observability::Gated::timer(mind_observability::Timer {
-                now_ms: now,
-                last_ms: last_ics,
-                period_ms: period * 1000,
-            });
-            let ics_decision = ics_gate.decide();
-            if ics_decision == mind_observability::GateDecision::Act {
-                let ics_t0 = now_ms();
-                let n = conv.refresh_ics().await;
-                if n > 0 {
-                    eprintln!("[calendar] refreshed {n} external event(s)");
-                }
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::Ics,
-                            process_start_ms,
-                            key: last_ics,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        mind_observability::LoopOutcome::Ran,
-                    )
-                    .considered(&[mind_observability::ConsideredSignal::DueDelegations])
-                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
-                    .count(n as u32)
-                    .wall_ms(now_ms().saturating_sub(ics_t0)),
-                );
-                last_ics = ics_gate.advance(ics_decision);
-            }
-        }
-
-        // Standing-lease expiry sweep (ARCH-6 P.4): its own cursor, no chat gating — it only ends
-        // leases whose time has passed, records each, and logs only when it did.
-        {
-            let period: u64 = std::env::var("YM_LEASE_SWEEP_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(60);
-            let now = now_ms();
-            let ls_gate = mind_observability::Gated::timer(mind_observability::Timer {
-                now_ms: now,
-                last_ms: last_lease_sweep,
-                period_ms: period * 1000,
-            });
-            let ls_decision = ls_gate.decide();
-            if ls_decision == mind_observability::GateDecision::Act {
-                let ls_t0 = now_ms();
-                let mut swept: u32 = 0;
-                for line in conv.sweep_leases().await {
-                    swept += 1;
-                    eprintln!("{line}");
-                }
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::LeaseSweep,
-                            process_start_ms,
-                            key: last_lease_sweep,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        mind_observability::LoopOutcome::Ran,
-                    )
-                    .considered(&[mind_observability::ConsideredSignal::DueDelegations])
-                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
-                    .count(swept)
-                    .wall_ms(now_ms().saturating_sub(ls_t0)),
-                );
-                last_lease_sweep = ls_gate.advance(ls_decision);
-            }
-        }
-
-        // Default-mode ("sleep") tick: when the user has been idle past the threshold, run ONE bounded
-        // offline-cognition pass (rehearse → reconcile → associate over the typed substrate). Paced so
-        // it fires at most every YM_DMN_SECS, and only while idle so it never competes with a live turn.
-        {
-            // L1 v3: the due window is computed OUTSIDE the enable switch so a disabled DMN still
-            // records `held:disabled` once per window; the switch itself is unchanged.
-            let dmn_on = std::env::var("YM_DMN").map(|v| v != "off").unwrap_or(true);
-            let idle_secs: u64 = std::env::var("YM_DMN_IDLE_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(600);
-            let period: u64 = std::env::var("YM_DMN_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(300);
-            let now = now_ms();
-            let dmn_due = now.saturating_sub(last_dmn) >= period * 1000;
-            let dmn_considered = [
-                mind_observability::ConsideredSignal::Tensions,
-                mind_observability::ConsideredSignal::Beliefs,
-                mind_observability::ConsideredSignal::PaperDesk,
-            ];
-            let dmn_policy = [
-                mind_observability::LoopPolicy::Cadence(period),
-                mind_observability::LoopPolicy::Idle(idle_secs),
-                mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::DmnOneCall),
-            ];
-            if dmn_on && dmn_due && now.saturating_sub(last_activity) >= idle_secs * 1000 {
-                let t0 = now_ms();
-                let lines = conv.dmn_tick().await;
-                for line in &lines {
-                    eprintln!("{line}");
-                }
-                // The act records under the due window it closes; model calls stay unknown until
-                // the DMN reports its own count (never inferred from its budget).
-                gate_dmn.mark(last_dmn);
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::Dmn,
-                            process_start_ms,
-                            key: last_dmn,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        mind_observability::LoopOutcome::Dreamed,
-                    )
-                    .considered(&dmn_considered)
-                    .policy(&dmn_policy)
-                    .count(lines.len() as u32)
-                    .wall_ms(now_ms().saturating_sub(t0)),
-                );
-                last_dmn = now;
-            } else if dmn_due {
-                if let Some(window) = gate_dmn.take_window(
-                    mind_observability::LoopId::Dmn,
-                    process_start_ms,
-                    last_dmn,
-                ) {
-                    conv.record_loop_tick(
-                        mind_observability::LoopTick::held(
-                            window,
-                            mind_observability::LoopHost::Telegram,
-                            if dmn_on {
-                                mind_observability::HeldReason::IdleGate
-                            } else {
-                                mind_observability::HeldReason::Disabled
-                            },
-                        )
-                        .considered(&dmn_considered)
-                        .policy(&dmn_policy),
-                    );
-                }
-            }
-        }
+        // L3a: the external-calendar refresh, the standing-lease sweep and the default-mode tick
+        // are hosted by the process-hosted loop runner (`crate::loops`) on every box, not here.
 
         // Proactive: the unprompted paths — all heavily gated (idle + quiet-hours + a once-per-period
         // cap) and capped at ONE message per tick. A value DIGEST (urges that cleared the bar) takes
@@ -4112,7 +3965,6 @@ mod tests {
         let poll = &poll_all[..poll_all.find("#[cfg(test)]").unwrap_or(poll_all.len())];
         let headless = fn_body(SELF_SRC, "pub async fn run_headless(");
         for id in [
-            "LoopId::Dmn",
             "LoopId::Knock",
             "LoopId::Digest",
             "LoopId::Ask",
@@ -4124,8 +3976,6 @@ mod tests {
             "LoopId::FollowUp",
             "LoopId::PriceWatch",
             "LoopId::MemberBeat",
-            "LoopId::Ics",
-            "LoopId::LeaseSweep",
             "LoopId::MailSweep",
             "LoopId::Whois",
             "LoopId::TraditionPrep",
@@ -4143,7 +3993,7 @@ mod tests {
         assert!(!headless.contains(literal));
         assert!(!poll.contains("record_loop_tick(\"") && !headless.contains("record_loop_tick(\""));
         // Held states pass through an opportunity gate; acts mark the window they close.
-        for g in ["gate_dmn", "gate_digest", "gate_ask"] {
+        for g in ["gate_digest", "gate_ask"] {
             assert!(
                 poll.contains(&format!("{g}.take_window(")),
                 "{g} holds once per window"
@@ -4172,8 +4022,6 @@ mod tests {
             ("fm", "timer_chat_quiet"),
             ("fu", "timer_chat_quiet"),
             ("pw", "timer_chat_quiet"),
-            ("ics", "timer"),
-            ("ls", "timer"),
             ("mb", "timer_quiet"),
             ("ms", "persisted_chat_quiet"),
             ("tp", "persisted_receptive"),
@@ -4212,8 +4060,6 @@ mod tests {
             ("fm", "last_family"),
             ("fu", "last_followup"),
             ("pw", "last_pricewatch"),
-            ("ics", "last_ics"),
-            ("ls", "last_lease_sweep"),
             ("mb", "last_member_beat"),
             ("pat", "last_patterns"),
         ] {
@@ -4258,7 +4104,51 @@ mod tests {
         assert!(poll.matches("process_start_ms,").count() >= 6);
         // Disabled loops are observable: the DMN switch and the proactive switch are read into
         // names and the held:disabled path exists outside them.
-        assert!(poll.contains("let dmn_on = ") && poll.contains("let proactive_on = "));
+        assert!(poll.contains("let proactive_on = "));
+        // L3a: the three process-hosted loops are gone from the poll body and live in the
+        // runner, never in both.
+        for id in ["LoopId::Ics", "LoopId::LeaseSweep", "LoopId::Dmn"] {
+            assert!(
+                !poll.contains(id),
+                "{id} is hosted by the runner, not the poll loop"
+            );
+        }
+        assert!(
+            !poll.contains("dmn_tick()")
+                && !poll.contains("refresh_ics()")
+                && !poll.contains("sweep_leases()")
+        );
+        let runner = include_str!("loops.rs");
+        for id in ["LoopId::Ics", "LoopId::LeaseSweep", "LoopId::Dmn"] {
+            assert!(runner.contains(id), "{id} is hosted by the runner");
+        }
+        assert_eq!(
+            SELF_SRC
+                .matches(concat!(
+                    "crate::loops::",
+                    "spawn_loop_runner(conv.clone());"
+                ))
+                .count(),
+            2,
+            "one start per host"
+        );
+        // L3a: in both hosts the runner starts AFTER lease reconciliation (its first tick is
+        // immediate; the sweep must not race the restart reconciliation).
+        for host in [poll_all, headless] {
+            let reconciled = host
+                .find("conv.reconcile_leases().await")
+                .expect("each host reconciles leases");
+            let started = host
+                .find(concat!(
+                    "crate::loops::",
+                    "spawn_loop_runner(conv.clone());"
+                ))
+                .expect("each host starts the runner");
+            assert!(
+                reconciled < started,
+                "the runner starts after reconciliation"
+            );
+        }
         assert!(poll.matches("HeldReason::Disabled").count() >= 3);
         // Every held record says what it considered.
         assert_eq!(

@@ -930,6 +930,9 @@ impl ConversationEngine {
     /// are the ones that belong to every turn regardless of loop: lending the engine handle the
     /// bus needs, and delivering held results.
     pub async fn turn(self: &Arc<Self>, user_text: &str, id: TurnIdentity) -> Result<String> {
+        // L3a: every frontend turn registers here for its whole life, so the process-hosted
+        // runner can never START the offline-cognition pass while a turn is in flight.
+        let _turn = self.turns.begin_turn(Self::now_ms());
         *self.self_ref.lock().unwrap() = Arc::downgrade(self);
         // Grade what was said LAST time by the shape of what arrived NOW — before this turn
         // overwrites it. Primary lane only: a correction is graded against the answer its own

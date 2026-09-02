@@ -22,7 +22,7 @@ def new(p, body):
     io.open(R + p, "w", encoding="utf-8", newline="\n").write(body)
 
 
-new("profiles/qwen.env", """# cb2n profile "qwen" — the frozen v3 reading's behaviour: the owned gateway, no key injection,
+new("profiles/qwen.profile", """# cb2n profile "qwen" — the frozen v3 reading's behaviour: the owned gateway, no key injection,
 # the Mind on its local lane. Loaded by run/profile.sh (CB2_PROFILE unset -> qwen).
 CB2_UPSTREAM=aig.mycluster.cyou
 CB2_UPSTREAM_IP=192.168.4.203
@@ -34,7 +34,7 @@ CB2_MIND_LANE=local
 CB2_MIND_PROVIDER=
 CB2_MIND_KEY_ENV=
 """)
-new("profiles/nim.env", """# cb2n profile "nim" (E.CB2-N): NVIDIA NIM upstream, its IPv4 addresses resolved on the box at
+new("profiles/nim.profile", """# cb2n profile "nim" (E.CB2-N): NVIDIA NIM upstream, its IPv4 addresses resolved on the box at
 # run start (allowlisted exclusively, recorded in every receipt); the key file mounted read-only
 # into the PROXY container only and injected as the Authorization header on every forward; both
 # work containers hold placeholder keys. One model for both systems. The Mind runs with
@@ -51,15 +51,15 @@ CB2_MIND_KEY_ENV=NVIDIA_API_KEY
 """)
 new("run/profile.sh", """#!/bin/bash
 # Profile loader (sourced): `cb2_profile_load <fixtures dir>` exports the CB2_* upstream/model/key
-# settings of profiles/${CB2_PROFILE:-qwen}.env. With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
+# settings of profiles/${CB2_PROFILE:-qwen}.profile. With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
 # addresses are resolved HERE, once per invocation (CB2_UPSTREAM_IPS; the first -> CB2_UPSTREAM_IP)
 # and CB2_RESOLVED_AT records when. A named key file must exist and be non-empty; its content is
 # read by nothing in these scripts — the proxy container gets it by bind mount, and the leak
 # scan hands the FILE to grep as a pattern file, so the key never enters a variable.
 cb2_profile_load() {
   local fix=$1 name=${CB2_PROFILE:-qwen}
-  [ -f "$fix/profiles/$name.env" ] || { echo "profile: unknown profile '$name'"; return 1; }
-  set -a; . "$fix/profiles/$name.env"; set +a
+  [ -f "$fix/profiles/$name.profile" ] || { echo "profile: unknown profile '$name'"; return 1; }
+  set -a; . "$fix/profiles/$name.profile"; set +a
   CB2_RESOLVED_AT=""
   if [ "${CB2_UPSTREAM_RESOLVE:-0}" = 1 ]; then
     CB2_UPSTREAM_IPS=$(getent ahosts "$CB2_UPSTREAM" | awk '$1 ~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/ {print $1}' | sort -u | tr '\\n' ' ' | sed 's/ $//')
@@ -241,7 +241,7 @@ rw("net/captest_client.py", [
 ])
 rw("MANIFEST.json", [
     ('  "id": "E.CB2",\n  "version": 3,\n',
-     '  "id": "E.CB2-N",\n  "version": 4,\n  "derived_from": "fixtures/cb2 at d4febe6 (the frozen Qwen reading; untouched) by the recorded patch scratch/cb2n_patch.py",\n  "profiles": "profiles/<name>.env, loaded by run/profile.sh (CB2_PROFILE, default qwen). qwen = the v3 reading unchanged: owned gateway 192.168.4.203, no key injection, the Mind on its local lane. nim (E.CB2-N) = upstream integrate.api.nvidia.com with its IPv4 addresses resolved on the box at run start (allowlisted EXCLUSIVELY — ACCEPT rules for any other upstream are removed — and recorded with the resolution time in every receipt), the key file (mode 0400) mounted read-only into the PROXY container only and injected as the Authorization header on every forward, placeholder keys in both work containers, one model for both systems (z-ai/glm-5.2), the Mind via YM_PRIMARY_BRAIN=nim:<model> behind YM_PROVIDER_BASE_URL_NIM. Receipts gain profile/upstream/upstream_ips/resolved_at/model/model_ok/key_leak_hits/upstream_http_errors/upstream_transport_errors/usage_*/void; the proxy receipt gains upstream/upstream_ip/upstream_ips/resolved_at/key_injected/upstream_http_errors/response_models/usage. Key-leak scans hand the key FILE to grep as a pattern file (the key and its prefix never enter a variable, log or receipt); any hit in a work container\'s env, home, state, raw log or artifact disqualifies. Model identity: every tallied response model must equal the profile model or the leg is disqualified; a leg with no tallied model is disqualified too. Void = an upstream HTTP error (4xx/5xx) on a model request or a transport/TLS failure: infrastructure, not the agent; the first receipt and outputs are preserved as *_void1, exactly one same-leg rerun is allowed (run/profile.sh cb2_rerun_prepare), a second void refuses.",\n'),
+     '  "id": "E.CB2-N",\n  "version": 4,\n  "derived_from": "fixtures/cb2 at d4febe6 (the frozen Qwen reading; untouched) by the recorded patch scratch/cb2n_patch.py",\n  "profiles": "profiles/<name>.profile, loaded by run/profile.sh (CB2_PROFILE, default qwen). qwen = the v3 reading unchanged: owned gateway 192.168.4.203, no key injection, the Mind on its local lane. nim (E.CB2-N) = upstream integrate.api.nvidia.com with its IPv4 addresses resolved on the box at run start (allowlisted EXCLUSIVELY — ACCEPT rules for any other upstream are removed — and recorded with the resolution time in every receipt), the key file (mode 0400) mounted read-only into the PROXY container only and injected as the Authorization header on every forward, placeholder keys in both work containers, one model for both systems (z-ai/glm-5.2), the Mind via YM_PRIMARY_BRAIN=nim:<model> behind YM_PROVIDER_BASE_URL_NIM. Receipts gain profile/upstream/upstream_ips/resolved_at/model/model_ok/key_leak_hits/upstream_http_errors/upstream_transport_errors/usage_*/void; the proxy receipt gains upstream/upstream_ip/upstream_ips/resolved_at/key_injected/upstream_http_errors/response_models/usage. Key-leak scans hand the key FILE to grep as a pattern file (the key and its prefix never enter a variable, log or receipt); any hit in a work container\'s env, home, state, raw log or artifact disqualifies. Model identity: every tallied response model must equal the profile model or the leg is disqualified; a leg with no tallied model is disqualified too. Void = an upstream HTTP error (4xx/5xx) on a model request or a transport/TLS failure: infrastructure, not the agent; the first receipt and outputs are preserved as *_void1, exactly one same-leg rerun is allowed (run/profile.sh cb2_rerun_prepare), a second void refuses.",\n'),
 ])
 # ── a distinct proxy image so the frozen cb2 image is never rebuilt ───────────────────────────
 for p in ("run/proxy.sh", "net/cb2net.sh", "README.md", "MANIFEST.json"):

@@ -1,14 +1,14 @@
 #!/bin/bash
 # Profile loader (sourced): `cb2_profile_load <fixtures dir>` exports the CB2_* upstream/model/key
-# settings of profiles/${CB2_PROFILE:-qwen}.env. With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
+# settings of profiles/${CB2_PROFILE:-qwen}.profile (.profile, not .env: the repository ignores *.env). With CB2_UPSTREAM_RESOLVE=1 the upstream's IPv4
 # addresses are resolved HERE, once per invocation (CB2_UPSTREAM_IPS; the first -> CB2_UPSTREAM_IP)
 # and CB2_RESOLVED_AT records when. A named key file must exist and be non-empty; its content is
 # read by nothing in these scripts — the proxy container gets it by bind mount, and the leak
 # scan hands the FILE to grep as a pattern file, so the key never enters a variable.
 cb2_profile_load() {
   local fix=$1 name=${CB2_PROFILE:-qwen}
-  [ -f "$fix/profiles/$name.env" ] || { echo "profile: unknown profile '$name'"; return 1; }
-  set -a; . "$fix/profiles/$name.env"; set +a
+  [ -f "$fix/profiles/$name.profile" ] || { echo "profile: unknown profile '$name'"; return 1; }
+  set -a; . "$fix/profiles/$name.profile"; set +a
   CB2_RESOLVED_AT=""
   if [ "${CB2_UPSTREAM_RESOLVE:-0}" = 1 ]; then
     CB2_UPSTREAM_IPS=$(getent ahosts "$CB2_UPSTREAM" | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')

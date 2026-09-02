@@ -6,8 +6,12 @@ is enforced BEFORE the ninth request reaches the model. Writes a counts-only rec
 every request. Env: CB2_UPSTREAM (host), CB2_UPSTREAM_IP, CB2_CAP (int), CB2_COUNT_FILE (path),
 CB2_KEY_PATH (optional: a file whose content replaces the Authorization header on EVERY forward —
 the work containers then never hold the real key), CB2_PROFILE / CB2_MODEL / CB2_UPSTREAM_IPS /
-CB2_RESOLVED_AT (recorded). The receipt also tallies the `model` id of every model response and
-provider-reported usage counts; bodies are never stored."""
+CB2_RESOLVED_AT (recorded). Error classes on model requests: upstream_http_errors = 429 or 5xx
+(infrastructure → void), upstream_client_errors = other 4xx (the caller's request; informational),
+upstream_errors = transport/TLS failures including a failed upstream body read; a client that
+disconnects mid-stream is client_disconnects, never an upstream error. The receipt tallies the
+`model` id of every SUCCESSFUL model response and provider-reported usage counts; bodies are
+never stored."""
 import http.client, json, os, ssl, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -22,7 +26,8 @@ COUNT_FILE = os.environ.get("CB2_COUNT_FILE", "/count/requests.json")
 KEY_PATH = os.environ.get("CB2_KEY_PATH", "")
 KEY = open(KEY_PATH, encoding="utf-8").read().strip() if KEY_PATH else ""
 lock = threading.Lock()
-state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {},
+state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "upstream_client_errors": 0, "client_disconnects": 0,
+         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {},
          "profile": os.environ.get("CB2_PROFILE", ""), "model_expected": os.environ.get("CB2_MODEL", ""), "upstream": UPSTREAM, "upstream_ip": UPSTREAM_IP,
          "upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),
          "response_models": {}, "usage": {"responses_with_usage": 0, "prompt_tokens": 0, "completion_tokens": 0}}
@@ -85,11 +90,12 @@ class H(BaseHTTPRequestHandler):
             return
         if is_model_request and resp.status >= 400:
             with lock:
-                state["upstream_http_errors"] += 1
+                state["upstream_http_errors" if (resp.status == 429 or resp.status >= 500) else "upstream_client_errors"] += 1
                 persist()
         self.send_response(resp.status)
         chunked = False
         seen = bytearray()
+        client_gone = False
         for k, v in resp.getheaders():
             lk = k.lower()
             if lk in ("connection", "keep-alive", "transfer-encoding"):
@@ -101,28 +107,45 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             while True:
-                chunk = resp.read(4096)
+                try:
+                    chunk = resp.read(4096)
+                except Exception:
+                    # the UPSTREAM body read failed: a transport error (void class), model requests only
+                    if is_model_request:
+                        with lock:
+                            state["upstream_errors"] += 1
+                            persist()
+                    break
                 if not chunk:
                     break
-                if is_model_request and len(seen) < 4_000_000:
+                if is_model_request and resp.status < 400 and len(seen) < 4_000_000:
                     seen.extend(chunk)
-                if chunked:
-                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-                else:
-                    self.wfile.write(chunk)
-                self.wfile.flush()
-            if chunked:
-                self.wfile.write(b"0\r\n\r\n")
-        except Exception:
-            pass
+                try:
+                    if chunked:
+                        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    else:
+                        self.wfile.write(chunk)
+                    self.wfile.flush()
+                except Exception:
+                    client_gone = True   # the CLIENT went away: not an upstream fault
+                    break
+            if chunked and not client_gone:
+                try:
+                    self.wfile.write(b"0\r\n\r\n")
+                except Exception:
+                    client_gone = True
         finally:
             conn.close()
-        if is_model_request and seen:
+        if client_gone:
+            with lock:
+                state["client_disconnects"] += 1
+                persist()
+        if is_model_request and resp.status < 400 and seen:
             self._tally(bytes(seen))
 
     def _tally(self, raw):
-        """From a model response body: the `model` id (tallied) and provider-reported usage (summed)
-        — a JSON body, or SSE events. Counts only; the body is discarded."""
+        """From a SUCCESSFUL model response body: the `model` id (tallied) and provider-reported
+        usage (summed) — a JSON body, or SSE events. Counts only; the body is discarded."""
         objs = []
         try:
             objs.append(json.loads(raw))
@@ -145,7 +168,7 @@ class H(BaseHTTPRequestHandler):
                 state["response_models"]["(none)"] = state["response_models"].get("(none)", 0) + 1
             if usage:
                 pt, ct = usage.get("prompt_tokens"), usage.get("completion_tokens")
-                if type(pt) is int and type(ct) is int:
+                if type(pt) is int and type(ct) is int and pt >= 0 and ct >= 0:
                     state["usage"]["responses_with_usage"] += 1
                     state["usage"]["prompt_tokens"] += pt
                     state["usage"]["completion_tokens"] += ct

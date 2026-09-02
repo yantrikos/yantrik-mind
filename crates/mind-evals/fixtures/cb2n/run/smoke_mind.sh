@@ -7,8 +7,7 @@ FIX="$(cd "$(dirname "$0")/.." && pwd)"; OUT=$(mktemp -d /tmp/cb2-smoke-mind-XXX
 if [ "$CB2_MIND_LANE" = local ]; then
   LANE=(-e YM_LOCAL_OLLAMA_URL=http://172.30.0.7:8080 -e YM_LOCAL_OLLAMA_MODEL="$CB2_MODEL" -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local); BOOTLINE="LOCAL primary + private lane active (ollama-local:$CB2_MODEL)"
 else
-  PU=$(echo "$CB2_MIND_PROVIDER" | tr 'a-z-' 'A-Z_')
-  SPEC="$CB2_MIND_PROVIDER:$CB2_MODEL"
+  PU=$(echo "$CB2_MIND_PROVIDER" | tr 'a-z-' 'A-Z_'); SPEC="$CB2_MIND_PROVIDER:$CB2_MODEL"
   LANE=(-e YM_PRIMARY_BRAIN="$SPEC" -e "YM_PROVIDER_BASE_URL_$PU=http://172.30.0.7:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"
         -e YM_ROLE_CHAT="$SPEC" -e YM_ROLE_RESEARCH="$SPEC" -e YM_ROLE_UTIL="$SPEC" -e YM_ROLE_VERIFY="$SPEC" -e YM_ROLE_CODE="$SPEC" -e YM_ROLE_CONSOLIDATE="$SPEC"); BOOTLINE="cloud provider '$SPEC'"
 fi

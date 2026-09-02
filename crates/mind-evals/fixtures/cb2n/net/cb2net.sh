@@ -39,7 +39,7 @@ iptables -L DOCKER-USER -n | grep -q "172.30.0.0/24" && { echo "superseded rules
 BR_WORK="br-$(docker network inspect cb2net --format '{{.Id}}' | cut -c1-12)"
 BR_EGRESS="br-$(docker network inspect cb2egress --format '{{.Id}}' | cut -c1-12)"
 iptables -C DOCKER-USER -s 172.30.1.0/24 -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -j DROP
-# upstream ACCEPTs: exactly the profile's resolved addresses; an ACCEPT for any other destination (a previous profile) is removed
+# upstream ACCEPTs: exactly the run state's resolved addresses; an ACCEPT of this shape for any other destination (a previous profile) is removed
 for RULE in $(iptables -S DOCKER-USER | grep -E -- "^-A DOCKER-USER -s 172.30.1.0/24 -d [0-9./]+ -p tcp -m tcp --dport 443 -j ACCEPT$" | awk '{print $6}'); do
   KEEP=0; for IP in $CB2_UPSTREAM_IPS; do [ "$RULE" = "$IP/32" ] && KEEP=1; done
   [ $KEEP = 1 ] || iptables -D DOCKER-USER -s 172.30.1.0/24 -d "$RULE" -p tcp --dport 443 -j ACCEPT || { echo "could not delete stale upstream rule $RULE"; exit 1; }
@@ -47,12 +47,19 @@ done
 for IP in $CB2_UPSTREAM_IPS; do
   iptables -C DOCKER-USER -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT
 done
+# FAIL CLOSED: every surviving ACCEPT for the egress subnet, whatever its shape, must name one of the resolved addresses as /32
+while read -r RULE; do
+  [ -n "$RULE" ] || continue
+  D=$(echo "$RULE" | grep -oE -- '-d [0-9./]+' | awk '{print $2}'); OK=0
+  for IP in $CB2_UPSTREAM_IPS; do [ "$D" = "$IP/32" ] && OK=1; done
+  [ $OK = 1 ] || { echo "CONTAINMENT NOT PROVEN: a foreign ACCEPT survives in DOCKER-USER: $RULE"; exit 1; }
+done < <(iptables -S DOCKER-USER | grep -- "-s 172.30.1.0/24" | grep -- "-j ACCEPT")
 iptables -C DOCKER-USER -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 for BR in $BR_WORK $BR_EGRESS; do
   iptables -C INPUT -i $BR -j DROP 2>/dev/null || iptables -I INPUT 1 -i $BR -j DROP
   iptables -C INPUT -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 done
-echo "profile: $CB2_PROFILE upstream=$CB2_UPSTREAM addresses=[$CB2_UPSTREAM_IPS] resolved_at=${CB2_RESOLVED_AT:-static}"
+echo "profile: $CB2_PROFILE upstream=$CB2_UPSTREAM addresses=[$CB2_UPSTREAM_IPS] resolved_at=$CB2_RESOLVED_AT run_state=$CB2_RUN_STATE"
 echo "networks: cb2net internal=$(docker network inspect cb2net --format '{{.Internal}}') subnet=172.30.0.0/24; cb2egress subnet=172.30.1.0/24; bridges work=$BR_WORK egress=$BR_EGRESS"
 iptables -S DOCKER-USER | grep "172.30" | sed 's/^/rule: /'; iptables -S INPUT | grep -E "$BR_WORK|$BR_EGRESS" | sed 's/^/rule: /'
 # probes through a throwaway proxy at a fixed address

@@ -1,8 +1,9 @@
-# cb2n profile "nim" (E.CB2-N): NVIDIA NIM upstream, its IPv4 addresses resolved on the box at
-# run start (allowlisted exclusively, recorded in every receipt); the key file mounted read-only
-# into the PROXY container only and injected as the Authorization header on every forward; both
-# work containers hold placeholder keys. One model for both systems. The Mind runs with
-# YM_PRIMARY_BRAIN=nim:<model> behind YM_PROVIDER_BASE_URL_NIM (the proxy).
+# cb2n profile "nim" (E.CB2-N): NVIDIA NIM upstream, its IPv4 addresses resolved on the box ONCE
+# per run into the immutable run state (allowlisted exclusively, recorded in every receipt); the
+# key file (uid 10002, mode 0400) mounted read-only into the PROXY container only and injected as
+# the Authorization header on every forward; both work containers hold placeholder keys. One
+# model for both systems. The Mind runs with YM_PRIMARY_BRAIN=nim:<model> and all six roles equal
+# to it, behind YM_PROVIDER_BASE_URL_NIM (the proxy).
 CB2_UPSTREAM=integrate.api.nvidia.com
 CB2_UPSTREAM_IP=
 CB2_UPSTREAM_IPS=

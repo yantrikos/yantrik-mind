@@ -4,6 +4,8 @@
 # and reports tls_hostname_verified=true. Usage: proxy.sh up <name> <count-dir> <cb2net-ip> | down <name>
 set -u
 CMD=$1; NAME=$2
+# teardown is unconditional and needs no profile, key or run state (a vanished key file must never strand a proxy)
+if [ "$CMD" = down ]; then docker rm -f "$NAME" >/dev/null 2>&1; echo "proxy $NAME down"; exit 0; fi
 FIX="$(cd "$(dirname "$0")/.." && pwd)"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1
 KEYMOUNT=(); [ -n "$CB2_KEY_FILE" ] && KEYMOUNT=(-v "$CB2_KEY_FILE:/run/secrets/upstream.key:ro" -e CB2_KEY_PATH=/run/secrets/upstream.key)
 fail() { echo "proxy $NAME: $1"; docker rm -f "$NAME" >/dev/null 2>&1; exit 1; }

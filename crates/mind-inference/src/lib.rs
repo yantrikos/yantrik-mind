@@ -1843,6 +1843,13 @@ pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
     }
 }
 
+/// The trimmed `YM_PRIMARY_BRAIN` spec, `None` when unset or blank. Pure (lookup injected).
+pub fn primary_brain_spec(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    lookup("YM_PRIMARY_BRAIN")
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
 /// The base URL for `provider`: `YM_PROVIDER_BASE_URL_<PROVIDER>` when set to a non-empty value
 /// (trimmed, trailing '/' dropped), else `default`. Pure: the lookup is injected so tests never
 /// touch process env.
@@ -1888,6 +1895,18 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         if let Some((be, lbl)) = &local {
             links.push(be.clone());
             labels.push(lbl.clone());
+        }
+    }
+    // `YM_PRIMARY_BRAIN=<provider[:model]>` names any catalog provider as the first cloud link — the
+    // default chain is otherwise limited to the three providers below. Used by the E.CB2-N scratch
+    // instance (a NIM-only brain behind a counting proxy); unset or unresolvable → no change.
+    if let Some(spec) = primary_brain_spec(|name| std::env::var(name).ok()) {
+        match backend_from_spec(&spec) {
+            Some(be) => {
+                links.push(be);
+                labels.push(spec);
+            }
+            None => eprintln!("[brain] YM_PRIMARY_BRAIN={spec:?} — unknown provider or missing key; ignored"),
         }
     }
     for (provider, model) in order {
@@ -2268,6 +2287,13 @@ mod privacy_tests {
         // blank override falls back; '-' maps to '_' in the variable name
         assert_eq!(resolve_provider_base("ollama-cloud", "https://ollama.com/v1", env), "https://ollama.com/v1");
         assert_eq!(resolve_provider_base("groq", "https://api.groq.com/openai/v1", env), "https://api.groq.com/openai/v1");
+    }
+
+    #[test]
+    fn primary_brain_spec_is_trimmed_and_blank_is_none() {
+        assert_eq!(primary_brain_spec(|_| Some("  nim:z-ai/glm-5.2 ".into())), Some("nim:z-ai/glm-5.2".to_string()));
+        assert_eq!(primary_brain_spec(|_| Some("   ".into())), None);
+        assert_eq!(primary_brain_spec(|_| None), None);
     }
 
     /// THE LEAK-PROOF INVARIANT (sol 019f8287): for a Private-grounded turn, ZERO bytes reach a cloud

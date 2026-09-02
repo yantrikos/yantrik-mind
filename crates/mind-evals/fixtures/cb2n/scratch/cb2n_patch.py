@@ -200,7 +200,7 @@ rw("run/mind_leg.sh", [
     ('T=$1; OUT=${2:-/root/cb2/out}; WALL=1800\nFIX="$(cd "$(dirname "$0")/.." && pwd)"\n',
      'T=$1; OUT=${2:-/root/cb2/out}; WALL=1800\nFIX="$(cd "$(dirname "$0")/.." && pwd)"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1\ncb2_rerun_prepare mind "$T" "$OUT" || exit 2\n'),
     ('NAME="cb2-mind-$T"; PROXY="cb2proxy-mind-$T"; PIP=172.30.0.2\n',
-     'NAME="cb2-mind-$T"; PROXY="cb2proxy-mind-$T"; PIP=172.30.0.2\n# model lane by profile: "local" = the owned endpoint as the local/private lane (v3 behaviour);\n# "roles" = YM_PRIMARY_BRAIN=<provider>:<model> behind YM_PROVIDER_BASE_URL_<PROVIDER> (the proxy),\n# a placeholder key in the container, no local lane (the scratch state holds nothing private).\nif [ "$CB2_MIND_LANE" = local ]; then\n  LANE=(-e YM_LOCAL_OLLAMA_URL="http://$PIP:8080" -e YM_LOCAL_OLLAMA_MODEL="$CB2_MODEL" -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local)\nelse\n  PU=$(echo "$CB2_MIND_PROVIDER" | tr \'a-z-\' \'A-Z_\')\n  LANE=(-e YM_PRIMARY_BRAIN="$CB2_MIND_PROVIDER:$CB2_MODEL" -e "YM_PROVIDER_BASE_URL_$PU=http://$PIP:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain")\nfi\n'),
+     'NAME="cb2-mind-$T"; PROXY="cb2proxy-mind-$T"; PIP=172.30.0.2\n# model lane by profile: "local" = the owned endpoint as the local/private lane (v3 behaviour);\n# "roles" = YM_PRIMARY_BRAIN=<provider>:<model> behind YM_PROVIDER_BASE_URL_<PROVIDER> (the proxy),\n# a placeholder key in the container, no local lane (the scratch state holds nothing private).\nif [ "$CB2_MIND_LANE" = local ]; then\n  LANE=(-e YM_LOCAL_OLLAMA_URL="http://$PIP:8080" -e YM_LOCAL_OLLAMA_MODEL="$CB2_MODEL" -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local)\nelse\n  PU=$(echo "$CB2_MIND_PROVIDER" | tr \'a-z-\' \'A-Z_\')\n  SPEC="$CB2_MIND_PROVIDER:$CB2_MODEL"\n  LANE=(-e YM_PRIMARY_BRAIN="$SPEC" -e "YM_PROVIDER_BASE_URL_$PU=http://$PIP:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"\n        -e YM_ROLE_CHAT="$SPEC" -e YM_ROLE_RESEARCH="$SPEC" -e YM_ROLE_UTIL="$SPEC" -e YM_ROLE_VERIFY="$SPEC" -e YM_ROLE_CODE="$SPEC" -e YM_ROLE_CONSOLIDATE="$SPEC")\nfi\n'),
     ('  -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata -e YM_LOCAL_OLLAMA_URL="http://$PIP:8080" -e YM_LOCAL_OLLAMA_MODEL=qwen3.8:27b-q4_K_M \\\n  -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local -e YM_INFER_PERMITS=2 \\\n',
      '  -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata "${LANE[@]}" -e YM_INFER_PERMITS=2 \\\n'),
     ('docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1\ndocker rm -f "$NAME" >/dev/null 2>&1   # the parent stops the instance AFTER the driver wrote its receipt\n',
@@ -209,6 +209,31 @@ rw("run/mind_leg.sh", [
      'python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "${CB2_RESOLVED_AT:-static}" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<\'EOF\'\nimport json, sys\nsrc, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, model, leak, checks, brain_gate = sys.argv[1:]\nck = dict(kv.split("=", 1) for kv in checks.split())\n'),
     ('d["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or special > 0 or int(rc) != 0\n',
      'void = ck.get("http_errors") != "0" or ck.get("transport_errors") != "0"\nd.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "model": model, "model_ok": ck.get("model_ok") == "true", "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),\n          "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),\n          "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)), "usage_responses": int(ck.get("usage_n", 0)), "void": void})\nd["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or special > 0 or int(rc) != 0 or int(leak) != 0 or ck.get("model_ok") != "true"\n'),
+])
+
+# ── mind leg: BRAIN GATE (Codex, 18:01Z) — fail closed before the driver under the roles lane ─
+rw("run/mind_leg.sh", [
+    ('docker logs "$NAME" > "$OUT/raw/mind_${T}_boot.txt" 2>&1 &\n',
+     'docker logs "$NAME" > "$OUT/raw/mind_${T}_boot.txt" 2>&1 &\n'
+     '# BRAIN GATE: under the roles lane the leg is aborted (disqualified, nothing graded) unless the\n'
+     '# container env carries exactly six YM_ROLE_* equal to the spec plus YM_PRIMARY_BRAIN, no local\n'
+     '# lane variable, no provider key other than the placeholder, and the boot log names the spec as\n'
+     '# the cloud provider. Four booleans go into the receipt as brain_gate.\n'
+     'BRAIN_GATE=\'{"lane":"local"}\'\n'
+     'if [ "$CB2_MIND_LANE" = roles ]; then\n'
+     '  ENVJ=$(docker inspect "$NAME" --format \'{{join .Config.Env "\\n"}}\')\n'
+     '  ROLES=$(echo "$ENVJ" | grep -cE "^YM_ROLE_(CHAT|RESEARCH|UTIL|VERIFY|CODE|CONSOLIDATE)=$SPEC$"); PRIM=$(echo "$ENVJ" | grep -cF "YM_PRIMARY_BRAIN=$SPEC")\n'
+     '  LOCALV=$(echo "$ENVJ" | grep -cE \'^(YM_LOCAL_OLLAMA_URL|YM_BRAIN_POOL)=\')\n'
+     '  KEYS=$(echo "$ENVJ" | grep -cE \'^(NANOGPT_KEY|OLLAMA_CLOUD_KEY|MINIMAX_API_KEY|QWEN_API_KEY|OPEN_ROUTER_KEY|GROQ_API_KEY|CEREBRAS_API_KEY|GROK_API_KEY|ANTHROPIC_API_KEY)=\'); PLACE=$(echo "$ENVJ" | grep -cF "$CB2_MIND_KEY_ENV=none")\n'
+     '  LABEL=0; for i in $(seq 1 30); do LABEL=$(docker logs "$NAME" 2>&1 | grep -cF "cloud provider \'$SPEC\'"); [ "$LABEL" != 0 ] && break; sleep 1; done\n'
+     '  G1=$([ "$ROLES" = 6 ] && [ "$PRIM" = 1 ] && echo true || echo false); G2=$([ "$LOCALV" = 0 ] && echo true || echo false)\n'
+     '  G3=$([ "$KEYS" = 0 ] && [ "$PLACE" = 1 ] && echo true || echo false); G4=$([ "$LABEL" = 1 ] && echo true || echo false)\n'
+     '  BRAIN_GATE="{\\"roles_exact\\":$G1,\\"no_local_lane\\":$G2,\\"no_other_keys\\":$G3,\\"boot_label_exact\\":$G4}"\n'
+     '  if [ "$G1$G2$G3$G4" != truetruetruetrue ]; then\n'
+     '    echo "brain gate FAILED: $BRAIN_GATE — leg aborted, nothing graded"\n'
+     '    printf \'{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"disqualified":true,"void":false}\\n\' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5\n'
+     '  fi\n'
+     'fi\n'),
 ])
 
 # ── smokes + cap test ─────────────────────────────────────────────────────────────────────────

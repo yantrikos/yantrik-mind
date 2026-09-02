@@ -25,7 +25,9 @@ if [ "$CB2_MIND_LANE" = local ]; then
   LANE=(-e YM_LOCAL_OLLAMA_URL="http://$PIP:8080" -e YM_LOCAL_OLLAMA_MODEL="$CB2_MODEL" -e YM_PRIVATE_PROVIDERS=ollama-local -e YM_HOUSEHOLD_PROVIDERS=ollama-local)
 else
   PU=$(echo "$CB2_MIND_PROVIDER" | tr 'a-z-' 'A-Z_')
-  LANE=(-e YM_PRIMARY_BRAIN="$CB2_MIND_PROVIDER:$CB2_MODEL" -e "YM_PROVIDER_BASE_URL_$PU=http://$PIP:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain")
+  SPEC="$CB2_MIND_PROVIDER:$CB2_MODEL"
+  LANE=(-e YM_PRIMARY_BRAIN="$SPEC" -e "YM_PROVIDER_BASE_URL_$PU=http://$PIP:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"
+        -e YM_ROLE_CHAT="$SPEC" -e YM_ROLE_RESEARCH="$SPEC" -e YM_ROLE_UTIL="$SPEC" -e YM_ROLE_VERIFY="$SPEC" -e YM_ROLE_CODE="$SPEC" -e YM_ROLE_CONSOLIDATE="$SPEC")
 fi
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down "$PROXY" >/dev/null 2>&1
@@ -43,6 +45,25 @@ docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off \
   cb2-mind /mind-core > "$OUT/raw/mind_${T}_stdout.txt" 2>&1 || true
 docker logs "$NAME" > "$OUT/raw/mind_${T}_boot.txt" 2>&1 &
+# BRAIN GATE: under the roles lane the leg is aborted (disqualified, nothing graded) unless the
+# container env carries exactly six YM_ROLE_* equal to the spec plus YM_PRIMARY_BRAIN, no local
+# lane variable, no provider key other than the placeholder, and the boot log names the spec as
+# the cloud provider. Four booleans go into the receipt as brain_gate.
+BRAIN_GATE='{"lane":"local"}'
+if [ "$CB2_MIND_LANE" = roles ]; then
+  ENVJ=$(docker inspect "$NAME" --format '{{join .Config.Env "\n"}}')
+  ROLES=$(echo "$ENVJ" | grep -cE "^YM_ROLE_(CHAT|RESEARCH|UTIL|VERIFY|CODE|CONSOLIDATE)=$SPEC$"); PRIM=$(echo "$ENVJ" | grep -cF "YM_PRIMARY_BRAIN=$SPEC")
+  LOCALV=$(echo "$ENVJ" | grep -cE '^(YM_LOCAL_OLLAMA_URL|YM_BRAIN_POOL)=')
+  KEYS=$(echo "$ENVJ" | grep -cE '^(NANOGPT_KEY|OLLAMA_CLOUD_KEY|MINIMAX_API_KEY|QWEN_API_KEY|OPEN_ROUTER_KEY|GROQ_API_KEY|CEREBRAS_API_KEY|GROK_API_KEY|ANTHROPIC_API_KEY)='); PLACE=$(echo "$ENVJ" | grep -cF "$CB2_MIND_KEY_ENV=none")
+  LABEL=0; for i in $(seq 1 30); do LABEL=$(docker logs "$NAME" 2>&1 | grep -cF "cloud provider '$SPEC'"); [ "$LABEL" != 0 ] && break; sleep 1; done
+  G1=$([ "$ROLES" = 6 ] && [ "$PRIM" = 1 ] && echo true || echo false); G2=$([ "$LOCALV" = 0 ] && echo true || echo false)
+  G3=$([ "$KEYS" = 0 ] && [ "$PLACE" = 1 ] && echo true || echo false); G4=$([ "$LABEL" = 1 ] && echo true || echo false)
+  BRAIN_GATE="{\"roles_exact\":$G1,\"no_local_lane\":$G2,\"no_other_keys\":$G3,\"boot_label_exact\":$G4}"
+  if [ "$G1$G2$G3$G4" != truetruetruetrue ]; then
+    echo "brain gate FAILED: $BRAIN_GATE — leg aborted, nothing graded"
+    printf '{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"disqualified":true,"void":false}\n' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5
+  fi
+fi
 timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count > "$OUT/raw/mind_${T}_driver.txt" 2>&1
 RC=$?
 docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1

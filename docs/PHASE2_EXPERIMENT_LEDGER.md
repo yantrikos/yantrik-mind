@@ -3088,3 +3088,33 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Tests before evidence | cycle_id present on every in-scope act and hold, including the detached mail-sweep row (fixture drives the poll body's recording paths); exactly one shadow row per due wake and none on a no-due wake (replayed day); the overflow bound; the f64 equivalence; the tie-break order. |
 | Where it can run | Its useful sample needs the Telegram-hosted loops, i.e. prod (the canary has only the heartbeat). Design-complete on the canary; evidence owner-gated on the prod batch. |
 | AGI feed | Phase D — the first time the roadmap's priority rule is computed on real opportunities, and the first record of what the mind would have chosen to do with its own time. |
+
+## L2 co-prereg v6 — correction row (docs-only; Codex's independent check of `8a3f385`)
+
+| Field | Value |
+| --- | --- |
+| Error | The integer-score row states the numerator's maximum as `1000 × 1000 × 2000 × 2000 × 2000 = 8 × 10^18`. The product is `8 × 10^15`. |
+| Consequence | None to the design: the bound is smaller, so the no-overflow claim, the `4_000_000_000_000` denominator and the maximum score of 2000 all stand unchanged. The bound test asserts the true product. |
+| Rule | Ledger corrections are new rows; the original row is left as written. |
+
+## L1b — amendment (narrow; race fix, deliberately changes legacy behaviour): the detached mail sweep spawns once per window
+
+| Field | Value |
+| --- | --- |
+| Found by review (Codex 02:44Z, 02:59Z) | Legacy: `if !quiet && mail_sweep_due() { spawn }` reads the persisted stamp that the DETACHED body writes later, so a poll wake arriving before that write could spawn the same sweep twice. L1's "one record per opportunity" made the race visible. |
+| Change | The mail-sweep act path claims its act through `OpportunityGate::take_act(key)`, which keeps an acted key apart from the record key: Hold* → one Act is allowed (an earlier quiet/no-chat hold under the window does not starve the sweep when conditions clear); a second Act under the same key is refused until the stamp moves. Nothing else about what the sweep sends or when changes. |
+| Fixture | mind-observability: hold-then-act spawns once, act-then-act spawns once, a moved stamp opens a fresh act. Telegram guard: the act path is `take_act(ms_last)`, the hold path the single `take_window`, no `mark`. |
+| Why this is an amendment, not a kill | L1's kill forbids changing what a loop sends or when; this suppresses a duplicate that legacy could only produce by a race, never by design. Recorded as a deliberate deviation, reviewed by Codex. |
+
+## L1b-v3 — implemented; TECHNICAL REVIEW PASS from Codex (03:10Z) on the visible tree; folded in the commit that follows this row
+
+| Field | Value |
+| --- | --- |
+| What changed | Side-effect-free `mail_sweep_state()` / `whois_state()` / `tradition_prep_state()` (persisted last-run stamp, effective period; `None` when structurally off). Named-field gate inputs `Timer { now_ms, last_ms, period_ms }` and `Presence { chat_present, quiet }`; a private-field `Gated { kind, state }` constructed only through per-kind constructors that take exactly what the kind reads (`timer_chat_quiet`, `timer`, `timer_quiet`, `idle_gated`, `persisted_receptive`, `persisted_chat_quiet`, `forced`); `Gated::decide` checks each kind's blockers in the legacy if-chain order so a hold names the FIRST legacy blocker (mail-sweep: quiet before chat; patterns: spoke → switch → chat → quiet → idle). `LoopOpportunity::Forced { loop_id, at_ms }` with strict parse. Twelve sites (the ten timers incl. patterns, plus mail-sweep and tradition-prep) call the constructor of their kind; whois picks `forced` or `persisted_receptive` per wake. Due-ness lives in `Timer::due` and is read from the timer at exactly two sites (the receptivity short-circuits). Home-watch counts alerts + news topics; follow-up counts nudges + stale-thread asks; mail-sweep marks the act at spawn and records after its detached body with the produced count and the body's own wall. |
+| Fixtures | mind-observability: a test-local oracle (`oracle_due` / `oracle_runs` / `oracle_first_blocker`, transcribed in the test module, calling nothing in the production gate) drives a replayed day per kind: due-ness, act/hold, the hold's reason, and the emitted-id SET against the oracle's due occurrences; multi-blocker wakes pin the precedence; Forced and Window ids for the same instant are distinct. mind-core: the poll-body guard checks the site → constructor table, `wh_gate` both branches, no `GateState {`, no `decide_given`, no hand-computed due, exactly two timer reads, the three state accessors present and the three `_due()` calls absent. |
+| Gaps closed (Codex 02:01Z, 02:14Z) | Persisted due-ness fabricated → read from state, gate decides. Colliding ids → persisted-stamp windows + forced occurrences. Incomplete counts → home topics, follow-up asks, mail after completion. Tautological replay → per-kind oracle in the test, id sets. Shared due oracle → test-local. Hand-built GateState → typed constructors. Generic hold precedence → kind-specific, legacy order. |
+| Residuals closed (Codex 02:26Z) | The old generic GateInputs seam and its replays deleted (Gated is the only seam). Idle inputs named (`IdleInputs { enabled, spoke, idle }`). Typed timer transition `Gated::advance(decision)` transcribing each kind's reset rule; every timer site moves its stamp through it; the replayed day asserts it against a test-local oracle and feeds it forward, so one-id-per-opportunity is proven over the production transition. `Forced { at_ms }` carries no loop: whois by the variant, parse refuses any other loop's forced label. |
+| Residuals closed (Codex 02:44Z) | Scoped `cargo fmt --check` clean. The replay keeps raw attempts per opportunity key and asserts at most one act per key with nothing after it, modelling the persisted stamp's external write on an act. The mail-sweep act path takes its window from the gate, so a wake before the body writes the stamp cannot spawn the same sweep twice — the one deliberate deviation from legacy (a race dedupe), flagged to Codex. |
+| Residuals closed (Codex 02:59Z) | The mail race guard starved Hold→Act (one key cannot both dedupe Act→Act and permit Hold→Act); `OpportunityGate::take_act` keeps a separate acted key; fixture replays the site's sequence at the gate. |
+| Suite | 45 binaries / 1507 passed / 0 failed (03:07Z). |
+| Review | Visible trees sent to Codex 02:23Z, 02:40Z, 02:58Z and 03:08Z before any commit; commit and staging deploy on its message on the final tree. |

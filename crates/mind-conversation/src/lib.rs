@@ -94,6 +94,8 @@ mod chains_window_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
+mod l3b_tests;
+#[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
 pub mod turn_exclusion;
@@ -5458,6 +5460,69 @@ impl ConversationEngine {
     }
 
     /// L3a: the turn-exclusion primitive the process-hosted loop runner admits DMN through.
+    /// L3b: the console notice queue, for the one operator this mind serves. Store-only calls —
+    /// no turn is registered, the idle clock does not move, and without a durable store the
+    /// caller gets an error rather than a dropped line.
+    pub const NOTICE_OPERATOR: &'static str = "primary";
+    pub fn has_notice_queue(&self) -> bool {
+        self.recipes.as_ref().is_some_and(|r| r.has_store())
+    }
+    fn notice_engine(&self) -> anyhow::Result<&RecipeEngine> {
+        self.recipes
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("recipe engine unavailable: no notice queue"))
+    }
+    /// Queue one line under a delivery kind. The dedupe key is the kind, the BOUNDED text's full
+    /// digest and the UTC day: the same visible line twice in a day is one notice; tomorrow's is new.
+    pub fn queue_notice(
+        &self,
+        kind: mind_observability::DeliveryKind,
+        text: &str,
+    ) -> anyhow::Result<mind_recipes::QueuedNotice> {
+        let now = Self::now_ms();
+        let notice_kind = match kind {
+            mind_observability::DeliveryKind::Verdict => mind_spec::NoticeKind::Verdict,
+            mind_observability::DeliveryKind::ProfileRefresh => {
+                mind_spec::NoticeKind::ProfileRefresh
+            }
+            mind_observability::DeliveryKind::Pattern => mind_spec::NoticeKind::Pattern,
+            mind_observability::DeliveryKind::HorizonTick => mind_spec::NoticeKind::HorizonTick,
+        };
+        // Keyed on the BOUNDED text, so raw variants that render identically are one notice.
+        let day = now / 86_400_000;
+        let bounded = mind_spec::bounded_notice_text(text);
+        let key = format!(
+            "{}:{}:{day}",
+            notice_kind.as_str(),
+            mind_spec::sha256_hex(bounded.as_bytes())
+        );
+        self.notice_engine()?
+            .queue_notice(Self::NOTICE_OPERATOR, notice_kind, text, &key, now)
+    }
+    pub fn lease_notices(
+        &self,
+        lease_ms: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<mind_recipes::LeasedNotice>> {
+        self.notice_engine()?
+            .lease_notices(Self::NOTICE_OPERATOR, Self::now_ms(), lease_ms, limit)
+    }
+    pub fn ack_notice_shown(&self, notice_id: &str, lease_id: &str) -> anyhow::Result<bool> {
+        self.notice_engine()?
+            .ack_notice_shown(notice_id, lease_id, Self::now_ms())
+    }
+    pub fn notice_queue_depth(&self) -> anyhow::Result<(usize, usize)> {
+        self.notice_engine()?
+            .notice_queue_depth(Self::NOTICE_OPERATOR, Self::now_ms())
+    }
+    pub fn notice_history(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<mind_recipes::NoticeHistoryEntry>> {
+        self.notice_engine()?
+            .notice_history(Self::NOTICE_OPERATOR, limit)
+    }
+
     pub fn turns(&self) -> &turn_exclusion::TurnExclusion {
         &self.turns
     }
@@ -7919,6 +7984,18 @@ impl ConversationEngine {
                 // L1 (ARCH7): the loop ledger — the mind's idle time, one line per loop.
                 if prefix == "loops" {
                     return verified_report(mind_observability::render_loop_ledger);
+                }
+                // L3b: where the loops' lines went — one row per kind over the verified log,
+                // plus the console queue's depth. Counts only.
+                if prefix == "deliveries" {
+                    let ledger = verified_report(mind_observability::render_delivery_ledger);
+                    let depth = match self.notice_queue_depth() {
+                        Ok((unseen, leased)) => format!(
+                            "CONSOLE NOTICE QUEUE — unseen {unseen} · under a live lease {leased}"
+                        ),
+                        Err(_) => "CONSOLE NOTICE QUEUE — unavailable on this build".to_string(),
+                    };
+                    return format!("{ledger}\n{depth}");
                 }
                 // L3a: why the offline-cognition pass did or did not start — the turn exclusion's
                 // own counters, read live. Counts and stamps only; this call is itself a turn.

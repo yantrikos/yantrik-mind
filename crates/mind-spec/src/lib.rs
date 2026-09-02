@@ -40,7 +40,11 @@ pub mod coverage;
 pub mod goal;
 pub mod horizon;
 pub mod horizon_replan;
+pub mod notice;
 pub use horizon_replan::{ReplanIdentity, ReplanMarker};
+pub use notice::{
+    bounded_notice_text, sha256_hex, NoticeEvent, NoticeKind, NoticeReceipt, NOTICE_MAX_CHARS,
+};
 
 pub use capsule::{Capsule, Evidence, EvidenceRef, Observation, Progress, Uncertainty};
 pub use control::{Controller, Decision, Limits, ReasonCode, StepOutcome};

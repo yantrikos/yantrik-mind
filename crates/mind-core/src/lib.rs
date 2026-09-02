@@ -10,7 +10,8 @@ use mind_conversation::ConversationEngine;
 use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
-pub(crate) mod loops;
+pub(crate) mod delivery;
+mod loops;
 pub mod setup;
 pub mod telegram;
 pub mod wallet_setup;

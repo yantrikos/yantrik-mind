@@ -6,7 +6,7 @@
 //! arriving after admission proceeds without waiting and may overlap the already-running pass.
 //! Nothing is cancelled and no turn ever waits on the pass — the only critical section is the
 //! await-free admission itself.
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::RwLock;
 
 pub struct TurnExclusion {
@@ -20,7 +20,8 @@ pub struct TurnExclusion {
     /// label (`turn`, `fast_reply`, `cli:<verb>`) — updated under one lock so concurrent
     /// registrations can never pair one caller's stamp with another's label.
     last_registration: std::sync::Mutex<(u64, &'static str)>,
-    dmn_running: AtomicBool,
+    /// Which background pass holds admission right now: 0 none, else `BackgroundPass::code`.
+    running_pass: AtomicU8,
 }
 
 /// Held for the whole life of one turn. Dropping it (normally or by cancellation) releases it.
@@ -54,14 +55,51 @@ impl Drop for TurnGuard<'_> {
     }
 }
 
-/// Held for the life of one offline-cognition pass. Dropping it clears `dmn_running`.
-pub struct DmnPermit<'a> {
+/// L3b: the background passes that take exclusive admission. A pass is never ADMITTED while a
+/// turn is active on any surface (a turn that arrives after admission proceeds and may overlap —
+/// the legacy overlap contract), the two passes never run beside each other, and each holds its
+/// permit across its model call and its delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundPass {
+    /// The offline-cognition pass (DMN).
+    Dmn,
+    /// The pattern-finder pass (L3b).
+    Patterns,
+}
+
+impl BackgroundPass {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Dmn => 1,
+            Self::Patterns => 2,
+        }
+    }
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Dmn),
+            2 => Some(Self::Patterns),
+            _ => None,
+        }
+    }
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dmn => "dmn",
+            Self::Patterns => "patterns",
+        }
+    }
+}
+
+/// Held for the life of one background pass. Dropping it releases admission.
+pub struct BackgroundPermit<'a> {
     owner: &'a TurnExclusion,
 }
 
-impl Drop for DmnPermit<'_> {
+/// The offline-cognition pass's permit, by its L3a name.
+pub type DmnPermit<'a> = BackgroundPermit<'a>;
+
+impl Drop for BackgroundPermit<'_> {
     fn drop(&mut self) {
-        self.owner.dmn_running.store(false, Ordering::Release);
+        self.owner.running_pass.store(0, Ordering::Release);
     }
 }
 
@@ -74,7 +112,7 @@ impl TurnExclusion {
             active_turns: AtomicUsize::new(0),
             last_user_activity_ms: AtomicU64::new(now_ms),
             last_registration: std::sync::Mutex::new((now_ms, "boot")),
-            dmn_running: AtomicBool::new(false),
+            running_pass: AtomicU8::new(0),
         }
     }
 
@@ -131,9 +169,22 @@ impl TurnExclusion {
     }
 
     /// Admit the offline-cognition pass iff no turn is active, the idle stretch is met, and no
-    /// pass is already running — all re-checked under the exclusive lock, which is released
-    /// before this returns so the pass itself never holds it.
+    /// background pass is already running — all re-checked under the exclusive lock, which is
+    /// released before this returns so the pass itself never holds it.
     pub fn try_admit_dmn(&self, now_ms: u64, idle_ms: u64) -> Option<DmnPermit<'_>> {
+        self.try_admit_background(now_ms, idle_ms, BackgroundPass::Dmn)
+    }
+
+    /// L3b: the same contract for any background pass. Atomic against a turn registering on any
+    /// surface: the idle read and the admission happen under one exclusive lock, so a view or a
+    /// person's turn cannot slip in between "idle enough" and the model call. The permit is
+    /// held by the caller across the pass; a second pass is refused while one holds it.
+    pub fn try_admit_background(
+        &self,
+        now_ms: u64,
+        idle_ms: u64,
+        pass: BackgroundPass,
+    ) -> Option<BackgroundPermit<'_>> {
         let _exclusive = self.admission.write().unwrap_or_else(|p| p.into_inner());
         if self.active_turns.load(Ordering::Acquire) != 0 {
             return None;
@@ -141,10 +192,19 @@ impl TurnExclusion {
         if now_ms.saturating_sub(self.last_user_activity_ms.load(Ordering::Acquire)) < idle_ms {
             return None;
         }
-        if self.dmn_running.swap(true, Ordering::AcqRel) {
+        if self
+            .running_pass
+            .compare_exchange(0, pass.code(), Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return None;
         }
-        Some(DmnPermit { owner: self })
+        Some(BackgroundPermit { owner: self })
+    }
+
+    /// Which background pass holds admission, if any.
+    pub fn background_pass(&self) -> Option<BackgroundPass> {
+        BackgroundPass::from_code(self.running_pass.load(Ordering::Acquire))
     }
 
     pub fn active_turns(&self) -> usize {
@@ -154,7 +214,7 @@ impl TurnExclusion {
         self.last_user_activity_ms.load(Ordering::Acquire)
     }
     pub fn dmn_running(&self) -> bool {
-        self.dmn_running.load(Ordering::Acquire)
+        self.background_pass() == Some(BackgroundPass::Dmn)
     }
 }
 
@@ -495,5 +555,57 @@ mod tests {
             drop(admitted_here);
         }
         assert_eq!(violations, 0);
+    }
+
+    /// L3b: the second background pass shares the admission seam exactly. A registered turn —
+    /// a person's or a machine view's — refuses it; the two passes exclude each other; dropping
+    /// the permit releases admission; and the refusal is decided under the lock, so a turn
+    /// that registers first always wins.
+    #[test]
+    fn a_background_pass_is_refused_during_any_turn_and_passes_exclude_each_other() {
+        let x = TurnExclusion::starting_at(0);
+        assert!(x
+            .try_admit_background(IDLE, IDLE, BackgroundPass::Patterns)
+            .is_some());
+        {
+            let _view = x.begin_view_on("cli:loops_json", IDLE + 1);
+            assert!(x
+                .try_admit_background(IDLE + 2, IDLE, BackgroundPass::Patterns)
+                .is_none());
+        }
+        {
+            let _person = x.begin_turn_on("telegram", IDLE + 3);
+            assert!(x
+                .try_admit_background(IDLE + 4 + IDLE, IDLE, BackgroundPass::Patterns)
+                .is_none());
+        }
+        // The person's turn moved the clock; idle again after the stretch.
+        let later = IDLE + 3 + IDLE;
+        let patterns = x
+            .try_admit_background(later, IDLE, BackgroundPass::Patterns)
+            .expect("idle and quiet: admitted");
+        assert_eq!(x.background_pass(), Some(BackgroundPass::Patterns));
+        assert!(
+            !x.dmn_running(),
+            "the DMN label is not borrowed by patterns"
+        );
+        assert!(
+            x.try_admit_dmn(later, IDLE).is_none(),
+            "passes exclude each other"
+        );
+        assert!(x
+            .try_admit_background(later, IDLE, BackgroundPass::Patterns)
+            .is_none());
+        drop(patterns);
+        assert_eq!(x.background_pass(), None);
+        let dmn = x.try_admit_dmn(later, IDLE).expect("released");
+        assert!(x.dmn_running());
+        assert!(x
+            .try_admit_background(later, IDLE, BackgroundPass::Patterns)
+            .is_none());
+        drop(dmn);
+        assert!(x
+            .try_admit_background(later, IDLE, BackgroundPass::Patterns)
+            .is_some());
     }
 }

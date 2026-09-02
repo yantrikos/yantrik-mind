@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use mind_spec::{bounded_notice_text, sha256_hex, NoticeEvent, NoticeKind, NoticeReceipt};
 use mind_spec::{
     reduce_replan, GoalCheckpoint, HorizonControlAction, HorizonControlReceipt,
     HorizonLifecycleEvent, HorizonLifecycleReceipt, HorizonRun, OutcomeReceipt, ReplanAcquisition,
@@ -157,6 +158,37 @@ pub struct ActiveHorizonRecord {
     pub failure_reason: Option<String>,
 }
 
+/// L3b: a queued console notice as accounting — never the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedNotice {
+    /// False when the dedupe key already named this notice: nothing was written this call.
+    pub fresh: bool,
+    pub notice_id: String,
+    pub operator_id: String,
+    pub kind: NoticeKind,
+    pub created_ms: u64,
+    pub chars: usize,
+    pub text_sha256: String,
+}
+
+/// L3b: a notice handed to one cockpit under a lease; the text travels here and only here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeasedNotice {
+    pub notice_id: String,
+    pub lease_id: String,
+    pub lease_until_ms: u64,
+    pub kind: NoticeKind,
+    pub text: String,
+    pub created_ms: u64,
+}
+
+/// L3b: one notice with its verified receipt chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeHistoryEntry {
+    pub notice: QueuedNotice,
+    pub receipts: Vec<NoticeReceipt>,
+}
+
 /// E.F3: what one scheduler tick's atomic sweep-and-claim produced.
 #[derive(Debug, Clone, Default)]
 pub struct HorizonSweep {
@@ -220,6 +252,32 @@ impl RecipeStore {
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS mind_horizon_lifecycle_expired_once
                 ON mind_horizon_lifecycle(goal_id) WHERE event='expired'",
+        )?;
+        // L3b: the console notice queue — notices plus their append-only receipts; one `shown`
+        // per notice is the store's own rule.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS mind_notices (
+                notice_id TEXT PRIMARY KEY,
+                operator_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_ms INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                text_sha256 TEXT NOT NULL,
+                chars INTEGER NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                UNIQUE (operator_id, dedupe_key)
+            );
+            CREATE TABLE IF NOT EXISTS mind_notice_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                notice_id TEXT NOT NULL,
+                operator_id TEXT NOT NULL,
+                event TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                receipt_sha256 TEXT NOT NULL UNIQUE,
+                occurred_ms INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS mind_notice_shown_once
+                ON mind_notice_receipts(notice_id) WHERE event='shown';",
         )?;
         Self::migrate_run_identity(&conn)?;
         Ok(Self {
@@ -2362,5 +2420,521 @@ mod run_identity_migration_tests {
             Some("market-check")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// L3b: one stored notice row, read whole so it can be verified whole.
+struct NoticeRow {
+    notice_id: String,
+    operator_id: String,
+    kind: String,
+    created_ms: i64,
+    text: String,
+    text_sha256: String,
+    chars: i64,
+    dedupe_key: String,
+}
+
+/// The notice id is the full digest of the row's identity: operator, kind, creation instant,
+/// text digest and dedupe key. A row whose id does not recompute is not the row that was queued.
+fn notice_id_for(
+    operator_id: &str,
+    kind: NoticeKind,
+    created_ms: u64,
+    text_sha256: &str,
+    dedupe_key: &str,
+) -> String {
+    format!(
+        "notice:{}",
+        sha256_hex(
+            format!(
+                "{operator_id}\n{}\n{created_ms}\n{text_sha256}\n{dedupe_key}",
+                kind.as_str()
+            )
+            .as_bytes()
+        )
+    )
+}
+
+/// Bind the row to itself: bounded text, digest, length, kind and the recomputed id. Every read
+/// that hands text to a renderer goes through here, so a mutated row is an error, never a line.
+fn verify_notice_row(row: &NoticeRow, operator_id: &str) -> anyhow::Result<(NoticeKind, u64)> {
+    let kind = NoticeKind::parse(&row.kind)
+        .ok_or_else(|| anyhow::anyhow!("notice kind failed validation"))?;
+    let created_ms = u64::try_from(row.created_ms)
+        .map_err(|_| anyhow::anyhow!("notice timestamp failed validation"))?;
+    let chars = usize::try_from(row.chars).unwrap_or(usize::MAX);
+    if row.operator_id != operator_id
+        || bounded_notice_text(&row.text) != row.text
+        || row.text.is_empty()
+        || sha256_hex(row.text.as_bytes()) != row.text_sha256
+        || row.text.chars().count() != chars
+        || row.notice_id
+            != notice_id_for(
+                operator_id,
+                kind,
+                created_ms,
+                &row.text_sha256,
+                &row.dedupe_key,
+            )
+    {
+        anyhow::bail!("notice row failed validation");
+    }
+    Ok((kind, created_ms))
+}
+
+/// L3b: the console notice queue.
+impl RecipeStore {
+    /// Every notice row for an operator, oldest first (`newest_first` flips it), unverified —
+    /// callers verify each row before using anything from it.
+    fn load_notice_rows(
+        conn: &rusqlite::Connection,
+        operator_id: &str,
+        newest_first: bool,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<NoticeRow>> {
+        let order = if newest_first {
+            "ORDER BY created_ms DESC,notice_id DESC"
+        } else {
+            "ORDER BY created_ms,notice_id"
+        };
+        let sql = format!(
+            "SELECT notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key
+             FROM mind_notices WHERE operator_id=?1 {order} LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let limit = limit.map(|l| l as i64).unwrap_or(-1);
+        let rows = stmt
+            .query_map(rusqlite::params![operator_id, limit], |row| {
+                Ok(NoticeRow {
+                    notice_id: row.get(0)?,
+                    operator_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    created_ms: row.get(3)?,
+                    text: row.get(4)?,
+                    text_sha256: row.get(5)?,
+                    chars: row.get(6)?,
+                    dedupe_key: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Queue one bounded notice for an operator with its `queued` receipt in ONE transaction.
+    /// A repeated dedupe key lands nothing and returns `Ok(None)`; empty text is refused.
+    pub fn queue_notice(
+        &self,
+        operator_id: &str,
+        kind: NoticeKind,
+        text: &str,
+        dedupe_key: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<QueuedNotice> {
+        if operator_id.is_empty() || dedupe_key.is_empty() || dedupe_key.len() > 200 {
+            anyhow::bail!("notice requires an operator and a bounded dedupe key");
+        }
+        let text = bounded_notice_text(text);
+        if text.is_empty() {
+            anyhow::bail!("notice text is empty after bounding");
+        }
+        let chars = text.chars().count();
+        let text_sha256 = sha256_hex(text.as_bytes());
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let duplicate: Option<NoticeRow> = tx
+            .query_row(
+                "SELECT notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key
+                 FROM mind_notices WHERE dedupe_key=?1 AND operator_id=?2",
+                rusqlite::params![dedupe_key, operator_id],
+                |row| {
+                    Ok(NoticeRow {
+                        notice_id: row.get(0)?,
+                        operator_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        created_ms: row.get(3)?,
+                        text: row.get(4)?,
+                        text_sha256: row.get(5)?,
+                        chars: row.get(6)?,
+                        dedupe_key: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(row) = duplicate {
+            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            return Ok(QueuedNotice {
+                fresh: false,
+                notice_id: row.notice_id,
+                operator_id: operator_id.to_string(),
+                kind,
+                created_ms,
+                chars: row.text.chars().count(),
+                text_sha256: row.text_sha256,
+            });
+        }
+        let notice_id = notice_id_for(operator_id, kind, now_ms, &text_sha256, dedupe_key);
+        let created_ms = i64::try_from(now_ms)
+            .map_err(|_| anyhow::anyhow!("notice timestamp is out of range"))?;
+        tx.execute(
+            "INSERT INTO mind_notices (notice_id,operator_id,kind,created_ms,text,text_sha256,chars,dedupe_key)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                notice_id,
+                operator_id,
+                kind.as_str(),
+                created_ms,
+                text,
+                text_sha256,
+                chars as i64,
+                dedupe_key
+            ],
+        )?;
+        let receipt = NoticeReceipt::issue(
+            notice_id.clone(),
+            operator_id,
+            NoticeEvent::Queued,
+            now_ms,
+            None,
+            None,
+            None,
+        )
+        .ok_or_else(|| anyhow::anyhow!("queued notice receipt has an invalid shape"))?;
+        Self::insert_notice_receipt(&tx, &receipt)?;
+        tx.commit()?;
+        Ok(QueuedNotice {
+            fresh: true,
+            notice_id,
+            operator_id: operator_id.to_string(),
+            kind,
+            created_ms: now_ms,
+            chars,
+            text_sha256,
+        })
+    }
+
+    /// Lease up to `limit` unseen notices for one operator, oldest first, each under a fresh
+    /// lease that expires at `now + lease_ms`. Rows under a live lease or already shown are
+    /// skipped; a corrupt chain fails the read closed. ONE transaction.
+    pub fn lease_notices(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
+        if lease_ms == 0 {
+            anyhow::bail!("a notice lease needs a positive duration");
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let rows = Self::load_notice_rows(&tx, operator_id, false, None)?;
+        let mut leased = Vec::new();
+        for row in rows {
+            if leased.len() >= limit {
+                break;
+            }
+            // The row and its chain are verified whole before anything is read from them; a
+            // forged `shown` row cannot hide a notice, and a mutated text cannot be rendered.
+            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;
+            let Some(last) = receipts.last() else {
+                anyhow::bail!("notice without a queued receipt");
+            };
+            if last.event == NoticeEvent::Shown {
+                continue;
+            }
+            if last.event == NoticeEvent::Leased
+                && last.lease_until_ms.is_some_and(|until| until > now_ms)
+            {
+                continue;
+            }
+            let lease_id = sha256_hex(
+                format!(
+                    "lease\n{}\n{now_ms}\n{}",
+                    row.notice_id, last.receipt_sha256
+                )
+                .as_bytes(),
+            )[..16]
+                .to_string();
+            let lease_until_ms = now_ms.saturating_add(lease_ms);
+            let receipt = NoticeReceipt::issue(
+                row.notice_id.clone(),
+                operator_id,
+                NoticeEvent::Leased,
+                now_ms,
+                Some(lease_id.clone()),
+                Some(lease_until_ms),
+                Some(last.receipt_sha256.clone()),
+            )
+            .ok_or_else(|| anyhow::anyhow!("leased notice receipt has an invalid shape"))?;
+            Self::insert_notice_receipt(&tx, &receipt)?;
+            leased.push(LeasedNotice {
+                notice_id: row.notice_id,
+                lease_id,
+                lease_until_ms,
+                kind,
+                text: row.text,
+                created_ms,
+            });
+        }
+        tx.commit()?;
+        Ok(leased)
+    }
+
+    /// Acknowledge a paint: the chain's last receipt must be THIS live lease. `Ok(true)` writes
+    /// the one `shown` receipt; `Ok(false)` means this lease already acknowledged (idempotent);
+    /// any other shape — unknown notice, not leased, foreign or expired lease — is an error.
+    pub fn ack_notice_shown(
+        &self,
+        notice_id: &str,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let operator_id: Option<String> = tx
+            .query_row(
+                "SELECT operator_id FROM mind_notices WHERE notice_id=?1",
+                [notice_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(operator_id) = operator_id else {
+            anyhow::bail!("no notice matches that id");
+        };
+        let receipts = Self::load_notice_chain(&tx, notice_id, &operator_id)?;
+        let Some(last) = receipts.last() else {
+            anyhow::bail!("notice without a queued receipt");
+        };
+        match last.event {
+            NoticeEvent::Shown => {
+                if last.lease_id.as_deref() == Some(lease_id) {
+                    return Ok(false);
+                }
+                anyhow::bail!("notice already shown under another lease");
+            }
+            NoticeEvent::Queued => anyhow::bail!("notice is not leased"),
+            NoticeEvent::Leased => {
+                if last.lease_id.as_deref() != Some(lease_id) {
+                    anyhow::bail!("lease does not match the live lease");
+                }
+                if !last.lease_until_ms.is_some_and(|until| until > now_ms) {
+                    anyhow::bail!("lease expired: lease the notice again");
+                }
+            }
+        }
+        let receipt = NoticeReceipt::issue(
+            notice_id,
+            operator_id.as_str(),
+            NoticeEvent::Shown,
+            now_ms,
+            Some(lease_id.to_string()),
+            None,
+            Some(last.receipt_sha256.clone()),
+        )
+        .ok_or_else(|| anyhow::anyhow!("shown notice receipt has an invalid shape"))?;
+        Self::insert_notice_receipt(&tx, &receipt)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Every notice for an operator, newest first, each with its verified chain. A corrupt chain
+    /// is an error, never a hidden row.
+    pub fn notice_history(
+        &self,
+        operator_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<NoticeHistoryEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = Self::load_notice_rows(&conn, operator_id, true, Some(limit))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (kind, created_ms) = verify_notice_row(&row, operator_id)?;
+            let receipts = Self::load_notice_chain(&conn, &row.notice_id, operator_id)?;
+            out.push(NoticeHistoryEntry {
+                notice: QueuedNotice {
+                    fresh: false,
+                    notice_id: row.notice_id,
+                    operator_id: operator_id.to_string(),
+                    kind,
+                    created_ms,
+                    chars: row.text.chars().count(),
+                    text_sha256: row.text_sha256,
+                },
+                receipts,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `(unseen, under a live lease)` for one operator — the `why deliveries` numbers.
+    pub fn notice_queue_depth(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<(usize, usize)> {
+        let conn = self.conn.lock().unwrap();
+        let rows = Self::load_notice_rows(&conn, operator_id, false, None)?;
+        let mut unseen = 0usize;
+        let mut live = 0usize;
+        for row in rows {
+            verify_notice_row(&row, operator_id)?;
+            let receipts = Self::load_notice_chain(&conn, &row.notice_id, operator_id)?;
+            let Some(last) = receipts.last() else {
+                anyhow::bail!("notice without a queued receipt");
+            };
+            if last.event == NoticeEvent::Shown {
+                continue;
+            }
+            unseen += 1;
+            if last.event == NoticeEvent::Leased && last.lease_until_ms.is_some_and(|u| u > now_ms)
+            {
+                live += 1;
+            }
+        }
+        Ok((unseen, live))
+    }
+
+    fn insert_notice_receipt(
+        tx: &rusqlite::Transaction<'_>,
+        receipt: &NoticeReceipt,
+    ) -> anyhow::Result<()> {
+        let occurred_ms = i64::try_from(receipt.occurred_at_ms)
+            .map_err(|_| anyhow::anyhow!("notice receipt timestamp is out of range"))?;
+        tx.execute(
+            "INSERT INTO mind_notice_receipts (notice_id,operator_id,event,receipt_json,receipt_sha256,occurred_ms)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![
+                receipt.notice_id,
+                receipt.operator_id,
+                receipt.event.as_str(),
+                serde_json::to_string(receipt)?,
+                receipt.receipt_sha256,
+                occurred_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read and verify one notice's chain: opens with `queued`, links by digest, and nothing
+    /// follows `shown`.
+    fn load_notice_chain(
+        conn: &rusqlite::Connection,
+        notice_id: &str,
+        operator_id: &str,
+    ) -> anyhow::Result<Vec<NoticeReceipt>> {
+        let mut stmt = conn.prepare(
+            "SELECT event,receipt_json,receipt_sha256 FROM mind_notice_receipts
+             WHERE notice_id=?1 ORDER BY id",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([notice_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut receipts: Vec<NoticeReceipt> = Vec::with_capacity(rows.len());
+        for (event, receipt_json, stored_sha256) in rows {
+            let receipt: NoticeReceipt = serde_json::from_str(&receipt_json)?;
+            let previous = receipts.last();
+            let opens = receipts.is_empty();
+            if receipt.notice_id != notice_id
+                || receipt.operator_id != operator_id
+                || receipt.event.as_str() != event
+                || receipt.receipt_sha256 != stored_sha256
+                || !receipt.verify()
+                || (opens != (receipt.event == NoticeEvent::Queued))
+                || receipt.previous_receipt_sha256.as_deref()
+                    != previous.map(|p| p.receipt_sha256.as_str())
+                || previous.is_some_and(|p| p.event == NoticeEvent::Shown)
+            {
+                anyhow::bail!("notice receipt chain failed validation");
+            }
+            // Transition semantics, not only shape: time never moves backward; a lease may be
+            // taken again only at or after the previous lease's expiry; `shown` closes the SAME
+            // live lease it follows and nothing else.
+            if let Some(prev) = previous {
+                let semantic_ok = receipt.occurred_at_ms >= prev.occurred_at_ms
+                    && match receipt.event {
+                        NoticeEvent::Queued => false,
+                        NoticeEvent::Leased => match prev.event {
+                            NoticeEvent::Queued => true,
+                            NoticeEvent::Leased => prev
+                                .lease_until_ms
+                                .is_some_and(|until| receipt.occurred_at_ms >= until),
+                            NoticeEvent::Shown => false,
+                        },
+                        NoticeEvent::Shown => {
+                            prev.event == NoticeEvent::Leased
+                                && prev.lease_id == receipt.lease_id
+                                && prev
+                                    .lease_until_ms
+                                    .is_some_and(|until| receipt.occurred_at_ms < until)
+                        }
+                    };
+                if !semantic_ok {
+                    anyhow::bail!("notice receipt chain failed transition validation");
+                }
+            }
+            receipts.push(receipt);
+        }
+        Ok(receipts)
+    }
+
+    /// Test-only (L3b): insert a receipt row exactly as given, bypassing every semantic check.
+    #[cfg(test)]
+    pub(crate) fn insert_receipt_for_test(&self, receipt: &NoticeReceipt) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        Self::insert_notice_receipt(&tx, receipt)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Test-only (L3b): mutate a stored notice's text under an otherwise valid chain.
+    #[cfg(test)]
+    pub(crate) fn mutate_notice_text_for_test(&self, notice_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_notices SET text=text||'!' WHERE notice_id=?1",
+            [notice_id],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only (L3b): the last receipt's digest, to forge a successor from.
+    #[cfg(test)]
+    pub(crate) fn last_receipt_sha_for_test(&self, notice_id: &str) -> anyhow::Result<String> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT receipt_sha256 FROM mind_notice_receipts WHERE notice_id=?1 ORDER BY id DESC LIMIT 1",
+            [notice_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Test-only (L3b): a second `shown` row by raw write must be refused by the store's index.
+    #[cfg(test)]
+    pub(crate) fn duplicate_shown_row_for_test(&self, notice_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mind_notice_receipts(notice_id,operator_id,event,receipt_json,receipt_sha256,occurred_ms)
+             SELECT notice_id,operator_id,event,receipt_json,receipt_sha256||'x',occurred_ms
+             FROM mind_notice_receipts WHERE notice_id=?1 AND event='shown'",
+            [notice_id],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only (L3b): alter a stored receipt's digest column so the chain no longer verifies.
+    #[cfg(test)]
+    pub(crate) fn tamper_notice_receipt_for_test(&self, notice_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mind_notice_receipts SET receipt_sha256=substr(receipt_sha256,2)||'0'
+             WHERE notice_id=?1",
+            [notice_id],
+        )?;
+        Ok(())
     }
 }

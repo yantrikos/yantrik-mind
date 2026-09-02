@@ -4941,7 +4941,7 @@ bounded_enum! {
         DigestSent => "digest-sent", NothingToSay => "nothing-to-say", Asked => "asked",
         NothingToAsk => "nothing-to-ask", Ran => "ran", Delegations => "delegations",
         Surfaced => "surfaced", FoundUndelivered => "found-undelivered",
-        NothingFound => "nothing-found",
+        NothingFound => "nothing-found", FoundQueued => "found-queued",
     }
 }
 bounded_enum! {
@@ -4964,11 +4964,202 @@ bounded_enum! {
 }
 bounded_enum! {
     /// A named budget a loop consulted.
-    BudgetKind { DmnOneCall => "dmn-one-call", ReceptivityGate => "receptivity-gate" }
+    BudgetKind {
+        DmnOneCall => "dmn-one-call", ReceptivityGate => "receptivity-gate",
+        ResolveGrade => "resolve-grade", ProfileLearnOneCall => "profile-learn-one-call",
+        PatternsOneCall => "patterns-one-call",
+    }
 }
 bounded_enum! {
     /// A named cap a loop consulted.
     CapKind { OnePerDay => "one-per-day", OneOutstanding => "one-outstanding" }
+}
+bounded_enum! {
+    /// L3b: what a loop handed to the delivery seam. A closed list; the text never rides here.
+    DeliveryKind {
+        Verdict => "verdict", ProfileRefresh => "profile-refresh", Pattern => "pattern",
+        HorizonTick => "horizon-tick",
+    }
+}
+bounded_enum! {
+    /// L3b: where the delivery seam put a line. Only `telegram-accepted` is DELIVERED; a queued
+    /// console notice is a promise the cockpit still has to keep, and the journal is nowhere.
+    DeliveryOutcome {
+        TelegramAccepted => "telegram-accepted", ConsoleQueued => "console-queued",
+        Undelivered => "undelivered",
+    }
+}
+
+pub const DELIVERY_LEDGER_VERSION: &str = "delivery-ledger-v1";
+
+/// L3b: one delivery decision — kind, outcome, the receipt id when one exists, and the size.
+/// Typed so no free text reaches the log; recorded exactly once per `deliver` call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryTick {
+    pub kind: DeliveryKind,
+    pub outcome: DeliveryOutcome,
+    /// The console notice id for `console-queued`; none otherwise.
+    pub receipt_id: Option<String>,
+    pub chars: u32,
+}
+
+impl DeliveryTick {
+    /// Only Telegram acceptance counts as delivered (Codex's L3b accounting note).
+    pub fn delivered(&self) -> bool {
+        self.outcome == DeliveryOutcome::TelegramAccepted
+    }
+    pub fn to_event(&self, ts_ms: u64) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(
+            &format!("delivery-{}-{ts_ms}", self.kind.as_str()),
+            "delivery",
+        );
+        ev.ts_ms = ts_ms;
+        ev.actor = Some("delivery".into());
+        ev.lane = Some("primary".into());
+        ev.goal_id = Some(format!("delivery:{}", self.kind.as_str()));
+        ev.trigger = Some(self.outcome.as_str().into());
+        ev.object_id = self.receipt_id.clone();
+        ev.chosen = Some(self.outcome.as_str().into());
+        ev.verdict = Some(
+            if self.delivered() {
+                "delivered"
+            } else {
+                "undelivered"
+            }
+            .into(),
+        );
+        ev.outcome = Some(format!("chars:{}", self.chars));
+        ev.evaluator_id = Some(DELIVERY_LEDGER_VERSION.into());
+        ev
+    }
+}
+
+/// A fully validated stored delivery row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDelivery {
+    pub kind: DeliveryKind,
+    pub outcome: DeliveryOutcome,
+    pub receipt_id: Option<String>,
+    pub chars: u32,
+}
+
+pub fn parse_delivery(e: &DecisionEvent) -> Option<ParsedDelivery> {
+    if e.kind != "delivery" || e.evaluator_id.as_deref() != Some(DELIVERY_LEDGER_VERSION) {
+        return None;
+    }
+    let kind = DeliveryKind::parse(e.goal_id.as_deref()?.strip_prefix("delivery:")?)?;
+    let outcome = DeliveryOutcome::parse(e.trigger.as_deref()?)?;
+    if e.chosen.as_deref()? != outcome.as_str() || e.actor.as_deref()? != "delivery" {
+        return None;
+    }
+    let expected_verdict = if outcome == DeliveryOutcome::TelegramAccepted {
+        "delivered"
+    } else {
+        "undelivered"
+    };
+    if e.verdict.as_deref()? != expected_verdict {
+        return None;
+    }
+    let chars = e
+        .outcome
+        .as_deref()?
+        .strip_prefix("chars:")?
+        .parse::<u32>()
+        .ok()?;
+    if (outcome == DeliveryOutcome::ConsoleQueued) != e.object_id.is_some() {
+        return None;
+    }
+    // A console receipt id is exactly the store's shape: `notice:` + 64 lower-hex.
+    if let Some(id) = e.object_id.as_deref() {
+        let hex = id.strip_prefix("notice:")?;
+        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()) {
+            return None;
+        }
+    }
+    Some(ParsedDelivery {
+        kind,
+        outcome,
+        receipt_id: e.object_id.clone(),
+        chars,
+    })
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DeliveryLedgerRow {
+    pub kind: String,
+    pub telegram_accepted: u32,
+    pub console_queued: u32,
+    pub undelivered: u32,
+    pub chars: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DeliveryLedger {
+    pub version: String,
+    pub rows: Vec<DeliveryLedgerRow>,
+    pub malformed: usize,
+}
+
+/// The delivery ledger over `[now_ms - window_ms, now_ms]`: one row per kind, counts by outcome.
+pub fn delivery_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> DeliveryLedger {
+    let since = now_ms.saturating_sub(window_ms);
+    let mut malformed = 0usize;
+    let mut rows: std::collections::BTreeMap<String, DeliveryLedgerRow> = Default::default();
+    for e in events
+        .iter()
+        .filter(|e| e.kind == "delivery" && e.ts_ms >= since && e.ts_ms <= now_ms)
+    {
+        let Some(d) = parse_delivery(e) else {
+            malformed += 1;
+            continue;
+        };
+        let row = rows
+            .entry(d.kind.as_str().to_string())
+            .or_insert_with(|| DeliveryLedgerRow {
+                kind: d.kind.as_str().into(),
+                ..Default::default()
+            });
+        match d.outcome {
+            DeliveryOutcome::TelegramAccepted => row.telegram_accepted += 1,
+            DeliveryOutcome::ConsoleQueued => row.console_queued += 1,
+            DeliveryOutcome::Undelivered => row.undelivered += 1,
+        }
+        row.chars += u64::from(d.chars);
+    }
+    DeliveryLedger {
+        version: DELIVERY_LEDGER_VERSION.into(),
+        rows: rows.into_values().collect(),
+        malformed,
+    }
+}
+
+pub fn render_delivery_ledger_at(events: &[DecisionEvent], now_ms: u64) -> String {
+    let ledger = delivery_ledger(events, now_ms, 24 * 60 * 60 * 1000);
+    if ledger.rows.is_empty() {
+        return format!(
+            "No deliveries in the last 24 h (as of ts_ms {}); malformed {}.",
+            now_ms, ledger.malformed
+        );
+    }
+    let mut out = format!(
+        "DELIVERY LEDGER {} — last 24 h as of ts_ms {} ({} kind(s); malformed {})\n",
+        ledger.version,
+        now_ms,
+        ledger.rows.len(),
+        ledger.malformed
+    );
+    for r in ledger.rows {
+        out.push_str(&format!(
+            "  {:<16} telegram-accepted {:>3} · console-queued {:>3} · undelivered {:>3} · chars {}\n",
+            r.kind, r.telegram_accepted, r.console_queued, r.undelivered, r.chars
+        ));
+    }
+    out.push_str("Only telegram-accepted is delivered; a queued notice is a promise the cockpit keeps by acknowledging it.\n");
+    out
+}
+
+pub fn render_delivery_ledger(events: &[DecisionEvent]) -> String {
+    render_delivery_ledger_at(events, now_ms())
 }
 
 /// A policy line the loop actually consulted, typed so it renders bounded text.
@@ -6515,5 +6706,102 @@ mod legacy_gate_tests {
         assert_eq!(a.id(), "whois:forced:5");
         assert_eq!(LoopOpportunity::parse("home-watch:forced:5"), None);
         assert_eq!(LoopOpportunity::parse("dmn:forced:5"), None);
+    }
+}
+
+#[cfg(test)]
+mod delivery_ledger_tests {
+    use super::*;
+
+    /// Every outcome round-trips through the typed event; only Telegram acceptance is
+    /// delivered; the ledger counts by kind; a doctored row is malformed, never counted.
+    #[test]
+    fn delivery_records_round_trip_and_only_telegram_counts_as_delivered() {
+        let accepted = DeliveryTick {
+            kind: DeliveryKind::Verdict,
+            outcome: DeliveryOutcome::TelegramAccepted,
+            receipt_id: None,
+            chars: 42,
+        };
+        let queued = DeliveryTick {
+            kind: DeliveryKind::Pattern,
+            outcome: DeliveryOutcome::ConsoleQueued,
+            receipt_id: Some(format!("notice:{}", "0123456789abcdef".repeat(4))),
+            chars: 7,
+        };
+        let lost = DeliveryTick {
+            kind: DeliveryKind::HorizonTick,
+            outcome: DeliveryOutcome::Undelivered,
+            receipt_id: None,
+            chars: 3,
+        };
+        assert!(accepted.delivered());
+        assert!(!queued.delivered());
+        assert!(!lost.delivered());
+        for (tick, ts) in [(&accepted, 100u64), (&queued, 200), (&lost, 300)] {
+            let ev = tick.to_event(ts);
+            assert_eq!(ev.kind, "delivery");
+            assert_eq!(ev.ts_ms, ts);
+            let parsed = parse_delivery(&ev).expect("round trip");
+            assert_eq!(parsed.kind, tick.kind);
+            assert_eq!(parsed.outcome, tick.outcome);
+            assert_eq!(parsed.receipt_id, tick.receipt_id);
+            assert_eq!(parsed.chars, tick.chars);
+            assert_eq!(
+                ev.verdict.as_deref(),
+                Some(if tick.delivered() {
+                    "delivered"
+                } else {
+                    "undelivered"
+                })
+            );
+        }
+        // Doctored: a queued row with no receipt id, and a verdict that lies about delivery.
+        let mut no_receipt = queued.to_event(201);
+        no_receipt.object_id = None;
+        assert!(parse_delivery(&no_receipt).is_none());
+        let mut short_id = queued.to_event(202);
+        short_id.object_id = Some("notice:0011223344556677".into());
+        assert!(parse_delivery(&short_id).is_none());
+        let mut liar = lost.to_event(301);
+        liar.verdict = Some("delivered".into());
+        assert!(parse_delivery(&liar).is_none());
+        let mut wrong_version = accepted.to_event(101);
+        wrong_version.evaluator_id = Some("delivery-ledger-v0".into());
+        assert!(parse_delivery(&wrong_version).is_none());
+        let events = vec![
+            accepted.to_event(100),
+            accepted.to_event(110),
+            queued.to_event(200),
+            lost.to_event(300),
+            liar,
+            no_receipt,
+        ];
+        let ledger = delivery_ledger(&events, 1_000, 10_000);
+        assert_eq!(ledger.malformed, 2);
+        assert_eq!(ledger.rows.len(), 3);
+        let row = |k: &str| ledger.rows.iter().find(|r| r.kind == k).unwrap().clone();
+        assert_eq!(row("verdict").telegram_accepted, 2);
+        assert_eq!(row("verdict").chars, 84);
+        assert_eq!(row("pattern").console_queued, 1);
+        assert_eq!(row("horizon-tick").undelivered, 1);
+        let text = render_delivery_ledger_at(&events, 1_000);
+        assert!(text.contains("DELIVERY LEDGER delivery-ledger-v1"));
+        assert!(text.contains("Only telegram-accepted is delivered"));
+        // Outside the window: nothing.
+        assert!(render_delivery_ledger_at(&events, 100 * 3_600_000).starts_with("No deliveries"));
+        // The new budget lines and the queued outcome render and parse as bounded text.
+        for b in [
+            BudgetKind::ResolveGrade,
+            BudgetKind::ProfileLearnOneCall,
+            BudgetKind::PatternsOneCall,
+        ] {
+            let line = LoopPolicy::Budget(b).render();
+            assert_eq!(LoopPolicy::parse(&line), Some(LoopPolicy::Budget(b)));
+        }
+        assert_eq!(
+            LoopOutcome::parse("found-queued"),
+            Some(LoopOutcome::FoundQueued)
+        );
     }
 }

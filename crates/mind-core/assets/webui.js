@@ -67,7 +67,39 @@ function showApp() {
   fillTopbar();
   loadInstruments();
   if (!window.__instTimer) window.__instTimer = setInterval(loadInstruments, 30000);
+  loadNotices();
+  if (!window.__noticeTimer) window.__noticeTimer = setInterval(loadNotices, 30000);
   input.focus();
+}
+
+/* ── L3b: console notices — lease, render ONCE by id, acknowledge. At-least-once until the ACK;
+   a lease that lapses before the ACK comes back under the same id and is not drawn twice. ── */
+async function loadNotices() {
+  const host = $("notices-lines"); const state = $("notices-state");
+  if (!host || !state) return;
+  try {
+    const r = await fetch("/api/notices", { headers: { "X-YM-Web": "1" } });
+    if (!r.ok) { state.textContent = r.status === 403 ? "operator only" : "unavailable"; return; }
+    const data = await r.json();
+    if (data.available === false) { state.textContent = "no queue"; return; }
+    const list = data.notices || [];
+    for (const n of list) {
+      if (!host.querySelector('[data-id="' + n.id + '"]')) {
+        const line = el("div", "chain-line notice notice-" + (n.kind || "unknown"));
+        line.dataset.id = n.id;
+        line.textContent = n.text;
+        host.prepend(line);
+      }
+      try {
+        await fetch("/api/notice-shown", {
+          method: "POST",
+          headers: { "X-YM-Web": "1", "Content-Type": "application/json" },
+          body: JSON.stringify({ id: n.id, lease_id: n.lease_id }),
+        });
+      } catch (_) { /* the lease lapses; the same id returns on the next lease */ }
+    }
+    state.textContent = list.length ? list.length + " new" : (host.childElementCount ? host.childElementCount + " shown" : "quiet");
+  } catch (_) { state.textContent = "unavailable"; }
 }
 
 /* ── E.WEB15: two looks, the user's choice — same data, same code, a token + layout switch ── */

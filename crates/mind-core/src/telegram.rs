@@ -472,7 +472,7 @@ fn quiet_hours_end_at_ms() -> Option<i64> {
     Some(now_ms() as i64 + until_end_ms)
 }
 
-fn in_quiet_hours_now() -> bool {
+pub(crate) fn in_quiet_hours_now() -> bool {
     use chrono::Timelike;
     let start = std::env::var("YM_QUIET_START")
         .ok()
@@ -510,7 +510,7 @@ pub(crate) fn now_ms() -> u64 {
 
 /// Proactive send + transcript mirror: the mind must remember its own pings, or replies to them
 /// land with no referent. Every tick-driven send goes through here.
-async fn tg_send_mirrored(
+pub(crate) async fn tg_send_mirrored(
     conv: &Arc<mind_conversation::ConversationEngine>,
     api: &str,
     chat: i64,
@@ -1822,8 +1822,10 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
     }
     // L3a: the process-hosted loop runner starts once per process, on every box — AFTER lease
     // reconciliation, because its first tick is immediate and the lease sweep must never race
-    // the restart reconciliation.
-    crate::loops::spawn_loop_runner(conv.clone());
+    // the restart reconciliation. L3b: headless has no phone; the seam's only surface is the
+    // console notice queue, and the heartbeat's notes go through the same door.
+    let delivery = Arc::new(crate::delivery::Delivery::new(conv.clone(), None));
+    crate::loops::spawn_loop_runner(conv.clone(), delivery.clone());
     // The horizon/recipe heartbeat (E.STG2). In telegram mode the poll loop ticks delegations
     // between updates; headless had no beat at all, and a due durable goal sat "due now" for eight
     // hours on staging. Same tick, journal instead of chat: receipts persist in SQLite either way.
@@ -1848,6 +1850,13 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
             let notes = ticker.tick_delegations().await;
             for note in &notes {
                 eprintln!("[headless-tick] {note}");
+            }
+            // L3b: the same notes reach the cockpit through the delivery seam (queued, never
+            // "spoken"); the journal line above stays byte-identical.
+            for note in &notes {
+                delivery
+                    .deliver(mind_observability::DeliveryKind::HorizonTick, note)
+                    .await;
             }
             // L1 v3: an act is ONE BEAT's opportunity (a 30 s bucket), so many acts in ten minutes
             // are many opportunities; an idle stretch records "nothing-due" once per 600 s report
@@ -1986,7 +1995,6 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut gate_knock = mind_observability::OpportunityGate::default();
     let mut gate_digest = mind_observability::OpportunityGate::default();
     let mut gate_ask = mind_observability::OpportunityGate::default();
-    let mut gate_patterns = mind_observability::OpportunityGate::default();
     let mut gate_member_beat = mind_observability::OpportunityGate::default();
     let mut gate_home_watch = mind_observability::OpportunityGate::default();
     let mut gate_family = mind_observability::OpportunityGate::default();
@@ -1998,9 +2006,6 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     let mut last_digest = now_ms(); // don't surface a proactive digest right after boot
     let mut last_ask = 0u64; // 0 = the ask-drive may pose its first get-to-know-you question once idle
     let mut last_home_watch = 0u64; // proactive home-anomaly watch cadence
-    let mut last_patterns = now_ms(); // pattern-finder surface cadence (don't fire right after boot)
-    let mut last_resolve = 0u64; // prediction-resolver cadence (grade due predictions, surface verdicts)
-    let mut last_profile = now_ms(); // periodic profile refresh cadence (re-crawl the seed for what changed)
     let mut last_family = 0u64; // family key-date nudge cadence (birthdays/anniversaries)
     let mut last_followup = 0u64; // deadline follow-through cadence (escalating reminder nudges)
                                   // Leases, reconciled BEFORE the first turn is served: a restart drops transient mounts, and a
@@ -2010,8 +2015,16 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     }
     // L3a: the process-hosted loop runner starts once per process, on every box — AFTER lease
     // reconciliation, because its first tick is immediate and the lease sweep must never race
-    // the restart reconciliation.
-    crate::loops::spawn_loop_runner(conv.clone());
+    // the restart reconciliation. L3b: the seam prefers this box's chat and falls back to the
+    // console queue; the three loops that speak (Resolve, ProfileRefresh, Patterns) run there now.
+    let delivery = Arc::new(crate::delivery::Delivery::new(
+        conv.clone(),
+        Some(crate::delivery::TelegramTarget {
+            api: api.clone(),
+            active_chat: active_chat.clone(),
+        }),
+    ));
+    crate::loops::spawn_loop_runner(conv.clone(), delivery);
     let mut last_pricewatch = now_ms(); // price-watch drop-check cadence
     let mut last_member_beat = 0u64; // member reminders + briefs cadence
     loop {
@@ -2358,102 +2371,6 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     .count(hw_items)
                     .wall_ms(now_ms().saturating_sub(hw_t0)),
                 );
-            }
-        }
-
-        // Prediction-resolver tick: grade any predictions whose deadline has passed against the current
-        // understanding, write the hit/miss into per-domain calibration, and surface the verdict. Paced
-        // (YM_RESOLVE_SECS, default 1h) and quiet-hours-gated; this is the self-scoring half of the
-        // learning curve running on its own — no user prompt needed for tracked subjects.
-        {
-            let period: u64 = std::env::var("YM_RESOLVE_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3600);
-            let now = now_ms();
-            let rs_gate = mind_observability::Gated::timer(mind_observability::Timer {
-                now_ms: now,
-                last_ms: last_resolve,
-                period_ms: period * 1000,
-            });
-            let rs_decision = rs_gate.decide();
-            if rs_decision == mind_observability::GateDecision::Act {
-                let rs_t0 = now_ms();
-                let chat = active_chat.load(Ordering::Relaxed);
-                let mut verdicts: u32 = 0;
-                for verdict in conv.resolve_predictions(false).await {
-                    verdicts += 1;
-                    if chat != 0 && !in_quiet_hours_now() {
-                        let _ = tg_send_mirrored(&conv, &api, chat, &verdict).await;
-                    }
-                }
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::Resolve,
-                            process_start_ms,
-                            key: last_resolve,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        mind_observability::LoopOutcome::Ran,
-                    )
-                    .considered(&[mind_observability::ConsideredSignal::Beliefs])
-                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
-                    .count(verdicts)
-                    .wall_ms(now_ms().saturating_sub(rs_t0)),
-                );
-                last_resolve = rs_gate.advance(rs_decision);
-            }
-        }
-
-        // Periodic profile refresh: re-crawl the registered personal seed (site + linked profiles) so
-        // personal facts stay current — a new paper, a role change, a new project surfaces on its own.
-        // Paced (YM_PROFILE_REFRESH_SECS, default ~3 days); beliefs dedupe/reinforce, only genuinely new
-        // facts are added. Background; a re-learn summary is surfaced when quiet-hours allow.
-        {
-            let period: u64 = std::env::var("YM_PROFILE_REFRESH_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(259_200);
-            let now = now_ms();
-            let pr_gate = mind_observability::Gated::timer(mind_observability::Timer {
-                now_ms: now,
-                last_ms: last_profile,
-                period_ms: period * 1000,
-            });
-            let pr_decision = pr_gate.decide();
-            if pr_decision == mind_observability::GateDecision::Act {
-                let pr_t0 = now_ms();
-                let mut refreshed: u32 = 0;
-                if let Some(update) = conv.refresh_profile().await {
-                    refreshed = 1;
-                    let chat = active_chat.load(Ordering::Relaxed);
-                    if chat != 0 && !in_quiet_hours_now() {
-                        let _ = tg_send_mirrored(
-                            &conv,
-                            &api,
-                            chat,
-                            &format!("🧭 Refreshed what I know about you:\n\n{update}"),
-                        )
-                        .await;
-                    }
-                }
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::ProfileRefresh,
-                            process_start_ms,
-                            key: last_profile,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        mind_observability::LoopOutcome::Ran,
-                    )
-                    .considered(&[mind_observability::ConsideredSignal::Beliefs])
-                    .policy(&[mind_observability::LoopPolicy::Cadence(period)])
-                    .count(refreshed)
-                    .wall_ms(now_ms().saturating_sub(pr_t0)),
-                );
-                last_profile = pr_gate.advance(pr_decision);
             }
         }
 
@@ -3783,96 +3700,6 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
                     );
                 }
             }
-            // Pattern-finder surface — the flagship "learn from memory" loop turned outward. On its own
-            // slow cadence (default ~2 days), while idle + awake, run the cross-domain pattern analysis;
-            // it SAVES survivors as learned beliefs regardless, but only MESSAGES the user when it found
-            // a real, grounded one (the 💡 marker). Never competes with a digest/ask in the same tick.
-            let pat_secs: u64 = std::env::var("YM_PATTERNS_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(172_800);
-            let patterns_on = std::env::var("YM_PATTERNS")
-                .map(|v| v != "off")
-                .unwrap_or(true);
-            let pat_gate = mind_observability::Gated::idle_gated(
-                mind_observability::Timer {
-                    now_ms: now,
-                    last_ms: last_patterns,
-                    period_ms: pat_secs * 1000,
-                },
-                mind_observability::Presence {
-                    chat_present: chat != 0,
-                    quiet: quiet_now,
-                },
-                mind_observability::IdleInputs {
-                    enabled: patterns_on,
-                    spoke,
-                    idle: idle_stretch,
-                },
-            );
-            let pat_decision = pat_gate.decide();
-            let pat_considered = [
-                mind_observability::ConsideredSignal::Beliefs,
-                mind_observability::ConsideredSignal::Receptivity,
-            ];
-            let pat_policy = [
-                mind_observability::LoopPolicy::Cadence(pat_secs),
-                mind_observability::LoopPolicy::Idle(idle_secs),
-            ];
-            if pat_decision == mind_observability::GateDecision::Act {
-                let pat_t0 = now_ms();
-                let pat_window = last_patterns;
-                let msg = conv.find_patterns().await;
-                let found = msg.starts_with('\u{1f4a1}');
-                let mut delivered = false;
-                if found && tg_send_mirrored(&conv, &api, chat, &msg).await.is_ok() {
-                    eprintln!(
-                        "[patterns] surfaced a learned pattern ({} chars)",
-                        msg.len()
-                    );
-                    conv.note_proactive_sent().await;
-                    delivered = true;
-                }
-                last_patterns = pat_gate.advance(pat_decision);
-                gate_patterns.mark(pat_window);
-                conv.record_loop_tick(
-                    mind_observability::LoopTick::acted(
-                        mind_observability::LoopOpportunity::Window {
-                            loop_id: mind_observability::LoopId::Patterns,
-                            process_start_ms,
-                            key: pat_window,
-                        },
-                        mind_observability::LoopHost::Telegram,
-                        if found && delivered {
-                            mind_observability::LoopOutcome::Surfaced
-                        } else if found {
-                            mind_observability::LoopOutcome::FoundUndelivered
-                        } else {
-                            mind_observability::LoopOutcome::NothingFound
-                        },
-                    )
-                    .considered(&pat_considered)
-                    .policy(&pat_policy)
-                    .count(u32::from(found))
-                    .wall_ms(now_ms().saturating_sub(pat_t0)),
-                );
-            } else if let mind_observability::GateDecision::Hold(pat_reason) = pat_decision {
-                if let Some(window) = gate_patterns.take_window(
-                    mind_observability::LoopId::Patterns,
-                    process_start_ms,
-                    last_patterns,
-                ) {
-                    conv.record_loop_tick(
-                        mind_observability::LoopTick::held(
-                            window,
-                            mind_observability::LoopHost::Telegram,
-                            pat_reason,
-                        )
-                        .considered(&pat_considered)
-                        .policy(&pat_policy),
-                    );
-                }
-            }
         }
     }
 }
@@ -3968,10 +3795,7 @@ mod tests {
             "LoopId::Knock",
             "LoopId::Digest",
             "LoopId::Ask",
-            "LoopId::Patterns",
             "LoopId::HomeWatch",
-            "LoopId::Resolve",
-            "LoopId::ProfileRefresh",
             "LoopId::Family",
             "LoopId::FollowUp",
             "LoopId::PriceWatch",
@@ -4015,17 +3839,15 @@ mod tests {
         // Every timer / cadence site calls the constructor of its kind — a kind can only be
         // handed the inputs it reads — and decides through it; no site assembles gate state
         // or computes due-ness by hand.
+        // L3b: rs / pr / pat moved to the runner with their kinds intact (checked there).
         for (name, ctor) in [
             ("hw", "timer_chat_quiet"),
-            ("rs", "timer"),
-            ("pr", "timer"),
             ("fm", "timer_chat_quiet"),
             ("fu", "timer_chat_quiet"),
             ("pw", "timer_chat_quiet"),
             ("mb", "timer_quiet"),
             ("ms", "persisted_chat_quiet"),
             ("tp", "persisted_receptive"),
-            ("pat", "idle_gated"),
         ] {
             assert!(
                 poll.contains(&format!(
@@ -4036,6 +3858,19 @@ mod tests {
             assert!(
                 poll.contains(&format!("{name}_gate.decide()")),
                 "{name} decides through its gate"
+            );
+        }
+        let runner = include_str!("loops.rs");
+        for (name, ctor) in [("rs", "timer"), ("pr", "timer"), ("pat", "idle_gated")] {
+            assert!(
+                runner.contains(&format!(
+                    "let {name}_gate = mind_observability::Gated::{ctor}("
+                )),
+                "{name} calls the constructor of its kind in the runner"
+            );
+            assert!(
+                runner.contains(&format!("{name}_gate.decide()")),
+                "{name} decides through its gate in the runner"
             );
         }
         assert!(
@@ -4055,13 +3890,10 @@ mod tests {
         // Every legacy timer moves through its gate's typed transition, never by hand.
         for (name, var) in [
             ("hw", "last_home_watch"),
-            ("rs", "last_resolve"),
-            ("pr", "last_profile"),
             ("fm", "last_family"),
             ("fu", "last_followup"),
             ("pw", "last_pricewatch"),
             ("mb", "last_member_beat"),
-            ("pat", "last_patterns"),
         ] {
             assert!(
                 poll.contains(&format!("{var} = {name}_gate.advance({name}_decision);")),
@@ -4072,7 +3904,24 @@ mod tests {
                 "{name} resets its timer by hand"
             );
         }
-        assert!(poll.contains("mind_observability::IdleInputs {"));
+        // L3b: the runner's timer bodies return the gate's transition (the caller stores it);
+        // Patterns stores it on the runner state. Nothing resets by hand there either.
+        for (name, expect) in [
+            ("rs", "rs_gate.advance(rs_decision)\n}"),
+            ("pr", "pr_gate.advance(pr_decision)\n}"),
+            ("pat", "st.last_patterns = pat_gate.advance(pat_decision);"),
+        ] {
+            assert!(
+                runner.replace('\r', "").contains(expect),
+                "{name} advances its timer through the gate in the runner"
+            );
+        }
+        assert!(
+            !runner.contains("last_resolve = now;")
+                && !runner.contains("last_profile = now;")
+                && !runner.contains("last_patterns = now;")
+        );
+        assert!(runner.contains("mind_observability::IdleInputs {"));
         // The detached mail sweep claims its act through the gate's acted key (once per
         // window, never starved by an earlier hold) and records its hold through take_window.
         assert!(poll.contains("if gate_mail_sweep.take_act(ms_last) {"));
@@ -4105,9 +3954,16 @@ mod tests {
         // Disabled loops are observable: the DMN switch and the proactive switch are read into
         // names and the held:disabled path exists outside them.
         assert!(poll.contains("let proactive_on = "));
-        // L3a: the three process-hosted loops are gone from the poll body and live in the
+        // L3a + L3b: the six process-hosted loops are gone from the poll body and live in the
         // runner, never in both.
-        for id in ["LoopId::Ics", "LoopId::LeaseSweep", "LoopId::Dmn"] {
+        for id in [
+            "LoopId::Ics",
+            "LoopId::LeaseSweep",
+            "LoopId::Dmn",
+            "LoopId::Resolve",
+            "LoopId::ProfileRefresh",
+            "LoopId::Patterns",
+        ] {
             assert!(
                 !poll.contains(id),
                 "{id} is hosted by the runner, not the poll loop"
@@ -4117,16 +3973,26 @@ mod tests {
             !poll.contains("dmn_tick()")
                 && !poll.contains("refresh_ics()")
                 && !poll.contains("sweep_leases()")
+                && !poll.contains("resolve_predictions(")
+                && !poll.contains("refresh_profile()")
+                && !poll.contains("find_patterns()")
         );
         let runner = include_str!("loops.rs");
-        for id in ["LoopId::Ics", "LoopId::LeaseSweep", "LoopId::Dmn"] {
+        for id in [
+            "LoopId::Ics",
+            "LoopId::LeaseSweep",
+            "LoopId::Dmn",
+            "LoopId::Resolve",
+            "LoopId::ProfileRefresh",
+            "LoopId::Patterns",
+        ] {
             assert!(runner.contains(id), "{id} is hosted by the runner");
         }
         assert_eq!(
             SELF_SRC
                 .matches(concat!(
                     "crate::loops::",
-                    "spawn_loop_runner(conv.clone());"
+                    "spawn_loop_runner(conv.clone(), "
                 ))
                 .count(),
             2,
@@ -4141,7 +4007,7 @@ mod tests {
             let started = host
                 .find(concat!(
                     "crate::loops::",
-                    "spawn_loop_runner(conv.clone());"
+                    "spawn_loop_runner(conv.clone(), "
                 ))
                 .expect("each host starts the runner");
             assert!(

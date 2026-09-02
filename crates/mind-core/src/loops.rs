@@ -9,10 +9,22 @@
 //! (`TurnExclusion::try_admit_dmn`), which is atomic against a turn starting on any surface.
 //!
 //! Frozen shape (the L3a prereg): one non-reentrant task per process behind a start latch; the
-//! sole owner of the three timer states; a 5 s interval with `MissedTickBehavior::Delay`; the three
-//! bodies awaited serially in the poll loop's order (Ics → LeaseSweep → DMN); no per-body spawn;
-//! nothing in this module sends, and no model call happens here outside DMN's existing pass.
-use crate::telegram::now_ms;
+//! sole owner of the timer states; a 5 s interval with `MissedTickBehavior::Delay`; the bodies
+//! awaited serially in the poll loop's order; no per-body spawn; nothing in this module sends —
+//! every line goes through the delivery seam — and the only model calls are the four named
+//! passes' own (Resolve grading, ProfileRefresh's one learn call, Patterns' one grounded call,
+//! DMN's one call).
+//!
+//! L3b (second slice) moved the three judge-calling loops that speak — Resolve, ProfileRefresh,
+//! Patterns — here, behind `crate::delivery::Delivery`, so they run on a box with no phone. Their
+//! gates, considered sets, cadences, ledger recording and timer transitions are unchanged; each
+//! gained the `Budget` line naming its one-call bound. What changed is stated: a line lands on
+//! Telegram when reachable outside quiet hours, else in the console notice queue (quiet hours
+//! now queue instead of dropping); Patterns' presence input means "a surface exists", its idle
+//! input is the engine's turn exclusion, and its `spoke` input is "a proactive line was sent in
+//! the last ten minutes" rather than the poll loop's per-tick flag.
+use crate::delivery::{Delivered, Delivery};
+use crate::telegram::{in_quiet_hours_now, now_ms};
 use mind_conversation::ConversationEngine;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,12 +32,12 @@ use std::sync::Arc;
 static RUNNER_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Start the runner exactly once per process. A second call is refused and reported.
-pub(crate) fn spawn_loop_runner(conv: Arc<ConversationEngine>) -> bool {
+pub(crate) fn spawn_loop_runner(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) -> bool {
     if !claim_runner_start() {
         eprintln!("[loops] runner already started in this process; second start refused");
         return false;
     }
-    tokio::spawn(run_loops(conv));
+    tokio::spawn(run_loops(conv, delivery));
     true
 }
 
@@ -48,9 +60,14 @@ fn runner_period_secs() -> u64 {
         .unwrap_or(5)
 }
 
-async fn run_loops(conv: Arc<ConversationEngine>) {
+async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
     let process_start_ms = now_ms();
-    let mut state = RunnerState::default();
+    // Legacy boot stamps: profile refresh and patterns do not fire right after boot.
+    let mut state = RunnerState {
+        last_profile: process_start_ms,
+        last_patterns: process_start_ms,
+        ..Default::default()
+    };
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(runner_period_secs()));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -59,17 +76,268 @@ async fn run_loops(conv: Arc<ConversationEngine>) {
         state.last_ics = run_ics(&conv, process_start_ms, state.last_ics).await;
         state.last_lease_sweep =
             run_lease_sweep(&conv, process_start_ms, state.last_lease_sweep).await;
+        state.last_resolve =
+            run_resolve(&conv, &delivery, process_start_ms, state.last_resolve).await;
+        state.last_profile =
+            run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile).await;
+        run_patterns(&conv, &delivery, process_start_ms, &mut state).await;
         run_dmn(&conv, process_start_ms, &mut state).await;
     }
 }
 
-/// The three timer states, owned by the runner task alone.
+/// The timer states, owned by the runner task alone.
 #[derive(Default)]
 pub(crate) struct RunnerState {
     pub(crate) last_ics: u64,
     pub(crate) last_lease_sweep: u64,
+    pub(crate) last_resolve: u64,
+    pub(crate) last_profile: u64,
+    pub(crate) last_patterns: u64,
+    pub(crate) gate_patterns: mind_observability::OpportunityGate,
     pub(crate) last_dmn: u64,
     pub(crate) gate_dmn: mind_observability::OpportunityGate,
+}
+
+/// L3b: "spoke" for the process host — a proactive line was SENT within this window.
+const SPOKE_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// Prediction-resolver tick: grade any predictions whose deadline has passed against the current
+/// understanding, write the hit/miss into per-domain calibration, and surface each verdict
+/// through the seam. Paced (YM_RESOLVE_SECS, default 1h); this is the self-scoring half of the
+/// learning curve running on its own — no user prompt needed for tracked subjects.
+pub(crate) async fn run_resolve(
+    conv: &ConversationEngine,
+    delivery: &Delivery,
+    process_start_ms: u64,
+    last_resolve: u64,
+) -> u64 {
+    let period: u64 = std::env::var("YM_RESOLVE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600);
+    let now = now_ms();
+    let rs_gate = mind_observability::Gated::timer(mind_observability::Timer {
+        now_ms: now,
+        last_ms: last_resolve,
+        period_ms: period * 1000,
+    });
+    let rs_decision = rs_gate.decide();
+    if rs_decision != mind_observability::GateDecision::Act {
+        return last_resolve;
+    }
+    let rs_t0 = now_ms();
+    let mut verdicts: u32 = 0;
+    for verdict in conv.resolve_predictions(false).await {
+        verdicts += 1;
+        delivery
+            .deliver(mind_observability::DeliveryKind::Verdict, &verdict)
+            .await;
+    }
+    conv.record_loop_tick(
+        mind_observability::LoopTick::acted(
+            mind_observability::LoopOpportunity::Window {
+                loop_id: mind_observability::LoopId::Resolve,
+                process_start_ms,
+                key: last_resolve,
+            },
+            mind_observability::LoopHost::Process,
+            mind_observability::LoopOutcome::Ran,
+        )
+        .considered(&[mind_observability::ConsideredSignal::Beliefs])
+        .policy(&[
+            mind_observability::LoopPolicy::Cadence(period),
+            mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::ResolveGrade),
+        ])
+        .count(verdicts)
+        .wall_ms(now_ms().saturating_sub(rs_t0)),
+    );
+    rs_gate.advance(rs_decision)
+}
+
+/// Periodic profile refresh: re-crawl the registered personal seed so personal facts stay
+/// current. Paced (YM_PROFILE_REFRESH_SECS, default ~3 days); one `learn_profile` model call
+/// per period; beliefs dedupe/reinforce. A re-learn summary goes through the seam.
+pub(crate) async fn run_profile_refresh(
+    conv: &ConversationEngine,
+    delivery: &Delivery,
+    process_start_ms: u64,
+    last_profile: u64,
+) -> u64 {
+    let period: u64 = std::env::var("YM_PROFILE_REFRESH_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(259_200);
+    let now = now_ms();
+    let pr_gate = mind_observability::Gated::timer(mind_observability::Timer {
+        now_ms: now,
+        last_ms: last_profile,
+        period_ms: period * 1000,
+    });
+    let pr_decision = pr_gate.decide();
+    if pr_decision != mind_observability::GateDecision::Act {
+        return last_profile;
+    }
+    let pr_t0 = now_ms();
+    let mut refreshed: u32 = 0;
+    if let Some(update) = conv.refresh_profile().await {
+        refreshed = 1;
+        delivery
+            .deliver(
+                mind_observability::DeliveryKind::ProfileRefresh,
+                &format!("🧭 Refreshed what I know about you:\n\n{update}"),
+            )
+            .await;
+    }
+    conv.record_loop_tick(
+        mind_observability::LoopTick::acted(
+            mind_observability::LoopOpportunity::Window {
+                loop_id: mind_observability::LoopId::ProfileRefresh,
+                process_start_ms,
+                key: last_profile,
+            },
+            mind_observability::LoopHost::Process,
+            mind_observability::LoopOutcome::Ran,
+        )
+        .considered(&[mind_observability::ConsideredSignal::Beliefs])
+        .policy(&[
+            mind_observability::LoopPolicy::Cadence(period),
+            mind_observability::LoopPolicy::Budget(
+                mind_observability::BudgetKind::ProfileLearnOneCall,
+            ),
+        ])
+        .count(refreshed)
+        .wall_ms(now_ms().saturating_sub(pr_t0)),
+    );
+    pr_gate.advance(pr_decision)
+}
+
+/// Pattern-finder surface — the "learn from memory" loop turned outward. On its own slow cadence
+/// (default ~2 days), while idle, awake and with a surface to land on, run the cross-domain
+/// pattern analysis (one grounded model call); it SAVES survivors as learned beliefs regardless,
+/// but only SAYS something when it found a real, grounded one (the 💡 marker). Delivered to
+/// Telegram it counts as spoken; queued for the console it does not.
+pub(crate) async fn run_patterns(
+    conv: &ConversationEngine,
+    delivery: &Delivery,
+    process_start_ms: u64,
+    st: &mut RunnerState,
+) {
+    let pat_secs: u64 = std::env::var("YM_PATTERNS_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(172_800);
+    let patterns_on = std::env::var("YM_PATTERNS")
+        .map(|v| v != "off")
+        .unwrap_or(true);
+    let idle_secs: u64 = std::env::var("YM_DMN_IDLE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+    let now = now_ms();
+    let quiet_now = in_quiet_hours_now();
+    let idle_stretch = now.saturating_sub(conv.turns().last_user_activity_ms()) >= idle_secs * 1000;
+    let spoke = conv.spoke_recently(SPOKE_WINDOW_MS).await;
+    let pat_gate = mind_observability::Gated::idle_gated(
+        mind_observability::Timer {
+            now_ms: now,
+            last_ms: st.last_patterns,
+            period_ms: pat_secs * 1000,
+        },
+        mind_observability::Presence {
+            chat_present: delivery.has_surface(),
+            quiet: quiet_now,
+        },
+        mind_observability::IdleInputs {
+            enabled: patterns_on,
+            spoke,
+            idle: idle_stretch,
+        },
+    );
+    let pat_decision = pat_gate.decide();
+    let pat_considered = [
+        mind_observability::ConsideredSignal::Beliefs,
+        mind_observability::ConsideredSignal::Receptivity,
+    ];
+    let pat_policy = [
+        mind_observability::LoopPolicy::Cadence(pat_secs),
+        mind_observability::LoopPolicy::Idle(idle_secs),
+        mind_observability::LoopPolicy::Budget(mind_observability::BudgetKind::PatternsOneCall),
+    ];
+    // The gate's idle input is a reading; admission is the decision. The permit is taken under
+    // the engine's exclusive lock BEFORE the model call and held across the call and the
+    // delivery, so a turn that registers first — a person's or a machine view's — always wins.
+    let permit = if pat_decision == mind_observability::GateDecision::Act {
+        conv.turns().try_admit_background(
+            now,
+            idle_secs * 1000,
+            mind_conversation::turn_exclusion::BackgroundPass::Patterns,
+        )
+    } else {
+        None
+    };
+    if let Some(_permit) = permit {
+        let pat_t0 = now_ms();
+        let pat_window = st.last_patterns;
+        let msg = conv.find_patterns().await;
+        let found = msg.starts_with('\u{1f4a1}');
+        let outcome = if found {
+            match delivery
+                .deliver(mind_observability::DeliveryKind::Pattern, &msg)
+                .await
+            {
+                Delivered::TelegramAccepted { chars } => {
+                    eprintln!("[patterns] surfaced a learned pattern ({chars} chars)");
+                    conv.note_proactive_sent().await;
+                    mind_observability::LoopOutcome::Surfaced
+                }
+                Delivered::ConsoleQueued { .. } => mind_observability::LoopOutcome::FoundQueued,
+                Delivered::Undelivered => mind_observability::LoopOutcome::FoundUndelivered,
+            }
+        } else {
+            mind_observability::LoopOutcome::NothingFound
+        };
+        st.last_patterns = pat_gate.advance(pat_decision);
+        st.gate_patterns.mark(pat_window);
+        conv.record_loop_tick(
+            mind_observability::LoopTick::acted(
+                mind_observability::LoopOpportunity::Window {
+                    loop_id: mind_observability::LoopId::Patterns,
+                    process_start_ms,
+                    key: pat_window,
+                },
+                mind_observability::LoopHost::Process,
+                outcome,
+            )
+            .considered(&pat_considered)
+            .policy(&pat_policy)
+            .count(u32::from(found))
+            .wall_ms(now_ms().saturating_sub(pat_t0)),
+        );
+    } else {
+        // Held: the gate said so, or admission lost to a registered turn (idle-gate). Once per
+        // window; the timer does not advance and the act window is not marked.
+        let pat_reason = match pat_decision {
+            mind_observability::GateDecision::Hold(reason) => reason,
+            mind_observability::GateDecision::Act => mind_observability::HeldReason::IdleGate,
+            // Not due: no opportunity exists, so nothing is recorded (legacy behaviour).
+            mind_observability::GateDecision::NotDue => return,
+        };
+        if let Some(window) = st.gate_patterns.take_window(
+            mind_observability::LoopId::Patterns,
+            process_start_ms,
+            st.last_patterns,
+        ) {
+            conv.record_loop_tick(
+                mind_observability::LoopTick::held(
+                    window,
+                    mind_observability::LoopHost::Process,
+                    pat_reason,
+                )
+                .considered(&pat_considered)
+                .policy(&pat_policy),
+            );
+        }
+    }
 }
 
 /// External-calendar refresh: re-pull the read-only ICS feed if one is connected. Paced
@@ -252,9 +520,10 @@ pub(crate) async fn run_dmn(
 mod tests {
     use super::*;
 
-    /// The runner module sends nothing and calls no model outside DMN's own pass; the three
-    /// bodies keep their gate kinds, considered sets, policy lines, ledger recording and timer
-    /// transitions; the runner is serial, single-owner, latched, and delay-on-miss.
+    /// The runner module sends nothing itself (every line goes through the delivery seam) and
+    /// calls no model outside the four named passes; the bodies keep their gate kinds,
+    /// considered sets, policy lines, ledger recording and timer transitions; the runner is
+    /// serial, single-owner, latched, and delay-on-miss.
     #[test]
     fn the_runner_is_frozen_as_preregistered() {
         let src = include_str!("loops.rs");
@@ -278,18 +547,31 @@ mod tests {
         // Serial legacy order, no per-body spawn.
         let i = body.find("run_ics(").unwrap();
         let l = body.find("run_lease_sweep(").unwrap();
+        let r = body.find("run_resolve(").unwrap();
+        let p = body.find("run_profile_refresh(").unwrap();
+        let pt = body.find("run_patterns(").unwrap();
         let d = body.find("run_dmn(").unwrap();
-        assert!(i < l && l < d);
+        assert!(i < l && l < r && r < p && p < pt && pt < d);
         // Each body records under the process host with its legacy kind and lines.
         for needle in [
             "mind_observability::Gated::timer(",
+            "mind_observability::Gated::idle_gated(",
             "LoopId::Ics,",
             "LoopId::LeaseSweep,",
+            "LoopId::Resolve,",
+            "LoopId::ProfileRefresh,",
+            "LoopId::Patterns,",
             "LoopId::Dmn,",
             "BudgetKind::DmnOneCall",
+            "BudgetKind::ResolveGrade",
+            "BudgetKind::ProfileLearnOneCall",
+            "BudgetKind::PatternsOneCall",
             "ConsideredSignal::DueDelegations",
             "ics_gate.advance(ics_decision)",
             "ls_gate.advance(ls_decision)",
+            "rs_gate.advance(rs_decision)",
+            "pr_gate.advance(pr_decision)",
+            "pat_gate.advance(pat_decision)",
             "try_admit_dmn(now, idle_secs * 1000)",
         ] {
             assert!(body.contains(needle), "{needle}");
@@ -298,8 +580,51 @@ mod tests {
         assert_eq!(
             body.matches("mind_observability::LoopHost::Process")
                 .count(),
-            4
+            8
         );
+        // L3b: the model-call kill is exactly the four passes' own calls, each once; every
+        // outward line is a `deliver`, and only a Telegram acceptance marks anything spoken.
+        for call in [
+            "conv.resolve_predictions(",
+            "conv.refresh_profile(",
+            "conv.find_patterns(",
+            "conv.dmn_tick(",
+        ] {
+            assert_eq!(body.matches(call).count(), 1, "{call}");
+        }
+        assert_eq!(
+            body.matches(".deliver(").count(),
+            3,
+            "three sends, all through the seam"
+        );
+        assert_eq!(
+            body.matches("note_proactive_sent").count(),
+            1,
+            "spoken is marked once, on Telegram acceptance"
+        );
+        let mark = body.find("note_proactive_sent").unwrap();
+        assert!(
+            body[..mark].ends_with("Delivered::TelegramAccepted { chars } => {\n                    eprintln!(\"[patterns] surfaced a learned pattern ({chars} chars)\");\n                    conv."),
+            "the mark sits inside the TelegramAccepted arm alone"
+        );
+        assert!(body.contains("chat_present: delivery.has_surface()"));
+        // L3b (Codex's second pass): Patterns admits atomically under the turn exclusion, takes
+        // the permit BEFORE its model call, holds it across the call and the delivery, and on
+        // refusal records one held:idle-gate without advancing or marking.
+        let pat_start = body.find("pub(crate) async fn run_patterns(").unwrap();
+        let pat_end = body.find("pub(crate) async fn run_dmn(").unwrap();
+        let pat = &body[pat_start..pat_end];
+        let admit = pat
+            .find("try_admit_background(")
+            .expect("patterns reaches the admission seam");
+        let call = pat.find("conv.find_patterns(").unwrap();
+        let deliver = pat.find(".deliver(").unwrap();
+        assert!(admit < call && call < deliver);
+        assert!(pat[admit..call].contains("if let Some(_permit) = permit {"));
+        assert!(pat.contains("BackgroundPass::Patterns"));
+        let held = &pat[pat.rfind("} else {").unwrap()..];
+        assert!(held.contains("HeldReason::IdleGate"));
+        assert!(!held.contains("pat_gate.advance(") && !held.contains("gate_patterns.mark("));
     }
 
     /// Every frontend reply callsite in mind-core reaches the engine through one of its three

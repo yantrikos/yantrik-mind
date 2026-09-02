@@ -931,6 +931,90 @@ fn handle(
                 }
             }
         }
+        // L3b: the console notice queue. Leasing is the cockpit's READ — store-only, no turn is
+        // registered and the idle clock does not move; the acknowledgement is its promise kept.
+        ("GET", "/api/notices") => match operator(&head, &devices) {
+            Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+            Ok(_) => match conv.lease_notices(120_000, 20) {
+                Ok(list) => {
+                    let notices: Vec<serde_json::Value> = list
+                        .iter()
+                        .map(|n| {
+                            serde_json::json!({
+                                "id": n.notice_id,
+                                "lease_id": n.lease_id,
+                                "kind": n.kind.as_str(),
+                                "text": n.text,
+                                "created_ms": n.created_ms,
+                            })
+                        })
+                        .collect();
+                    send_json(
+                        &mut stream,
+                        "200 OK",
+                        "",
+                        &serde_json::json!({ "available": true, "notices": notices }),
+                    )
+                }
+                Err(_) => send_json(
+                    &mut stream,
+                    "200 OK",
+                    "",
+                    &serde_json::json!({ "available": false, "notices": [] }),
+                ),
+            },
+        },
+        ("POST", "/api/notice-shown") => {
+            if !has_client_header {
+                send(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    "",
+                    "missing client header",
+                );
+                return;
+            }
+            match operator(&head, &devices) {
+                Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
+                Ok(_) => {
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                    let id = parsed["id"].as_str().unwrap_or("").trim();
+                    let lease = parsed["lease_id"].as_str().unwrap_or("").trim();
+                    // Only the store's own id shape is accepted: `notice:` + 64 hex.
+                    let id_ok = id
+                        .strip_prefix("notice:")
+                        .is_some_and(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()));
+                    let lease_ok =
+                        lease.len() == 16 && lease.chars().all(|c| c.is_ascii_hexdigit());
+                    if !id_ok || !lease_ok {
+                        send(
+                            &mut stream,
+                            "400 Bad Request",
+                            "text/plain",
+                            "",
+                            "id and lease_id are required",
+                        );
+                        return;
+                    }
+                    match conv.ack_notice_shown(id, lease) {
+                        Ok(shown) => send_json(
+                            &mut stream,
+                            "200 OK",
+                            "",
+                            &serde_json::json!({ "shown": shown }),
+                        ),
+                        Err(_) => send(
+                            &mut stream,
+                            "409 Conflict",
+                            "text/plain",
+                            "",
+                            "lease is not live",
+                        ),
+                    }
+                }
+            }
+        }
         ("GET", "/api/horizons") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {

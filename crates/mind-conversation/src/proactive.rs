@@ -821,6 +821,22 @@ impl super::ConversationEngine {
         self.recorder.record(tick.to_event(now));
     }
 
+    /// L3b: one record per delivery decision — kind, outcome, receipt id, size; never the text.
+    pub fn record_delivery(&self, tick: mind_observability::DeliveryTick) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.recorder.record(tick.to_event(now));
+    }
+
+    /// L3b: whether a proactive line was SENT within `within_ms` — the process runner's stand-in
+    /// for the poll loop's per-tick `spoke` flag, so a pattern does not pile onto a fresh digest.
+    pub async fn spoke_recently(&self, within_ms: i64) -> bool {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.proactive_pending()
+            .await
+            .iter()
+            .any(|sent| now.saturating_sub(*sent) <= within_ms)
+    }
+
     /// THE CALIBRATED KNOCK (sol's #1, day-one rung). At most ONE per day, and only when every part
     /// of the contract holds: proof-carrying prepared work exists, its trigger was OBSERVED or TOLD,
     /// the recipient looks receptive, and the predicted engagement clears the bar for a speakable

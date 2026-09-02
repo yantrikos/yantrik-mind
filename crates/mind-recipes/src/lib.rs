@@ -16,7 +16,9 @@ use std::sync::Arc;
 pub mod store;
 use mind_spec::ReplanAcquisition;
 use store::HorizonFailureReason;
-pub use store::{ActiveHorizonRecord, RecipeStore, RunRecord};
+pub use store::{
+    ActiveHorizonRecord, LeasedNotice, NoticeHistoryEntry, QueuedNotice, RecipeStore, RunRecord,
+};
 
 const HORIZON_RECIPE_RUN_PREFIX: &str = "horizon-segment:";
 
@@ -819,6 +821,58 @@ impl RecipeEngine {
     }
 
     /// Persist runs (durability + crash recovery).
+    /// L3b: the console notice queue lives beside the durable goals. Without a store there is
+    /// no queue, and a caller learns that as an error — never as a silently dropped notice.
+    fn notice_store(&self) -> anyhow::Result<&RecipeStore> {
+        self.store
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("durable store unavailable: no notice queue"))
+    }
+    pub fn queue_notice(
+        &self,
+        operator_id: &str,
+        kind: mind_spec::NoticeKind,
+        text: &str,
+        dedupe_key: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<QueuedNotice> {
+        self.notice_store()?
+            .queue_notice(operator_id, kind, text, dedupe_key, now_ms)
+    }
+    pub fn lease_notices(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
+        self.notice_store()?
+            .lease_notices(operator_id, now_ms, lease_ms, limit)
+    }
+    pub fn ack_notice_shown(
+        &self,
+        notice_id: &str,
+        lease_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<bool> {
+        self.notice_store()?
+            .ack_notice_shown(notice_id, lease_id, now_ms)
+    }
+    pub fn notice_history(
+        &self,
+        operator_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<NoticeHistoryEntry>> {
+        self.notice_store()?.notice_history(operator_id, limit)
+    }
+    pub fn notice_queue_depth(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+    ) -> anyhow::Result<(usize, usize)> {
+        self.notice_store()?.notice_queue_depth(operator_id, now_ms)
+    }
+
     pub fn with_store(mut self, store: Arc<RecipeStore>) -> Self {
         self.store = Some(store);
         self
@@ -2650,6 +2704,8 @@ pub fn morning_briefing() -> Recipe {
 mod ef2_tests;
 #[cfg(test)]
 mod ef3_tests;
+#[cfg(test)]
+mod l3b_tests;
 
 #[cfg(test)]
 mod tests {

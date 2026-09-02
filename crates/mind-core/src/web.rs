@@ -667,9 +667,11 @@ fn handle(
         ("GET", "/api/tasks") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let out = rt.block_on(
-                    conv.cli_dispatch("jobs json", &mind_types::AccessContext::operator_audit()),
-                );
+                let out =
+                    rt.block_on(conv.cli_dispatch_view(
+                        "jobs json",
+                        &mind_types::AccessContext::operator_audit(),
+                    ));
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
                     Err(_) => send(
@@ -932,7 +934,7 @@ fn handle(
         ("GET", "/api/horizons") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let out = rt.block_on(conv.cli_dispatch(
+                let out = rt.block_on(conv.cli_dispatch_view(
                     "horizons_json",
                     &mind_types::AccessContext::operator_audit(),
                 ));
@@ -975,7 +977,7 @@ fn handle(
                     );
                     return;
                 }
-                let out = rt.block_on(conv.cli_dispatch(
+                let out = rt.block_on(conv.cli_dispatch_view(
                     &format!("horizon_history_json {id}"),
                     &mind_types::AccessContext::operator_audit(),
                 ));
@@ -1011,7 +1013,7 @@ fn handle(
                     None => "chains_json".to_string(),
                 };
                 let out = rt.block_on(
-                    conv.cli_dispatch(&verb, &mind_types::AccessContext::operator_audit()),
+                    conv.cli_dispatch_view(&verb, &mind_types::AccessContext::operator_audit()),
                 );
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
@@ -1028,9 +1030,10 @@ fn handle(
         ("GET", "/api/skills") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let out = rt.block_on(
-                    conv.cli_dispatch("skills_json", &mind_types::AccessContext::operator_audit()),
-                );
+                let out = rt.block_on(conv.cli_dispatch_view(
+                    "skills_json",
+                    &mind_types::AccessContext::operator_audit(),
+                ));
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
                     Err(_) => send(
@@ -1055,7 +1058,7 @@ fn handle(
                 return;
             };
             let out = rt.block_on(
-                conv.cli_dispatch("claims_json", &mind_types::AccessContext::operator_audit()),
+                conv.cli_dispatch_view("claims_json", &mind_types::AccessContext::operator_audit()),
             );
             match serde_json::from_str::<serde_json::Value>(&out) {
                 Ok(v) => send_json(&mut stream, "200 OK", "", &v),
@@ -1163,9 +1166,11 @@ fn handle(
         ("GET", "/api/loops") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let out = rt.block_on(
-                    conv.cli_dispatch("loops_json", &mind_types::AccessContext::operator_audit()),
-                );
+                let out =
+                    rt.block_on(conv.cli_dispatch_view(
+                        "loops_json",
+                        &mind_types::AccessContext::operator_audit(),
+                    ));
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
                     Err(_) => send_json(
@@ -1181,7 +1186,7 @@ fn handle(
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
                 let out = rt.block_on(
-                    conv.cli_dispatch("orders", &mind_types::AccessContext::operator_audit()),
+                    conv.cli_dispatch_view("orders", &mind_types::AccessContext::operator_audit()),
                 );
                 send_json(
                     &mut stream,
@@ -1196,9 +1201,10 @@ fn handle(
         ("GET", "/api/standing-orders") => match operator(&head, &devices) {
             Err(resp) => send(&mut stream, resp.0, "text/plain", "", resp.1),
             Ok(_) => {
-                let out = rt.block_on(
-                    conv.cli_dispatch("orders json", &mind_types::AccessContext::operator_audit()),
-                );
+                let out = rt.block_on(conv.cli_dispatch_view(
+                    "orders json",
+                    &mind_types::AccessContext::operator_audit(),
+                ));
                 match serde_json::from_str::<serde_json::Value>(&out) {
                     Ok(v) => send_json(&mut stream, "200 OK", "", &v),
                     Err(_) => send(

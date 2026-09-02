@@ -316,6 +316,7 @@ mod tests {
         let mut turn = 0;
         let mut fast = 0;
         let mut cli = 0;
+        let mut views = 0;
         for src in sources {
             // Production text only: the guard tests quote these names inside string literals.
             let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
@@ -326,6 +327,50 @@ mod tests {
             turn += prod.matches("conv.turn(").count() + prod.matches("conv2.turn(").count();
             fast += prod.matches("conv.fast_reply(").count();
             cli += prod.matches("conv.cli_dispatch(").count();
+            views += prod.matches("conv.cli_dispatch_view(").count();
+        }
+        // The cockpit's automatic JSON refreshes are views: turns that do not move the clock.
+        // The table is exact; a new polled route must be added here and to the engine's
+        // allowlist together.
+        let web = include_str!("web.rs");
+        let web_prod = &web[..web.find("#[cfg(test)]").unwrap_or(web.len())];
+        for view in [
+            "\"jobs json\"",
+            "\"horizons_json\"",
+            "\"skills_json\"",
+            "\"claims_json\"",
+            "\"loops_json\"",
+            "\"orders\",",
+            "\"orders json\"",
+            "&format!(\"horizon_history_json {id}\")",
+        ] {
+            let at = web_prod.find(view).unwrap_or_else(|| panic!("{view}"));
+            let before = &web_prod[at.saturating_sub(120)..at];
+            assert!(
+                before.contains("cli_dispatch_view("),
+                "{view} is a machine view"
+            );
+        }
+        // The chains view builds its line into `verb` (an auditor-selected window) first.
+        assert!(
+            web_prod.contains("conv.cli_dispatch_view(&verb, "),
+            "chains_json is a machine view"
+        );
+        assert_eq!(views, 9, "the nine read-only GET views, and no mutation");
+        for mutation in [
+            "import {doc}",
+            "jobs {verb} {id}",
+            "orders {verb} {id}",
+            "plugin {verb} {id}",
+        ] {
+            let at = web_prod
+                .find(mutation)
+                .unwrap_or_else(|| panic!("{mutation}"));
+            let before = &web_prod[at.saturating_sub(120)..at];
+            assert!(
+                !before.contains("cli_dispatch_view("),
+                "{mutation} is a person's action"
+            );
         }
         assert!(
             turn >= 5,

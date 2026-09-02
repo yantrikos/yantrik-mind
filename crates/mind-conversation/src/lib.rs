@@ -6700,17 +6700,55 @@ impl ConversationEngine {
     /// not just the route). Memory-touching verbs run under `ctx`, completing ARCH-1 for the CLI path.
     #[deny(unreachable_patterns)]
     pub async fn cli_dispatch(&self, line: &str, ctx: &mind_types::AccessContext) -> String {
+        self.cli_dispatch_inner(line, ctx, false).await
+    }
+
+    /// L3a: the same console dispatch for a MACHINE view — the cockpit's automatic JSON
+    /// refreshes. Registers as a turn (DMN never starts while it runs) without moving the
+    /// user-activity clock: an open tab is not a person being present.
+    pub async fn cli_dispatch_view(&self, line: &str, ctx: &mind_types::AccessContext) -> String {
+        // The allowlist is exact and enforced HERE: only the cockpit's read-only GET views are
+        // machine views. Anything else handed to this entry is a person's line and is dispatched
+        // as one, so a mis-routed mutation can never hide from the activity clock.
+        let machine = Self::is_machine_view(line.trim());
+        self.cli_dispatch_inner(line, ctx, machine).await
+    }
+
+    /// The exact machine-view allowlist: the nine read-only GET views the web server issues on
+    /// a timer (see the web callsite fixture). Verb plus argument shape, never a wildcard.
+    pub fn is_machine_view(line: &str) -> bool {
+        let mut it = line.splitn(2, char::is_whitespace);
+        let verb = it.next().unwrap_or("");
+        let rest = it.next().unwrap_or("").trim();
+        match verb {
+            "jobs" | "orders" => rest == "json" || (verb == "orders" && rest.is_empty()),
+            "horizons_json" | "skills_json" | "claims_json" | "loops_json" => rest.is_empty(),
+            "horizon_history_json" => !rest.is_empty() && !rest.contains(char::is_whitespace),
+            "chains_json" => rest.is_empty() || rest.starts_with("since="),
+            _ => false,
+        }
+    }
+
+    async fn cli_dispatch_inner(
+        &self,
+        line: &str,
+        ctx: &mind_types::AccessContext,
+        machine_view: bool,
+    ) -> String {
         if !ctx.is_operator() {
             return "(the ym console requires operator authorization)".to_string();
         }
-        // L3a: an operator turn is a turn on a surface; held for the dispatch's whole life.
+        // L3a: a turn on a surface, held for the dispatch's whole life.
         let line = line.trim();
         let mut it = line.splitn(2, char::is_whitespace);
         let cmd = it.next().unwrap_or("").to_lowercase();
         // The label is the bounded verb, never the line.
-        let turn = self
-            .turns
-            .begin_turn_on(Self::cli_surface_label(&cmd), Self::now_ms());
+        let label = Self::cli_surface_label(&cmd);
+        let turn = if machine_view {
+            self.turns.begin_view_on(label, Self::now_ms())
+        } else {
+            self.turns.begin_turn_on(label, Self::now_ms())
+        };
         let rest = it.next().unwrap_or("").trim().to_string();
         // Capability dispatch — a command owned by a plugin with a registered handler routes
         // through the registry, so enable/disable actually governs the COMMAND surface too (a

@@ -16,9 +16,10 @@ pub struct TurnExclusion {
     active_turns: AtomicUsize,
     /// Monotone: the latest user activity on any surface, in ms.
     last_user_activity_ms: AtomicU64,
-    /// The bounded static label of the surface that registered most recently (`turn`,
-    /// `fast_reply`, `cli:<verb>`), so a readout can name a caller that is not a person.
-    last_surface: std::sync::Mutex<&'static str>,
+    /// The most recent registration as ONE consistent pair — its stamp and its bounded surface
+    /// label (`turn`, `fast_reply`, `cli:<verb>`) — updated under one lock so concurrent
+    /// registrations can never pair one caller's stamp with another's label.
+    last_registration: std::sync::Mutex<(u64, &'static str)>,
     dmn_running: AtomicBool,
 }
 
@@ -28,8 +29,9 @@ pub struct TurnGuard<'a> {
     /// The activity stamp observed atomically when THIS turn registered. Keeping it on the guard
     /// prevents a concurrent turn from overwriting a diagnostic turn's evidence.
     previous_activity_ms: u64,
-    /// The surface label this registration displaced — the caller that registered before us.
-    previous_surface: &'static str,
+    /// The registration this one displaced, as one consistent (stamp, surface) pair — the
+    /// caller that registered before us.
+    previous_registration: (u64, &'static str),
 }
 
 impl TurnGuard<'_> {
@@ -38,7 +40,11 @@ impl TurnGuard<'_> {
     }
     /// The bounded label of the surface that registered before this turn.
     pub fn previous_surface(&self) -> &'static str {
-        self.previous_surface
+        self.previous_registration.1
+    }
+    /// The registration before this turn, as the consistent pair it was written as.
+    pub fn previous_registration(&self) -> (u64, &'static str) {
+        self.previous_registration
     }
 }
 
@@ -67,7 +73,7 @@ impl TurnExclusion {
             admission: RwLock::new(()),
             active_turns: AtomicUsize::new(0),
             last_user_activity_ms: AtomicU64::new(now_ms),
-            last_surface: std::sync::Mutex::new("boot"),
+            last_registration: std::sync::Mutex::new((now_ms, "boot")),
             dmn_running: AtomicBool::new(false),
         }
     }
@@ -78,27 +84,50 @@ impl TurnExclusion {
         self.begin_turn_on("turn", now_ms)
     }
 
-    /// Register a turn and name its surface with a bounded static label (never content).
+    /// Register a turn and name its surface with a bounded static label (never content). A
+    /// person's act: it counts AND moves the user-activity clock.
     pub fn begin_turn_on(&self, surface: &'static str, now_ms: u64) -> TurnGuard<'_> {
+        self.register(surface, now_ms, true)
+    }
+
+    /// Register a MACHINE view — the cockpit's automatic JSON refreshes. It counts as an active
+    /// turn (DMN never starts while it is in flight) but does not move the user-activity clock:
+    /// a console tab left open is not a person being present.
+    pub fn begin_view_on(&self, surface: &'static str, now_ms: u64) -> TurnGuard<'_> {
+        self.register(surface, now_ms, false)
+    }
+
+    fn register(&self, surface: &'static str, now_ms: u64, moves_clock: bool) -> TurnGuard<'_> {
         let _shared = self.admission.read().unwrap_or_else(|p| p.into_inner());
         self.active_turns.fetch_add(1, Ordering::AcqRel);
-        let before = self
-            .last_user_activity_ms
-            .fetch_max(now_ms, Ordering::AcqRel);
-        let previous_surface = std::mem::replace(
-            &mut *self.last_surface.lock().unwrap_or_else(|p| p.into_inner()),
-            surface,
-        );
+        // The pair is swapped under its own lock: the displaced (stamp, surface) belongs to
+        // exactly one earlier registration, never to a mixture of two.
+        let previous = {
+            let mut last = self
+                .last_registration
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            std::mem::replace(&mut *last, (now_ms, surface))
+        };
+        let before = if moves_clock {
+            self.last_user_activity_ms
+                .fetch_max(now_ms, Ordering::AcqRel)
+        } else {
+            self.last_user_activity_ms.load(Ordering::Acquire)
+        };
         TurnGuard {
             owner: self,
             previous_activity_ms: before,
-            previous_surface,
+            previous_registration: previous,
         }
     }
 
     /// The bounded label of the surface that registered most recently.
     pub fn last_surface(&self) -> &'static str {
-        *self.last_surface.lock().unwrap_or_else(|p| p.into_inner())
+        self.last_registration
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .1
     }
 
     /// Admit the offline-cognition pass iff no turn is active, the idle stretch is met, and no
@@ -166,16 +195,30 @@ mod tests {
                 lib,
                 "pub async fn fast_reply(&self, user_text: &str, id: TurnIdentity)",
             ),
-            (
-                lib,
-                "pub async fn cli_dispatch(&self, line: &str, ctx: &mind_types::AccessContext)",
-            ),
+            (lib, "async fn cli_dispatch_inner("),
         ] {
             assert!(
                 body_after(src, signature).contains(".begin_turn"),
                 "{signature} must register a turn"
             );
         }
+        // The two console wrappers reach the registering inner dispatch and register nothing
+        // of their own; the view wrapper enforces the allowlist before choosing the origin.
+        for wrapper in [
+            "pub async fn cli_dispatch(",
+            "pub async fn cli_dispatch_view(",
+        ] {
+            let body = body_after(lib, wrapper);
+            assert!(
+                body.contains("cli_dispatch_inner("),
+                "{wrapper} reaches the inner dispatch"
+            );
+            assert!(
+                !body.contains("begin_"),
+                "{wrapper} registers nothing of its own"
+            );
+        }
+        assert!(body_after(lib, "pub async fn cli_dispatch_view(").contains("is_machine_view("));
         for signature in [
             "pub async fn handle_turn(&self, user_text: &str)",
             "pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity)",
@@ -212,6 +255,63 @@ mod tests {
             "turn",
             "the label is who registered last, not who is active"
         );
+    }
+
+    /// A machine view counts as a turn while it lives but does not move the user-activity
+    /// clock; a typed line does. DMN is admitted after a view when the person has been idle.
+    #[test]
+    fn a_machine_view_counts_as_a_turn_but_is_not_user_activity() {
+        let x = TurnExclusion::starting_at(1_000);
+        let view = x.begin_view_on("cli:loops_json", 500_000);
+        assert_eq!(x.active_turns(), 1, "the view counts while it lives");
+        assert_eq!(x.last_user_activity_ms(), 1_000, "the clock did not move");
+        assert_eq!(view.previous_activity_ms(), 1_000);
+        assert!(
+            x.try_admit_dmn(700_000, IDLE).is_none(),
+            "not while the view is in flight"
+        );
+        drop(view);
+        assert!(
+            x.try_admit_dmn(700_000, IDLE).is_some(),
+            "idle since boot, views notwithstanding"
+        );
+        let typed = x.begin_turn_on("cli:why", 800_000);
+        drop(typed);
+        assert_eq!(x.last_user_activity_ms(), 800_000, "a typed line moves it");
+        assert!(x.try_admit_dmn(900_000, IDLE).is_none());
+    }
+
+    /// Under concurrent registration, every guard's displaced pair is exactly one earlier
+    /// registration's (stamp, surface) — attribution cannot tear into a mixture.
+    #[test]
+    fn concurrent_registrations_cannot_tear_the_attribution_pair() {
+        use std::collections::BTreeSet;
+        use std::sync::Arc;
+        let x = Arc::new(TurnExclusion::starting_at(0));
+        let labels: [&'static str; 4] = ["turn", "fast_reply", "cli:why", "cli:loops_json"];
+        let handles: Vec<_> = (1..=64u64)
+            .map(|i| {
+                let x = x.clone();
+                let label = labels[(i % 4) as usize];
+                std::thread::spawn(move || {
+                    let g = x.begin_turn_on(label, i * 1_000);
+                    ((i * 1_000, label), g.previous_registration())
+                })
+            })
+            .collect();
+        let mut written = BTreeSet::from([(0u64, "boot")]);
+        let mut displaced = Vec::new();
+        for h in handles {
+            let (mine, prev) = h.join().unwrap();
+            written.insert(mine);
+            displaced.push(prev);
+        }
+        for pair in displaced {
+            assert!(
+                written.contains(&pair),
+                "displaced pair {pair:?} was never written as one"
+            );
+        }
     }
 
     #[test]

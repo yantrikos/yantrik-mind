@@ -1738,6 +1738,20 @@ impl LLMBackend for ChainBackend {
     fn backend_name(&self) -> &str {
         &self.name
     }
+
+    // The same 4-of-6 gap the strict adapter had, in the backend that most needs the other two: a
+    // chain is what runs during an outage. `is_degraded` reported false while the mind was in
+    // survival mode, and `model_id` reported "unknown" for every pooled call. Reported by review as
+    // the sibling of a defect it had already found.
+    fn is_degraded(&self) -> bool {
+        in_survival_mode() || self.links.iter().any(|l| l.is_degraded())
+    }
+
+    /// The chain is not one model, so this names the CHAIN — its ordered labels — rather than
+    /// claiming a single id. "unknown" was worse: it is what a caller reads when nobody set one.
+    fn model_id(&self) -> &str {
+        &self.name
+    }
 }
 
 // ── Provider catalog + per-function router ────────────────────────────────────────────────────
@@ -1850,8 +1864,13 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 // it wrong by omission: the comment said "every provider reached through this table", and the table
 // contains `ollama` and `ollama-cloud` — the very endpoints that IGNORE `think` and for which the
 // non-standard value is the only thing that suppresses the preamble. Stripping it there would have
-// silently undone the measured 10 s → 0.9 s improvement on the CLOUD Ollama lane while the ledger
-// row talked only about the local one. So the exclusion is explicit and named.
+// applied a fix for "the provider REJECTS this field" to a provider that NEEDS it. So the exclusion
+// is explicit and named.
+//
+// One honesty note, because review caught the first version of this comment claiming otherwise: the
+// measured 10 s → 0.9 s improvement was taken on the LOCAL lane, which uses the native endpoint
+// where `think` alone suffices. No measurement of `ollama.com/v1` exists. The exclusion rests on the
+// endpoint family's behaviour, not on evidence from that host.
 //
 // The LOCAL Ollama lane is a separate constructor (`local_backend_from_env`, and the brain pool)
 // and is never wrapped at all.
@@ -3125,11 +3144,64 @@ mod privacy_tests {
                 "{strict} validates the enum and must stay on the strict path"
             );
         }
-        for name in ["ollama", "ollama-cloud", "nim", "groq"] {
+        // The real risk is a NEW catalogue entry that nobody classified. Every provider the table
+        // knows is listed here with its decision, so adding one without deciding fails this test
+        // rather than silently landing on the strict path.
+        const CLASSIFIED: &[(&str, bool)] = &[
+            ("nanogpt", false),
+            ("ollama-cloud", true),
+            ("ollama", true),
+            ("minimax", false),
+            ("qwencloud", false),
+            ("qwen", false),
+            ("openrouter", false),
+            ("nim", false),
+            ("nvidia", false),
+            ("groq", false),
+            ("cerebras", false),
+            ("grok", false),
+            ("anthropic", false),
+        ];
+        for (name, ollama_like) in CLASSIFIED {
             assert!(
                 provider_catalog(name).is_some(),
                 "{name} is not in the provider table any more"
             );
+            assert_eq!(
+                provider_is_ollama_compatible(name),
+                *ollama_like,
+                "{name} changed category without the list being updated"
+            );
+        }
+        // and the list is complete: every arm of the table appears above
+        let src = include_str!("lib.rs");
+        let table = src
+            .split("pub fn provider_catalog(")
+            .nth(1)
+            .expect("the provider table")
+            .split(
+                "
+}",
+            )
+            .next()
+            .expect("its body");
+        for line in table.lines() {
+            let line = line.trim();
+            if let Some(arms) = line
+                .strip_suffix(" => (")
+                .or_else(|| line.strip_suffix(" => ("))
+            {
+                for name in arms.split('|') {
+                    let name = name.trim().trim_matches('"');
+                    if name.is_empty() || name == "_" {
+                        continue;
+                    }
+                    assert!(
+                        CLASSIFIED.iter().any(|(n, _)| *n == name),
+                        "provider {name:?} is in the table but not classified strict or ollama-like"
+                    );
+                }
+            }
         }
     }
 

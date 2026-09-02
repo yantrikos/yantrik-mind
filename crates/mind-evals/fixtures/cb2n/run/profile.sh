@@ -13,6 +13,12 @@ cb2_profile_load() {
   local fix=$1 name=${CB2_PROFILE:-qwen} state=${CB2_RUN_STATE:-${CB2_OUT:-/root/cb2n/out}/run_state.json}
   [ -f "$fix/profiles/$name.profile" ] || { echo "profile: unknown profile '$name'"; return 1; }
   set -a; . "$fix/profiles/$name.profile"; set +a
+  # The key is validated FIRST: a missing or wrongly-owned key must not leave a resolved run state
+  # pinned behind it, or a later corrected load would silently inherit the first resolution.
+  if [ -n "${CB2_KEY_FILE:-}" ]; then
+    [ -s "$CB2_KEY_FILE" ] || { echo "profile: key file missing or empty"; return 1; }
+    [ "$(stat -c '%u %a' "$CB2_KEY_FILE")" = "10002 400" ] || { echo "profile: key file must be uid 10002 (the proxy user) and mode 0400"; return 1; }
+  fi
   if [ -f "$state" ]; then
     local got
     got=$(python3 -c "import json,sys
@@ -34,11 +40,8 @@ print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'
 json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL'}, open('$state.tmp', 'w'), indent=1)" || return 1
     mv "$state.tmp" "$state" && chmod 444 "$state" || return 1
   fi
-  if [ -n "${CB2_KEY_FILE:-}" ]; then
-    [ -s "$CB2_KEY_FILE" ] || { echo "profile: key file missing or empty"; return 1; }
-    [ "$(stat -c '%u %a' "$CB2_KEY_FILE")" = "10002 400" ] || { echo "profile: key file must be uid 10002 (the proxy user) and mode 0400"; return 1; }
-  fi
-  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
+  CB2_RUN_STATE_SHA=$(sha256sum "$state" | cut -c1-64)
+  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
 }
 # Key-leak COUNT over the given paths (files, recursive): grep takes the key file itself as its
 # pattern file; nothing here reads the key. Empty key file setting -> 0.
@@ -54,13 +57,17 @@ cb2_env_leak_hits() {
   docker inspect "$1" --format '{{join .Config.Env "\n"}}' 2>/dev/null | grep -cFf "$CB2_KEY_FILE" || true
 }
 # Void / rerun bookkeeping: `cb2_rerun_prepare <system> <task> <out>` returns 0 when the leg may
-# start: either nothing exists for it, or exactly one prior receipt exists, is VOID, and no _void1
-# archive exists yet — in which case every prior output of the leg is renamed *_void1 (preserved).
+# start: either nothing exists for it, or exactly one prior receipt exists that is PURELY void —
+# void true, disqualified false AND dq_independent false — and no _void1 archive exists yet, in
+# which case every prior output of the leg is renamed *_void1 (preserved). A leg that broke a rule
+# of its own never earns a rerun, however the infrastructure behaved alongside it.
 cb2_rerun_prepare() {
   local sys=$1 t=$2 out=$3 rec="$3/receipts/${1}_${2}.json" x
   [ -e "$rec" ] || [ -e "$out/artifacts/${sys}_$t" ] || return 0
   [ -e "$out/receipts/${sys}_${t}_void1.json" ] && { echo "refusing: ${sys} $t already used its one rerun"; return 1; }
-  python3 -c "import json,sys; d=json.load(open('$rec')); sys.exit(0 if d.get('void') is True else 1)" 2>/dev/null || { echo "refusing: ${sys} $t exists and is not void (one invocation per task)"; return 1; }
+  python3 -c "import json,sys
+d=json.load(open('$rec'))
+sys.exit(0 if (d.get('void') is True and d.get('disqualified') is False and d.get('dq_independent') is not True) else 1)" 2>/dev/null || { echo "refusing: ${sys} $t exists and is not a PURE infrastructure void (one invocation per task)"; return 1; }
   for x in "artifacts/${sys}_$t" "homes/${sys}_$t" "proxy/${sys}_$t" "state/${sys}_$t"; do
     [ -e "$out/$x" ] && { mv "$out/$x" "$out/${x}_void1" || return 1; }
   done

@@ -38,30 +38,36 @@ done
 iptables -L DOCKER-USER -n | grep -q "172.30.0.0/24" && { echo "superseded rules remain"; exit 1; }
 BR_WORK="br-$(docker network inspect cb2net --format '{{.Id}}' | cut -c1-12)"
 BR_EGRESS="br-$(docker network inspect cb2egress --format '{{.Id}}' | cut -c1-12)"
-iptables -C DOCKER-USER -s 172.30.1.0/24 -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -j DROP
-# upstream ACCEPTs: exactly the run state's resolved addresses; an ACCEPT of this shape for any other destination (a previous profile) is removed
-for RULE in $(iptables -S DOCKER-USER | grep -E -- "^-A DOCKER-USER -s 172.30.1.0/24 -d [0-9./]+ -p tcp -m tcp --dport 443 -j ACCEPT$" | awk '{print $6}'); do
-  KEEP=0; for IP in $CB2_UPSTREAM_IPS; do [ "$RULE" = "$IP/32" ] && KEEP=1; done
-  [ $KEEP = 1 ] || iptables -D DOCKER-USER -s 172.30.1.0/24 -d "$RULE" -p tcp --dport 443 -j ACCEPT || { echo "could not delete stale upstream rule $RULE"; exit 1; }
+# The egress policy lives in its OWN chain, rebuilt from scratch every run and verified rule for
+# rule. Editing DOCKER-USER in place could only ever check the rules it knew to look for, and said
+# nothing about their ORDER — a permissive rule sitting above them would have passed the audit.
+iptables -N CB2-EGRESS 2>/dev/null || true
+iptables -F CB2-EGRESS
+iptables -A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+for IP in $CB2_UPSTREAM_IPS; do iptables -A CB2-EGRESS -s 172.30.1.0/24 -d "$IP" -p tcp --dport 443 -j ACCEPT; done
+iptables -A CB2-EGRESS -s 172.30.1.0/24 -j DROP
+# every DOCKER-USER rule that mentions our subnets goes, including previous jumps; then ONE jump at position 1
+for _ in $(seq 1 32); do
+  N=$(iptables -L DOCKER-USER --line-numbers -n | grep -E "172\\.30\\.[01]\\.0/24|CB2-EGRESS" | head -1 | awk '{print $1}')
+  [ -z "$N" ] && break
+  iptables -D DOCKER-USER "$N" || { echo "could not delete DOCKER-USER rule $N"; exit 1; }
 done
-for IP in $CB2_UPSTREAM_IPS; do
-  iptables -C DOCKER-USER -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT
-done
-# FAIL CLOSED: every surviving ACCEPT for the egress subnet, whatever its shape, must name one of the resolved addresses as /32
-while read -r RULE; do
-  [ -n "$RULE" ] || continue
-  D=$(echo "$RULE" | grep -oE -- '-d [0-9./]+' | awk '{print $2}'); OK=0
-  for IP in $CB2_UPSTREAM_IPS; do [ "$D" = "$IP/32" ] && OK=1; done
-  [ $OK = 1 ] || { echo "CONTAINMENT NOT PROVEN: a foreign ACCEPT survives in DOCKER-USER: $RULE"; exit 1; }
-done < <(iptables -S DOCKER-USER | grep -- "-s 172.30.1.0/24" | grep -- "-j ACCEPT")
-iptables -C DOCKER-USER -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -I DOCKER-USER 1 -j CB2-EGRESS
+# FAIL CLOSED: the chain must be EXACTLY the expected policy, in order, and the jump must be first.
+EXPECT=$(printf -- '-N CB2-EGRESS\n-A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n')
+for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT$(printf -- '-A CB2-EGRESS -s 172.30.1.0/24 -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\n' "$IP")"; done
+EXPECT="$EXPECT$(printf -- '-A CB2-EGRESS -s 172.30.1.0/24 -j DROP')"
+GOT=$(iptables -S CB2-EGRESS)
+[ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
+[ "$(iptables -S DOCKER-USER | sed -n 2p)" = "-A DOCKER-USER -j CB2-EGRESS" ] || { echo "CONTAINMENT NOT PROVEN: the CB2-EGRESS jump is not the first DOCKER-USER rule"; iptables -S DOCKER-USER; exit 1; }
+[ "$(iptables -S DOCKER-USER | grep -c -- '172\\.30\\.')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- '172\\.30\\.'; exit 1; }
 for BR in $BR_WORK $BR_EGRESS; do
   iptables -C INPUT -i $BR -j DROP 2>/dev/null || iptables -I INPUT 1 -i $BR -j DROP
   iptables -C INPUT -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i $BR -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 done
 echo "profile: $CB2_PROFILE upstream=$CB2_UPSTREAM addresses=[$CB2_UPSTREAM_IPS] resolved_at=$CB2_RESOLVED_AT run_state=$CB2_RUN_STATE"
 echo "networks: cb2net internal=$(docker network inspect cb2net --format '{{.Internal}}') subnet=172.30.0.0/24; cb2egress subnet=172.30.1.0/24; bridges work=$BR_WORK egress=$BR_EGRESS"
-iptables -S DOCKER-USER | grep "172.30" | sed 's/^/rule: /'; iptables -S INPUT | grep -E "$BR_WORK|$BR_EGRESS" | sed 's/^/rule: /'
+iptables -S CB2-EGRESS | sed 's/^/rule: /'; iptables -S DOCKER-USER | sed -n 2p | sed 's/^/rule: /'; iptables -S INPUT | grep -E "$BR_WORK|$BR_EGRESS" | sed 's/^/rule: /'
 # probes through a throwaway proxy at a fixed address
 docker rm -f cb2probe-proxy cb2probe-work >/dev/null 2>&1
 trap 'docker rm -f cb2probe-proxy cb2probe-work >/dev/null 2>&1' EXIT

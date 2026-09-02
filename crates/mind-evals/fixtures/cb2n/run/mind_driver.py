@@ -103,9 +103,18 @@ for p in added:
     dst = art / p.relative_to(STATE / "public"); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, dst)
 req, att, bad = spend_rows(); accepted, refused, present = proxy_count()
 receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
+           "stop_reason": stop or "",
            "files_added": len(added), "result_bytes": len(result.encode("utf-8")),
            "ledger_requests": req, "ledger_attempts": att, "ledger_malformed": bad,
            "proxy_receipt_present": present, "proxy_accepted": accepted, "proxy_refused": refused,
            "proxy_attempted": (accepted + refused) if present else -1,
+           "proxy_client_disconnects": -1,
+           # The driver's own reasons, split. INDEPENDENT: evidence the run broke a rule of its own —
+           # a missing or malformed proxy receipt, a refusal (a ninth request was attempted), an
+           # over-cap count, a malformed ledger row. These stand whatever the upstream was doing.
+           # DEPENDENT: the wall. A transport outage that ends in a timeout must not become an
+           # independent violation, or an infrastructure void would also disqualify the leg.
+           "dq_independent": (not present) or bad > 0 or refused > 0 or accepted > CAP,
+           "dq_dependent": stop == "timeout",
            "disqualified": (not present) or bad > 0 or refused > 0 or accepted > CAP or stop is not None}
 (STATE / "receipt.json").write_text(json.dumps(receipt, indent=1)); print(json.dumps(receipt))

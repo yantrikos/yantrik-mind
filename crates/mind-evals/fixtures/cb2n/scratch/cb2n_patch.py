@@ -85,6 +85,12 @@ cb2_profile_load() {
   local fix=$1 name=${CB2_PROFILE:-qwen} state=${CB2_RUN_STATE:-${CB2_OUT:-/root/cb2n/out}/run_state.json}
   [ -f "$fix/profiles/$name.profile" ] || { echo "profile: unknown profile '$name'"; return 1; }
   set -a; . "$fix/profiles/$name.profile"; set +a
+  # The key is validated FIRST: a missing or wrongly-owned key must not leave a resolved run state
+  # pinned behind it, or a later corrected load would silently inherit the first resolution.
+  if [ -n "${CB2_KEY_FILE:-}" ]; then
+    [ -s "$CB2_KEY_FILE" ] || { echo "profile: key file missing or empty"; return 1; }
+    [ "$(stat -c '%u %a' "$CB2_KEY_FILE")" = "10002 400" ] || { echo "profile: key file must be uid 10002 (the proxy user) and mode 0400"; return 1; }
+  fi
   if [ -f "$state" ]; then
     local got
     got=$(python3 -c "import json,sys
@@ -106,11 +112,8 @@ print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'
 json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL'}, open('$state.tmp', 'w'), indent=1)" || return 1
     mv "$state.tmp" "$state" && chmod 444 "$state" || return 1
   fi
-  if [ -n "${CB2_KEY_FILE:-}" ]; then
-    [ -s "$CB2_KEY_FILE" ] || { echo "profile: key file missing or empty"; return 1; }
-    [ "$(stat -c '%u %a' "$CB2_KEY_FILE")" = "10002 400" ] || { echo "profile: key file must be uid 10002 (the proxy user) and mode 0400"; return 1; }
-  fi
-  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
+  CB2_RUN_STATE_SHA=$(sha256sum "$state" | cut -c1-64)
+  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
 }
 # Key-leak COUNT over the given paths (files, recursive): grep takes the key file itself as its
 # pattern file; nothing here reads the key. Empty key file setting -> 0.
@@ -126,13 +129,17 @@ cb2_env_leak_hits() {
   docker inspect "$1" --format '{{join .Config.Env "\\n"}}' 2>/dev/null | grep -cFf "$CB2_KEY_FILE" || true
 }
 # Void / rerun bookkeeping: `cb2_rerun_prepare <system> <task> <out>` returns 0 when the leg may
-# start: either nothing exists for it, or exactly one prior receipt exists, is VOID, and no _void1
-# archive exists yet — in which case every prior output of the leg is renamed *_void1 (preserved).
+# start: either nothing exists for it, or exactly one prior receipt exists that is PURELY void —
+# void true, disqualified false AND dq_independent false — and no _void1 archive exists yet, in
+# which case every prior output of the leg is renamed *_void1 (preserved). A leg that broke a rule
+# of its own never earns a rerun, however the infrastructure behaved alongside it.
 cb2_rerun_prepare() {
   local sys=$1 t=$2 out=$3 rec="$3/receipts/${1}_${2}.json" x
   [ -e "$rec" ] || [ -e "$out/artifacts/${sys}_$t" ] || return 0
   [ -e "$out/receipts/${sys}_${t}_void1.json" ] && { echo "refusing: ${sys} $t already used its one rerun"; return 1; }
-  python3 -c "import json,sys; d=json.load(open('$rec')); sys.exit(0 if d.get('void') is True else 1)" 2>/dev/null || { echo "refusing: ${sys} $t exists and is not void (one invocation per task)"; return 1; }
+  python3 -c "import json,sys
+d=json.load(open('$rec'))
+sys.exit(0 if (d.get('void') is True and d.get('disqualified') is False and d.get('dq_independent') is not True) else 1)" 2>/dev/null || { echo "refusing: ${sys} $t exists and is not a PURE infrastructure void (one invocation per task)"; return 1; }
   for x in "artifacts/${sys}_$t" "homes/${sys}_$t" "proxy/${sys}_$t" "state/${sys}_$t"; do
     [ -e "$out/$x" ] && { mv "$out/$x" "$out/${x}_void1" || return 1; }
   done
@@ -157,13 +164,22 @@ if diff -r --exclude='*.tar.gz' --exclude=__pycache__ "$T" "$HERE"; then echo "c
 """)
 new("run/receipt_checks.py", """\"\"\"Profile-side receipt checks, counts only (strictly typed). Usage:
   receipt_checks.py <proxy requests.json> <expected model>
-Prints one line: http_errors=<n> transport_errors=<n> client_errors=<n> model_ok=<true|false>
-models=<distinct> usage_p=<n> usage_c=<n> usage_n=<n>
-Every count must be an exact non-negative int (bool/str/negative are rejected) and every
-response_models value a positive int, else the fallback line (all -1 / false / 0) is printed.
-model_ok is true iff at least one successful model response was tallied and every tallied model
+Prints one line:
+  valid=<true|false> http_errors=<n> transport_errors=<n> client_errors=<n> disconnects=<n>
+  accepted=<n> refused=<n> model_ok=<true|false> models=<distinct> usage_p=<n> usage_c=<n> usage_n=<n>
+
+`valid` is the load-bearing field: it is true only when the receipt exists and EVERY count is an
+exact non-negative int (a bool, a string or a negative fails) and every response_models value is a
+positive int. A caller must treat valid=false as an INDEPENDENT disqualification — a missing or
+malformed receipt is not evidence of an infrastructure fault, so it can never be a void. When
+valid is false every other field is a placeholder (-1 / false / 0) and means nothing.
+
+model_ok is true iff at least one SUCCESSFUL model response was tallied and every tallied model
 equals the expected model.\"\"\"
 import json, sys
+
+FALLBACK = ("valid=false http_errors=-1 transport_errors=-1 client_errors=-1 disconnects=-1 "
+            "accepted=-1 refused=-1 model_ok=false models=0 usage_p=0 usage_c=0 usage_n=0")
 
 
 def nn(x):
@@ -171,23 +187,27 @@ def nn(x):
 
 
 def main():
-    fallback = "http_errors=-1 transport_errors=-1 client_errors=-1 model_ok=false models=0 usage_p=0 usage_c=0 usage_n=0"
     try:
         d = json.load(open(sys.argv[1]))
         want = sys.argv[2]
-        http_err, trans, client = d["upstream_http_errors"], d["upstream_errors"], d["upstream_client_errors"]
+        http_err, trans = d["upstream_http_errors"], d["upstream_errors"]
+        client, disc = d["upstream_client_errors"], d["client_disconnects"]
+        acc, ref = d["model_requests"], d["refused_over_cap"]
         models, usage = d["response_models"], d["usage"]
-        typed = (nn(http_err) and nn(trans) and nn(client) and isinstance(models, dict)
+        valid = (all(nn(x) for x in (http_err, trans, client, disc, acc, ref))
+                 and isinstance(models, dict)
                  and all(isinstance(k, str) and type(v) is int and v > 0 for k, v in models.items())
-                 and isinstance(usage, dict) and all(nn(usage.get(k)) for k in ("responses_with_usage", "prompt_tokens", "completion_tokens")))
-        if not typed:
-            print(fallback)
+                 and isinstance(usage, dict)
+                 and all(nn(usage.get(k)) for k in ("responses_with_usage", "prompt_tokens", "completion_tokens")))
+        if not valid:
+            print(FALLBACK)
             return
         ok = bool(models) and all(k == want for k in models)
-        print(f"http_errors={http_err} transport_errors={trans} client_errors={client} model_ok={str(ok).lower()} models={len(models)} "
+        print(f"valid=true http_errors={http_err} transport_errors={trans} client_errors={client} disconnects={disc} "
+              f"accepted={acc} refused={ref} model_ok={str(ok).lower()} models={len(models)} "
               f"usage_p={usage['prompt_tokens']} usage_c={usage['completion_tokens']} usage_n={usage['responses_with_usage']}")
     except Exception:
-        print(fallback)
+        print(FALLBACK)
 
 
 main()
@@ -224,13 +244,42 @@ rw("net/cb2net.sh", [
     ('set -u\nGW=192.168.4.203; HERE="$(cd "$(dirname "$0")" && pwd)"\n',
      'set -u\nHERE="$(cd "$(dirname "$0")" && pwd)"; . "$HERE/../run/profile.sh"; cb2_profile_load "$HERE/.." || exit 1\nGW=$CB2_UPSTREAM_IP\n'),
     ('iptables -C DOCKER-USER -s 172.30.1.0/24 -d $GW -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -d $GW -p tcp --dport 443 -j ACCEPT\n',
-     '# upstream ACCEPTs: exactly the run state\'s resolved addresses; an ACCEPT of this shape for any other destination (a previous profile) is removed\nfor RULE in $(iptables -S DOCKER-USER | grep -E -- "^-A DOCKER-USER -s 172.30.1.0/24 -d [0-9./]+ -p tcp -m tcp --dport 443 -j ACCEPT$" | awk \'{print $6}\'); do\n  KEEP=0; for IP in $CB2_UPSTREAM_IPS; do [ "$RULE" = "$IP/32" ] && KEEP=1; done\n  [ $KEEP = 1 ] || iptables -D DOCKER-USER -s 172.30.1.0/24 -d "$RULE" -p tcp --dport 443 -j ACCEPT || { echo "could not delete stale upstream rule $RULE"; exit 1; }\ndone\nfor IP in $CB2_UPSTREAM_IPS; do\n  iptables -C DOCKER-USER -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -d $IP -p tcp --dport 443 -j ACCEPT\ndone\n# FAIL CLOSED: every surviving ACCEPT for the egress subnet, whatever its shape, must name one of the resolved addresses as /32\nwhile read -r RULE; do\n  [ -n "$RULE" ] || continue\n  D=$(echo "$RULE" | grep -oE -- \'-d [0-9./]+\' | awk \'{print $2}\'); OK=0\n  for IP in $CB2_UPSTREAM_IPS; do [ "$D" = "$IP/32" ] && OK=1; done\n  [ $OK = 1 ] || { echo "CONTAINMENT NOT PROVEN: a foreign ACCEPT survives in DOCKER-USER: $RULE"; exit 1; }\ndone < <(iptables -S DOCKER-USER | grep -- "-s 172.30.1.0/24" | grep -- "-j ACCEPT")\n'),
+     '''# The egress policy lives in its OWN chain, rebuilt from scratch every run and verified rule for
+# rule. Editing DOCKER-USER in place could only ever check the rules it knew to look for, and said
+# nothing about their ORDER — a permissive rule sitting above them would have passed the audit.
+iptables -N CB2-EGRESS 2>/dev/null || true
+iptables -F CB2-EGRESS
+iptables -A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+for IP in $CB2_UPSTREAM_IPS; do iptables -A CB2-EGRESS -s 172.30.1.0/24 -d "$IP" -p tcp --dport 443 -j ACCEPT; done
+iptables -A CB2-EGRESS -s 172.30.1.0/24 -j DROP
+# every DOCKER-USER rule that mentions our subnets goes, including previous jumps; then ONE jump at position 1
+for _ in $(seq 1 32); do
+  N=$(iptables -L DOCKER-USER --line-numbers -n | grep -E "172\\\\.30\\\\.[01]\\\\.0/24|CB2-EGRESS" | head -1 | awk \'{print $1}\')
+  [ -z "$N" ] && break
+  iptables -D DOCKER-USER "$N" || { echo "could not delete DOCKER-USER rule $N"; exit 1; }
+done
+iptables -I DOCKER-USER 1 -j CB2-EGRESS
+# FAIL CLOSED: the chain must be EXACTLY the expected policy, in order, and the jump must be first.
+EXPECT=$(printf -- \'-N CB2-EGRESS\\n-A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\\n\')
+for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT$(printf -- \'-A CB2-EGRESS -s 172.30.1.0/24 -d %s/32 -p tcp -m tcp --dport 443 -j ACCEPT\\n\' "$IP")"; done
+EXPECT="$EXPECT$(printf -- \'-A CB2-EGRESS -s 172.30.1.0/24 -j DROP\')"
+GOT=$(iptables -S CB2-EGRESS)
+[ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
+[ "$(iptables -S DOCKER-USER | sed -n 2p)" = "-A DOCKER-USER -j CB2-EGRESS" ] || { echo "CONTAINMENT NOT PROVEN: the CB2-EGRESS jump is not the first DOCKER-USER rule"; iptables -S DOCKER-USER; exit 1; }
+[ "$(iptables -S DOCKER-USER | grep -c -- \'172\\\\.30\\\\.\')" = 0 ] || { echo "CONTAINMENT NOT PROVEN: a stray DOCKER-USER rule still names our subnets"; iptables -S DOCKER-USER | grep -- \'172\\\\.30\\\\.\'; exit 1; }
+'''),
+    # the DROP and the established-ACCEPT now live INSIDE CB2-EGRESS, in a verified order; leaving
+    # these two in DOCKER-USER would put unaudited rules above the jump
+    ('iptables -C DOCKER-USER -s 172.30.1.0/24 -j DROP 2>/dev/null || iptables -I DOCKER-USER 1 -s 172.30.1.0/24 -j DROP\n', ''),
+    ('iptables -C DOCKER-USER -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n', ''),
     ('echo "networks: cb2net internal=$(docker network inspect cb2net --format \'{{.Internal}}\') subnet=172.30.0.0/24; cb2egress subnet=172.30.1.0/24; bridges work=$BR_WORK egress=$BR_EGRESS"',
      'echo "profile: $CB2_PROFILE upstream=$CB2_UPSTREAM addresses=[$CB2_UPSTREAM_IPS] resolved_at=$CB2_RESOLVED_AT run_state=$CB2_RUN_STATE"\necho "networks: cb2net internal=$(docker network inspect cb2net --format \'{{.Internal}}\') subnet=172.30.0.0/24; cb2egress subnet=172.30.1.0/24; bridges work=$BR_WORK egress=$BR_EGRESS"'),
     ('docker run -d --name cb2probe-proxy --network cb2egress --dns 127.0.0.1 --add-host aig.mycluster.cyou:$GW -e CB2_CAP=1 -e CB2_COUNT_FILE=/tmp/c.json cb2-proxy >/dev/null',
      'docker run -d --name cb2probe-proxy --network cb2egress --dns 127.0.0.1 --add-host "$CB2_UPSTREAM:$GW" -e CB2_UPSTREAM="$CB2_UPSTREAM" -e CB2_UPSTREAM_IP="$GW" -e CB2_CAP=1 -e CB2_COUNT_FILE=/tmp/c.json cb2-proxy >/dev/null'),
     ('W=$(docker run --rm --name cb2probe-work --network cb2net --add-host aig.mycluster.cyou:$GW --dns 127.0.0.1 -v "$HERE/probe_work.py:/probe.py:ro" python:3.13-slim python3 /probe.py 2>/dev/null)',
      'W=$(docker run --rm --name cb2probe-work --network cb2net --dns 127.0.0.1 -e CB2_UPSTREAM_IP="$GW" -v "$HERE/probe_work.py:/probe.py:ro" python:3.13-slim python3 /probe.py 2>/dev/null)'),
+    ('iptables -S DOCKER-USER | grep "172.30" | sed \'s/^/rule: /\'; iptables -S INPUT | grep -E "$BR_WORK|$BR_EGRESS" | sed \'s/^/rule: /\'',
+     'iptables -S CB2-EGRESS | sed \'s/^/rule: /\'; iptables -S DOCKER-USER | sed -n 2p | sed \'s/^/rule: /\'; iptables -S INPUT | grep -E "$BR_WORK|$BR_EGRESS" | sed \'s/^/rule: /\''),
 ])
 rw("net/probe_work.py", [
     ('import socket\n', 'import os, socket\nUP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")\n'),
@@ -243,6 +292,11 @@ rw("net/probe_proxy.py", [
 
 # ── hermes leg ────────────────────────────────────────────────────────────────────────────────
 rw("run/hermes_leg.sh", [
+    # A proxy that cannot come up (TLS preflight, listener, address) is INFRASTRUCTURE, before the
+    # agent was ever invoked: void, not disqualified — otherwise the invalidation rule and the void
+    # rule contradict each other on the same fault.
+    ("printf '{\"system\":\"hermes\",\"task\":\"%s\",\"status\":\"proxy-not-ready\",\"disqualified\":true}\\n' \"$T\"",
+      "printf '{\"system\":\"hermes\",\"task\":\"%s\",\"status\":\"proxy-not-ready\",\"void\":true,\"dq_independent\":false,\"dq_dependent\":false,\"disqualified\":false}\\n' \"$T\""),
     ('T=$1; OUT=${2:-/root/cb2/out}; WALL=1800; CAP=8\nFIX="$(cd "$(dirname "$0")/.." && pwd)"\n',
      'T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=8\nFIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1\ncb2_rerun_prepare hermes "$T" "$OUT" || exit 2\n'),
     ("printf 'model:\\n  default: qwen3.8:27b-q4_K_M\\n  provider: custom\\n  base_url: http://%s:8080/v1\\nagent:\\n  max_turns: %s\\n' \"$PIP\" \"$CAP\" > \"$H/config.yaml\"",
@@ -250,22 +304,38 @@ rw("run/hermes_leg.sh", [
     ('RC=$?\nEND=$(date -u +%Y-%m-%dT%H:%M:%SZ); WALLS=$(( $(date +%s) - T0 ))\ndocker rm -f "$NAME" >/dev/null 2>&1\n',
      'RC=$?\nEND=$(date -u +%Y-%m-%dT%H:%M:%SZ); WALLS=$(( $(date +%s) - T0 ))\nENVLEAK=$(cb2_env_leak_hits "$NAME")\ndocker rm -f "$NAME" >/dev/null 2>&1\n'),
     ('DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")\n',
-     'DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")\nLEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$W" "$H" "$RAW/hermes_${T}_stdout.txt") ))\nread -r PHTTP PTRANS PCLIENT MODEL_OK NMODELS UP UC UN <<< "$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL" | sed -E \'s/[a-z_]+=//g\')"\n# VOID (infrastructure, never the agent\'s fault): an upstream 429/5xx on a model request or a transport/TLS failure\nVOID=false; { [ "$PHTTP" != 0 ] || [ "$PTRANS" != 0 ]; } && VOID=true\n'),
+     'DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")\n'
+     'LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$W" "$H" "$RAW/hermes_${T}_stdout.txt") ))\n'
+     'read -r RC_VALID PHTTP PTRANS PCLIENT PDISC RC_ACC RC_REF MODEL_OK NMODELS UP UC UN <<< "$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL" | sed -E \'s/[a-z_]+=//g\')"\n'
+     '# VOID (infrastructure, never the agent\'s fault): a TYPED receipt showing an upstream 429/5xx on a\n'
+     '# model request or a transport/TLS failure. An untyped or missing receipt is NOT evidence of an\n'
+     '# infrastructure fault — it is an independent disqualification below.\n'
+     'VOID=false\n'
+     'if [ "$RC_VALID" = true ] && { [ "$PHTTP" != 0 ] || [ "$PTRANS" != 0 ]; }; then VOID=true; fi\n'),
     ('DQ=false; [ "$VALID" = false ] && DQ=true; [ "$CALLS" -gt $CAP ] && DQ=true; [ "$DL" -gt 0 ] && DQ=true; [ $RC -ne 0 ] && DQ=true\n',
-     '# disqualification: INDEPENDENT violations always; DEPENDENT ones (exit code, receipt zero-error shape, model identity) only when the leg is not void\nDQ_IND=false; [ "$VALID" = false ] && DQ_IND=true; [ "$CALLS" -gt $CAP ] && DQ_IND=true; [ "$DL" -gt 0 ] && DQ_IND=true; [ "$LEAK" != 0 ] && DQ_IND=true\nDQ_DEP=false; [ $RC -ne 0 ] && DQ_DEP=true; [ "$MODEL_OK" = true ] || DQ_DEP=true\n'),
+     '# disqualification: INDEPENDENT violations always — including the CAP EVIDENCE, which must stand\n'
+     '# on its own: a refusal or an over-cap count is the agent exceeding its budget whatever the\n'
+     '# upstream was doing at the time. DEPENDENT ones (exit code/wall, receipt shape, model identity)\n'
+     '# only when the leg is not void.\n'
+     'DQ_IND=false; [ "$VALID" = false ] && DQ_IND=true; [ "$CALLS" -gt $CAP ] && DQ_IND=true; [ "$DL" -gt 0 ] && DQ_IND=true; [ "$LEAK" != 0 ] && DQ_IND=true\n'
+     '[ "$RC_VALID" = true ] || DQ_IND=true          # missing/malformed proxy receipt: independent, never a void\n'
+     'if [ "$RC_VALID" = true ]; then { [ "$RC_REF" -gt 0 ] || [ "$RC_ACC" -gt $CAP ]; } && DQ_IND=true; fi\n'
+     'DQ_DEP=false; [ $RC -ne 0 ] && DQ_DEP=true; [ "$MODEL_OK" = true ] || DQ_DEP=true\n'),
     ("    ok=type(a) is int and type(r) is int and type(u) is int and 1<=a<=$CAP and r==0 and u==0 and t is True and a==int('$CALLS')",
      "    ok=type(a) is int and type(r) is int and type(u) is int and 1<=a<=$CAP and r==0 and t is True and a==int('$CALLS')"),
     ('[ "$RECEIPT_OK" = true ] || DQ=true\n', '[ "$RECEIPT_OK" = true ] || DQ_DEP=true\n'),
     ("echo \"$HASH\" | grep -Eq '^[0-9a-f]{64} files=[0-9]+ bytes=[0-9]+ symlinks=0 specials=0$' || DQ=true",
      "echo \"$HASH\" | grep -Eq '^[0-9a-f]{64} files=[0-9]+ bytes=[0-9]+ symlinks=0 specials=0$' || DQ_IND=true\nDQ=false; [ \"$DQ_IND\" = true ] && DQ=true; [ \"$VOID\" = false ] && [ \"$DQ_DEP\" = true ] && DQ=true"),
     ('"download_or_install_lines":%s,"proxy_receipt_ok":%s,"disqualified":%s,"tree":"%s"}',
-     '"download_or_install_lines":%s,"proxy_receipt_ok":%s,"profile":"%s","upstream":"%s","upstream_ips":"%s","resolved_at":"%s","run_state":"%s","model":"%s","model_ok":%s,"key_leak_hits":%s,"upstream_http_errors":%s,"upstream_transport_errors":%s,"upstream_client_errors":%s,"usage_prompt_tokens":%s,"usage_completion_tokens":%s,"usage_responses":%s,"void":%s,"dq_independent":%s,"dq_dependent":%s,"disqualified":%s,"tree":"%s"}'),
+     '"download_or_install_lines":%s,"proxy_receipt_ok":%s,"profile":"%s","upstream":"%s","upstream_ips":"%s","resolved_at":"%s","run_state":"%s","run_state_sha256":"%s","model":"%s","model_ok":%s,"receipt_valid":%s,"key_leak_hits":%s,"upstream_http_errors":%s,"upstream_transport_errors":%s,"upstream_client_errors":%s,"client_disconnects":%s,"usage_prompt_tokens":%s,"usage_completion_tokens":%s,"usage_responses":%s,"void":%s,"dq_independent":%s,"dq_dependent":%s,"disqualified":%s,"tree":"%s"}'),
     ('"$TOKS" "$DL" "$RECEIPT_OK" "$DQ" "$HASH"',
-     '"$TOKS" "$DL" "$RECEIPT_OK" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_MODEL" "$MODEL_OK" "$LEAK" "$PHTTP" "$PTRANS" "$PCLIENT" "$UP" "$UC" "$UN" "$VOID" "$DQ_IND" "$DQ_DEP" "$DQ" "$HASH"'),
+     '"$TOKS" "$DL" "$RECEIPT_OK" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$MODEL_OK" "$RC_VALID" "$LEAK" "$PHTTP" "$PTRANS" "$PCLIENT" "$PDISC" "$UP" "$UC" "$UN" "$VOID" "$DQ_IND" "$DQ_DEP" "$DQ" "$HASH"'),
 ])
 
 # ── mind leg ──────────────────────────────────────────────────────────────────────────────────
 rw("run/mind_leg.sh", [
+    ("printf '{\"system\":\"mind\",\"task\":\"%s\",\"status\":\"proxy-not-ready\",\"disqualified\":true}\\n' \"$T\"",
+      "printf '{\"system\":\"mind\",\"task\":\"%s\",\"status\":\"proxy-not-ready\",\"void\":true,\"dq_independent\":false,\"dq_dependent\":false,\"disqualified\":false}\\n' \"$T\""),
     ('T=$1; OUT=${2:-/root/cb2/out}; WALL=1800\nFIX="$(cd "$(dirname "$0")/.." && pwd)"\n',
      'T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800\nFIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1\ncb2_rerun_prepare mind "$T" "$OUT" || exit 2\n'),
     ('NAME="cb2-mind-$T"; PROXY="cb2proxy-mind-$T"; PIP=172.30.0.2\n',
@@ -296,11 +366,31 @@ rw("run/mind_leg.sh", [
     ('docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1\ndocker rm -f "$NAME" >/dev/null 2>&1   # the parent stops the instance AFTER the driver wrote its receipt\n',
      'docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1\nENVLEAK=$(cb2_env_leak_hits "$NAME")\ndocker rm -f "$NAME" >/dev/null 2>&1   # the parent stops the instance AFTER the driver wrote its receipt\nLEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$ST" "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt") ))\nCHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")\n'),
     ('python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" <<\'EOF\'\nimport json, sys\nsrc, dst, bin_sha, prov, img, tree, rc, task, prx = sys.argv[1:]\n',
-     'python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<\'EOF\'\nimport json, sys\nsrc, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, model, leak, checks, brain_gate = sys.argv[1:]\nck = dict(kv.split("=", 1) for kv in checks.split())\n'),
+     'python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<\'EOF\'\nimport json, sys\nsrc, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate = sys.argv[1:]\nck = dict(kv.split("=", 1) for kv in checks.split())\n'),
     ('    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and acc >= 0 and ref >= 0 and acc <= 8 and ref == 0 and upe == 0 and tls\n',
      '    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and acc >= 0 and ref >= 0 and acc <= 8 and ref == 0 and tls\n'),
+    # a receipt the driver never wrote is missing EVIDENCE, not an infrastructure fault
+    ('    d = {"system": "mind", "task": task, "status": "driver-failed", "disqualified": True}\n',
+     '    d = {"system": "mind", "task": task, "status": "driver-failed", "dq_independent": True, "disqualified": True}\n'),
     ('d["disqualified"] = bool(d.get("disqualified")) or (not receipt_ok) or (not capture_ok) or syml > 0 or special > 0 or int(rc) != 0\n',
-     '# VOID (infrastructure): an upstream 429/5xx on a model request or a transport/TLS failure. INDEPENDENT violations\n# always disqualify; DEPENDENT ones (exit code, receipt shape, model identity) only when the leg is not void.\nvoid = ck.get("http_errors") != "0" or ck.get("transport_errors") != "0"\ndq_ind = bool(d.get("disqualified")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0\ndq_dep = (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"\nd.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "model": model, "model_ok": ck.get("model_ok") == "true",\n          "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate), "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),\n          "upstream_client_errors": int(ck.get("client_errors", -1)), "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),\n          "usage_responses": int(ck.get("usage_n", 0)), "void": void, "dq_independent": dq_ind, "dq_dependent": dq_dep})\nd["disqualified"] = dq_ind or ((not void) and dq_dep)\n'),
+     '# VOID (infrastructure) needs a TYPED proxy receipt showing an upstream 429/5xx on a model request or a\n# transport/TLS failure. A missing or malformed receipt is not that evidence: it is an INDEPENDENT violation.\n# Independent violations always disqualify (the driver\'s own independent reasons, capture, symlinks/specials,\n# a key leak, an untyped receipt); DEPENDENT ones (the wall or a non-zero exit, the receipt\'s zero-refusal\n# shape, model identity) only when the leg is not void.\nvalid = ck.get("valid") == "true"\nvoid = valid and (ck.get("http_errors") != "0" or ck.get("transport_errors") != "0")\ndq_ind = bool(d.get("dq_independent")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0 or (not valid)\ndq_dep = bool(d.get("dq_dependent")) or (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"\nd.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "run_state_sha256": run_state_sha,\n          "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),\n          "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),\n          "upstream_client_errors": int(ck.get("client_errors", -1)), "client_disconnects": int(ck.get("disconnects", -1)),\n          "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),\n          "usage_responses": int(ck.get("usage_n", 0)), "void": void, "dq_independent": dq_ind, "dq_dependent": dq_dep})\nd["disqualified"] = dq_ind or ((not void) and dq_dep)\n'),
+])
+
+# ── mind driver: name its OWN disqualification reasons, split independent from dependent ─────
+rw("run/mind_driver.py", [
+    ('''           "disqualified": (not present) or bad > 0 or refused > 0 or accepted > CAP or stop is not None}''',
+     '''           "proxy_client_disconnects": -1,
+           # The driver's own reasons, split. INDEPENDENT: evidence the run broke a rule of its own —
+           # a missing or malformed proxy receipt, a refusal (a ninth request was attempted), an
+           # over-cap count, a malformed ledger row. These stand whatever the upstream was doing.
+           # DEPENDENT: the wall. A transport outage that ends in a timeout must not become an
+           # independent violation, or an infrastructure void would also disqualify the leg.
+           "dq_independent": (not present) or bad > 0 or refused > 0 or accepted > CAP,
+           "dq_dependent": stop == "timeout",
+           "disqualified": (not present) or bad > 0 or refused > 0 or accepted > CAP or stop is not None}'''),
+    ('''receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,''',
+     '''receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
+           "stop_reason": stop or "",'''),
 ])
 
 # ── smokes + cap test ─────────────────────────────────────────────────────────────────────────
@@ -335,7 +425,7 @@ rw("net/captest_client.py", [
 # ── MANIFEST: both profiles described without contradiction ──────────────────────────────────
 rw("MANIFEST.json", [
     ('  "id": "E.CB2",\n  "version": 3,\n',
-     '  "id": "E.CB2-N",\n  "version": 4,\n  "derived_from": "fixtures/cb2 at d4febe6 (the frozen Qwen reading; untouched) by the recorded patch scratch/cb2n_patch.py; scratch/rederive.sh proves the tree re-derives exactly",\n  "profiles": "profiles/<name>.profile, loaded by run/profile.sh (CB2_PROFILE, default qwen) THROUGH an immutable run state ($OUT/run_state.json: profile, upstream, resolved IPv4 addresses, first address, resolution time, model) written by the first loader call of a run and consumed unchanged by the network script, the proxy, both legs, the smokes and the cap test. qwen = the v3 reading unchanged: owned gateway 192.168.4.203, no key injection, the Mind on its local lane. nim (E.CB2-N) = upstream integrate.api.nvidia.com, its addresses resolved once (allowlisted EXCLUSIVELY: the network script fails closed if any other ACCEPT for the egress subnet survives), the key file (uid 10002, mode 0400) mounted read-only into the PROXY container only and injected as the Authorization header on every forward, placeholder keys in both work containers, one model for both systems (z-ai/glm-5.2), the Mind via YM_PRIMARY_BRAIN=nim:<model> with all six YM_ROLE_* equal to it behind YM_PROVIDER_BASE_URL_NIM (brain gate: env + boot log, fail closed). Key-leak scans hand the key FILE to grep as a pattern file (the key and its prefix never enter a variable, log or receipt); any hit in a work container\'s env, home, state, raw log or artifact disqualifies. Model identity: every model id tallied from SUCCESSFUL responses must equal the profile model, and at least one must exist, or the leg is disqualified (when not void). VOID = an upstream 429/5xx on a model request or a transport/TLS failure (a failed upstream body read included; a client disconnect is not): infrastructure, never a disqualification by itself; the first receipt and outputs are preserved as *_void1, exactly one same-leg rerun is allowed (run/profile.sh cb2_rerun_prepare), a second void refuses. Other 4xx are the caller\'s request errors: counted (upstream_client_errors), neither void nor rerun.",\n'),
+     '  "id": "E.CB2-N",\n  "version": 4,\n  "derived_from": "fixtures/cb2 at d4febe6 (the frozen Qwen reading; untouched) by the recorded patch scratch/cb2n_patch.py; scratch/rederive.sh proves the tree re-derives exactly",\n  "profiles": "profiles/<name>.profile, loaded by run/profile.sh (CB2_PROFILE, default qwen) THROUGH an immutable run state ($OUT/run_state.json: profile, upstream, resolved IPv4 addresses, first address, resolution time, model) written by the first loader call of a run and consumed unchanged by the network script, the proxy, both legs, the smokes and the cap test. qwen = the v3 reading unchanged: owned gateway 192.168.4.203, no key injection, the Mind on its local lane. nim (E.CB2-N) = upstream integrate.api.nvidia.com, its addresses resolved once (allowlisted EXCLUSIVELY: the network script fails closed if any other ACCEPT for the egress subnet survives), the key file (uid 10002, mode 0400) mounted read-only into the PROXY container only and injected as the Authorization header on every forward, placeholder keys in both work containers, one model for both systems (z-ai/glm-5.2), the Mind via YM_PRIMARY_BRAIN=nim:<model> with all six YM_ROLE_* equal to it behind YM_PROVIDER_BASE_URL_NIM (brain gate: env + boot log, fail closed). Key-leak scans hand the key FILE to grep as a pattern file (the key and its prefix never enter a variable, log or receipt); any hit in a work container\'s env, home, state, raw log or artifact disqualifies. Model identity: every model id tallied from SUCCESSFUL responses must equal the profile model, and at least one must exist, or the leg is disqualified (when not void). VOID = a TYPED proxy receipt showing an upstream 429/5xx on a model request or a transport/TLS failure (a failed upstream body read included; a client disconnect is counted separately and is not): infrastructure, never a disqualification by itself. A MISSING OR MALFORMED receipt is not that evidence: it is an independent disqualification. Cap evidence (a refusal, or accepted > cap) is independent too and stands whatever the upstream was doing; the Mind driver splits its own reasons the same way, independent (missing/malformed proxy receipt, a refusal, over-cap, a malformed ledger row) against dependent (the wall). A void leg preserves its first receipt and outputs as *_void1 and may be rerun exactly once, and only when it is PURELY void (void true, disqualified false, dq_independent false); a second void refuses. Other 4xx are the request errors of the caller: counted (upstream_client_errors), neither void nor rerun. A proxy that cannot come up writes a pre-invocation receipt with void true and disqualified false: nothing was graded. Egress policy lives in its own iptables chain CB2-EGRESS, flushed and rebuilt every run and jumped to from DOCKER-USER position 1 (established/related, one ACCEPT per resolved address on tcp/443, then DROP); the audit compares that chain rule for rule against the expected policy and fails closed on any difference, on a jump that is not first, or on any surviving DOCKER-USER rule naming the subnets. Each profile uses its own output root (/root/cb2n/out-qwen, /root/cb2n/out-nim), and every receipt carries the path and SHA-256 of the run state.",\n'),
     ('ACCEPT 172.30.1.0/24 → 192.168.4.203 tcp/443, DROP 172.30.1.0/24 → any.',
      'ACCEPT 172.30.1.0/24 → each address in the run state tcp/443 (qwen: 192.168.4.203; nim: the resolved integrate.api.nvidia.com addresses) and NOTHING else — any other ACCEPT for that subnet fails the script —, DROP 172.30.1.0/24 → any.'),
     ('forwards every request verbatim (streaming included) to 192.168.4.203:443 with Host aig.mycluster.cyou;',

@@ -37,7 +37,7 @@ cleanup() {
   rm -rf "$ST"; chmod -R a-w "$A" 2>/dev/null
 }
 trap cleanup EXIT
-bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","disqualified":true}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
+bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","void":true,"dq_independent":false,"dq_dependent":false,"disqualified":false}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
 BIN_SHA=$(sha256sum /opt/yantrik-mind/mind-core | cut -c1-64); PROV=$(cd /root/codes/ym-autodeploy && git rev-parse --short HEAD)
 docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
   -v /opt/yantrik-mind/mind-core:/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
@@ -75,14 +75,14 @@ CHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<'EOF'
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<'EOF'
 import json, sys
-src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, model, leak, checks, brain_gate = sys.argv[1:]
+src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate = sys.argv[1:]
 ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
 except Exception:
-    d = {"system": "mind", "task": task, "status": "driver-failed", "disqualified": True}
+    d = {"system": "mind", "task": task, "status": "driver-failed", "dq_independent": True, "disqualified": True}
 try:
     p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p["upstream_errors"])
     acc = p["model_requests"]; ref = p["refused_over_cap"]
@@ -94,14 +94,20 @@ special = int(tree.split("specials=")[1].split()[0]) if "specials=" in tree else
 import re
 capture_ok = bool(re.fullmatch(r"[0-9a-f]{64}", bin_sha)) and bool(prov) and bool(re.fullmatch(r"[0-9a-f]{64} files=\d+ bytes=\d+ symlinks=\d+ specials=\d+", tree))
 d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tree": tree, "driver_rc": int(rc), "proxy_tls_hostname_verified": tls, "proxy_upstream_errors": upe, "proxy_accepted_parent": acc, "proxy_refused_parent": ref, "proxy_receipt_ok": receipt_ok, "capture_ok": capture_ok, "symlinks": syml, "specials": special})
-# VOID (infrastructure): an upstream 429/5xx on a model request or a transport/TLS failure. INDEPENDENT violations
-# always disqualify; DEPENDENT ones (exit code, receipt shape, model identity) only when the leg is not void.
-void = ck.get("http_errors") != "0" or ck.get("transport_errors") != "0"
-dq_ind = bool(d.get("disqualified")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0
-dq_dep = (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"
-d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "model": model, "model_ok": ck.get("model_ok") == "true",
-          "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate), "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
-          "upstream_client_errors": int(ck.get("client_errors", -1)), "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),
+# VOID (infrastructure) needs a TYPED proxy receipt showing an upstream 429/5xx on a model request or a
+# transport/TLS failure. A missing or malformed receipt is not that evidence: it is an INDEPENDENT violation.
+# Independent violations always disqualify (the driver's own independent reasons, capture, symlinks/specials,
+# a key leak, an untyped receipt); DEPENDENT ones (the wall or a non-zero exit, the receipt's zero-refusal
+# shape, model identity) only when the leg is not void.
+valid = ck.get("valid") == "true"
+void = valid and (ck.get("http_errors") != "0" or ck.get("transport_errors") != "0")
+dq_ind = bool(d.get("dq_independent")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0 or (not valid)
+dq_dep = bool(d.get("dq_dependent")) or (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"
+d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "run_state_sha256": run_state_sha,
+          "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
+          "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
+          "upstream_client_errors": int(ck.get("client_errors", -1)), "client_disconnects": int(ck.get("disconnects", -1)),
+          "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),
           "usage_responses": int(ck.get("usage_n", 0)), "void": void, "dq_independent": dq_ind, "dq_dependent": dq_dep})
 d["disqualified"] = dq_ind or ((not void) and dq_dep)
 json.dump(d, open(dst, "w"), indent=1); print(json.dumps(d))

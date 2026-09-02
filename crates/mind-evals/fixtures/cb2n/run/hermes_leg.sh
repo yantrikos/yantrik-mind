@@ -22,7 +22,7 @@ cleanup() { docker rm -f "$NAME" >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down 
 trap cleanup EXIT
 printf 'model:\n  default: %s\n  provider: custom\n  base_url: http://%s:8080/v1\nagent:\n  max_turns: %s\n' "$CB2_MODEL" "$PIP" "$CAP" > "$H/config.yaml"
 chown 10001:10001 "$H/config.yaml"
-bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"hermes","task":"%s","status":"proxy-not-ready","disqualified":true}\n' "$T" | tee "$R/hermes_$T.json"; exit 4; }
+bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"hermes","task":"%s","status":"proxy-not-ready","void":true,"dq_independent":false,"dq_dependent":false,"disqualified":false}\n' "$T" | tee "$R/hermes_$T.json"; exit 4; }
 ARCHIVE_SHA=$(sha256sum "$FIX/docker/hermes-3ce1cf2.tar.gz" 2>/dev/null | cut -c1-64)
 [ "$ARCHIVE_SHA" = "30698554ea31ae928ab757c6ab67ae0c38f83bee6974de31193d62533590aaac" ] || { echo "archive is not the pinned commit — leg aborted"; printf '{"system":"hermes","task":"%s","status":"archive-mismatch","disqualified":true}\n' "$T" | tee "$R/hermes_$T.json"; exit 5; }
 BRIEF="$(cat "$FIX/briefs/$T.txt")"
@@ -45,13 +45,21 @@ fi
 if [ -f "$CD/requests.json" ] && read -r PACC PREF PTLS PUPE <<< "$(python3 -c "import json;d=json.load(open('$CD/requests.json'));print(int(d['model_requests']), int(d['refused_over_cap']), d.get('tls_hostname_verified'), int(d['upstream_errors']))" 2>/dev/null)"; then PPRESENT=true; else PACC=-1; PREF=-1; PTLS=absent; PUPE=-1; PPRESENT=false; fi
 DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")
 LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$W" "$H" "$RAW/hermes_${T}_stdout.txt") ))
-read -r PHTTP PTRANS PCLIENT MODEL_OK NMODELS UP UC UN <<< "$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL" | sed -E 's/[a-z_]+=//g')"
-# VOID (infrastructure, never the agent's fault): an upstream 429/5xx on a model request or a transport/TLS failure
-VOID=false; { [ "$PHTTP" != 0 ] || [ "$PTRANS" != 0 ]; } && VOID=true
+read -r RC_VALID PHTTP PTRANS PCLIENT PDISC RC_ACC RC_REF MODEL_OK NMODELS UP UC UN <<< "$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL" | sed -E 's/[a-z_]+=//g')"
+# VOID (infrastructure, never the agent's fault): a TYPED receipt showing an upstream 429/5xx on a
+# model request or a transport/TLS failure. An untyped or missing receipt is NOT evidence of an
+# infrastructure fault — it is an independent disqualification below.
+VOID=false
+if [ "$RC_VALID" = true ] && { [ "$PHTTP" != 0 ] || [ "$PTRANS" != 0 ]; }; then VOID=true; fi
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$W")
 IMG=$(docker image inspect cb2-hermes --format '{{.Id}}')
-# disqualification: INDEPENDENT violations always; DEPENDENT ones (exit code, receipt zero-error shape, model identity) only when the leg is not void
+# disqualification: INDEPENDENT violations always — including the CAP EVIDENCE, which must stand
+# on its own: a refusal or an over-cap count is the agent exceeding its budget whatever the
+# upstream was doing at the time. DEPENDENT ones (exit code/wall, receipt shape, model identity)
+# only when the leg is not void.
 DQ_IND=false; [ "$VALID" = false ] && DQ_IND=true; [ "$CALLS" -gt $CAP ] && DQ_IND=true; [ "$DL" -gt 0 ] && DQ_IND=true; [ "$LEAK" != 0 ] && DQ_IND=true
+[ "$RC_VALID" = true ] || DQ_IND=true          # missing/malformed proxy receipt: independent, never a void
+if [ "$RC_VALID" = true ]; then { [ "$RC_REF" -gt 0 ] || [ "$RC_ACC" -gt $CAP ]; } && DQ_IND=true; fi
 DQ_DEP=false; [ $RC -ne 0 ] && DQ_DEP=true; [ "$MODEL_OK" = true ] || DQ_DEP=true
 # strict proxy receipt: typed non-negative integers, 1 <= accepted <= CAP, refused 0, upstream 0, TLS true, accepted == api calls in the log
 RECEIPT_OK=$(python3 -c "import json,sys
@@ -65,5 +73,5 @@ print('true' if ok else 'false')")
 # exact tree hash: 64 hex + files/bytes/symlinks/specials fields, zero unsafe nodes
 echo "$HASH" | grep -Eq '^[0-9a-f]{64} files=[0-9]+ bytes=[0-9]+ symlinks=0 specials=0$' || DQ_IND=true
 DQ=false; [ "$DQ_IND" = true ] && DQ=true; [ "$VOID" = false ] && [ "$DQ_DEP" = true ] && DQ=true
-printf '{"system":"hermes","task":"%s","image":"%s","commit":"3ce1cf2bb768f39026e059f5236522dea2a4afe3","archive_sha256":"%s","started":"%s","finished":"%s","wall_s":%s,"rc":%s,"timed_out":%s,"valid_log":%s,"session":"%s","api_calls_from_log":%s,"proxy_receipt_present":%s,"proxy_accepted":%s,"proxy_refused":%s,"proxy_attempted":%s,"proxy_tls_hostname_verified":"%s","proxy_upstream_errors":%s,"tokens_in_out":"%s","download_or_install_lines":%s,"proxy_receipt_ok":%s,"profile":"%s","upstream":"%s","upstream_ips":"%s","resolved_at":"%s","run_state":"%s","model":"%s","model_ok":%s,"key_leak_hits":%s,"upstream_http_errors":%s,"upstream_transport_errors":%s,"upstream_client_errors":%s,"usage_prompt_tokens":%s,"usage_completion_tokens":%s,"usage_responses":%s,"void":%s,"dq_independent":%s,"dq_dependent":%s,"disqualified":%s,"tree":"%s"}\n' \
-  "$T" "$IMG" "$ARCHIVE_SHA" "$START" "$END" "$WALLS" "$RC" "$([ $RC -eq 124 ] && echo true || echo false)" "$VALID" "$SID" "$CALLS" "$PPRESENT" "$PACC" "$PREF" "$(( PACC + PREF ))" "$PTLS" "$PUPE" "$TOKS" "$DL" "$RECEIPT_OK" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_MODEL" "$MODEL_OK" "$LEAK" "$PHTTP" "$PTRANS" "$PCLIENT" "$UP" "$UC" "$UN" "$VOID" "$DQ_IND" "$DQ_DEP" "$DQ" "$HASH" | tee "$R/hermes_$T.json"
+printf '{"system":"hermes","task":"%s","image":"%s","commit":"3ce1cf2bb768f39026e059f5236522dea2a4afe3","archive_sha256":"%s","started":"%s","finished":"%s","wall_s":%s,"rc":%s,"timed_out":%s,"valid_log":%s,"session":"%s","api_calls_from_log":%s,"proxy_receipt_present":%s,"proxy_accepted":%s,"proxy_refused":%s,"proxy_attempted":%s,"proxy_tls_hostname_verified":"%s","proxy_upstream_errors":%s,"tokens_in_out":"%s","download_or_install_lines":%s,"proxy_receipt_ok":%s,"profile":"%s","upstream":"%s","upstream_ips":"%s","resolved_at":"%s","run_state":"%s","run_state_sha256":"%s","model":"%s","model_ok":%s,"receipt_valid":%s,"key_leak_hits":%s,"upstream_http_errors":%s,"upstream_transport_errors":%s,"upstream_client_errors":%s,"client_disconnects":%s,"usage_prompt_tokens":%s,"usage_completion_tokens":%s,"usage_responses":%s,"void":%s,"dq_independent":%s,"dq_dependent":%s,"disqualified":%s,"tree":"%s"}\n' \
+  "$T" "$IMG" "$ARCHIVE_SHA" "$START" "$END" "$WALLS" "$RC" "$([ $RC -eq 124 ] && echo true || echo false)" "$VALID" "$SID" "$CALLS" "$PPRESENT" "$PACC" "$PREF" "$(( PACC + PREF ))" "$PTLS" "$PUPE" "$TOKS" "$DL" "$RECEIPT_OK" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$MODEL_OK" "$RC_VALID" "$LEAK" "$PHTTP" "$PTRANS" "$PCLIENT" "$PDISC" "$UP" "$UC" "$UN" "$VOID" "$DQ_IND" "$DQ_DEP" "$DQ" "$HASH" | tee "$R/hermes_$T.json"

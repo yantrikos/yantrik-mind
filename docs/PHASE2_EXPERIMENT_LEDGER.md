@@ -3246,3 +3246,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Review closure (Codex 05:28Z) | `fast_reply` (the voice fast path) was a production reply surface outside the guard; it registers now. Two fixtures reconcile prereg and code: the engine asserts `turn`, `fast_reply`, `cli_dispatch` register within their own bodies and `handle_turn[_as]` do not (reached only through them); mind-core asserts no frontend calls the inner turn directly and counts its surfaces. |
 | Suite | 45 binaries / 1539 passed / 0 failed (05:32Z); scoped fmt clean. |
 | Review | Trees sent to Codex 05:24Z, 05:28Z and 05:33Z before any commit; commit and staging deploy on its message on this tree; witness with the preregistered `YM_ICS_SECS=600` staging-only override, restored after. |
+
+## L3a — amendment row (docs-only, before the code): a machine refresh is a turn, not user activity
+
+| Field | Value |
+| --- | --- |
+| Found live on the canary (06:45–06:50Z) | After the L3a deploy the offline-cognition pass never started although the box was idle for a probe-free sixteen minutes. Two read-only diagnostics were added (`ym why idle`, `ym why idle surface`, the second carrying the displaced registration label on the guard) and named the caller: `cli:loops_json` — the cockpit's `/api/loops` refresh, issued by a paired operator session every ~10 s. Every such refresh reaches the engine through `cli_dispatch`, registers a turn, and moves the user-activity clock; DMN can never reach its idle stretch while any console tab is open. |
+| Rule | A registration has two effects that the prereg conflated: it COUNTS as an active turn (so DMN never starts while one is in flight — unchanged for every surface) and it MOVES the user-activity clock. Only a person's act moves the clock. The cockpit's automatic JSON views (`loops_json`, `horizons_json`, `horizon_history_json`, `skills_json`, `claims_json`, `jobs json`, `orders`, `orders json`, and the other `*_json` verbs the web server issues on a timer) count as turns but do not move the clock. A typed console line, a chat turn, and the voice fast path move it. |
+| Fixture | A machine view registers (count 1 while it lives) and leaves the activity stamp untouched; a typed line moves it; DMN admission after a machine view proceeds when the person has been idle. The web callsite fixture in mind-core lists which routes dispatch machine views. |
+| Kill | A machine view that moves the clock; a typed line that does not; any surface other than the console's JSON views classified as machine. |

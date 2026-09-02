@@ -1,54 +1,39 @@
 {
   "id": "E.CB2",
-  "standing": "three-task exploratory bakeoff; NOT a superiority claim under competitive benchmark v1 (24 paired trials)",
-  "systems": {
-    "mind": {
-      "binary": "the deployed staging mind-core (ledger tip at run time; provenance recorded in the run receipt)",
-      "host": "192.168.4.95 (staging canary), scratch instance at /var/lib/ym-cb2, never /var/lib/yantrik-mind",
-      "ports": {"pages": 8099, "console_api": 8091, "ctl": 8078},
-      "env": {
-        "YM_LOCAL_OLLAMA_URL": "https://aig.mycluster.cyou",
-        "YM_LOCAL_OLLAMA_MODEL": "qwen3.8:27b-q4_K_M",
-        "YM_PRIVATE_PROVIDERS": "ollama-local",
-        "YM_HOUSEHOLD_PROVIDERS": "ollama-local",
-        "YM_INFER_PERMITS": "2",
-        "YM_DMN": "off", "YM_PROACTIVE": "off", "YM_PATTERNS": "off", "YM_HOME_WATCH": "off",
-        "no cloud keys present": true, "no Telegram token": true, "no code executor (YM_CODER_*) configured": true
-      },
-      "invocation": "one POST /api/agent {name, task} per task through the paired scratch console; the delegate router chooses the executor",
-      "python": "3.13.5"
-    },
-    "hermes": {
-      "install": "Hermes Agent v0.14.0 (2026.5.16), local install at %LOCALAPPDATA%/hermes/hermes-agent",
-      "host": "the Windows workstation (this session's machine)",
-      "home": "an isolated HERMES_HOME profile (config.yaml: provider custom, base_url https://aig.mycluster.cyou/v1, model qwen3.8:27b-q4_K_M)",
-      "toolsets": "file,terminal,code_execution (no web, browser, memory, skills, delegation, image_gen, tts, cronjob, messaging)",
-      "invocation": "one `hermes chat -Q -t file,terminal,code_execution -q \"Work only inside the current directory (<dir>). <brief>\"` per task, cwd = a fresh empty directory",
-      "node": "v24.19.0"
-    }
+  "version": 2,
+  "standing": "three-task exploratory bakeoff, Mind vs Hermes only; NOT a superiority claim under competitive benchmark v1 (24 paired trials)",
+  "host": "everything runs on the staging box 192.168.4.95 (Debian 13, 8 cores, 12 GB): both legs and all artifact execution — one host, no environment confound; wall time recorded per leg but still not treated as a performance ranking",
+  "containment": {
+    "network": "net/cb2net.sh — Docker network cb2net 172.30.0.0/24; iptables DOCKER-USER: ACCEPT established/related to the subnet, ACCEPT subnet → 192.168.4.203 tcp/443 (the owned model gateway), DROP everything else from the subnet; containers run with --dns 127.0.0.1 and --add-host aig.mycluster.cyou:192.168.4.203; the script ends with a probe container that must print 'gateway ok / internet blocked / dns blocked'",
+    "filesystem": "Hermes: image cb2-hermes (docker/hermes.Dockerfile), --read-only root, tmpfs /tmp 512m, only two writable mounts: the task directory (/work) and a fresh per-task HERMES_HOME; unprivileged uid 10001; --memory 4g --cpus 4 --pids-limit 512. Checks: image cb2-check (docker/check.Dockerfile), a writable COPY of the artifact at /work, --memory 2g --cpus 2 --pids-limit 256, 300 s. The Mind's page path executes nothing; its artifacts are executed only inside cb2-check.",
+    "mind": "a fresh scratch instance per task on the host (run/scratch_up.sh: /var/lib/ym-cb2, ports 8099/8091/8078, YM_LOCAL_OLLAMA_URL=the gateway, model qwen3.8:27b-q4_K_M, YM_PRIVATE_PROVIDERS=YM_HOUSEHOLD_PROVIDERS=ollama-local, no cloud keys, no Telegram, no coder, DMN/proactive/patterns/home-watch off); torn down after each task with a receipt (run/scratch_down.sh)"
   },
-  "model": {"id": "qwen3.8:27b-q4_K_M", "endpoint": "https://aig.mycluster.cyou (owned lane; OpenAI-compatible /v1 for Hermes)", "rule": "the only model either system may reach; a task not built on it is reported as not built"},
+  "systems": {
+    "mind": {"binary": "the deployed staging mind-core, ledger tip at run time (provenance in the receipt)", "invocation": "one POST /api/agent {name, task} through the paired scratch console; the delegate router chooses the executor", "known_limit": "no code executor on this binary: a brief routed to `code` reads 'not runnable as configured'"},
+    "hermes": {"repo": "https://github.com/NousResearch/hermes-agent.git", "commit": "3ce1cf2bb768f39026e059f5236522dea2a4afe3", "version": "v0.14.0 (2026.5.16)", "config": "model.default qwen3.8:27b-q4_K_M, provider custom, base_url https://aig.mycluster.cyou/v1, agent.max_turns 8", "toolsets": "file,terminal,code_execution", "invocation": "one `hermes chat -Q -t file,terminal,code_execution -q \"Work only inside the current directory (/work). <brief>\"` per task, cwd /work (fresh, empty)"}
+  },
+  "model": {"id": "qwen3.8:27b-q4_K_M", "endpoint": "https://aig.mycluster.cyou (192.168.4.203; OpenAI-compatible /v1)", "rule": "the only model either system can reach — enforced by the network, not by configuration alone"},
   "caps": {
     "top_level_invocations_per_system_per_task": 1,
     "wall_clock_seconds": 1800,
-    "model_requests_hard_cap": 8,
-    "cap_enforcement": "Hermes: --max-turns is not exposed on this version; the harness counts `API call #n` lines in the profile's agent.log and DISQUALIFIES a run that exceeded 8 requests. Mind: the delegate path's own budget; the harness counts the scratch instance's inference_call rows and disqualifies the same way.",
-    "manual_edits": "none; the artifact directory is read-only from the moment the invocation exits or the job reports done/failed (a snapshot copy is hashed then)",
-    "network": "denied except loopback and the pinned owned Qwen endpoint — Hermes by toolset exclusion (no web/browser tools); Mind by configuration (no cloud keys, no web-search URL, YM_SEARXNG_URL unset). Package downloads or installs during a run disqualify it (Hermes terminal tool may attempt pip/npm; the checker refuses any run whose transcript shows a download).",
-    "downloads_installs": "forbidden"
+    "model_requests": 8,
+    "enforcement": "Hermes: agent.max_turns=8 prevents a 9th request; the receipt counts `API call #n` lines for the session and fails closed (invalid) if the session id or log is missing. Mind: the harness reads the scratch instance's inference_call rows under the closed schema (v1, verdict served|failed|refused, attempts:<n>; anything else counted as malformed, never as spend) every 15 s and KILLS the instance on the 9th request or at 1800 s (status cancelled:cap|cancelled:timeout).",
+    "manual_edits": "none — artifact directories are made read-only at exit/done and tree-hashed immediately",
+    "downloads_installs": "forbidden and impossible by network; any transcript line matching pip/npm/apt/curl/wget disqualifies anyway",
+    "artifact_execution": "only inside cb2-check on a writable copy"
   },
-  "briefs": {"T1": "briefs/T1.txt", "T2": "briefs/T2.txt", "T3": "briefs/T3.txt", "sha256": "receipts/briefs.sha256 (T1 5a31beab…, T2 3312cdf4…, T3 212a5cfd…)"},
-  "seed": {"file": "seed/leads.json", "semantics": "seed/expected.json — 20 leads, UTC calendar days, 14 bins 2026-08-20..2026-09-02 inclusive, 'today' fixed at 2026-09-02Z, most-recent by created_at", "placement": "T1 only: before the T1 check the harness copies seed/leads.json OVER the artifact's leads file (the file the artifact writes to, found by the checker as the JSON file its form appends to); the dashboard must then show expected.json's numbers"},
-  "output_dir_contract": {"hermes": "everything under the fresh working directory", "mind": "everything the job wrote under the scratch instance's YM_WEB_DIR (/var/lib/ym-cb2/public) plus any workdir the delegate reports, copied out after done/failed", "tree_hash": "tools/tree_hash.py — SHA-256 over (relative path, bytes) of every regular file sorted by path, excluding .git, __pycache__, node_modules, .pytest_cache, *.pyc, .DS_Store, Thumbs.db and the harness's own receipts"},
+  "briefs": {"files": ["briefs/T1.txt", "briefs/T2.txt", "briefs/T3.txt"], "contracts": "vendor-neutral store/render/CLI contracts appended to each brief (identical text to both systems)", "sha256": "receipts/briefs.sha256"},
+  "seed": {"file": "seed/leads.json", "expected": "seed/expected.json", "semantics": "20 leads, UTC calendar days, 14 bins ending on the UTC date of the newest lead (2026-09-02) inclusive, every bin present; recent = 5 names newest first", "placement": "the T1 checker writes the seed to data/leads.json in the writable copy before the dashboard check; the form check runs on the seed too (expects exactly total+1 afterwards)"},
   "checks": {
-    "browser": "Playwright 1.62.1, chromium headless shell 1223, viewport 1280x800, 10 s load timeout, console errors captured",
-    "T1": "checks/check_web.mjs t1: page loads with 0 console errors; every same-origin link resolves; form found (>=2 inputs + submit) and submitting appends exactly one record to the leads JSON; /dashboard (or dashboard.html) shows total == expected.total, the five_most_recent names, and the 14 per-day counts (numbers scraped from page text; a miss lists the scraped numbers for the grader)",
-    "T2": "checks/check_web.mjs t2: page loads with 0 console errors; every same-origin link resolves; text/DOM contains a projects section with >=4 items, a writing section with >=3 items, a reachable contact section (heuristics stated in the script; the grader reads the artifact too)",
-    "T3": "checks/check_t3.py: in a fresh copy — tests discovered and run (pytest if present else unittest), all pass; the CLI entry found (tracker.py|task.py|tasks.py|main.py|cli.py or a pyproject script) and `add`, `list`, `done`, `today` each exit 0 with sensible output on a fresh store; persistence verified across two processes"
+    "image": "cb2-check: Playwright 1.62.1 chromium, viewport 1280x800, 10 s load, console errors and any non-loopback request captured; pytest 8.3.5",
+    "T1": "checks/check_web.mjs t1 — run.sh present; site up on 8123; loads with 0 console errors and 0 external requests; relative links resolve; form#cb2-lead-form present; submit appends EXACTLY one record; the record equals the submitted fields with exactly the six contract keys and an ISO-8601 UTC created_at; /dashboard embeds script#cb2-dashboard whose total, per_day (14 exact keys and counts) and recent (5 names, order) equal seed/expected.json",
+    "T2": "checks/check_web.mjs t2 — loads with 0 console errors and 0 external requests; relative links resolve; section#projects has ≥4 article; section#writing has ≥3 article; section#contact has a mailto: link or a form",
+    "T3": "checks/check_t3.py — tracker.py present; test_*.py present and `python -m pytest -q` passes; on a fresh store: add→'added #1', add→'added #2', list = two exact lines, done 1→'done #1', list shows [x], today = the open task added today, tasks.json is a two-item array; every command its own process",
+    "selftest": "selftest/selftest.sh — six fixtures (t1/t2/t3 × pass/fail) must yield the expected verdicts before any graded run; the run's output is sent to the reviewer"
   },
-  "viewer_test": "Pranab, blind: per task, artifacts A/B (shuffled by Codex, who holds the label map outside the repo), fifteen seconds each, a forced pick; labels unsealed only after the pick is on the ledger",
-  "cost": {"mind": "inference_call rows of the scratch instance (requests, attempts, wall) — tokens absent", "hermes": "API call lines from its agent.log for the session (calls, provider-reported in/out tokens, latency)", "comparable": "requests/attempts only; tokens reported for Hermes with the caveat that the mind's are absent; wall time NOT compared (different hosts)"},
-  "environment_confound": "The Mind leg runs on the staging box; Hermes runs on the Windows workstation. Same-host execution is not available today. Wall time is recorded per leg and never compared. The model endpoint is the same for both.",
-  "receipts": "run/receipts/*.json per system per task: start/finish UTC, wall, status, request counts, tree hash, artifact byte count; no artifact text",
-  "kill": ["a brief edited per system", "a label unsealed before the pick", "a check softened after a failure", "a run on the live mind.db", "any artifact edited by hand", "any run that downloaded or installed packages", "any run over 8 model requests or 1800 s"]
+  "output_dir_contract": {"hermes": "/work (the task directory)", "mind": "RESULT.md (the job's result text, the declared output) plus every file the job added under the scratch YM_WEB_DIR", "tree_hash": "tools/tree_hash.py — SHA-256 over sorted (relative path, bytes); excludes .git, __pycache__, node_modules, .pytest_cache, .venv, *.pyc, .DS_Store, Thumbs.db"},
+  "receipts": "counts, ids, hashes, timings and statuses only; never result text (RESULT.md lives in the artifact)",
+  "cost": {"mind": "requests and attempts from the closed-schema rows; tokens absent", "hermes": "API calls and provider-reported in/out tokens from its session log", "comparable": "requests/attempts; tokens reported for Hermes with the mind's stated absent; wall recorded, not ranked"},
+  "viewer_test": "Pranab, blind: per task the two artifacts as A/B (map held by Codex outside the repo), fifteen seconds each, a forced pick; unsealed only after the pick is on the ledger",
+  "kill": ["a brief edited per system", "a label unsealed before the pick", "a check softened after a failure", "a run on the live mind.db", "any artifact edited by hand", "any run that reached the internet or installed anything", "any run over 8 model requests or 1800 s", "a self-test that disagrees with its expected verdict at run time"]
 }

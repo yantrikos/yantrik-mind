@@ -1,116 +1,97 @@
-// T1 / T2 mechanical checks with a fixed browser. Usage:
-//   node check_web.mjs t2 <artifact-dir>            (static: served by the checker on 127.0.0.1:8123)
-//   node check_web.mjs t1 <artifact-dir> [start-cmd] (T1: if the artifact ships a server, pass its
-//                                                     start command; else static serve)
-// Heuristics are stated inline; the verdict lists what was scraped so a grader can disagree.
+// E.CB2 web checks — EXACT contracts (briefs/T1.txt, briefs/T2.txt), run INSIDE the checker image on a
+// WRITABLE COPY of the artifact. Usage: node check_web.mjs t1|t2 <artifact-copy-dir>
+// Fixed browser: Playwright 1.62.1 chromium, viewport 1280x800, 10 s load timeout.
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { spawn } from "node:child_process";
-import pw from "file:///C:/Users/sync/AppData/Local/npm-cache/_npx/9833c18b2d85bc59/node_modules/playwright/index.js";
-const { chromium } = pw;
-const EXE = "C:/Users/sync/AppData/Local/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell-win64/chrome-headless-shell.exe";
-const [, , task, dir, startCmd] = process.argv;
-const PORT = 8123;
+import { chromium } from "playwright";
+const [, , task, dir] = process.argv;
+const PORT = 8123, base = `http://127.0.0.1:${PORT}`;
 const verdict = { task: task.toUpperCase(), checks: {}, scraped: {} };
+const check = (k, pass, extra = {}) => { verdict.checks[k] = { pass: !!pass, ...extra }; };
+const expected = JSON.parse(fs.readFileSync("/checker/seed/expected.json", "utf8"));
+const seed = fs.readFileSync("/checker/seed/leads.json", "utf8");
 
 function staticServer(root) {
-  const types = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml" };
+  const types = { ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp" };
   return http.createServer((req, res) => {
-    let p = decodeURIComponent(req.url.split("?")[0]);
-    if (p.endsWith("/")) p += "index.html";
-    let f = path.join(root, p);
-    if (!fs.existsSync(f) && fs.existsSync(f + ".html")) f = f + ".html";
-    if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); res.end("nf"); return; }
-    res.writeHead(200, { "content-type": types[path.extname(f)] || "application/octet-stream" });
-    res.end(fs.readFileSync(f));
+    let p = decodeURIComponent(req.url.split("?")[0]); if (p.endsWith("/")) p += "index.html";
+    let f = path.join(root, p); if (!fs.existsSync(f) && fs.existsSync(f + ".html")) f += ".html";
+    if (!fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { "content-type": types[path.extname(f)] || "application/octet-stream" }); res.end(fs.readFileSync(f));
   });
 }
+async function waitUp(ms = 15000) { const t = Date.now(); while (Date.now() - t < ms) { try { const r = await fetch(base + "/"); if (r.status < 500) return true; } catch {} await new Promise(r => setTimeout(r, 500)); } return false; }
 let server = null, child = null;
-if (startCmd) {
-  child = spawn(startCmd, { cwd: dir, shell: true, stdio: "ignore" });
-  await new Promise(r => setTimeout(r, 4000));
-} else {
-  server = staticServer(dir).listen(PORT);
-}
-const base = `http://127.0.0.1:${PORT}`;
-const browser = await chromium.launch({ executablePath: EXE });
+const runSh = path.join(dir, "run.sh");
+if (task === "t1") {
+  fs.mkdirSync(path.join(dir, "data"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "data", "leads.json"), seed);           // the seed installed per the contract
+  if (fs.existsSync(runSh)) { child = spawn("bash", ["run.sh"], { cwd: dir, stdio: "ignore" }); }
+  else { server = staticServer(dir).listen(PORT); }
+  check("run_sh_present", fs.existsSync(runSh));
+} else { server = staticServer(dir).listen(PORT); }
+check("site_up", await waitUp());
+const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 const errors = [];
 page.on("console", m => { if (m.type() === "error") errors.push(m.text().slice(0, 120)); });
 page.on("pageerror", e => errors.push(String(e).slice(0, 120)));
-const entry = fs.existsSync(path.join(dir, "index.html")) ? "/index.html" : "/" + (fs.readdirSync(dir).find(f => f.endsWith(".html")) || "");
+page.on("request", r => { const u = r.url(); if (!u.startsWith(base) && !u.startsWith("data:") && !u.startsWith("about:")) errors.push("external request: " + u.slice(0, 80)); });
 let loaded = false;
-try { await page.goto(base + entry, { timeout: 10000, waitUntil: "load" }); loaded = true; } catch (e) { errors.push("load: " + String(e).slice(0, 100)); }
-verdict.checks.loads_without_console_error = { pass: loaded && errors.length === 0, errors };
-// links
+try { await page.goto(base + "/", { timeout: 10000, waitUntil: "load" }); loaded = true; } catch (e) { errors.push("load: " + String(e).slice(0, 100)); }
+check("loads_without_console_error_or_external_request", loaded && errors.length === 0, { errors });
 const hrefs = loaded ? await page.$$eval("a[href]", as => as.map(a => a.getAttribute("href"))) : [];
-const local = hrefs.filter(h => h && !h.startsWith("http") && !h.startsWith("mailto:") && !h.startsWith("tel:") && !h.startsWith("#"));
-let broken = [];
-for (const h of local) {
-  const r = await fetch(base + (h.startsWith("/") ? h : "/" + h)).catch(() => ({ status: 0 }));
-  if (r.status !== 200) broken.push(h);
-}
-verdict.checks.links_resolve = { pass: broken.length === 0, checked: local.length, broken };
-const text = loaded ? (await page.evaluate(() => document.body.innerText)) : "";
+const local = hrefs.filter(h => h && !/^(https?:|mailto:|tel:|#|data:)/.test(h));
+const broken = [];
+for (const h of local) { const r = await fetch(base + (h.startsWith("/") ? h : "/" + h)).catch(() => ({ status: 0 })); if (r.status !== 200) broken.push(h); }
+check("relative_links_resolve", broken.length === 0, { checked: local.length, broken });
+
 if (task === "t2") {
-  const lower = text.toLowerCase();
-  const section = (word) => { const i = lower.indexOf(word); return i < 0 ? "" : lower.slice(i, i + 2500); };
-  const countItems = async (word) => {
-    return await page.evaluate((w) => {
-      const heads = [...document.querySelectorAll("h1,h2,h3,h4,section,nav a")].filter(e => e.textContent.toLowerCase().includes(w));
-      let best = 0;
-      for (const h of heads) {
-        const scope = h.closest("section") || h.parentElement;
-        if (!scope) continue;
-        const n = scope.querySelectorAll("article, li, .card, .project, .post, h3, h4").length;
-        best = Math.max(best, n);
-      }
-      return best;
-    }, word);
-  };
-  const projects = await countItems("project"), posts = await countItems("writing") || await countItems("post") || await countItems("blog");
-  const contact = lower.includes("contact") && (lower.includes("@") || lower.includes("mailto") || (await page.$$("form")).length > 0);
-  verdict.scraped = { projects_items: projects, writing_items: posts, contact_present: contact };
-  verdict.checks.projects_at_least_4 = { pass: projects >= 4 };
-  verdict.checks.writing_at_least_3 = { pass: posts >= 3 };
-  verdict.checks.contact_reachable = { pass: contact };
+  const counts = await page.evaluate(() => ({
+    projects: document.querySelectorAll("section#projects article").length,
+    writing: document.querySelectorAll("section#writing article").length,
+    contact: !!document.querySelector("section#contact") && (!!document.querySelector("section#contact a[href^='mailto:']") || !!document.querySelector("section#contact form")),
+  }));
+  verdict.scraped = counts;
+  check("projects_section_has_4_articles", counts.projects >= 4);
+  check("writing_section_has_3_articles", counts.writing >= 3);
+  check("contact_section_reachable", counts.contact);
 }
 if (task === "t1") {
-  const expected = JSON.parse(fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, "")), "..", "seed", "expected.json"), "utf8"));
-  // the form
-  const inputs = await page.$$("form input:not([type=hidden]), form textarea");
-  const submit = await page.$("form button, form input[type=submit]");
-  verdict.checks.form_present = { pass: inputs.length >= 2 && !!submit, inputs: inputs.length };
-  // the leads file: any *.json in the tree that looks like a list (the artifact's store)
-  const jsons = fs.readdirSync(dir, { recursive: true }).filter(f => f.endsWith(".json") && !f.includes("node_modules") && !f.includes("package"));
-  const before = Object.fromEntries(jsons.map(f => [f, fs.existsSync(path.join(dir, f)) ? fs.readFileSync(path.join(dir, f), "utf8").length : 0]));
-  let appended = false;
-  if (inputs.length >= 2 && submit) {
-    for (const i of inputs) { const t = (await i.getAttribute("type")) || "text"; const nm = ((await i.getAttribute("name")) || "").toLowerCase();
-      await i.fill(t === "email" || nm.includes("mail") ? "checker@example.in" : t === "tel" || nm.includes("phone") ? "+91 9876543210" : "Checker Lead").catch(() => {}); }
-    await submit.click().catch(() => {});
-    await new Promise(r => setTimeout(r, 2500));
-    const after = Object.fromEntries(jsons.map(f => [f, fs.existsSync(path.join(dir, f)) ? fs.readFileSync(path.join(dir, f), "utf8").length : 0]));
-    appended = jsons.some(f => after[f] > before[f]);
+  const store = path.join(dir, "data", "leads.json");
+  const form = await page.$("form#cb2-lead-form");
+  check("form_cb2_lead_form_present", !!form);
+  const sample = { name: "Checker Lead", email: "checker@example.in", phone: "+91 9876543210", business: "Checker Traders", message: "Checker message." };
+  let appendedExactly = false, recordMatches = false, createdAtIso = false;
+  if (form) {
+    for (const [k, v] of Object.entries(sample)) { const el = await form.$(`[name="${k}"]`); if (el) await el.fill(v).catch(() => {}); }
+    const btn = await form.$("button[type=submit], input[type=submit], button");
+    if (btn) await btn.click().catch(() => {});
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      const arr = JSON.parse(fs.readFileSync(store, "utf8"));
+      appendedExactly = Array.isArray(arr) && arr.length === expected.total + 1;
+      const last = arr[arr.length - 1] || {};
+      recordMatches = Object.entries(sample).every(([k, v]) => last[k] === v) && Object.keys(last).sort().join(",") === "business,created_at,email,message,name,phone";
+      createdAtIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(last.created_at || ""));
+    } catch (e) { verdict.scraped.store_error = String(e).slice(0, 100); }
   }
-  verdict.checks.form_appends_one_lead = { pass: appended, note: "a JSON store in the tree grew after submit (heuristic)" };
-  // dashboard on the seed: the harness placed seed/leads.json over the store before this run
-  let dashText = "";
-  for (const cand of ["/dashboard", "/dashboard.html", "/dashboard/index.html"]) {
-    try { const r = await page.goto(base + cand, { timeout: 10000 }); if (r && r.status() === 200) { dashText = await page.evaluate(() => document.body.innerText); break; } } catch {}
-  }
-  const nums = (dashText.match(/\d+/g) || []).map(Number);
-  const names = expected.five_most_recent.filter(n => dashText.includes(n.split(" ")[0]));
-  const perDay = Object.values(expected.per_day);
-  const perDayFound = perDay.every(v => nums.includes(v));
-  verdict.scraped.dashboard = { found: dashText.length > 0, numbers: nums.slice(0, 40), recent_names_matched: names.length };
-  verdict.checks.dashboard_total = { pass: nums.includes(expected.total), expected: expected.total };
-  verdict.checks.dashboard_recent_five = { pass: names.length === 5 };
-  verdict.checks.dashboard_per_day = { pass: perDayFound, note: "every expected per-day count appears as a number on the page (weak necessary condition, stated)" };
+  check("submit_appends_exactly_one_record", appendedExactly);
+  check("appended_record_matches_submission_and_schema", recordMatches && createdAtIso);
+  // dashboard on the pristine seed
+  fs.writeFileSync(store, seed);
+  let dash = null;
+  try { await page.goto(base + "/dashboard", { timeout: 10000, waitUntil: "load" }); dash = await page.$eval("script#cb2-dashboard", s => s.textContent); } catch (e) { verdict.scraped.dashboard_error = String(e).slice(0, 100); }
+  let d = null; try { d = JSON.parse(dash); } catch {}
+  verdict.scraped.dashboard = d ? { total: d.total, per_day_keys: Object.keys(d.per_day || {}).length, recent: (d.recent || []).length } : null;
+  check("dashboard_json_block_present", !!d);
+  check("dashboard_total_exact", !!d && d.total === expected.total, { expected: expected.total });
+  check("dashboard_per_day_exact_14_bins", !!d && JSON.stringify(d.per_day) === JSON.stringify(expected.per_day));
+  check("dashboard_recent_five_exact_order", !!d && JSON.stringify(d.recent) === JSON.stringify(expected.five_most_recent));
 }
-await browser.close();
-if (server) server.close();
-if (child) child.kill();
+await browser.close(); if (server) server.close(); if (child) child.kill("SIGKILL");
 verdict.pass = Object.values(verdict.checks).every(c => c.pass);
 console.log(JSON.stringify(verdict, null, 1));
+process.exit(verdict.pass ? 0 : 1);

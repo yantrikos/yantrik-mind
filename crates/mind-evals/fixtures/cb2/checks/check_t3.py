@@ -1,58 +1,40 @@
-"""T3 mechanical check — a command-line task tracker in Python. Runs in a FRESH COPY of the
-artifact directory. Reports a JSON verdict; never edits the artifact."""
-import json, os, shutil, subprocess, sys, tempfile, glob
-
-def run(cmd, cwd, timeout=60):
+"""E.CB2 T3 check — EXACT contract (briefs/T3.txt), run INSIDE the checker image on a writable copy.
+Usage: python3 check_t3.py <artifact-copy-dir>. Exit 0 iff every check passes."""
+import json, os, subprocess, sys, glob, datetime
+d = sys.argv[1]; py = sys.executable
+v = {"task": "T3", "checks": {}}
+def check(k, ok, **extra): v["checks"][k] = {"pass": bool(ok), **extra}
+def run(args, cwd, timeout=60):
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, (p.stdout + p.stderr)[-400:]
+        p = subprocess.run([py] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                           env={"PATH": os.environ.get("PATH", ""), "HOME": cwd, "PYTHONDONTWRITEBYTECODE": "1"})
+        return p.returncode, p.stdout.strip(), p.stderr[-200:]
     except Exception as e:
-        return 99, str(e)[:200]
-
-src = sys.argv[1]
-work = tempfile.mkdtemp(prefix="cb2-t3-")
-shutil.copytree(src, work, dirs_exist_ok=True)
-verdict = {"task": "T3", "checks": {}}
-# tests
-has_pytest = subprocess.run([sys.executable, "-c", "import pytest"], capture_output=True).returncode == 0
-test_files = [f for f in glob.glob(os.path.join(work, "**", "*test*.py"), recursive=True) if "node_modules" not in f]
-if not test_files:
-    verdict["checks"]["tests"] = {"pass": False, "why": "no test file found"}
-else:
-    cmd = [sys.executable, "-m", "pytest", "-q"] if has_pytest else [sys.executable, "-m", "unittest", "discover", "-v"]
-    rc, out = run(cmd, work, 180)
-    verdict["checks"]["tests"] = {"pass": rc == 0, "runner": cmd[2], "tail": out[-300:]}
-# the CLI entry
-entry = None
-for cand in ["tracker.py", "task.py", "tasks.py", "todo.py", "main.py", "cli.py", "app.py"]:
-    p = os.path.join(work, cand)
-    if os.path.exists(p):
-        entry = [sys.executable, p]; break
-if entry is None:
-    for py in glob.glob(os.path.join(work, "*.py")):
-        if "test" in os.path.basename(py):
-            continue
-        if "__main__" in open(py, encoding="utf-8", errors="replace").read():
-            entry = [sys.executable, py]; break
-if entry is None:
-    verdict["checks"]["cli"] = {"pass": False, "why": "no CLI entry found"}
-else:
-    fresh = tempfile.mkdtemp(prefix="cb2-t3-store-")
-    env = dict(os.environ, HOME=fresh, USERPROFILE=fresh)
-    steps = {}
-    for name, args in [("add", ["add", "Write the report"]), ("add2", ["add", "Call the bank"]), ("list", ["list"]), ("done", ["done", "1"]), ("today", ["today"])]:
-        try:
-            p = subprocess.run(entry + args, cwd=work, env=env, capture_output=True, text=True, timeout=60)
-            steps[name] = {"rc": p.returncode, "out_len": len(p.stdout)}
-        except Exception as e:
-            steps[name] = {"rc": 99, "why": str(e)[:120]}
-    # persistence across processes: a second `list` must still show the tasks
-    try:
-        p = subprocess.run(entry + ["list"], cwd=work, env=env, capture_output=True, text=True, timeout=60)
-        steps["persist"] = {"rc": p.returncode, "mentions_task": ("report" in p.stdout.lower()) or ("bank" in p.stdout.lower())}
-    except Exception as e:
-        steps["persist"] = {"rc": 99, "why": str(e)[:120]}
-    ok = all(s.get("rc") == 0 for s in steps.values()) and steps["persist"].get("mentions_task", False)
-    verdict["checks"]["cli"] = {"pass": ok, "entry": os.path.basename(entry[1]), "steps": steps}
-verdict["pass"] = all(c.get("pass") for c in verdict["checks"].values())
-print(json.dumps(verdict, indent=1))
+        return 99, "", str(e)[:120]
+tracker = os.path.join(d, "tracker.py")
+check("tracker_py_present", os.path.exists(tracker))
+tests = sorted(glob.glob(os.path.join(d, "test_*.py")))
+check("test_files_present", len(tests) > 0, files=[os.path.basename(t) for t in tests])
+rc, out, err = run(["-m", "pytest", "-q"], d, 180)
+check("pytest_passes", rc == 0 and len(tests) > 0, tail=(out + err)[-200:])
+# the CLI contract, every command its own process, on a fresh store directory
+store = os.path.join(d, "cb2_store"); os.makedirs(store, exist_ok=True)
+tp = os.path.abspath(tracker)
+rc1, o1, _ = run([tp, "add", "Write the report"], store); check("add_prints_added_1", rc1 == 0 and o1 == "added #1", out=o1[:60])
+rc2, o2, _ = run([tp, "add", "Call the bank"], store); check("add_prints_added_2", rc2 == 0 and o2 == "added #2", out=o2[:60])
+rc3, o3, _ = run([tp, "list"], store)
+check("list_two_open_lines", rc3 == 0 and o3.splitlines() == ["#1 [ ] Write the report", "#2 [ ] Call the bank"], out=o3[:120])
+rc4, o4, _ = run([tp, "done", "1"], store); check("done_prints_done_1", rc4 == 0 and o4 == "done #1", out=o4[:60])
+rc5, o5, _ = run([tp, "list"], store)
+check("list_marks_done", rc5 == 0 and o5.splitlines() == ["#1 [x] Write the report", "#2 [ ] Call the bank"], out=o5[:120])
+rc6, o6, _ = run([tp, "today"], store)
+check("today_lists_open_tasks_added_today", rc6 == 0 and o6.splitlines() == ["#2 [ ] Call the bank"], out=o6[:120])
+sp = os.path.join(store, "tasks.json")
+ok_store = False
+try:
+    arr = json.load(open(sp, encoding="utf-8")); ok_store = isinstance(arr, list) and len(arr) == 2
+except Exception:
+    pass
+check("tasks_json_is_a_two_item_array", ok_store)
+v["pass"] = all(c["pass"] for c in v["checks"].values())
+print(json.dumps(v, indent=1)); sys.exit(0 if v["pass"] else 1)

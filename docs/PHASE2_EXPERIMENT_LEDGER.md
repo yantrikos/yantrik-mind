@@ -5090,3 +5090,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The claim | The report leads with what was learned and bounds what it prints, without ever hiding that it truncated. |
 | Kill criteria, before the code | (1) Output is BOUNDED regardless of row count — a fixed cap, not a fraction. (2) The summary comes FIRST; it is the finding, and the per-wake blocks are evidence for it. (3) Omission is STATED, never silent — a report that truncates without saying so is the censoring pattern this ledger has already paid for twice. (4) When truncating, wakes WITH a shortfall survive in preference to wakes without: the interesting rows must not be the ones dropped. (5) Small inputs render exactly as before, so the four existing tests still pass unchanged — a fix for scale must not alter the case that was already right. |
 | Criterion 4 is the one that matters | A cap that keeps the FIRST n wakes would drop precisely the rows the report exists to surface, and would look perfectly reasonable doing it. |
+
+## E.L2B-R2 SHIPPED — the finding first, the evidence bounded
+| Field | Value |
+| --- | --- |
+| Kill criterion 1 — bounded | MET. Twelve wake blocks maximum, a fixed cap rather than a fraction. A 200-wake input renders under 120 lines; removing the cap fails the test. |
+| Kill criterion 2 — summary first | MET. The conclusion now precedes the evidence, asserted by comparing their positions in the output rather than by eye. |
+| Kill criterion 3 — never silent | MET. A truncated report states how many wakes it omitted AND that they are still counted in the numbers above. Making the truncation silent fails. |
+| Kill criterion 4 — the interesting rows survive | MET, and it is the one that would have looked reasonable while being wrong. Wakes carrying an unseen loop sort ahead of the rest, newest first within each group. The mutation that keeps the FIRST wakes by cycle order — the obvious implementation — drops precisely the rows the report exists to surface, and fails. |
+| **Kill criterion 5, which I got wrong when I wrote it** | I preregistered *"small inputs render exactly as before"*. That is now false and was never achievable: moving the summary above the detail changes the output for EVERY input, including small ones. What is actually true is what I should have written — **the CONTENT for small inputs is unchanged and all four original tests pass untouched.** Recording the imprecision rather than quietly reinterpreting my own criterion to match what I built. |
+| Mutations | Three, all die: cap removed, cap keeps the first wakes, truncation silent. Workspace 1763/1763. |

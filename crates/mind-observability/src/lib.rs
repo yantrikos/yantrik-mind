@@ -6719,55 +6719,36 @@ pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> Stri
 
     // The denominator: every wake with loop activity, plus any wake that produced a shadow row.
     let wakes: BTreeSet<CycleId> = due.keys().chain(shadows.keys()).copied().collect();
+
+    // E.L2B-R2: decide EVERYTHING first, print second.
+    //
+    // The first version of this report printed a block per wake and put the summary at the end.
+    // At two wakes that reads fine; at 389 it is 2,240 lines and 74 KB, and the one sentence that
+    // matters -- how many wakes carried a loop the shadow never saw -- is at the bottom of it.
+    // An operator does not scroll 74 KB to reach a conclusion, so the conclusion goes first and
+    // the evidence is bounded beneath it.
+    let mut per_wake: Vec<(CycleId, Vec<String>)> = Vec::new();
     let mut blind_wakes = 0usize;
     let mut unseen_total: BTreeMap<String, usize> = BTreeMap::new();
-
     for c in &wakes {
-        let shadow = shadows.get(c);
-        let considered: BTreeSet<String> = shadow
+        let considered: BTreeSet<String> = shadows
+            .get(c)
             .map(|e| e.candidates.iter().cloned().collect())
             .unwrap_or_default();
         let empty = BTreeMap::new();
         let due_here = due.get(c).unwrap_or(&empty);
-        let unseen: Vec<&String> = due_here.keys().filter(|l| !considered.contains(*l)).collect();
+        let unseen: Vec<String> = due_here
+            .keys()
+            .filter(|l| !considered.contains(*l))
+            .cloned()
+            .collect();
         if !unseen.is_empty() {
             blind_wakes += 1;
             for l in &unseen {
-                *unseen_total.entry((*l).clone()).or_default() += 1;
+                *unseen_total.entry(l.clone()).or_default() += 1;
             }
         }
-        out.push_str(&format!("  wake {}
-", c.render()));
-        match shadow {
-            Some(e) => {
-                out.push_str(&format!(
-                    "    considered : {}
-    would pick : {}
-    scores     : {}
-",
-                    if considered.is_empty() { "—".into() } else { considered.iter().cloned().collect::<Vec<_>>().join(", ") },
-                    e.chosen.as_deref().unwrap_or("(abstained)"),
-                    if e.policy.is_empty() { "—".to_string() } else { e.policy.join(" ") },
-                ));
-            }
-            // The strongest shortfall there is, and the case a shadow-scoped denominator hides.
-            None => out.push_str("    considered : NO SHADOW ROW — the shadow saw nothing this wake
-"),
-        }
-        out.push_str(&format!(
-            "    due        : {}
-",
-            if due_here.is_empty() {
-                "—".to_string()
-            } else {
-                due_here.iter().map(|(l, v)| format!("{l}({v})")).collect::<Vec<_>>().join(", ")
-            }
-        ));
-        out.push_str(&format!(
-            "    UNSEEN     : {}
-",
-            if unseen.is_empty() { "—".to_string() } else { unseen.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") }
-        ));
+        per_wake.push((*c, unseen));
     }
 
     out.push_str(&format!(
@@ -6792,6 +6773,70 @@ pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> Stri
         "{unpairable} loop row(s) carry no wake and are excluded from every number above (an older era, or the Telegram host, which has no wake counter). They are reported rather than dropped: a denominator that quietly shrinks to the rows that happen to pair is how two earlier readings were censored.
 "
     ));
+
+    // The evidence, bounded. Wakes that carried an UNSEEN loop come first and newest-first within
+    // each group, so a cap can never drop the rows this report exists to surface -- keeping the
+    // first N by cycle order would have dropped exactly those and looked reasonable doing it.
+    const MAX_WAKE_BLOCKS: usize = 12;
+    let mut ordered: Vec<&(CycleId, Vec<String>)> = per_wake.iter().collect();
+    ordered.sort_by_key(|(c, unseen)| (unseen.is_empty(), std::cmp::Reverse(c.wake_no)));
+    let shown = ordered.len().min(MAX_WAKE_BLOCKS);
+    if !ordered.is_empty() {
+        out.push_str(&format!(
+            "
+wakes in detail ({} of {}, those with an unseen loop first):
+",
+            shown,
+            ordered.len()
+        ));
+    }
+    for (c, unseen) in ordered.iter().take(MAX_WAKE_BLOCKS) {
+        let shadow = shadows.get(c);
+        let considered: BTreeSet<String> = shadow
+            .map(|e| e.candidates.iter().cloned().collect())
+            .unwrap_or_default();
+        let empty = BTreeMap::new();
+        let due_here = due.get(c).unwrap_or(&empty);
+        out.push_str(&format!("  wake {}
+", c.render()));
+        match shadow {
+            Some(e) => {
+                out.push_str(&format!(
+                    "    considered : {}
+    would pick : {}
+    scores     : {}
+",
+                    if considered.is_empty() { "—".into() } else { considered.iter().cloned().collect::<Vec<_>>().join(", ") },
+                    e.chosen.as_deref().unwrap_or("(abstained)"),
+                    if e.policy.is_empty() { "—".to_string() } else { e.policy.join(" ") },
+                ));
+            }
+            None => out.push_str("    considered : NO SHADOW ROW — the shadow saw nothing this wake
+"),
+        }
+        out.push_str(&format!(
+            "    due        : {}
+",
+            if due_here.is_empty() {
+                "—".to_string()
+            } else {
+                due_here.iter().map(|(l, v)| format!("{l}({v})")).collect::<Vec<_>>().join(", ")
+            }
+        ));
+        out.push_str(&format!(
+            "    UNSEEN     : {}
+",
+            if unseen.is_empty() { "—".to_string() } else { unseen.join(", ") }
+        ));
+    }
+    if ordered.len() > shown {
+        // Never a silent truncation.
+        out.push_str(&format!(
+            "  … {} further wake(s) not shown; every one of them is counted in the numbers above.
+",
+            ordered.len() - shown
+        ));
+    }
     out
 }
 

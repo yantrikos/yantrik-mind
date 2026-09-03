@@ -638,6 +638,73 @@ mod l2b_reader_tests {
         );
     }
 
+    /// E.L2B-R2 KILL 1 + 3: the report is BOUNDED at any row count, and never truncates silently.
+    #[test]
+    fn a_large_window_is_bounded_and_says_what_it_omitted() {
+        let mut evs = Vec::new();
+        for n in 1..=200u64 {
+            let c = wake(n);
+            evs.push(shadow(c, &["lease-sweep"], "lease-sweep", 10 + n));
+            evs.push(tick(Some(c), LoopId::LeaseSweep, None, 10 + n));
+        }
+        let out = render_attention_shadow_at(&evs, 100_000);
+        let lines = out.lines().count();
+        assert!(
+            lines < 120,
+            "200 wakes must not render 200 blocks; got {lines} lines"
+        );
+        assert!(out.contains("200 wake(s)"), "every wake is still counted: {out}");
+        assert!(
+            out.contains("further wake(s) not shown"),
+            "a truncation must announce itself: {out}"
+        );
+        assert!(
+            out.contains("counted in the numbers above"),
+            "and must say the omitted rows still count: {out}"
+        );
+    }
+
+    /// E.L2B-R2 KILL 2: the summary comes FIRST. It is the finding; the blocks are evidence for
+    /// it, and 2,240 lines of evidence above a conclusion is a conclusion nobody reads.
+    #[test]
+    fn the_summary_precedes_the_per_wake_detail() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            tick(Some(wake(1)), LoopId::Dmn, Some(HeldReason::IdleGate), 12),
+        ];
+        let out = render_attention_shadow_at(&evs, 20);
+        let summary = out.find("wake(s);").expect("the summary is present");
+        let detail = out.find("  wake cycle:").expect("the detail is present");
+        assert!(summary < detail, "the finding must precede its evidence:
+{out}");
+    }
+
+    /// E.L2B-R2 KILL 4, the one that matters: when the cap bites, wakes WITH an unseen loop
+    /// survive. A cap that kept the first N by order would drop exactly the rows this report
+    /// exists to surface, and would look entirely reasonable doing it.
+    #[test]
+    fn truncation_keeps_the_wakes_that_carry_a_shortfall() {
+        let mut evs = Vec::new();
+        // 60 uninteresting wakes FIRST, so anything that keeps the earliest would lose the finding.
+        for n in 1..=60u64 {
+            let c = wake(n);
+            evs.push(shadow(c, &["lease-sweep"], "lease-sweep", 10 + n));
+            evs.push(tick(Some(c), LoopId::LeaseSweep, None, 10 + n));
+        }
+        // one late wake where a due loop was never considered
+        let c = wake(99);
+        evs.push(shadow(c, &["lease-sweep"], "lease-sweep", 200));
+        evs.push(tick(Some(c), LoopId::LeaseSweep, None, 200));
+        evs.push(tick(Some(c), LoopId::Dmn, Some(HeldReason::IdleGate), 201));
+        let out = render_attention_shadow_at(&evs, 100_000);
+        assert!(
+            out.contains("UNSEEN     : dmn"),
+            "the one wake with a shortfall must survive truncation:
+{out}"
+        );
+    }
+
     /// Rows that cannot be paired are REPORTED, never dropped. A denominator that quietly shrinks
     /// to the rows that happen to pair is the censoring pattern that cost two earlier readings.
     #[test]

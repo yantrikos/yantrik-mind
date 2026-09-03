@@ -5556,3 +5556,23 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Preflight before any graded leg, per the manifest | The full self-test suite; image freshness (the checker and proxy are baked into images); containment proof with exact TCP probes both sides; the live cap proof; a no-model Mind smoke and a Hermes smoke. Results go to Codex before the first graded leg. |
 | Prediction, recorded so it can be wrong | I expect the Mind to complete all three tasks void-free, and I do **not** predict a win. Reading 6 was 26–25 and its own note says both systems are variable; reading 5 was 4–22 on the same harness. A margin under ~3 points across 27 checks is noise, and I will say so whichever way it falls. |
 | What I will NOT do | Call a result a win from a small margin; re-run a leg that was disqualified rather than void; or adjust anything mid-sequence. If the harness breaks, the reading stops and is reported as stopped. |
+
+## E.CB2-N READING 7 — RESULT: Hermes 24/27, Mind 17/27. A loss, reported as one.
+| task | mind | hermes | reqs (m/h) | wall (m/h) |
+| --- | --- | --- | --- | --- |
+| T1 | **2/11** | **11/11** | 3 / 16 | 171 s / 201 s |
+| T2 | **6/6** | 4/6 | 3 / 5 | 101 s / 74 s |
+| T3 | 9/10 | 9/10 | 3 / 15 | 71 s / 156 s |
+| **total** | **17/27** | **24/27** | | |
+
+| Field | Value |
+| --- | --- |
+| Validity | All six legs **valid**: `void false`, `disqualified false`, `dq_independent false`, accounting agrees, model identity correct, zero key-leak hits, zero upstream 5xx across the whole reading. Nothing was rerun. The sequence ran exactly as preregistered. |
+| The result | **Hermes wins by 7.** The entire gap is T1: the Mind's artifact was a 2,814-byte `server.py` with no `index.html`, and the server never started — `ERR_CONNECTION_REFUSED`. The Mind won T2 6/6 against 4/6 and tied T3 at 9/10. |
+| My prediction, scored | I predicted the Mind would complete all three void-free — **correct**. I explicitly did not predict a win — **correct, and it lost**. Recording both halves, since the point of writing a prediction down is that it can be wrong. |
+| What this does NOT settle | Whether the loss is variance or a regression from my own clamp. The two gate legs scored **11/11 twice on T1 with the same profile, the same clamp active, and the same deadline** — so the budget demonstrably suffices for a full T1 artifact. Three T1 samples now read 11/11, 11/11, 2/11. That spread is the finding, and it is not one I can resolve by staring at it. |
+| The suspicion I must not wave away | The gate legs ran binary `87788793` (a400391); this reading ran `2632e857` (6350026). The only product change between them is the forge clamp in `code.rs`, a lane this benchmark does not use — so causation is implausible, but "implausible" is not "measured", and I have been wrong about exactly that shape of reasoning four times today. |
+| A defect in my own instrumentation, found by using it | The crash guard adds `checker_completed` to the verdict, which inflates the denominator: the raw file reads `2/5` for a task with **11** checks. The tally above excludes it, but the verdict as written is misleading to anyone reading it directly. `checker_completed` should be reported beside the score, not inside it. |
+| What the guard did earn | Without it, the Mind's T1 would have produced **no verdict at all** — the checker crashed on the navigation after the site failed to come up. Instead the reading has a scoreable, explainable failure. |
+| Not doing | Rerunning T1 to get a better number. It was not void; the one declared rerun does not apply; and re-rolling a leg until it looks better is the exact thing the void rule exists to prevent. |
+| Standing across readings | 5: Hermes 22–4. 6: Mind 26–25. 7: **Hermes 24–17**. Reading 6's own caution — "do NOT claim a win from 26-25, both systems are variable" — applies symmetrically, and reading 7 is the demonstration. |

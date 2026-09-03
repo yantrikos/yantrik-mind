@@ -8174,6 +8174,11 @@ impl ConversationEngine {
                 if prefix == "attention" {
                     return verified_report(mind_observability::render_attention_shadow);
                 }
+                // E.G2-R: what the world model knew each time something asked it, and whether the
+                // agreement it exists to measure is computable at all on this box.
+                if prefix == "world" {
+                    return verified_report(mind_observability::render_world_shadow);
+                }
                 // E.CFG1: what each configured function would actually call. The plain read makes no
                 // network call and says so; `roles verify` asks each distinct provider whether it
                 // serves the model the route names — the question the router never asks, and the one

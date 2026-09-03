@@ -6490,6 +6490,134 @@ fn join_counts(m: &std::collections::BTreeMap<String, usize>) -> String {
 }
 
 /// `ym why loops`: the last 24 hours of the mind's idle time, one loop per block, anchored to now.
+/// E.G2-R: `ym why world` — what the world model knew, each time something asked it.
+///
+/// The shadow had 9,889 rows on the canary and no reader. This reports them, and refuses three
+/// ways of being misleading that the hand-run measurement walked into first:
+///
+///   * The two samples are NEVER pooled. `knock-receptivity` is recorded at a real decision moment
+///     and `headless-cadence` on a fixed tick; one can measure agreement with a decision, the other
+///     only that ingestion → gate → verdict is alive. Averaging them would invent a number that
+///     describes neither.
+///   * The disposition breakdown sits beside the known/stale/unknown split. "known 1.5%" alone
+///     invites the conclusion that the model is failing, when the reading is that every evaluation
+///     exited at `no_packets` before the gate and the model was answering about an idle box.
+///   * When nothing reached the gate, the agreement is reported as UNCOMPUTABLE, never as zero. A
+///     zero standing where "uncomputable" belongs looks like a healthy result and is the one way
+///     this report could quietly mislead the person reading it.
+pub fn render_world_shadow(events: &[DecisionEvent]) -> String {
+    let now = events.iter().map(|e| e.ts_ms).max().unwrap_or(0);
+    render_world_shadow_at(events, now)
+}
+
+pub fn render_world_shadow_at(events: &[DecisionEvent], now_ms: u64) -> String {
+    use std::collections::BTreeMap;
+    let since = now_ms.saturating_sub(24 * 60 * 60 * 1000);
+    let win = |e: &&DecisionEvent| e.ts_ms >= since && e.ts_ms <= now_ms;
+
+    // sample -> (bucket -> count), plus the window each sample actually spans.
+    let mut per: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut span: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut shadow_ids: std::collections::BTreeSet<&str> = Default::default();
+    for e in events.iter().filter(|e| e.kind == "world_shadow").filter(win) {
+        let sample = e
+            .goal_id
+            .as_deref()
+            .and_then(|g| g.strip_prefix("worldshadow:"))
+            .unwrap_or("(unlabelled)")
+            .to_string();
+        // The bucket, not the value: `stale:away:last_verified=…` is one situation, not many.
+        let bucket = e
+            .outcome
+            .as_deref()
+            .unwrap_or("(none)")
+            .split(':')
+            .next()
+            .unwrap_or("(none)")
+            .to_string();
+        *per.entry(sample.clone()).or_default().entry(bucket).or_default() += 1;
+        let sp = span.entry(sample).or_insert((e.ts_ms, e.ts_ms));
+        sp.0 = sp.0.min(e.ts_ms);
+        sp.1 = sp.1.max(e.ts_ms);
+        shadow_ids.insert(e.trace_id.as_str());
+    }
+
+    let mut dispositions: BTreeMap<String, usize> = BTreeMap::new();
+    let mut verdicts: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut joined, mut orphan) = (0usize, 0usize);
+    for e in events.iter().filter(|e| e.kind == "knock_disposition").filter(win) {
+        *dispositions
+            .entry(e.chosen.clone().unwrap_or_else(|| "(none)".into()))
+            .or_default() += 1;
+        *verdicts
+            .entry(e.verdict.clone().unwrap_or_else(|| "(none)".into()))
+            .or_default() += 1;
+        match e.parent_event_id.as_deref() {
+            Some(p) if shadow_ids.contains(p) => joined += 1,
+            _ => orphan += 1,
+        }
+    }
+
+    if per.is_empty() && dispositions.is_empty() {
+        return format!(
+            "No world-shadow rows in the last 24 h (as of ts_ms {now_ms}). The shadow records on every knock evaluation and on the headless tick; none happened in this window."
+        );
+    }
+
+    let mut out = format!("WORLD MODEL SHADOW — last 24 h (as of ts_ms {now_ms})
+");
+    out.push_str("It DECIDES NOTHING: every row is what the model would have said, recorded beside a decision it did not make.
+");
+    for (sample, buckets) in &per {
+        let total: usize = buckets.values().sum();
+        let (lo, hi) = span.get(sample).copied().unwrap_or((0, 0));
+        let hours = (hi.saturating_sub(lo)) as f64 / 3_600_000.0;
+        out.push_str(&format!("
+  sample {sample} — {total} consult(s) over {hours:.1} h
+"));
+        for (bucket, n) in buckets {
+            let pct = 100.0 * *n as f64 / total.max(1) as f64;
+            out.push_str(&format!("    {bucket:<10} {n:>6}  {pct:>5.1}%
+"));
+        }
+    }
+
+    if !dispositions.is_empty() {
+        let total: usize = dispositions.values().sum();
+        out.push_str(&format!("
+  paired knock evaluations — {total}
+"));
+        for (why, n) in &dispositions {
+            out.push_str(&format!("    ended at {why:<20} {n:>6}
+"));
+        }
+        out.push_str(&format!("    joined to a shadow row {joined}, orphaned {orphan}
+"));
+    }
+
+    // The agreement: only rows that actually reached the gate carry a verdict to agree with.
+    let reached: usize = verdicts
+        .iter()
+        .filter(|(v, _)| v.as_str() != "before-gate")
+        .map(|(_, n)| *n)
+        .sum();
+    out.push_str("
+");
+    if reached == 0 {
+        let before = verdicts.get("before-gate").copied().unwrap_or(0);
+        out.push_str(&format!(
+            "AGREEMENT: UNCOMPUTABLE. {before} evaluation(s) exited before the receptivity gate, so              the legacy verdict this shadow exists to be compared against was never produced. This              is not zero disagreement; it is no measurement. A box with prepared packets is needed.
+"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{reached} evaluation(s) reached the gate and carry a legacy verdict to compare against.
+"
+        ));
+    }
+    out
+}
+
 /// E.L2B-R: `ym why attention` — the attention shadow, readable at last.
 ///
 /// The shadow has been writing rows since L2-B step 2a and NOTHING could read them: its only

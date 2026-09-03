@@ -4800,3 +4800,23 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill criteria, set before the code and taken from getting this wrong by hand first | (1) The two samples are NEVER pooled — the code's own rule, because one measures agreement with a decision and the other only that the pipeline is alive. (2) It must print the disposition breakdown beside the known/stale/unknown split: "known 1.5%" without "the gate never ran, 9,638 × no_packets" is a number that invites exactly the wrong conclusion. (3) It must report join health — dispositions with and without a matching shadow row — because a silently broken join would make any agreement number meaningless while looking fine. (4) When no evaluation reached the gate it must SAY the agreement is uncomputable, never print an empty agreement table or a zero, which would read as "no disagreement". (5) Verified on the real 9,889 staging rows, not fixtures. |
 | Criterion 4 is the one that matters | Every other failure here is visible. A zero standing where "uncomputable" belongs looks like a healthy result and is the single most likely way this report misleads someone — including me, in three months, having forgotten. |
 | Why a reader at all, given the finding is already recorded | Because the finding was produced by an ad-hoc script on my machine, which nobody else can run and which will not exist next week. An instrument whose measurement lives in a scratch file is the same defect this whole day has been about. |
+
+## E.G2-R — SHIPPED, and my own crate-wide guard caught my fourth repeat of the same defect
+| Field | Value |
+| --- | --- |
+| What shipped | `ym why world`: per sample, the consult count, window and known/stale/unknown split; the disposition breakdown of the paired evaluations; the join health; and an explicit statement of whether the agreement is computable. |
+| Kill criterion 1 — never pool the samples | MET; mutating the sample key to a constant fails. |
+| Kill criterion 2 — dispositions beside the split | MET; dropping the breakdown fails. |
+| Kill criterion 3 — join health both ways | MET; dropping the joined/orphaned line fails. |
+| Kill criterion 4 — uncomputable is never zero | MET, and it is the one that would have looked healthy: mutating the branch so the "uncomputable" path can never be taken fails, because the test requires the report to say what the absence is NOT ("not zero disagreement"). |
+| **The guard earned itself back in one run** | The new report shipped with a run of spaces mid-sentence — the FOURTH time today. The crate-wide guard added in E.OBS2 caught it, naming the file and line. Three earlier occurrences each got a fix and a local guard and taught me nothing; the first guard written at the right scope caught the next instance immediately, in code I wrote hours later. |
+| Why it still reached a full-suite run | The guard lives in an integration test and I had only re-run the LIB tests after writing the reader. The workspace suite caught it before the push, which is exactly what the "full suite before push" rule is for — a rule I have followed all day and which has now paid twice. |
+
+## An open flake I could not explain, recorded rather than dismissed
+| Field | Value |
+| --- | --- |
+| The failure | `mind-evals :: coverage_oracle::tests::the_extractor_lifts_live_queries_without_touching_them` — *"the RECORDER must not hold it"*. The assertion is that a card number written into a decision event never reaches the log file, i.e. that redaction happened. |
+| Frequency | **Once in eleven workspace runs today.** Not reproducible: 6 consecutive crate-scope runs pass, 3 concurrent runs pass, and it passed in the very next workspace run. |
+| What I ruled out | Path collision — `scratch::unique` includes pid, nanos and an atomic sequence. Env interference — no `set_var` anywhere in `mind-evals`. Detector nondeterminism — `first_sensitive` is a pure ASCII scan with no shared state. A lock-out from E.OBS2 would produce an EMPTY file and a different panic, not a file containing the number. |
+| What I am NOT claiming | That it is benign, that it is unrelated to today's changes, or that redaction is fine. It asserts something security-relevant and it failed once; an unexplained flake in that assertion is worth more attention than I could give it here without stalling the lane. Flagged to Codex with the full reasoning. |
+| Why record a failure I could not fix | Because the alternative is that the next person sees it once, assumes it is noise, and re-derives all of this. One occurrence in eleven is exactly the rate at which a real defect gets dismissed. |

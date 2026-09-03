@@ -708,3 +708,115 @@ mod l2b_reader_tests {
     }
 }
 
+// ── E.G2-R: the world shadow's reader ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod g2r_reader_tests {
+    use crate::*;
+
+    fn shadow(sample: &str, outcome: &str, ts: u64, id: &str) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(id, "world_shadow");
+        ev.ts_ms = ts;
+        ev.goal_id = Some(format!("worldshadow:{sample}"));
+        ev.outcome = Some(outcome.into());
+        ev.chosen = Some("shadow-only".into());
+        ev.verdict = Some("shadowed".into());
+        ev
+    }
+
+    fn disposition(parent: Option<&str>, chosen: &str, verdict: &str, ts: u64) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(&format!("disp-{ts}"), "knock_disposition");
+        ev.ts_ms = ts;
+        ev.parent_event_id = parent.map(str::to_string);
+        ev.chosen = Some(chosen.into());
+        ev.verdict = Some(verdict.into());
+        ev
+    }
+
+    /// KILL 1: the two samples are never pooled. One measures agreement with a decision, the other
+    /// only that the pipeline is alive; an average of them describes neither.
+    #[test]
+    fn the_two_samples_are_reported_separately() {
+        let evs = vec![
+            shadow("knock-receptivity", "unknown", 10, "s1"),
+            shadow("knock-receptivity", "unknown", 11, "s2"),
+            shadow("headless-cadence", "known:home", 12, "s3"),
+        ];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(out.contains("sample knock-receptivity"), "{out}");
+        assert!(out.contains("sample headless-cadence"), "{out}");
+        // Each carries its OWN denominator; a pooled 3 would be the bug.
+        assert!(out.contains("2 consult(s)"), "the paired sample counts alone: {out}");
+        assert!(out.contains("1 consult(s)"), "and so does the unpaired one: {out}");
+    }
+
+    /// KILL 2: the disposition breakdown sits beside the split. "known 1.5%" alone reads as a
+    /// failing model; the truth on the canary was that every evaluation exited at no_packets and
+    /// the model was answering about an idle box.
+    #[test]
+    fn the_reason_evaluations_ended_is_shown_beside_what_the_model_knew() {
+        let evs = vec![
+            shadow("knock-receptivity", "unknown", 10, "s1"),
+            disposition(Some("s1"), "no_packets", "before-gate", 11),
+        ];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(
+            out.contains("ended at no_packets"),
+            "why the evaluation ended must appear: {out}"
+        );
+    }
+
+    /// KILL 3: join health. A silently broken join makes any agreement number meaningless while
+    /// the report still looks healthy.
+    #[test]
+    fn join_health_is_reported() {
+        let evs = vec![
+            shadow("knock-receptivity", "unknown", 10, "s1"),
+            disposition(Some("s1"), "no_packets", "before-gate", 11),
+            disposition(Some("missing"), "no_packets", "before-gate", 12),
+            disposition(None, "no_packets", "before-gate", 13),
+        ];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(
+            out.contains("joined to a shadow row 1, orphaned 2"),
+            "the join must be counted both ways: {out}"
+        );
+    }
+
+    /// KILL 4, THE ONE THAT MATTERS: with nothing reaching the gate, the agreement is UNCOMPUTABLE
+    /// and must be named as such. A zero standing where "uncomputable" belongs looks like a healthy
+    /// result — no disagreement — and is the single way this report could quietly mislead.
+    #[test]
+    fn an_agreement_that_cannot_be_computed_is_never_reported_as_zero() {
+        let evs = vec![
+            shadow("knock-receptivity", "unknown", 10, "s1"),
+            disposition(Some("s1"), "no_packets", "before-gate", 11),
+        ];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(out.contains("UNCOMPUTABLE"), "{out}");
+        assert!(
+            out.contains("not zero disagreement"),
+            "it must say what the absence is NOT, or a reader supplies the wrong meaning: {out}"
+        );
+    }
+
+    /// And when the gate DOES run, it says so instead — the report must not be permanently pessimistic.
+    #[test]
+    fn a_reached_gate_is_reported_as_comparable() {
+        let evs = vec![
+            shadow("knock-receptivity", "known:home", 10, "s1"),
+            disposition(Some("s1"), "sent", "receptive", 11),
+        ];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(!out.contains("UNCOMPUTABLE"), "{out}");
+        assert!(out.contains("1 evaluation(s) reached the gate"), "{out}");
+    }
+
+    /// Silence is silence, not an empty table.
+    #[test]
+    fn no_rows_says_so() {
+        let out = render_world_shadow_at(&[], 99);
+        assert!(out.contains("No world-shadow rows"), "{out}");
+    }
+}
+

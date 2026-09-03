@@ -311,18 +311,50 @@ fn a_cycle_label_round_trips_and_rejects_everything_else() {
         process_start_ms: 7,
         key: 0,
     };
-    let mut v6 = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
+
+    // L2-B step 2b changed what this must assert, and the change is a CORRECTION rather than a
+    // relaxation. While v6 had no writer, this test required a v6 row to be `superseded` by the
+    // reader. That conflated two different rules: "a v5 row is never PAIRED with a v6 row" (the
+    // real one, written on LOOP_LEDGER_V6) with "a v6 row is never AGGREGATED beside a v5 row"
+    // (which nothing ever required). v6 is v5 plus a wake label, so the two count together; the
+    // label alone decides what can be paired with a shadow, and a v5 row has none to pair on.
+    // Excluding a whole host from the ledger to enforce a pairing rule would have been a far
+    // larger error than the one it prevented.
+    let paired = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
+        .in_wake(CycleId::new(7, 3))
         .to_event(10);
-    v6.evaluator_id = Some(LOOP_LEDGER_V6.into());
-    let v5 = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
+    let unpaired = crate::LoopTick::acted(w, crate::LoopHost::Process, crate::LoopOutcome::Ran)
         .to_event(11);
-    let ledger = crate::loop_ledger(&[v6, v5], 20, 100);
+    let ledger = crate::loop_ledger(&[paired.clone(), unpaired.clone()], 20, 100);
+    assert_eq!(ledger.superseded, 0, "both current eras aggregate");
+    assert_eq!(ledger.malformed, 0);
+
+    // A row that CLAIMS v6 while carrying no wake label is MALFORMED — never quietly read as a v5
+    // row. A shadow paired against a row of unknown wake is evidence about nothing, so the version
+    // and the label must agree or the row does not count at all.
+    let mut lying = unpaired.clone();
+    lying.evaluator_id = Some(LOOP_LEDGER_V6.into());
+    let l = crate::loop_ledger(&[lying], 20, 100);
+    assert_eq!(l.malformed, 1, "v6 without a wake label is broken, not old");
+    assert_eq!(l.superseded, 0);
+    assert!(l.loops.is_empty());
+
+    // And one whose label is unparseable is malformed too, for the same reason.
+    let mut garbled = paired.clone();
+    garbled.context_fingerprint = Some("cycle:not-a-number:1".into());
+    let g = crate::loop_ledger(&[garbled], 20, 100);
+    assert_eq!(g.malformed, 1, "an unreadable wake is not a wake");
+
+    // A genuinely superseded era still is: v4 never parses.
+    let mut old = unpaired;
+    old.evaluator_id = Some(crate::LOOP_LEDGER_V4.into());
+    assert_eq!(crate::loop_ledger(&[old], 20, 100).superseded, 1);
+
+    // The wake survives the round trip, which is the whole point of the row carrying one.
     assert_eq!(
-        ledger.superseded, 1,
-        "a v6 row must be walled off from a v5 report, not aggregated into it"
+        crate::parse_tick(&paired).and_then(|t| t.cycle),
+        Some(CycleId::new(7, 3))
     );
-    assert_eq!(ledger.malformed, 0, "it is a future row, not a broken one");
-    assert_eq!(ledger.loops.len(), 1, "and the v5 row beside it still reads");
 }
 
 #[test]

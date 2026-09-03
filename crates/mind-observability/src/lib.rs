@@ -6007,6 +6007,11 @@ pub struct LoopTick {
     wall_ms: u64,
     /// L1d: the lifecycle phase of a detached speaker's record; `None` for a synchronous act.
     phase: Option<LoopPhase>,
+    /// L2-B step 2b: which poll wake wrote this row. `None` for a host that has no wake counter --
+    /// the eight proactive loops in the Telegram poll loop -- and such a row stays v5. A mixed log
+    /// is the expected steady state, not a migration failure, and the reader reports the
+    /// unpairable rows rather than shrinking its denominator to the ones that happen to pair.
+    cycle: Option<CycleId>,
 }
 impl LoopTick {
     pub fn acted(opportunity: LoopOpportunity, host: LoopHost, outcome: LoopOutcome) -> Self {
@@ -6020,6 +6025,7 @@ impl LoopTick {
             model_calls: None,
             wall_ms: 0,
             phase: None,
+            cycle: None,
         }
     }
     pub fn held(opportunity: LoopOpportunity, host: LoopHost, reason: HeldReason) -> Self {
@@ -6033,6 +6039,7 @@ impl LoopTick {
             model_calls: None,
             wall_ms: 0,
             phase: None,
+            cycle: None,
         }
     }
     pub fn considered(mut self, signals: &[ConsideredSignal]) -> Self {
@@ -6043,6 +6050,19 @@ impl LoopTick {
         self.policy = lines.to_vec();
         self
     }
+    /// L2-B step 2b: stamp this row with the wake that wrote it.
+    ///
+    /// Takes the wake's OWN `CycleId` rather than minting one, so a site physically cannot invent a
+    /// second identity for the same wake: there is one value per wake and it is created once, at
+    /// the top of the poll loop, beside the shadow's. That is what makes "every row in a wake
+    /// carries the same cycle" a property of the plumbing instead of a rule 19 call sites have to
+    /// remember -- and a rule of that shape is the one that fails silently, because a row stamped
+    /// from a second clock still looks perfectly reasonable to every count downstream.
+    pub fn in_wake(mut self, cycle: CycleId) -> Self {
+        self.cycle = Some(cycle);
+        self
+    }
+
     pub fn count(mut self, n: u32) -> Self {
         self.count = Some(n);
         self
@@ -6096,10 +6116,28 @@ impl LoopTick {
         ev.latency_ms = Some(self.wall_ms);
         // L1d: the phase rides in `subject`; a terminal record carries its once-by-id identity.
         ev.subject = self.phase.map(|p| format!("phase:{}", p.as_str()));
+        // L2-B step 2b: the wake identity, and with it the schema era this row belongs to.
+        //
+        // It rides in `context_fingerprint` and NOT in `policy`, because `parse_tick` parses policy
+        // into typed `LoopPolicy` entries -- a stray `cycle:` there is either a parse break or a
+        // silently malformed row, and a malformed loop row is exactly what a shadow must never be
+        // paired against.
+        //
+        // A row without a wake keeps declaring v5. The version is derived from the DATA rather than
+        // set by the caller, so a row cannot claim to know its wake while carrying none: the two
+        // facts have one source.
+        ev.context_fingerprint = self.cycle.map(|c| c.render());
         if self.phase == Some(LoopPhase::Terminal) {
             ev.event_id = Some(self.terminal_event_id());
         }
-        ev.evaluator_id = Some(LOOP_LEDGER_VERSION.into());
+        ev.evaluator_id = Some(
+            if self.cycle.is_some() {
+                LOOP_LEDGER_V6
+            } else {
+                LOOP_LEDGER_VERSION
+            }
+            .into(),
+        );
         ev
     }
 }
@@ -6115,6 +6153,11 @@ pub struct ParsedTick {
     pub count: Option<u32>,
     /// L1d: the lifecycle phase, or `None` for a synchronous record.
     pub phase: Option<LoopPhase>,
+    /// L2-B step 2b: the wake that wrote the row, or `None` for a v5 host with no wake counter.
+    /// A reader pairs on this and MUST report the rows where it is absent rather than dropping
+    /// them -- a denominator that silently shrinks to the pairable rows is the censoring pattern
+    /// E.D2 and E.G1c each cost us a reading.
+    pub cycle: Option<CycleId>,
 }
 
 /// Validate one stored row against the whole schema; `None` when any field cannot be read.
@@ -6199,6 +6242,14 @@ pub fn parse_tick(e: &DecisionEvent) -> Option<ParsedTick> {
         result,
         count,
         phase,
+        // A v6 row's label must PARSE. One that does not is malformed and is never quietly read as
+        // a v5 row: a shadow paired against a row of unknown wake is evidence about nothing, which
+        // is the rule written on CycleId::parse itself.
+        cycle: match (e.evaluator_id.as_deref(), e.context_fingerprint.as_deref()) {
+            (Some(LOOP_LEDGER_V6), Some(label)) => Some(CycleId::parse(label)?),
+            (Some(LOOP_LEDGER_V6), None) => return None,
+            _ => None,
+        },
     })
 }
 
@@ -6257,10 +6308,18 @@ pub fn loop_ledger(events: &[DecisionEvent], now_ms: u64, window_ms: u64) -> Loo
         .iter()
         .filter(|e| e.kind == "loop_tick" && e.ts_ms >= since && e.ts_ms <= now_ms)
     {
-        // The version wall (Codex, L1d-A review): only rows written under THIS schema aggregate;
-        // a v4 row is superseded by version exactly as v3 was under v4 — never parsed, so a
-        // v4-labelled row can never smuggle a new id or a phase into a v5 report.
-        if e.evaluator_id.as_deref() != Some(LOOP_LEDGER_VERSION) {
+        // The version wall (Codex, L1d-A review): only rows written under a CURRENT schema
+        // aggregate; a v4 row is superseded by version exactly as v3 was under v4 — never parsed,
+        // so a v4-labelled row can never smuggle a new id or a phase into the report.
+        //
+        // L2-B step 2b widens the wall to TWO current eras, and this is the one place that could
+        // quietly blend them. It does not: v6 = v5 + a wake label, so the two aggregate into the
+        // same counts, while the label itself is the ONLY thing that decides whether a row can be
+        // paired with a shadow. A v5 row is therefore never paired with a v6 row — it has no wake
+        // to pair on — which is the rule stated on LOOP_LEDGER_V6, now enforced by the data rather
+        // than by excluding an entire host from the ledger.
+        let era = e.evaluator_id.as_deref();
+        if era != Some(LOOP_LEDGER_VERSION) && era != Some(LOOP_LEDGER_V6) {
             superseded += 1;
             continue;
         }

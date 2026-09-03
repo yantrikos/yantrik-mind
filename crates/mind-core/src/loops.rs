@@ -99,13 +99,13 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
         // so an unanswered claim closes on every box within a minute of its deadline.
         state.last_housekeeping = run_housekeeping(&conv, state.last_housekeeping).await;
         // Serial, legacy order; no spawn.
-        state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals).await;
+        state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals, cycle).await;
         state.last_lease_sweep =
-            run_lease_sweep(&conv, process_start_ms, state.last_lease_sweep, &mut signals).await;
+            run_lease_sweep(&conv, process_start_ms, state.last_lease_sweep, &mut signals, cycle).await;
         state.last_resolve =
-            run_resolve(&conv, &delivery, process_start_ms, state.last_resolve, &mut signals).await;
+            run_resolve(&conv, &delivery, process_start_ms, state.last_resolve, &mut signals, cycle).await;
         state.last_profile =
-            run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile, &mut signals).await;
+            run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile, &mut signals, cycle).await;
         // L2-B step 2a — THE ONE PERMITTED WRITE, and the only place the switch is read.
         //
         // Four of eighteen gates fill the signal set so far, so this row is a partial view of the
@@ -122,9 +122,9 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
         // E.CFG2: does each configured route's provider actually serve the model it names?
         state.last_config_check =
             run_config_check(&conv, process_start_ms, state.last_config_check).await;
-        run_engagement(&conv, &delivery, process_start_ms, &mut state).await;
-        run_patterns(&conv, &delivery, process_start_ms, &mut state).await;
-        run_dmn(&conv, process_start_ms, &mut state).await;
+        run_engagement(&conv, &delivery, process_start_ms, &mut state, cycle).await;
+        run_patterns(&conv, &delivery, process_start_ms, &mut state, cycle).await;
+        run_dmn(&conv, process_start_ms, &mut state, cycle).await;
     }
 }
 
@@ -186,12 +186,32 @@ pub(crate) async fn run_housekeeping(conv: &ConversationEngine, last: u64) -> u6
 /// understanding, write the hit/miss into per-domain calibration, and surface each verdict
 /// through the seam. Paced (YM_RESOLVE_SECS, default 1h); this is the self-scoring half of the
 /// learning curve running on its own — no user prompt needed for tracked subjects.
+/// L2-B step 2b: the ONE way a loop row is written under the process runner.
+///
+/// Every site in this file goes through it, so "every row in a wake carries that wake's cycle" is
+/// a property of the plumbing rather than a rule eighteen call sites have to remember. That shape
+/// matters more than it looks: a site that stamped a row from a second clock would produce a
+/// plausible, WRONG pairing, and every count downstream would still look reasonable. It is the one
+/// kill criterion of this slice that could fail silently, so it is designed out rather than tested
+/// for.
+///
+/// The Telegram poll loop keeps calling `record_loop_tick` directly. It has no wake counter, so its
+/// rows stay v5 and simply cannot be paired -- which the reader reports rather than hides.
+fn wake_tick(
+    conv: &ConversationEngine,
+    cycle: mind_observability::CycleId,
+    tick: mind_observability::LoopTick,
+) {
+    conv.record_loop_tick(tick.in_wake(cycle));
+}
+
 pub(crate) async fn run_resolve(
     conv: &ConversationEngine,
     delivery: &Delivery,
     process_start_ms: u64,
     last_resolve: u64,
     signals: &mut mind_observability::WakeSignals,
+    cycle: mind_observability::CycleId,
 ) -> u64 {
     let period: u64 = std::env::var("YM_RESOLVE_SECS")
         .ok()
@@ -233,7 +253,7 @@ pub(crate) async fn run_resolve(
             .deliver(mind_observability::DeliveryKind::Verdict, &verdict)
             .await;
     }
-    conv.record_loop_tick(
+    wake_tick(conv, cycle, 
         mind_observability::LoopTick::acted(
             mind_observability::LoopOpportunity::Window {
                 loop_id: mind_observability::LoopId::Resolve,
@@ -263,6 +283,7 @@ pub(crate) async fn run_profile_refresh(
     process_start_ms: u64,
     last_profile: u64,
     signals: &mut mind_observability::WakeSignals,
+    cycle: mind_observability::CycleId,
 ) -> u64 {
     let period: u64 = std::env::var("YM_PROFILE_REFRESH_SECS")
         .ok()
@@ -305,7 +326,7 @@ pub(crate) async fn run_profile_refresh(
             )
             .await;
     }
-    conv.record_loop_tick(
+    wake_tick(conv, cycle, 
         mind_observability::LoopTick::acted(
             mind_observability::LoopOpportunity::Window {
                 loop_id: mind_observability::LoopId::ProfileRefresh,
@@ -344,6 +365,7 @@ pub(crate) async fn run_engagement(
     delivery: &Delivery,
     process_start_ms: u64,
     st: &mut RunnerState,
+    cycle: mind_observability::CycleId,
 ) {
     let proactive_on = std::env::var("YM_PROACTIVE")
         .map(|v| v != "off")
@@ -364,7 +386,7 @@ pub(crate) async fn run_engagement(
                 st.gate_digest
                     .take_window(LoopId::Digest, process_start_ms, st.last_digest)
             {
-                conv.record_loop_tick(
+                wake_tick(conv, cycle, 
                     mind_observability::LoopTick::held(
                         window,
                         mind_observability::LoopHost::Process,
@@ -383,7 +405,7 @@ pub(crate) async fn run_engagement(
                 st.gate_ask
                     .take_window(LoopId::Ask, process_start_ms, st.last_ask)
             {
-                conv.record_loop_tick(
+                wake_tick(conv, cycle, 
                     mind_observability::LoopTick::held(
                         window,
                         mind_observability::LoopHost::Process,
@@ -443,7 +465,7 @@ pub(crate) async fn run_engagement(
     let admitted = permit.is_some();
     if idle_ok && !admitted {
         if let Some(window) = st.gate_knock.take_stretch(LoopId::Knock, last_activity) {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -512,7 +534,7 @@ pub(crate) async fn run_engagement(
         }
         if knock_held_no_presence {
             if let Some(window) = st.gate_knock.take_stretch(LoopId::Knock, last_activity) {
-                conv.record_loop_tick(
+                wake_tick(conv, cycle, 
                     mind_observability::LoopTick::held(
                         window,
                         mind_observability::LoopHost::Process,
@@ -533,7 +555,7 @@ pub(crate) async fn run_engagement(
                 .take_stretch(LoopId::Knock, last_activity)
                 .is_some();
         if knocked || first {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::acted(
                     mind_observability::LoopOpportunity::Stretch {
                         loop_id: LoopId::Knock,
@@ -567,7 +589,7 @@ pub(crate) async fn run_engagement(
             st.gate_digest
                 .take_window(LoopId::Digest, process_start_ms, st.last_digest)
         {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -681,7 +703,7 @@ pub(crate) async fn run_engagement(
                 process_start_ms,
                 key: digest_window,
             };
-            conv.record_loop_tick(if digest_held_no_presence {
+            wake_tick(conv, cycle, if digest_held_no_presence {
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -713,7 +735,7 @@ pub(crate) async fn run_engagement(
                 st.gate_digest
                     .take_window(LoopId::Digest, process_start_ms, digest_window)
             {
-                conv.record_loop_tick(
+                wake_tick(conv, cycle, 
                     mind_observability::LoopTick::held(
                         window,
                         mind_observability::LoopHost::Process,
@@ -807,7 +829,7 @@ pub(crate) async fn run_engagement(
         }
         st.last_ask = now; // reset cadence whether or not it asked
         st.gate_ask.mark(ask_window);
-        conv.record_loop_tick(if ask_held_no_presence {
+        wake_tick(conv, cycle, if ask_held_no_presence {
             mind_observability::LoopTick::held(
                 window,
                 mind_observability::LoopHost::Process,
@@ -831,7 +853,7 @@ pub(crate) async fn run_engagement(
             .gate_ask
             .take_window(LoopId::Ask, process_start_ms, st.last_ask)
         {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -864,6 +886,7 @@ pub(crate) async fn run_patterns(
     delivery: &Delivery,
     process_start_ms: u64,
     st: &mut RunnerState,
+    cycle: mind_observability::CycleId,
 ) {
     let pat_secs: u64 = std::env::var("YM_PATTERNS_SECS")
         .ok()
@@ -949,7 +972,7 @@ pub(crate) async fn run_patterns(
         };
         st.last_patterns = pat_gate.advance(pat_decision);
         st.gate_patterns.mark(pat_window);
-        conv.record_loop_tick(
+        wake_tick(conv, cycle, 
             mind_observability::LoopTick::acted(
                 mind_observability::LoopOpportunity::Window {
                     loop_id: mind_observability::LoopId::Patterns,
@@ -978,7 +1001,7 @@ pub(crate) async fn run_patterns(
             process_start_ms,
             st.last_patterns,
         ) {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -998,6 +1021,7 @@ pub(crate) async fn run_ics(
     process_start_ms: u64,
     last_ics: u64,
     signals: &mut mind_observability::WakeSignals,
+    cycle: mind_observability::CycleId,
 ) -> u64 {
     let period: u64 = std::env::var("YM_ICS_SECS")
         .ok()
@@ -1024,7 +1048,7 @@ pub(crate) async fn run_ics(
         if n > 0 {
             eprintln!("[calendar] refreshed {n} external event(s)");
         }
-        conv.record_loop_tick(
+        wake_tick(conv, cycle, 
             mind_observability::LoopTick::acted(
                 mind_observability::LoopOpportunity::Window {
                     loop_id: mind_observability::LoopId::Ics,
@@ -1138,6 +1162,7 @@ pub(crate) async fn run_lease_sweep(
     process_start_ms: u64,
     last_lease_sweep: u64,
     signals: &mut mind_observability::WakeSignals,
+    cycle: mind_observability::CycleId,
 ) -> u64 {
     let period: u64 = std::env::var("YM_LEASE_SWEEP_SECS")
         .ok()
@@ -1165,7 +1190,7 @@ pub(crate) async fn run_lease_sweep(
             swept += 1;
             eprintln!("{line}");
         }
-        conv.record_loop_tick(
+        wake_tick(conv, cycle, 
             mind_observability::LoopTick::acted(
                 mind_observability::LoopOpportunity::Window {
                     loop_id: mind_observability::LoopId::LeaseSweep,
@@ -1193,6 +1218,7 @@ pub(crate) async fn run_dmn(
     conv: &ConversationEngine,
     process_start_ms: u64,
     st: &mut RunnerState,
+    cycle: mind_observability::CycleId,
 ) {
     // L1 v3: the due window is computed OUTSIDE the enable switch so a disabled DMN still
     // records `held:disabled` once per window; the switch itself is unchanged.
@@ -1239,7 +1265,7 @@ pub(crate) async fn run_dmn(
         // The act records under the due window it closes; model calls stay unknown until
         // the DMN reports its own count (never inferred from its budget).
         st.gate_dmn.mark(st.last_dmn);
-        conv.record_loop_tick(
+        wake_tick(conv, cycle, 
             mind_observability::LoopTick::acted(
                 mind_observability::LoopOpportunity::Window {
                     loop_id: mind_observability::LoopId::Dmn,
@@ -1261,7 +1287,7 @@ pub(crate) async fn run_dmn(
             process_start_ms,
             st.last_dmn,
         ) {
-            conv.record_loop_tick(
+            wake_tick(conv, cycle, 
                 mind_observability::LoopTick::held(
                     window,
                     mind_observability::LoopHost::Process,
@@ -1894,6 +1920,81 @@ pub(crate) async fn run_lease_sweep(")
             !src().contains("last_config_check: process_start_ms"),
             "the config clock must NOT be boot-stamped, or the first check is six hours late"
         );
+    }
+}
+
+#[cfg(test)]
+mod l2b_2b_tests {
+    //! E.L2B-2b kill criterion 4: every loop row written in a wake carries THAT wake's cycle.
+    //!
+    //! It is the criterion that can fail silently -- a site stamping from a second clock produces a
+    //! plausible, wrong pairing and every downstream count still looks reasonable -- so it is
+    //! designed out rather than tested for: there is exactly one way to write a row in this file.
+    //! This test guards the shape that makes that true.
+
+    /// The file WITHOUT any test module: a scan that includes its own source matches the strings it
+    /// is searching for, a trap this file has already sprung twice.
+    fn src() -> &'static str {
+        const FULL: &str = include_str!("loops.rs");
+        match FULL.find("mod l2b_wiring_tests") {
+            Some(i) => &FULL[..i],
+            None => FULL,
+        }
+    }
+
+    /// Exactly ONE direct call to the engine's recorder, and it is inside the helper. Every other
+    /// site goes through `wake_tick`, which is what makes the cycle impossible to get wrong.
+    #[test]
+    fn every_loop_row_in_this_file_is_written_through_one_helper() {
+        let s = src();
+        assert_eq!(
+            s.matches("conv.record_loop_tick(").count(),
+            1,
+            "a site writes a loop row without going through wake_tick; it could then stamp a              different wake than the shadow row of the same tick"
+        );
+        let helper = s.find("fn wake_tick(").expect("the helper exists");
+        let direct = s.find("conv.record_loop_tick(").expect("the one call");
+        assert!(
+            direct > helper && direct - helper < 400,
+            "the single direct call must be the helper's own body"
+        );
+        // And it stamps -- a helper that forgot to would silently return every row to v5.
+        assert!(
+            s[helper..helper + 600].contains("tick.in_wake(cycle)"),
+            "the helper must stamp the row with the wake it was given"
+        );
+    }
+
+    /// The wake handed to the loops is the SAME value handed to the shadow. Two `CycleId::new`
+    /// calls in the wake body would be two identities for one wake, and the pairing would be
+    /// fiction that still counted correctly.
+    #[test]
+    fn the_loops_and_the_shadow_share_one_wake_identity() {
+        let s = src();
+        let start = s.find("async fn run_loops(").expect("the poll loop exists");
+        let end = s[start..]
+            .find("
+/// The timer states")
+            .map(|e| start + e)
+            .unwrap_or(s.len());
+        let body = &s[start..end];
+        assert_eq!(
+            body.matches("CycleId::new(").count(),
+            1,
+            "one wake, one identity: a second mint is a second truth about the same tick"
+        );
+        // Every gate in the wake receives it.
+        for gate in [
+            "run_ics(", "run_lease_sweep(", "run_resolve(", "run_profile_refresh(",
+            "run_engagement(", "run_patterns(", "run_dmn(",
+        ] {
+            let i = body.find(gate).unwrap_or_else(|| panic!("{gate} is called"));
+            let call = &body[i..i + 220.min(body.len() - i)];
+            assert!(
+                call.contains("cycle"),
+                "{gate} must be handed the wake, or its rows cannot be paired"
+            );
+        }
     }
 }
 

@@ -185,3 +185,37 @@ def call_latencies(lines):
         if ev.get("verdict") == "served":
             row["served"] += 1
     return per
+
+
+def model_liveness(status, body_text):
+    """Did the model answer, and if not, is it GONE or merely unreachable?
+
+    E.MODEL1. The harness pins the model's NAME, the Hermes archive by hash, the checker, the briefs,
+    the cap and the resolved upstream addresses — and never checked that the model still EXISTS. On
+    2026-09-03 the frozen model was retired at 08:00Z; the first warning was a 410, hours after its
+    wind-down had already been corrupting measurements that I diagnosed as "a provider having a bad
+    minute". A reading must refuse to start on a model that is gone.
+
+    Returns (verdict, reason) where verdict is:
+      "alive"        — it answered.
+      "gone"         — the provider says the model is retired or unknown. REFUSE the run.
+      "inconclusive" — a timeout, a transport failure, an auth or rate-limit problem. NOT death:
+                       refusing here would turn a bad minute into a cancelled reading, and calling
+                       it death would repeat today's mistake in the opposite direction.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return "inconclusive", f"unreadable status {status!r}"
+    text = (body_text or "").strip()
+    if 200 <= code < 300:
+        return "alive", ""
+    # The provider's OWN words, so an operator learns "end of life" and not "it failed".
+    detail = text[:300]
+    if code in (404, 410):
+        return "gone", f"HTTP {code}: {detail}"
+    # A 400 that names the model is a retirement too on some providers; one that does not is a
+    # request defect and is not the model's death.
+    if code == 400 and ("model" in text.lower() and ("not found" in text.lower() or "end of life" in text.lower() or "no longer" in text.lower())):
+        return "gone", f"HTTP {code}: {detail}"
+    return "inconclusive", f"HTTP {code}: {detail}" if detail else f"HTTP {code}"

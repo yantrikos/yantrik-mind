@@ -31,11 +31,13 @@ cb2_profile_load() {
     local got
     got=$(python3 -c "import json,sys
 d=json.load(open('$state'))
-print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']), d.get('cap', 8))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
-    read -r sp su sm sip sat sips scap <<< "$got"
+print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']), d.get('cap', 8), d.get('model_alive', 'unchecked'), d.get('model_probe_ms', -1))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
+    read -r sp su sm sip sat sips scap salive sprobe <<< "$got"
     [ "$sp" = "$name" ] && [ "$su" = "$CB2_UPSTREAM" ] && [ "$sm" = "$CB2_MODEL" ] || { echo "profile: run state $state belongs to profile '$sp' ($su, $sm), not '$name' — use another out dir"; return 1; }
     [ "$scap" = "$CB2_CAP" ] || { echo "profile: run state $state was written at cap $scap, not $CB2_CAP — a reading may not change its budget mid-run; use another out dir"; return 1; }
     CB2_UPSTREAM_IP=$sip; CB2_RESOLVED_AT=$sat; CB2_UPSTREAM_IPS=${sips//|/ }
+    # Inherited, not re-probed: one liveness answer per reading, and every leg reports the same one.
+    CB2_MODEL_ALIVE=$salive; CB2_MODEL_PROBE_MS=$sprobe
   else
     CB2_RESOLVED_AT=static
     if [ "${CB2_UPSTREAM_RESOLVE:-0}" = 1 ]; then
@@ -44,13 +46,51 @@ print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'
       CB2_UPSTREAM_IP=${CB2_UPSTREAM_IPS%% *}; CB2_RESOLVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
     [ -n "${CB2_UPSTREAM_IP:-}" ] && [ -n "${CB2_UPSTREAM_IPS:-}" ] || { echo "profile: upstream address unset"; return 1; }
+    # E.MODEL1 — THE MODEL MUST STILL EXIST, checked HERE: this is the first loader call of the
+    # run, the one that resolves the upstream and writes the state. Every later call reads the
+    # verdict back out of the state, so a healthy reading costs exactly ONE extra request no matter
+    # how many legs, smokes and scripts source this file.
+    #
+    # It sits before the write for the reason the key check does: a model that is gone must not
+    # leave a resolved state pinned behind it, or a later corrected load would inherit this
+    # resolution. The harness pinned the model's NAME, the Hermes archive by hash, the checker, the
+    # briefs, the cap and the upstream's addresses — and never checked the model still EXISTED.
+    CB2_MODEL_ALIVE=unchecked; CB2_MODEL_PROBE_MS=-1
+    if [ -n "${CB2_KEY_FILE:-}" ] && [ "${CB2_MODEL_PROBE:-1}" = 1 ]; then
+      local t0 t1 code body probe verdict reason
+      t0=$(date +%s%3N)
+      code=$(curl -s --max-time 60 -o "/tmp/cb2_model_probe.$$" -w '%{http_code}'         -X POST "https://$CB2_UPSTREAM/v1/chat/completions"         -H "Authorization: Bearer $(cat "$CB2_KEY_FILE")"         -H 'Content-Type: application/json'         -d "{\"model\":\"$CB2_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"ok\"}],\"max_tokens\":4}" 2>/dev/null) || code=000
+      t1=$(date +%s%3N)
+      body=$(head -c 400 "/tmp/cb2_model_probe.$$" 2>/dev/null); rm -f "/tmp/cb2_model_probe.$$"
+      probe=$(CB2_PROBE_BODY="$body" python3 -c "
+import os, sys
+sys.path.insert(0, '$fix/run')
+from verdict import model_liveness
+v, r = model_liveness('$code', os.environ.get('CB2_PROBE_BODY', ''))
+print(v, r.replace(chr(10), ' ')[:200])
+") || probe="inconclusive the liveness classifier itself failed"
+      read -r verdict reason <<< "$probe"
+      # An unreadable classifier is not a dead model. Nothing here may turn a harness defect into
+      # a verdict about the provider.
+      case "$verdict" in alive|gone|inconclusive) ;; *) verdict=inconclusive; reason="unclassifiable probe";; esac
+      CB2_MODEL_ALIVE=$verdict
+      CB2_MODEL_PROBE_MS=$((t1 - t0))
+      if [ "$verdict" = gone ]; then
+        echo "profile: the model '$CB2_MODEL' is GONE — $reason"
+        echo "profile: refusing to start a reading on a model that no longer exists"
+        return 1
+      fi
+      # A timeout, a 429 or an auth failure is NOT death. Refusing here would turn a bad minute
+      # into a cancelled reading; calling it death would repeat the retirement mistake inverted.
+      [ "$verdict" = alive ] || echo "profile: WARNING model liveness inconclusive — $reason"
+    fi
     mkdir -p "$(dirname "$state")" || return 1
     python3 -c "import json,sys
-json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP')}, open('$state.tmp', 'w'), indent=1)" || return 1
+json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP'), 'model_alive': '$CB2_MODEL_ALIVE', 'model_alive_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'model_probe_ms': int('$CB2_MODEL_PROBE_MS')}, open('$state.tmp', 'w'), indent=1)" || return 1
     mv "$state.tmp" "$state" && chmod 444 "$state" || return 1
   fi
   CB2_RUN_STATE_SHA=$(sha256sum "$state" | cut -c1-64)
-  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_CAP CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
+  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_CAP CB2_MODEL_ALIVE CB2_MODEL_PROBE_MS CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
 }
 # Key-leak COUNT over the given paths (files, recursive): grep takes the key file itself as its
 # pattern file; nothing here reads the key. Empty key file setting -> 0.

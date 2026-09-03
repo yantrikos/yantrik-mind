@@ -6,7 +6,8 @@ fails here instead of quietly letting a leg through. The clean case is first and
 suite whose only cases are failures cannot notice a rule that rejects everything."""
 import json, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))
-from verdict import classify, host_independent, receipt_shape_ok, reported_project, call_latencies
+from verdict import (classify, host_independent, receipt_shape_ok, reported_project,
+                     call_latencies, model_liveness)
 
 # EVERY CASE RUNS AT BOTH CAPS. The rule used to import a module-level `CAP = 8`, so it was only
 # ever exercised at eight while the `nim-cap24` reading enforces twenty-four — a self-test that
@@ -204,4 +205,45 @@ for cap in CAPS:
             bad = 1
         print(f"cap{cap}/{name}: {'agree' if ok else 'DISAGREE'} "
               f"got=(ind={ind},dep={dep},agrees={agree}) want=(ind={want_ind},dep={want_dep},agrees={want_agree})")
+# E.MODEL1 — THE LIVENESS CLASSIFIER. Its two failure directions are opposite and both costly:
+# calling a bad minute "death" cancels readings that would have been fine, and calling death "a bad
+# minute" is what let a retired model corrupt half a day of measurements. The transport-failure
+# case alone does not watch the first direction — a mutation classifying EVERY non-2xx as death
+# survived a suite that had only a code-000 inconclusive case. So the HTTP errors are enumerated.
+LIVENESS_CASES = [
+    # name,                status, body,                                              want
+    ("answers",            200,    '{"choices":[]}',                                  "alive"),
+    ("answers_202",        202,    "",                                                "alive"),
+    ("retired",            410,    '{"detail":"The model gpt-oss-120b has reached its end of life"}', "gone"),
+    ("unknown_model",      404,    '{"error":"model not found"}',                     "gone"),
+    ("named_400",          400,    '{"error":"The model foo is no longer available"}', "gone"),
+    # Everything below is a PROVIDER having a bad minute, an operator misconfiguration, or the
+    # network. None of them is evidence the model has been retired.
+    ("rate_limited",       429,    "slow down",                                       "inconclusive"),
+    ("server_error",       500,    "internal",                                        "inconclusive"),
+    ("bad_gateway",        502,    "",                                                "inconclusive"),
+    ("gateway_timeout",    504,    "gateway timeout",                                 "inconclusive"),
+    ("overloaded",         503,    "overloaded",                                      "inconclusive"),
+    ("bad_key",            401,    "unauthorized",                                    "inconclusive"),
+    ("forbidden",          403,    "forbidden",                                       "inconclusive"),
+    ("request_defect_400", 400,    '{"error":"max_tokens must be positive"}',          "inconclusive"),
+    ("transport_failure",  0,      "",                                                "inconclusive"),
+    ("unreadable_status",  "xyz",  "",                                                "inconclusive"),
+]
+for name, status, body, want in LIVENESS_CASES:
+    got, reason = model_liveness(status, body)
+    ok = got == want
+    if not ok:
+        bad = 1
+    print(f"liveness/{name}: {'agree' if ok else 'DISAGREE'} got={got} want={want}")
+
+# The reason must carry the PROVIDER'S OWN WORDS. An operator who is told only "the model failed"
+# goes looking for a bug in the harness; one who is told "end of life on 2026-09-03" does not.
+_v, _r = model_liveness(410, '{"detail":"reached its end of life on 2026-09-03T08:00:00Z"}')
+if "end of life" not in _r or "410" not in _r:
+    bad = 1
+    print(f"liveness/reason_quotes_provider: DISAGREE got={_r!r}")
+else:
+    print("liveness/reason_quotes_provider: agree")
+
 sys.exit(bad)

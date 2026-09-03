@@ -4223,7 +4223,7 @@ pub(crate) fn publish_file_set(
     let written = crate::fileset::write_file_set(&root, &planned).map_err(|e| e.to_string())?;
     let base =
         std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
-    Ok((format!("{base}/{slug}/"), written, parsed.truncated))
+    Ok((format!("{base}/{slug}/"), written, parsed.unterminated))
 }
 
 /// Result of fetching a just-published page back off the web server.
@@ -14572,14 +14572,15 @@ impl RecipeHost for MindRecipeHost {
                     anyhow::bail!("a build needs a project name");
                 }
                 match publish_file_set(project, stream) {
-                    Ok((url, written, truncated)) => {
+                    Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
-                        if !truncated.is_empty() {
-                            // Never silent: a file lost to a budget is the expected failure here,
-                            // and a deliverable quietly missing one is worse than one that says so.
+                        if !unterminated.is_empty() {
+                            // An observation, not a verdict: the stream did not end with a newline,
+                            // so the last file MAY be incomplete. It is written either way — the
+                            // rule that deleted it threw away a complete test suite once already.
                             msg.push_str(&format!(
-                                " — INCOMPLETE: the generation was cut off inside {}",
-                                truncated.join(", ")
+                                " — NOTE: the stream ended without a newline, so {} may be incomplete",
+                                unterminated.join(", ")
                             ));
                         }
                         Ok(msg)

@@ -223,13 +223,23 @@ pub fn write_file_set(root: &Path, entries: &[FileEntry]) -> anyhow::Result<Vec<
 /// The marker that opens each file in a build stream.
 pub const FILE_MARKER: &str = "=== FILE:";
 
-/// What a parse recovered, and what it had to drop.
+/// What a parse recovered, and what it observed about how the stream ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSet {
     pub entries: Vec<FileEntry>,
-    /// Paths dropped because the stream ended inside them, in order. A generation that ran out of
-    /// budget mid-file is the expected failure here, not an exotic one.
-    pub truncated: Vec<String>,
+    /// The last file's path when the stream did NOT end with a newline — an OBSERVATION, not a
+    /// verdict, and the file is kept.
+    ///
+    /// This used to be `truncated`, and the file was DROPPED. That rule cost a real deliverable:
+    /// a graded preflight leg produced `tracker.py` and a complete `test_tracker.py`, and the whole
+    /// test suite was thrown away and reported as "cut off". Reproducing the same generation showed
+    /// `finish_reason: stop` with three complete files and no trailing newline — models routinely
+    /// end that way. A missing final newline CANNOT distinguish a truncated file from a finished
+    /// one; only the API's finish_reason can, and the parser does not have it. So the parser stops
+    /// guessing: it keeps what it recovered and reports what it saw. Dropping a probably-complete
+    /// file is a worse error than keeping a possibly-incomplete one, because the checker can judge
+    /// a file that exists and can do nothing with one that was deleted.
+    pub unterminated: Vec<String>,
     /// Text before the first marker — a preamble the model was told not to write. Kept as evidence
     /// rather than discarded silently, because "it ignored the format" is worth being able to see.
     pub preamble: String,
@@ -243,12 +253,14 @@ pub struct ParsedSet {
 /// larger. This format needs no escaping, so a file's contents cannot break it, and a stream cut off
 /// mid-file loses exactly that file instead of the whole deliverable.
 ///
-/// A file is TRUNCATED when the stream ends inside it AND the terminator was never seen. The
-/// terminator is the marker line for the next file, so the last file in a stream is only trusted
-/// when the stream ends with a newline — a stream that stops mid-token is not a finished file.
+/// The parser NEVER decides whether the last file is finished. The terminator is the next file's
+/// marker, so the final file has none by definition, and a missing trailing newline is equally
+/// consistent with a cut-off generation and with a model that ended without one. It is reported as
+/// `unterminated` and kept; only the API's `finish_reason` could settle it, and this function does
+/// not have it.
 pub fn parse_file_stream(text: &str) -> ParsedSet {
     let mut entries: Vec<FileEntry> = Vec::new();
-    let mut truncated: Vec<String> = Vec::new();
+    let mut unterminated: Vec<String> = Vec::new();
     let mut preamble = String::new();
     let mut current: Option<(String, String)> = None;
     let mut saw_marker = false;
@@ -269,20 +281,13 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
             continue;
         }
         match current.as_mut() {
-            Some((_, body)) => {
+            Some((path, body)) => {
                 let last = i + 1 == lines.len();
-                // The final line of the whole stream, with no trailing newline, is where a
-                // generation that ran out of budget stops. Everything before it is still real.
+                // A stream that does not end with a newline is NOTED and KEPT. It may be a
+                // generation cut off mid-file, or a model that simply ended without one — the text
+                // cannot tell them apart, and this used to guess "truncated" and delete the file.
                 if last && !line.ends_with(char::from(10)) {
-                    body.push_str(line);
-                    let (path, body) = current.take().expect("current is Some");
-                    truncated.push(path.clone());
-                    let _ = body;
-                    return ParsedSet {
-                        entries,
-                        truncated,
-                        preamble,
-                    };
+                    unterminated.push(path.clone());
                 }
                 body.push_str(line);
             }
@@ -298,7 +303,7 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
     }
     ParsedSet {
         entries,
-        truncated,
+        unterminated,
         preamble,
     }
 }

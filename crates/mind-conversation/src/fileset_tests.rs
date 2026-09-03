@@ -338,7 +338,7 @@ mod stream {
             true,
         );
         let got = parse_file_stream(&text);
-        assert!(got.truncated.is_empty(), "{:?}", got.truncated);
+        assert!(got.unterminated.is_empty(), "{:?}", got.unterminated);
         assert_eq!(got.preamble, "");
         let paths: Vec<&str> = got.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["index.html", "run.sh", "data/leads.json"]);
@@ -387,19 +387,41 @@ body
     }
 
     #[test]
-    fn a_stream_cut_off_mid_file_loses_that_file_and_keeps_the_rest() {
-        // The expected failure: a generation runs out of budget partway through the last file.
+    fn a_stream_that_does_not_end_with_a_newline_keeps_its_last_file_and_says_so() {
+        // THIS TEST ASSERTED THE OPPOSITE AND THE OPPOSITE WAS WRONG. It required the last file to
+        // be DROPPED as truncated. In a preflight leg that rule threw away a complete
+        // `test_tracker.py` — the whole test suite — and reported it as cut off. Reproducing the
+        // same generation showed `finish_reason: stop`, three complete files, and no trailing
+        // newline, which is simply how models often end.
+        //
+        // A missing final newline cannot distinguish a cut-off file from a finished one. The parser
+        // reports the observation and keeps the work; only `finish_reason` could settle it and the
+        // parser does not have it.
         let text = format!(
             "{FILE_MARKER} index.html\n<!doctype html>\n{FILE_MARKER} run.sh\n#!/bin/bash\necho start"
         );
         let got = parse_file_stream(&text);
-        assert_eq!(got.truncated, vec!["run.sh".to_string()]);
+        assert_eq!(
+            got.unterminated,
+            vec!["run.sh".to_string()],
+            "the observation is reported"
+        );
         let paths: Vec<&str> = got.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec!["index.html"],
-            "the complete files before the cut must survive"
+            vec!["index.html", "run.sh"],
+            "and NOTHING is thrown away: dropping a probably-complete file is the worse error"
         );
+        assert_eq!(got.entries[1].content, "#!/bin/bash\necho start");
+    }
+
+    #[test]
+    fn a_stream_that_ends_cleanly_reports_nothing_unterminated() {
+        // The other side of the same rule, so "unterminated" cannot become a constant.
+        let text = format!("{FILE_MARKER} a.txt\nbody\n");
+        let got = parse_file_stream(&text);
+        assert!(got.unterminated.is_empty(), "{:?}", got.unterminated);
+        assert_eq!(got.entries.len(), 1);
     }
 
     #[test]
@@ -418,7 +440,7 @@ body
     fn a_stream_with_no_marker_at_all_yields_nothing_and_says_why() {
         let got = parse_file_stream("I could not do that.\n");
         assert!(got.entries.is_empty());
-        assert!(got.truncated.is_empty());
+        assert!(got.unterminated.is_empty());
         assert_eq!(got.preamble, "I could not do that.\n");
     }
 
@@ -447,7 +469,7 @@ body
     }
 
     #[test]
-    fn a_truncated_stream_is_written_whole_or_not_at_all() {
+    fn an_unterminated_stream_still_writes_every_file_it_recovered() {
         // The end-to-end property from kill criterion 1: parse, then plan, then write. A set whose
         // recovered entries are all valid writes; one containing a bad path writes nothing.
         let s = Scratch::new("stream");

@@ -690,15 +690,12 @@ impl CapabilityHandler for DashboardsCapability {
                     return Some("(a build needs a project name)".to_string());
                 }
                 match crate::publish_file_set(&project, &stream) {
-                    Ok((url, written, truncated)) => {
+                    Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
-                        if !truncated.is_empty() {
-                            // Never silent. A file lost to a budget is the expected failure here,
-                            // and a deliverable that is quietly missing one is worse than one that
-                            // says which.
+                        if !unterminated.is_empty() {
                             msg.push_str(&format!(
-                                " — INCOMPLETE: the generation was cut off inside {}",
-                                truncated.join(", ")
+                                " — NOTE: the stream ended without a newline, so {} may be incomplete",
+                                unterminated.join(", ")
                             ));
                         }
                         msg

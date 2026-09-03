@@ -5364,6 +5364,73 @@ impl WakeSignals {
     }
 }
 
+/// E.CFG2: one route's answer to "does your provider actually serve the model you name?"
+///
+/// E.CFG1 already built the check (`ym why roles verify`). What was missing is that NOTHING RAN
+/// IT: `z-ai/glm-5.2` was retired by NVIDIA on 2026-08-21 and staging's research role kept naming
+/// it for thirteen days, looking "configured" in every report the whole time. A check nobody runs
+/// is indistinguishable from a check that passes, which makes it worse than a missing one.
+///
+/// This row is the durable half of the fix. It is a RECORD, not a decision: nothing reads it back
+/// to choose a backend, and a route whose model is missing keeps being used exactly as before.
+/// Announcing is the console notice's job; this is what survives the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigCheck {
+    /// The environment variable that configured the route, e.g. `YM_ROLE_RESEARCH`. Named rather
+    /// than the role alone so an operator can fix it without first working out which var to edit.
+    pub var: String,
+    pub provider: String,
+    pub model: String,
+    /// `served` | `not_served` | `unreachable` | `not_applicable`.
+    ///
+    /// `unreachable` is NOT a defect claim. A provider that cannot be reached is an unknown, and
+    /// reporting it as a missing model would be E.MODEL1's mistake inverted -- there, calling a bad
+    /// minute "death" would cancel good readings; here it would send an operator hunting a config
+    /// bug that does not exist.
+    pub verdict: String,
+    /// Catalogue size on `not_served`, so "absent from a catalogue of 81" is distinguishable from
+    /// "absent from a catalogue of 0" -- the second is a broken read wearing a verdict's clothes.
+    pub catalogue: Option<usize>,
+    /// Why the catalogue could not be read, on `unreachable`. Already credential-free at the
+    /// source: `fetch_model_catalogue` builds its reason from the error KIND, never the URL.
+    pub why: Option<String>,
+}
+
+impl ConfigCheck {
+    /// True when this row is a defect an operator should act on. `unreachable` deliberately is
+    /// not one -- see the note on `verdict`.
+    pub fn is_defect(&self) -> bool {
+        self.verdict == "not_served"
+    }
+
+    pub fn to_event(&self, ts_ms: u64) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(&format!("cfg-{}-{ts_ms}", self.var), "config_check");
+        ev.ts_ms = ts_ms;
+        ev.actor = Some("config".into());
+        ev.lane = Some("preflight".into());
+        ev.object_id = Some(self.var.clone());
+        ev.verdict = Some(self.verdict.clone());
+        // The VARIABLE leads, and it is repeated here rather than left to `object_id` alone: the
+        // operator-facing decisions feed projects a fixed subset of fields and drops `object_id`,
+        // so a row that named the variable only there would tell a reader which model is gone but
+        // not which line to edit. Found by reading the feed in a test instead of assuming it
+        // carried the whole event. Provider and model are configuration, not secrets, and without
+        // them the row cannot be acted on months later when the environment has moved on.
+        ev.outcome = Some(match (self.catalogue, &self.why) {
+            (Some(n), _) => format!(
+                "{} = {}:{} absent from a catalogue of {n}",
+                self.var, self.provider, self.model
+            ),
+            (None, Some(why)) => format!(
+                "{} = {}:{} catalogue unread ({why})",
+                self.var, self.provider, self.model
+            ),
+            (None, None) => format!("{} = {}:{}", self.var, self.provider, self.model),
+        });
+        ev
+    }
+}
+
 /// One wake's shadow: what the arbiter would have chosen, recorded at evaluation time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionShadow {

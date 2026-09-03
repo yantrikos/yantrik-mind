@@ -14505,3 +14505,146 @@ mod sec8_canaries {
         assert_eq!(decision.scope, mind_types::OutputScope::HouseholdMember);
     }
 }
+
+/// E.CFG2 kill criterion 1, END TO END: a route whose provider does not serve its model must
+/// produce a DURABLE row and a VISIBLE notice. Not a source scan — the failure being fixed is that
+/// a correct check produced output nobody met, and a test that only proves the code says the right
+/// words would repeat it exactly. E.PAGE1 shipped as a no-op behind ten green tests of that shape.
+#[tokio::test]
+async fn cfg2_a_route_its_provider_does_not_serve_is_recorded_and_announced() {
+    use mind_recipes::RecipeStore;
+
+    struct NoHost;
+    #[async_trait::async_trait]
+    impl RecipeHost for NoHost {
+        async fn call_tool(&self, _t: &str, _a: &serde_json::Value) -> anyhow::Result<String> {
+            anyhow::bail!("this test never runs a recipe; it only needs the notice store")
+        }
+    }
+
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1);
+    // A REAL notice queue. The announce is the load-bearing half, and without a store it degrades
+    // to a log line — which is the failure this whole slice exists to fix, so the test must hold an
+    // engine that can actually queue.
+    let store = Arc::new(RecipeStore::open(":memory:").unwrap());
+    let recipes =
+        Arc::new(RecipeEngine::new(pool.clone(), Arc::new(NoHost), "JARVIS").with_store(store));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_recipes(recipes);
+    assert!(conv.has_notice_queue(), "the fixture must own a notice queue");
+    let dir = std::env::temp_dir().join(format!("ym-cfg2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&dir.join("d.jsonl")));
+    let conv = conv.with_recorder(log);
+
+    let checks = vec![
+        mind_observability::ConfigCheck {
+            var: "YM_ROLE_VERIFY".into(),
+            provider: "nim".into(),
+            model: "deepseek-ai/deepseek-v4-flash-0731".into(),
+            verdict: "served".into(),
+            catalogue: None,
+            why: None,
+        },
+        // The real one: z-ai/glm-5.2 was retired 2026-08-21 and sat configured for thirteen days.
+        mind_observability::ConfigCheck {
+            var: "YM_ROLE_RESEARCH".into(),
+            provider: "nim".into(),
+            model: "z-ai/glm-5.2".into(),
+            verdict: "not_served".into(),
+            catalogue: Some(81),
+            why: None,
+        },
+        mind_observability::ConfigCheck {
+            var: "YM_ROLE_UTIL".into(),
+            provider: "groq".into(),
+            model: "openai/gpt-oss-120b".into(),
+            verdict: "unreachable".into(),
+            catalogue: None,
+            why: Some("provider answered HTTP 503".into()),
+        },
+    ];
+    let (rows, notices) = conv.announce_config_checks(&checks);
+    assert_eq!(rows, 3, "every route is recorded, defect or not");
+    assert_eq!(
+        notices, 1,
+        "exactly the ONE defect is announced — not the served route, and not the unreachable one"
+    );
+
+    // The durable half actually reached the recorder, with the evidence an operator needs months
+    // later: which variable, and how big the catalogue it was absent from.
+    let feed = conv.web_recent_decisions(50);
+    let cfg: Vec<_> = feed
+        .iter()
+        .filter(|r| r["kind"] == "config_check")
+        .collect();
+    assert_eq!(cfg.len(), 3, "three durable rows: {feed:?}");
+    let bad = cfg
+        .iter()
+        .find(|r| r["verdict"] == "not_served")
+        .expect("the defect row is on the ledger");
+    // The feed drops `object_id`, so the variable must survive in a field the feed actually shows —
+    // otherwise the row tells a reader which model is gone but not which line to edit.
+    let outcome = bad["outcome"].as_str().unwrap_or("");
+    assert!(
+        outcome.contains("YM_ROLE_RESEARCH"),
+        "the row must name the VARIABLE in a field this surface renders: {outcome}"
+    );
+    assert!(
+        outcome.contains("z-ai/glm-5.2") && outcome.contains("81"),
+        "the row carries the model and the catalogue size it was absent from: {outcome}"
+    );
+    // "absent from a catalogue of 0" is a broken read wearing a verdict's clothes, so the size is
+    // not decoration — it is how the two are told apart.
+    let unreachable = cfg
+        .iter()
+        .find(|r| r["verdict"] == "unreachable")
+        .expect("an unreachable provider is still recorded");
+    assert!(
+        unreachable["outcome"]
+            .as_str()
+            .unwrap_or("")
+            .contains("503"),
+        "the unreachable row keeps the provider's reason: {unreachable:?}"
+    );
+    // The notice an operator actually meets: it must name the variable to edit and the model that
+    // is gone. "a route is misconfigured" would be true and useless.
+    let (ready, _) = conv.notice_queue_depth().expect("notice queue readable");
+    assert_eq!(ready, 1, "one notice waiting for the operator");
+    let leased = conv.lease_notices(60_000, 10).expect("lease");
+    let text = leased
+        .first()
+        .map(|n| n.text.clone())
+        .unwrap_or_default();
+    assert!(
+        text.contains("YM_ROLE_RESEARCH") && text.contains("z-ai/glm-5.2"),
+        "the notice names the variable and the dead model: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// E.CFG2 kill criterion 2: unreachable is NOT missing. This is E.MODEL1's lesson inverted — there,
+/// calling a provider's bad minute "death" would cancel a good reading; here it would send an
+/// operator hunting a configuration bug that does not exist, and the notice is the only part of
+/// this feature that works.
+#[test]
+fn cfg2_an_unreachable_provider_is_never_a_defect() {
+    let base = |verdict: &str| mind_observability::ConfigCheck {
+        var: "YM_ROLE_CHAT".into(),
+        provider: "nim".into(),
+        model: "m".into(),
+        verdict: verdict.into(),
+        catalogue: None,
+        why: None,
+    };
+    assert!(base("not_served").is_defect(), "a missing model is the defect");
+    for benign in ["served", "unreachable", "not_applicable"] {
+        assert!(
+            !base(benign).is_defect(),
+            "{benign} must never be announced as a configuration defect"
+        );
+    }
+}
+

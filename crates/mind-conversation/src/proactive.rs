@@ -952,6 +952,58 @@ impl super::ConversationEngine {
         let _ = self.recorder.record_once(tick.to_event(now));
     }
 
+    /// E.CFG2: one durable row per configured route, per check. Recording only -- no caller reads
+    /// these back, and a route whose model is missing is still used exactly as before. The point is
+    /// that the finding OUTLIVES the process that made it; a check whose result dies with the run
+    /// is how a dead role sat unnoticed for thirteen days.
+    pub fn record_config_check(&self, check: &mind_observability::ConfigCheck) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.recorder.record(check.to_event(now));
+    }
+
+    /// E.CFG2: record every route's check, and ANNOUNCE the ones that are defects.
+    ///
+    /// Both halves live here so a test can watch them happen. A row survives the process; a notice
+    /// is what an operator meets without going looking. The failure being fixed is that nobody ran
+    /// the check -- a durable row nobody reads either would be the same bug in a different coat, so
+    /// the notice is the load-bearing half and the row is the evidence behind it.
+    ///
+    /// Returns (rows recorded, notices queued). The counts are what the loop's own test asserts on;
+    /// nothing reads them to make a decision.
+    pub fn announce_config_checks(
+        &self,
+        checks: &[mind_observability::ConfigCheck],
+    ) -> (usize, usize) {
+        let mut rows = 0usize;
+        let mut notices = 0usize;
+        for check in checks {
+            self.record_config_check(check);
+            rows += 1;
+            // `unreachable` is not a defect and must never be announced as one: an operator sent
+            // hunting a config bug that does not exist stops trusting the next notice, and the
+            // notice is the only part of this that works.
+            if !check.is_defect() {
+                continue;
+            }
+            let line = format!(
+                "{} names {}:{}, which its provider does not serve (catalogue of {}). That route                  will fail every time it is used until the model is changed.",
+                check.var,
+                check.provider,
+                check.model,
+                check.catalogue.unwrap_or(0)
+            );
+            eprintln!("[config] {line}");
+            if self.has_notice_queue()
+                && self
+                    .queue_notice(mind_observability::DeliveryKind::Verdict, &line)
+                    .is_ok()
+            {
+                notices += 1;
+            }
+        }
+        (rows, notices)
+    }
+
     /// L2-B: the attention shadow's ONE permitted write. A row per poll wake that had at least
     /// one due in-scope opportunity, carrying what the arbiter WOULD have chosen. It decides
     /// nothing: no caller reads it back, and the loops that ran had already run.

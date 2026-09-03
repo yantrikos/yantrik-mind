@@ -119,6 +119,9 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
                 conv.record_attention_shadow(&shadow);
             }
         }
+        // E.CFG2: does each configured route's provider actually serve the model it names?
+        state.last_config_check =
+            run_config_check(&conv, process_start_ms, state.last_config_check).await;
         run_engagement(&conv, &delivery, process_start_ms, &mut state).await;
         run_patterns(&conv, &delivery, process_start_ms, &mut state).await;
         run_dmn(&conv, process_start_ms, &mut state).await;
@@ -144,6 +147,10 @@ pub(crate) struct RunnerState {
     pub(crate) gate_ask: mind_observability::OpportunityGate,
     pub(crate) last_dmn: u64,
     pub(crate) gate_dmn: mind_observability::OpportunityGate,
+    /// E.CFG2: when the configured routes were last verified against their providers' catalogues.
+    /// Zero at boot ON PURPOSE, so the first wake checks -- a config defect present at startup is
+    /// the case that actually happened, and waiting six hours to notice it would miss it.
+    pub(crate) last_config_check: u64,
 }
 
 /// L3b: "spoke" for the process host — a proactive line was SENT within this window.
@@ -1039,6 +1046,93 @@ pub(crate) async fn run_ics(
 
 /// Standing-lease expiry sweep (ARCH-6 P.4): its own cursor, no chat gating — it only ends
 /// leases whose time has passed, records each, and logs only when it did.
+/// E.CFG2 -- run the check that already existed, because nothing ran it.
+///
+/// `ym why roles verify` (E.CFG1) has been able to answer "does this provider serve the model this
+/// route names?" the whole time. Nobody typed it, so `z-ai/glm-5.2` stayed configured for thirteen
+/// days after NVIDIA retired it, reading "configured" in every report. A check nobody runs is
+/// indistinguishable from a check that passes.
+///
+/// Deliberately NOT a second checker: `role_plan` + `verify_models` are called unchanged, and
+/// `verify_models` already fetches one catalogue per distinct provider/base-URL pair rather than
+/// one per route.
+///
+/// Decides nothing. A route whose model is missing is used exactly as before -- refusing to serve a
+/// turn because a catalogue lookup disagreed would be a far worse failure than the one being fixed.
+pub(crate) async fn run_config_check(
+    conv: &ConversationEngine,
+    process_start_ms: u64,
+    last_config_check: u64,
+) -> u64 {
+    // Six hours. A provider's catalogue changes on the order of days -- both retirements found so
+    // far were announced with dates, not minutes -- so anything faster spends requests to learn
+    // nothing. The first wake after boot always runs (last = 0), which is the case that mattered.
+    let period: u64 = std::env::var("YM_CONFIG_CHECK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6 * 60 * 60);
+    let now = now_ms();
+    let gate = mind_observability::Gated::timer(mind_observability::Timer {
+        now_ms: now,
+        last_ms: last_config_check,
+        period_ms: period * 1000,
+    });
+    // A pure timer: due or not. There is no hold condition -- reading a catalogue disturbs nobody,
+    // needs no presence, and speaks to no one unless it finds a defect.
+    if !matches!(gate.decide(), mind_observability::GateDecision::Act) {
+        return last_config_check;
+    }
+    let plan = mind_inference::role_plan(|k| std::env::var(k).ok());
+    if plan.is_empty() {
+        return now;
+    }
+    // The catalogue fetch is blocking (ureq) and can sit on a 20 s timeout per provider. On the
+    // runner's thread that would stall every other loop behind it, so it goes to a blocking thread:
+    // "must not take part in cognition" includes not holding the runner still while a provider
+    // decides whether to answer.
+    let checks = match tokio::task::spawn_blocking(move || {
+        mind_inference::verify_models(&plan, mind_inference::fetch_model_catalogue)
+            .into_iter()
+            .zip(plan.iter().cloned())
+            .map(|(check, route)| {
+                let (verdict, catalogue, why) = match check {
+                    mind_inference::ModelCheck::Served => ("served", None, None),
+                    mind_inference::ModelCheck::NotServed { catalogue } => {
+                        ("not_served", Some(catalogue), None)
+                    }
+                    mind_inference::ModelCheck::Unreachable { why } => {
+                        ("unreachable", None, Some(why))
+                    }
+                    mind_inference::ModelCheck::NotApplicable => ("not_applicable", None, None),
+                };
+                mind_observability::ConfigCheck {
+                    var: route.var,
+                    provider: route.provider,
+                    model: route.model,
+                    verdict: verdict.to_string(),
+                    catalogue,
+                    why,
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(checks) => checks,
+        // A panicked probe is not a verdict about anyone's configuration. Say nothing and let the
+        // next cadence try -- the alternative is announcing a defect that the evidence never showed.
+        Err(_) => return now,
+    };
+
+    // Record + announce in ONE place, in the engine, where a test can build a real recorder and
+    // notice queue and watch both halves happen. Keeping the announce here would have made the only
+    // thing that matters observable solely by source scan -- which is how E.PAGE1 shipped as a no-op
+    // with ten green tests.
+    let (_rows, _notices) = conv.announce_config_checks(&checks);
+    let _ = process_start_ms;
+    now
+}
+
 pub(crate) async fn run_lease_sweep(
     conv: &ConversationEngine,
     process_start_ms: u64,
@@ -1197,10 +1291,34 @@ mod tests {
         let src = include_str!("loops.rs");
         let body = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
         assert!(!body.contains("tg_send"), "the runner never sends");
-        assert!(
-            !body.contains("inference"),
-            "no model call from the runner itself"
-        );
+        // The runner calls no MODEL itself. This used to ban the substring "inference" outright,
+        // which was blunt enough to also ban reading a provider's model CATALOGUE — a plain GET
+        // that infers nothing. E.CFG2 needed exactly that, and the tempting fix was to re-export
+        // the two functions under another name so the scan stopped seeing them. That is evasion:
+        // it satisfies the string, not the rule. So the rule is stated properly instead — an
+        // ALLOWLIST, so any new reach into mind_inference has to be added here deliberately and
+        // justified, rather than slipping in under a ban that was easy to step around.
+        const INFERENCE_ALLOWED: [&str; 4] = [
+            "mind_inference::role_plan",      // E.CFG2: reads env, builds no backend, no network
+            "mind_inference::verify_models",  // E.CFG2: GETs /models; lists names, calls none
+            "mind_inference::fetch_model_catalogue", // handed to verify_models, never invoked here
+            "mind_inference::ModelCheck",     // the verdict TYPE; matching on it calls nothing
+        ];
+        for (i, _) in body.match_indices("mind_inference::") {
+            let tail = &body[i..];
+            assert!(
+                INFERENCE_ALLOWED.iter().any(|a| tail.starts_with(a)),
+                "the runner reached into mind_inference outside the allowlist: {}",
+                &tail[..tail.len().min(60)]
+            );
+        }
+        // And nothing that performs an inference, whatever module it came from.
+        for call in ["InferencePool", "LLMBackend"] {
+            assert!(
+                !body.contains(call),
+                "no model call from the runner itself: {call}"
+            );
+        }
         // L4-0b: the ask's opportunity is constructed ONCE, before `prepare_ask`, and the loop
         // row reuses that value; the model-capable act runs inside it.
         let flat: String = body.split_whitespace().collect();
@@ -1671,3 +1789,111 @@ mod l2b_wiring_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod cfg2_wiring_tests {
+    //! E.CFG2's wiring. These are source scans, and only for the criteria that ARE shape: that the
+    //! blocking fetch leaves the runner's thread, that the existing checker is reused rather than
+    //! reimplemented, and that the gate is actually called each wake. The load-bearing criterion —
+    //! a defect produces a durable row AND a visible notice — is tested end to end against a real
+    //! recorder and a real notice queue in mind-conversation, because a scan proving the code says
+    //! the right words is exactly how E.PAGE1 shipped as a no-op.
+
+    /// The file WITHOUT either test module. A scan that includes its own source matches the very
+    /// strings it searches for — a trap this file has already sprung twice.
+    fn src() -> &'static str {
+        const FULL: &str = include_str!("loops.rs");
+        match FULL.find("mod l2b_wiring_tests") {
+            Some(i) => &FULL[..i],
+            None => FULL,
+        }
+    }
+
+    fn config_check_body() -> &'static str {
+        let s = src();
+        let start = s
+            .find("pub(crate) async fn run_config_check(")
+            .expect("the gate exists");
+        let end = s[start..]
+            .find("
+pub(crate) async fn run_lease_sweep(")
+            .map(|e| start + e)
+            .unwrap_or(s.len());
+        &s[start..end]
+    }
+
+    /// KILL 3: the check must not hold the runner still. `fetch_model_catalogue` is ureq — blocking,
+    /// with a 20 s timeout PER PROVIDER — so on the runner's thread a slow provider would stall
+    /// every other loop behind it. "Takes no part in cognition" includes not freezing it.
+    #[test]
+    fn the_blocking_fetch_leaves_the_runner_thread() {
+        let body = config_check_body();
+        assert!(
+            body.contains("spawn_blocking"),
+            "the catalogue fetch must move off the runner's thread"
+        );
+        let fetch = body.find("fetch_model_catalogue").expect("it fetches");
+        let spawn = body.find("spawn_blocking").expect("it spawns");
+        assert!(
+            spawn < fetch,
+            "the fetch must happen INSIDE the blocking task, not before it"
+        );
+    }
+
+    /// KILL 5: no second checker. E.CFG1's `role_plan` + `verify_models` are called unchanged, and
+    /// `verify_models` already fetches one catalogue per distinct provider/base-URL pair. Building a
+    /// parallel implementation was the mistake this slice was one step away from making.
+    #[test]
+    fn it_reuses_the_checker_that_already_existed() {
+        let body = config_check_body();
+        assert!(body.contains("mind_inference::role_plan"), "reuses the plan");
+        assert!(
+            body.contains("mind_inference::verify_models"),
+            "reuses the verifier, and with it the one-fetch-per-provider cache"
+        );
+        assert_eq!(
+            body.matches("fetch_model_catalogue").count(),
+            1,
+            "exactly one fetch, handed to verify_models — a second call site is a second cache"
+        );
+    }
+
+    /// The gate is reached every wake, and it decides NOTHING: no branch of the runner depends on
+    /// its answer. A configuration report that could withhold a turn would be far worse than the
+    /// silence it replaces.
+    #[test]
+    fn the_gate_runs_each_wake_and_gates_nothing() {
+        let s = src();
+        let start = s.find("async fn run_loops(").expect("the poll loop exists");
+        let end = s[start..]
+            .find("
+/// The timer states")
+            .map(|e| start + e)
+            .unwrap_or(s.len());
+        let body = &s[start..end];
+        assert!(
+            body.contains("run_config_check("),
+            "the wake calls the gate"
+        );
+        // Its ONLY consumer is its own clock. If the call ever appears inside a condition or a
+        // match scrutinee, a configuration report has become something the runner obeys.
+        for steering in ["if run_config_check", "match run_config_check", "if !run_config_check"] {
+            assert!(
+                !body.contains(steering),
+                "the gate's result must not steer the runner ({steering})"
+            );
+        }
+        let call = body.find("run_config_check(").expect("called");
+        assert!(
+            body[..call].trim_end().ends_with("state.last_config_check ="),
+            "the only thing the call feeds is its own clock"
+        );
+        // Its clock starts at zero so the FIRST wake checks. A config defect present at boot is the
+        // case that actually happened; a six-hour wait would have missed it.
+        assert!(
+            !src().contains("last_config_check: process_start_ms"),
+            "the config clock must NOT be boot-stamped, or the first check is six hours late"
+        );
+    }
+}
+

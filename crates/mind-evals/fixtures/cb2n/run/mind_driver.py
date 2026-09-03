@@ -1,7 +1,7 @@
 """E.CB2 Mind driver v3 — runs INSIDE the cb2-mind container. Waits for the console, pairs with
 the instance's own code, submits ONE delegation, polls every 10 s and STOPS (never kills its
 own container — the parent does that after this receipt) at done/failed, at the first proxy
-refusal (a ninth request was attempted → cap hit), or at 1800 s. Declared output → /state/
+refusal (a ninth request was attempted → cap hit), or at the run state's wall. Declared output → /state/
 artifact (RESULT.md + files added under the web dir); receipt → /state/receipt.json, counts only,
 closed-schema accounting fail-closed; a missing proxy receipt disqualifies."""
 import json, os, pathlib, shutil, sys, time, urllib.request, http.cookiejar, hashlib

@@ -5227,3 +5227,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What would stop the sequence | The probe says **gone** → refuse, the model is retired. A leg **voids** (5xx or transport) → exactly one declared rerun, per the standing rule; a second void stops it. |
 | The wall question this answers, stated as a threshold now | If a leg's **wall utilisation exceeds 70% of 3600 s**, 3600 is still the wrong number and no sequence runs on it. Between 40% and 70% the wall stands. Below 40% it is comfortable. Writing the threshold down first is the point: after seeing "2,900 s, it finished" I would be arguing for it rather than measuring it. |
 | What I expect | 1,163 s of model time was measured at cap 24 with no agent or tool overhead. A real leg adds both. I expect 40–65% and will be unsurprised by a void. |
+
+## E.CB2-W follow-up — the preflight caught what the slice missed
+| Field | Value |
+| --- | --- |
+| What the preflight found | `MANIFEST.json` declared `"wall_clock_seconds": 1800` and killed **"any run with proxy model_requests above the run state's cap or over 1800 s"**. A leg at 3600 would have been declared dead by the document that decides disqualification, while every script ran it happily. The scripts were threaded and the **contract** was not. |
+| When | On the box, after the three preflight checks passed, minutes before a graded leg would have started. Four readings have already died to harness defects whose first run was a graded one; this is the first time the preflight paid. |
+| Why W6 missed it | W6 greps three files — `hermes_leg.sh`, `mind_leg.sh`, `mind_driver.py` — the three I thought of when I wrote it. **A completeness check is only as complete as its list.** The manifest is a consumer in the sense that matters most and was not on it. |
+| Fix | The manifest now names the run state's wall in all three places, exactly as it already did for the cap ("the run state's cap"). W9 asserts both: no literal `1800 s` in the kill list, and `wall_clock_seconds` naming the run state. Both mutants — restoring the literal declaration, restoring the literal kill — were watched to fail, and each was verified to have actually changed the file first. |
+| The habit this should change | When a parameter is threaded through code, ask what **documents** carry it too. The kill list is executable in the only sense that counts: it decides whether a reading survives. |

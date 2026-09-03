@@ -2,7 +2,7 @@
 # E.CB2 Hermes leg v3, contained: the pinned image on the INTERNAL network, the model reachable
 # only through this run's counting proxy (429 from request 9), fresh per-task HERMES_HOME with
 # agent.max_turns 8, toolsets file,terminal,code_execution, /work + home the only writable
-# mounts, 1800 s wall. Cleanup guaranteed by a trap. Receipt: counts only; raw stdout kept in a
+# mounts, the run state's wall. Cleanup guaranteed by a trap. Receipt: counts only; raw stdout kept in a
 # separate file. Fails closed on a missing session id or log.
 set -u
 T=$1; OUT=${2:-/root/cb2n/out}; WALL=${CB2_WALL:-1800}

@@ -176,4 +176,20 @@ say "a_profile_set_wall_reaches_a_child_process" "$(cat "$T/ow7")" "3600/8/cap/t
   bash -c 'echo "${CB2_WALL:-unset}/${CB2_CAP:-unset}"' ) > "$T/ow8"
 say "a_defaulted_wall_reaches_a_child_process" "$(cat "$T/ow8")" "1800/8"
 
+# W9. THE MANIFEST IS A CONSUMER TOO, and the one that matters most: it is the document that
+#     decides what disqualifies a run. It said `"wall_clock_seconds": 1800` and killed "any run
+#     ... over 1800 s", so a leg at 3600 would have been declared dead by the manifest while every
+#     script happily ran it. W6 did not catch it because W6 enumerates three files I thought of --
+#     a completeness check that is only as complete as the list. This was found by the PREFLIGHT,
+#     on the box, minutes before a graded leg would have run; four readings have already died to
+#     harness defects whose first run was a graded one.
+m="$HERE/../MANIFEST.json"
+say "the_manifest_kills_by_no_literal_wall" "$(grep -c '1800 s' "$m")" "0"
+r=$(python3 -c "
+import json
+w = json.load(open('$m'))['caps']['wall_clock_seconds']
+k = ' '.join(json.load(open('$m'))['kill'])
+print('ok' if (\"run state\" in str(w) and \"run state's wall\" in k) else 'literal')")
+say "the_manifest_wall_names_the_run_state" "$r" "ok"
+
 exit $BAD

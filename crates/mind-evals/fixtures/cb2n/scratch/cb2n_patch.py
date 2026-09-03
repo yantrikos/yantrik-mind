@@ -1022,3 +1022,30 @@ rw('profiles/nim-ds.profile', [
     ('\nCB2_CAP=24\n',
      '\nCB2_CAP=24\n# Measured, not guessed: 24 sequential 600-token calls on this model took 1,163 s -- 65% of the old\n# 1800 s wall in model time alone, before any agent or tool time, with a p90 of 80 s and a 110 s\n# tail. At 3600 s that same model time is 32%.\nCB2_WALL=3600\n'),
 ])
+
+# ── E.CB2-W follow-up: the MANIFEST is a consumer too ─────────────────────────────────────────
+# It declared `"wall_clock_seconds": 1800` and killed "any run ... over 1800 s", so a leg at 3600
+# would have been declared dead by the document that decides disqualification while every script
+# ran it happily. The scripts were threaded and the CONTRACT was not. Found by the preflight on
+# the box, minutes before a graded leg; W6 missed it because W6 enumerates three files, and a
+# completeness check is only as complete as its list.
+rw('MANIFEST.json', [
+    ('"wall_clock_seconds": 1800,',
+     '"wall_clock_seconds": "the run state\'s wall — profiles/<name>.profile CB2_WALL, default 1800; nim-ds sets 3600 (E.CB2-W). It is carried by the immutable run state and refused if a later load disagrees, exactly as the cap is: a reading may not change its own timeout mid-run.",'),
+    ('or at 1800 s with deadline-bounded waits',
+     "or at the run state's wall with deadline-bounded waits"),
+    ("above the run state's cap or over 1800 s",
+     "above the run state's cap or past the run state's wall"),
+])
+rw('run/hermes_leg.sh', [
+    ('1800 s wall',
+     "the run state's wall"),
+])
+rw('run/mind_driver.py', [
+    ('or at 1800 s.',
+     "or at the run state's wall."),
+])
+rw('selftest/cap_cases.sh', [
+    ('\nexit $BAD\n',
+     '\n# W9. THE MANIFEST IS A CONSUMER TOO, and the one that matters most: it is the document that\n#     decides what disqualifies a run. It said `"wall_clock_seconds": 1800` and killed "any run\n#     ... over 1800 s", so a leg at 3600 would have been declared dead by the manifest while every\n#     script happily ran it. W6 did not catch it because W6 enumerates three files I thought of --\n#     a completeness check that is only as complete as the list. This was found by the PREFLIGHT,\n#     on the box, minutes before a graded leg would have run; four readings have already died to\n#     harness defects whose first run was a graded one.\nm="$HERE/../MANIFEST.json"\nsay "the_manifest_kills_by_no_literal_wall" "$(grep -c \'1800 s\' "$m")" "0"\nr=$(python3 -c "\nimport json\nw = json.load(open(\'$m\'))[\'caps\'][\'wall_clock_seconds\']\nk = \' \'.join(json.load(open(\'$m\'))[\'kill\'])\nprint(\'ok\' if (\\"run state\\" in str(w) and \\"run state\'s wall\\" in k) else \'literal\')")\nsay "the_manifest_wall_names_the_run_state" "$r" "ok"\n\nexit $BAD\n'),
+])

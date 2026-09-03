@@ -801,6 +801,11 @@ rw('MANIFEST.json', [
 s = io.open(R + "run/verdict.py", encoding="utf-8").read().rstrip(chr(10))
 io.open(R + "run/verdict.py", "w", encoding="utf-8", newline=chr(10)).write(s + '\n\n\ndef host_independent(*, capture_ok, symlinks, specials, key_leak_hits, receipt_valid, downloads):\n    """The INDEPENDENT violations only the host can see, after the container is gone.\n\n    These lived as one long boolean expression inside the leg script\'s heredoc, where no test could\n    reach them — the same shape as the disqualification rule before it moved here, and the shape in\n    which three defects hid. `downloads` is the scan the Hermes leg has always run over its\n    transcript and the Mind was never held to.\n\n    Returns (violated, reasons) so a receipt can say WHICH rule fired rather than only that one did.\n    """\n    reasons = []\n    if not capture_ok:\n        reasons.append("capture")          # the binary sha, provenance or tree hash is malformed\n    if symlinks > 0:\n        reasons.append("symlinks")\n    if specials > 0:\n        reasons.append("specials")         # a fifo or device node in the artifact\n    if key_leak_hits != 0:\n        reasons.append("key_leak")\n    if not receipt_valid:\n        reasons.append("untyped_receipt")  # never a void: a missing receipt is not evidence of one\n    if downloads > 0:\n        reasons.append("download_or_install")\n    return bool(reasons), reasons\n')
 
+rw("selftest/cap_cases.sh", [
+    ('  n=$(grep -cE \'CAP *= *8|CB2_CAP=8|cap *= *8\' "$F/$f" 2>/dev/null || true)',
+     '  # COMMENTS ARE NOT CODE. The first version matched the whole line and so flagged verdict.py for\n  # the sentence explaining that its `CAP = 8` had been REMOVED — a scan failing on its own\n  # changelog. Everything from the first `#` is stripped before matching (both shell and Python use\n  # it), so only a literal that could still decide a budget counts.\n  n=$(sed \'s/#.*//\' "$F/$f" 2>/dev/null | grep -cE \'CAP *= *8|CB2_CAP=8|cap *= *8\' || true)'),
+])
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

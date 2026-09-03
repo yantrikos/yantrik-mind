@@ -86,7 +86,11 @@ F="$HERE/.."
 # file the case's own regex matched and its file list omitted. The cap is a required argument there
 # now, so nothing in it can decide a budget by itself.
 for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh run/verdict.py; do
-  n=$(grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' "$F/$f" 2>/dev/null || true)
+  # COMMENTS ARE NOT CODE. The first version matched the whole line and so flagged verdict.py for
+  # the sentence explaining that its `CAP = 8` had been REMOVED — a scan failing on its own
+  # changelog. Everything from the first `#` is stripped before matching (both shell and Python use
+  # it), so only a literal that could still decide a budget counts.
+  n=$(sed 's/#.*//' "$F/$f" 2>/dev/null | grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' || true)
   say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"
 done
 exit $BAD

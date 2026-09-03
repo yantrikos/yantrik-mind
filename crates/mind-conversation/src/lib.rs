@@ -113,6 +113,8 @@ mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;
 #[cfg(test)]
+mod page1_tests;
+#[cfg(test)]
 mod mq6_seam_tests;
 mod reflex;
 pub mod turn_exclusion;
@@ -4255,6 +4257,77 @@ fn is_tool_call_blob(s: &str) -> bool {
             || (t.contains("\"tool\"") && t.contains("\"args\""))
             || (t.contains("\"action\"") && t.contains("\"answer\""))
             || (t.contains("\"answer\"") && t.contains("\"tool\"")))
+}
+
+/// E.PAGE1: the filename a task EXPLICITLY requires, if it requires one.
+///
+/// A brief that says "entry `index.html` in the project root" used to get a file named after the
+/// page's `<title>`, because `publish_page` asks `title_from_html` first and only falls back to the
+/// caller's `name`. Measured cost on a frozen benchmark: the identical bytes scored 2/6 as
+/// `arjun-mehta---software-engineer.html` and 6/6 as `index.html`. Asking for a file by name and
+/// getting a different name is a defect any user hits; the benchmark only put a number on it.
+///
+/// DELIBERATELY NARROW. A filename counts only next to a phrase that makes it a REQUIREMENT, and
+/// only when the task names exactly one. An incidental mention ("see index.html for an example")
+/// must not capture the name, and two different requirements must fall back rather than guess —
+/// a wrong confident answer is worse here than today's behaviour, which is at least predictable.
+pub fn required_filename(task: &str) -> Option<String> {
+    // The phrase has to be near the name, not merely somewhere in a long brief. A window is the
+    // cheapest honest approximation of "near": the requirement and the name in the same breath.
+    // Cues that MEAN "this is the filename". Bare modals are not among them: "must be" and
+    // "should be" were, and "unlike about.html, this one should be playful" captured `about.html`
+    // — a modal three words away is not a naming instruction. A cue has to be about the NAME.
+    const CUES: &[&str] = &[
+        "entry", "named", "name it", "call it", "save as", "save it as", "saved as",
+        "project root", "at the root", "in the root", "filename", "file name",
+    ];
+    let low = task.to_ascii_lowercase();
+    let mut found: Vec<String> = Vec::new();
+    let bytes = low.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = low[i..].find(".html") {
+        let end = i + rel + ".html".len();
+        // Walk back over the stem: letters, digits, dot, dash, underscore. A slash or any other
+        // byte ends it — which is also what keeps a path out of the name (kill criterion 4).
+        let mut start = i + rel;
+        while start > 0 {
+            let c = bytes[start - 1];
+            if c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let name = &low[start..end];
+        // A window either side, big enough to hold "entry `index.html` in the project root" and
+        // small enough that a cue three sentences away does not reach.
+        let w0 = start.saturating_sub(60);
+        let w1 = (end + 60).min(low.len());
+        let window = &low[w0..w1];
+        let cued = CUES.iter().any(|c| window.contains(c));
+        // NO SEPARATOR CHECK HERE, and that is deliberate: the stem walk above stops at any byte
+        // outside `[A-Za-z0-9-_.]`, so a slash or a backslash has already ended the name — from
+        // `../../etc/passwd.html` the walk yields `passwd.html`. Guards for them stood here and
+        // could not fire; the test that proves the returned name holds no separator passes with
+        // them deleted, which is how they were found. What the walk does NOT stop is a dot, so
+        // `..` and a leading dot are checked, and they can fire.
+        let clean = name.len() > 5
+            && !name.starts_with('.')
+            && !name.contains("..")
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+        if cued && clean && !found.iter().any(|f| f == name) {
+            found.push(name.to_string());
+        }
+        i = end;
+    }
+    // Exactly one, or nothing. Ambiguity falls back to the title slug rather than picking.
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
 }
 
 /// A meaningful page slug source: the HTML's `<title>` (else first `<h1>`). Beats naming a page after
@@ -14456,7 +14529,16 @@ impl RecipeHost for MindRecipeHost {
                         html.len()
                     );
                 }
-                let name = title_from_html(html)
+                // E.PAGE1: a filename the TASK required outranks the page's title. The order used
+                // to be title, then the caller's `name`, then "page" — so an explicit instruction
+                // could not reach the filename at all, and a brief asking for `index.html` got a
+                // slug of its `<title>` instead.
+                let required = _args
+                    .get("required_filename")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let name = required
+                    .or_else(|| title_from_html(html))
                     .or_else(|| {
                         _args
                             .get("name")

@@ -410,7 +410,16 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
             },
             RecipeStep::Tool {
                 tool_name: "publish_page".into(),
-                args: serde_json::json!({ "name": name, "html": "{{page}}" }),
+                // E.PAGE1: a filename the BRIEF required travels with the publish call. Without it
+                // the tool asks the page's <title> and a brief saying "entry index.html in the
+                // project root" gets a slug of the title instead — measured at four checks on a
+                // frozen benchmark, on bytes that were otherwise a full-marks page.
+                args: match crate::required_filename(task) {
+                    Some(f) => {
+                        serde_json::json!({ "name": name, "required_filename": f, "html": "{{page}}" })
+                    }
+                    None => serde_json::json!({ "name": name, "html": "{{page}}" }),
+                },
                 store_as: "url".into(),
                 on_error: ErrorAction::Fail,
             },

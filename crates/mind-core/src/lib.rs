@@ -416,6 +416,99 @@ pub async fn handle_line_as(
 
 /// Build a `ConversationEngine` from a memory handle and an inference pool. The operator name is
 /// read from config (YM_OPERATOR), never hardcoded — defaults to "the user".
+/// WHAT the coder should be built from, decided from configuration alone.
+///
+/// E.CODER1. This used to be a `match` inside the engine builder, reading the process environment
+/// directly, so the only way to exercise it was to run a whole binary with the `claude` CLI on PATH.
+/// Three providers were recognised and each one's host was pinned in source: pointing the coder at
+/// any other endpoint required a rebuild. It is a pure function now — configuration in, a plan out —
+/// and `coder_plan_tests` drives every branch, including the ones that must refuse to build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoderPlan {
+    pub token: String,
+    pub model: String,
+    pub base_url: String,
+    /// A Max-plan subscription token, preferred over the key when present. Only the default lane
+    /// offers it: naming a provider means naming where the work goes.
+    pub oauth: Option<String>,
+}
+
+/// An environment-variable name an operator may name as the holder of the coder key. Deliberately
+/// strict: `YM_CODER_KEY_ENV` is an indirection, and an indirection that accepts anything is a way
+/// to read a variable nobody meant to expose.
+fn is_plausible_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn nonempty(get: &dyn Fn(&str) -> Option<String>, key: &str) -> Option<String> {
+    get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// Decide the coder's provider, endpoint, model and credential from configuration.
+///
+/// `None` means NO coder is built, which is the right answer for a misconfiguration: a coder
+/// pointed nowhere is worse than an absent one, because the delegation is accepted onto the board
+/// and only then fails.
+pub fn coder_plan(get: &dyn Fn(&str) -> Option<String>) -> Option<CoderPlan> {
+    let provider = get("YM_CODER_PROVIDER")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let oauth = nonempty(get, "CLAUDE_CODE_OAUTH_TOKEN");
+    let minimax = nonempty(get, "MINIMAX_API_KEY");
+    match provider.as_str() {
+        // QwenCloud token-plan, on the SAME endpoint the nightly qwen builder already uses, so both
+        // wings run the identical model. The host matters: the documented dashscope-intl endpoint
+        // returns 401 for token-plan keys (sk-sp-…) — measured, not assumed.
+        "qwen" => nonempty(get, "QWEN_API_KEY").map(|token| CoderPlan {
+            token,
+            model: nonempty(get, "YM_QWEN_MODEL").unwrap_or_else(|| "qwen3.8-max".to_string()),
+            base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic".into(),
+            oauth: None,
+        }),
+        "minimax" => minimax.map(|token| CoderPlan {
+            token,
+            model: nonempty(get, "YM_CODER_MODEL").unwrap_or_else(|| "MiniMax-M2".to_string()),
+            base_url: "https://api.minimax.io/anthropic".into(),
+            oauth: None,
+        }),
+        // E.CODER1: any Anthropic-protocol endpoint, named entirely in configuration. EVERY part is
+        // required and there is NO fallback — a `custom` coder that quietly became a MiniMax coder
+        // because one variable was missing would spend someone else's money on the wrong provider.
+        // The key is reached by NAME (`YM_CODER_KEY_ENV`) so the credential itself need never appear
+        // in a config file or a process listing beside the provider that consumes it.
+        "custom" => {
+            let base_url = nonempty(get, "YM_CODER_BASE_URL")?;
+            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+                return None;
+            }
+            let key_env = nonempty(get, "YM_CODER_KEY_ENV")?;
+            if !is_plausible_env_name(&key_env) {
+                return None;
+            }
+            Some(CoderPlan {
+                token: nonempty(get, &key_env)?,
+                model: nonempty(get, "YM_CODER_MODEL")?,
+                base_url,
+                oauth: None,
+            })
+        }
+        // "claude", or unset. MiniMax stays configured underneath as the fallback the coder itself
+        // drops to when a revoked OAuth token is rejected mid-run.
+        _ => (oauth.is_some() || minimax.is_some()).then(|| CoderPlan {
+            token: minimax.unwrap_or_default(),
+            model: nonempty(get, "YM_CODER_MODEL").unwrap_or_else(|| "MiniMax-M2".to_string()),
+            base_url: "https://api.minimax.io/anthropic".into(),
+            oauth,
+        }),
+    }
+}
+
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
     let operator = std::env::var("YM_OPERATOR").unwrap_or_default();
     let persona = mind_types::default_persona(&operator);
@@ -727,61 +820,18 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // the same fleet idea as the nightly builder's YM_BUILDER. Needs the `claude` CLI present.
     // Isolated scratch under the service user's home; secret-stripped child env.
     if mind_tools::Coder::available() {
-        let oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty());
-        let minimax = std::env::var("MINIMAX_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty());
-        let qwen = std::env::var("QWEN_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty());
         let scratch =
             std::env::var("YM_CODER_DIR").unwrap_or_else(|_| "/opt/yantrik-mind/coder".to_string());
-        // Unset keeps the historical behaviour EXACTLY: Max-plan OAuth when present, else MiniMax.
-        // Naming a provider is what makes the choice explicit and reproducible.
-        let provider = std::env::var("YM_CODER_PROVIDER")
-            .unwrap_or_default()
-            .trim()
-            .to_lowercase();
-        let coder = match provider.as_str() {
-            // QwenCloud token-plan, on the SAME endpoint the nightly qwen builder already uses, so
-            // both wings run the identical model. The host matters: the documented dashscope-intl
-            // endpoint returns 401 for token-plan keys (sk-sp-…) — measured, not assumed.
-            // HOUSEHOLD LANE ONLY, like every cloud provider here: it must never serve a
-            // private-grounded turn. Delegated building is household work, so this is in bounds.
-            "qwen" => qwen.map(|key| {
-                let model =
-                    std::env::var("YM_QWEN_MODEL").unwrap_or_else(|_| "qwen3.8-max".to_string());
-                mind_tools::Coder::new(
-                    key,
-                    model,
-                    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic",
-                    scratch,
-                )
-            }),
-            "minimax" => minimax.clone().map(|key| {
-                let model =
-                    std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
-                mind_tools::Coder::new(key, model, "https://api.minimax.io/anthropic", scratch)
-            }),
-            // "claude", or unset. MiniMax stays configured underneath as the fallback the coder
-            // itself drops to when a revoked OAuth token is rejected mid-run.
-            _ => (oauth.is_some() || minimax.is_some()).then(|| {
-                let model =
-                    std::env::var("YM_CODER_MODEL").unwrap_or_else(|_| "MiniMax-M2".to_string());
-                let c = mind_tools::Coder::new(
-                    minimax.clone().unwrap_or_default(),
-                    model,
-                    "https://api.minimax.io/anthropic",
-                    scratch,
-                );
-                match oauth {
-                    Some(t) => c.with_oauth(t), // prefer the Max-plan subscription (real Claude)
-                    None => c,
-                }
-            }),
-        };
+        // The DECISION is `coder_plan` (E.CODER1), a pure function over configuration that
+        // `coder_plan_tests` exercises branch by branch. What is left here is only the wiring:
+        // read the process environment, build the thing, hand it the timeout.
+        let coder = coder_plan(&|k| std::env::var(k).ok()).map(|plan| {
+            let c = mind_tools::Coder::new(plan.token, plan.model, plan.base_url, scratch);
+            match plan.oauth {
+                Some(t) => c.with_oauth(t), // prefer the Max-plan subscription (real Claude)
+                None => c,
+            }
+        });
         // The struct's 300s default is a scratch-script budget. Improving an EXISTING codebase can
         // spend all of it before the first edit: pointed at the desktop cockpit (190KB across four
         // files) the run died having only listed, copied and read them — correct behaviour, an
@@ -1217,5 +1267,199 @@ mod tests {
                 Outcome::Quit => panic!("{cmd} should return Said, not Quit"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod coder_plan_tests {
+    use super::{coder_plan, CoderPlan};
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let m: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |k: &str| m.get(k).cloned()
+    }
+
+    fn plan_from(pairs: Vec<(String, String)>) -> Option<CoderPlan> {
+        let m: HashMap<String, String> = pairs.into_iter().collect();
+        coder_plan(&move |k: &str| m.get(k).cloned())
+    }
+
+    // ── the three lanes that existed before E.CODER1 must be untouched ────────────────────────
+    #[test]
+    fn nothing_configured_builds_no_coder() {
+        assert_eq!(coder_plan(&env(&[])), None);
+    }
+
+    #[test]
+    fn the_default_lane_prefers_the_subscription_and_keeps_minimax_underneath() {
+        let p = coder_plan(&env(&[
+            ("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok"),
+            ("MINIMAX_API_KEY", "mm-key"),
+        ]))
+        .expect("a coder");
+        // The OAuth token is preferred AND the MiniMax key stays as the token, because the coder
+        // itself falls back to it when a revoked subscription token is rejected mid-run.
+        assert_eq!(p.oauth.as_deref(), Some("oauth-tok"));
+        assert_eq!(p.token, "mm-key");
+        assert_eq!(p.base_url, "https://api.minimax.io/anthropic");
+        assert_eq!(p.model, "MiniMax-M2");
+    }
+
+    #[test]
+    fn the_default_lane_works_from_a_key_alone_and_from_a_subscription_alone() {
+        let key_only = coder_plan(&env(&[("MINIMAX_API_KEY", "mm")])).expect("a coder");
+        assert_eq!(key_only.token, "mm");
+        assert_eq!(key_only.oauth, None);
+        let sub_only = coder_plan(&env(&[("CLAUDE_CODE_OAUTH_TOKEN", "t")])).expect("a coder");
+        assert_eq!(sub_only.oauth.as_deref(), Some("t"));
+        assert_eq!(
+            sub_only.token, "",
+            "no key to fall back to, and that is not a failure"
+        );
+    }
+
+    #[test]
+    fn a_named_provider_never_borrows_another_lanes_credential() {
+        // qwen named, only a MiniMax key present: NO coder. Silently building a MiniMax coder here
+        // would spend the wrong subscription on work the operator routed elsewhere.
+        assert_eq!(
+            coder_plan(&env(&[
+                ("YM_CODER_PROVIDER", "qwen"),
+                ("MINIMAX_API_KEY", "mm"),
+                ("CLAUDE_CODE_OAUTH_TOKEN", "t"),
+            ])),
+            None
+        );
+        let q = coder_plan(&env(&[("YM_CODER_PROVIDER", "QWEN "), ("QWEN_API_KEY", "qk")]))
+            .expect("a coder");
+        assert_eq!(q.token, "qk");
+        assert_eq!(q.model, "qwen3.8-max");
+        assert!(q
+            .base_url
+            .contains("token-plan.ap-southeast-1.maas.aliyuncs.com"));
+        assert_eq!(q.oauth, None, "a named provider gets no subscription");
+    }
+
+    #[test]
+    fn minimax_named_pins_its_host_and_honours_the_model_override() {
+        let p = coder_plan(&env(&[
+            ("YM_CODER_PROVIDER", "minimax"),
+            ("MINIMAX_API_KEY", "mm"),
+            ("YM_CODER_MODEL", "MiniMax-Other"),
+        ]))
+        .expect("a coder");
+        assert_eq!(p.base_url, "https://api.minimax.io/anthropic");
+        assert_eq!(p.model, "MiniMax-Other");
+    }
+
+    // ── E.CODER1: any endpoint, entirely from configuration ───────────────────────────────────
+    fn custom(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = [
+            ("YM_CODER_PROVIDER", "custom"),
+            ("YM_CODER_BASE_URL", "https://anthropic.example.internal/v1"),
+            ("YM_CODER_KEY_ENV", "MY_HOUSE_KEY"),
+            ("MY_HOUSE_KEY", "sk-house"),
+            ("YM_CODER_MODEL", "house-model-1"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        v.extend(extra.iter().map(|(k, x)| (k.to_string(), x.to_string())));
+        v
+    }
+
+    #[test]
+    fn a_custom_endpoint_is_reachable_from_configuration_alone() {
+        let p = plan_from(custom(&[])).expect("a coder");
+        assert_eq!(p.base_url, "https://anthropic.example.internal/v1");
+        assert_eq!(p.model, "house-model-1");
+        assert_eq!(p.token, "sk-house", "the key is read from the NAMED variable");
+        assert_eq!(p.oauth, None);
+    }
+
+    #[test]
+    fn every_part_of_a_custom_endpoint_is_required_and_none_of_it_falls_back() {
+        // Kill criterion 2: a coder pointed nowhere is worse than no coder, because the delegation
+        // is accepted onto the board and only then fails. Drop each part in turn.
+        for drop in [
+            "YM_CODER_BASE_URL",
+            "YM_CODER_KEY_ENV",
+            "MY_HOUSE_KEY",
+            "YM_CODER_MODEL",
+        ] {
+            let pairs: Vec<(String, String)> =
+                custom(&[]).into_iter().filter(|(k, _)| k != drop).collect();
+            assert_eq!(plan_from(pairs), None, "custom built without {drop}");
+            // And with the other lanes' credentials sitting right there, it STILL refuses rather
+            // than quietly becoming a MiniMax or subscription coder.
+            let pairs: Vec<(String, String)> = custom(&[
+                ("MINIMAX_API_KEY", "mm"),
+                ("CLAUDE_CODE_OAUTH_TOKEN", "tok"),
+            ])
+            .into_iter()
+            .filter(|(k, _)| k != drop)
+            .collect();
+            assert_eq!(
+                plan_from(pairs),
+                None,
+                "custom fell back to another lane without {drop}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_endpoint_must_be_http_and_an_empty_value_is_not_a_value() {
+        for bad in ["ftp://host/x", "host/x", "/local/path", " "] {
+            let pairs = custom(&[("YM_CODER_BASE_URL", bad)]);
+            assert_eq!(plan_from(pairs), None, "accepted base_url {bad:?}");
+        }
+        for blank in ["", "   "] {
+            assert_eq!(
+                plan_from(custom(&[("MY_HOUSE_KEY", blank)])),
+                None,
+                "accepted a blank key"
+            );
+            assert_eq!(
+                plan_from(custom(&[("YM_CODER_MODEL", blank)])),
+                None,
+                "accepted a blank model"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_variable_must_be_named_like_a_key_variable() {
+        // Kill criterion 3. The indirection is the point of the feature and also its risk: an
+        // indirection that accepts anything is a way to read a variable nobody meant to expose.
+        for bad in ["my_house_key", "PATH-ISH", "1KEY", "", " ", "A B"] {
+            let mut pairs = custom(&[("YM_CODER_KEY_ENV", bad)]);
+            pairs.push((bad.to_string(), "sk-sneaky".to_string()));
+            assert_eq!(plan_from(pairs), None, "accepted key env name {bad:?}");
+        }
+        // A long name is refused rather than truncated.
+        let long = "A".repeat(65);
+        let mut pairs = custom(&[("YM_CODER_KEY_ENV", long.as_str())]);
+        pairs.push((long, "sk".to_string()));
+        assert_eq!(
+            plan_from(pairs),
+            None,
+            "accepted an over-long key env name"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_name_falls_to_the_default_lane_exactly_as_before() {
+        // Not a new behaviour: the original match had the same catch-all, so a typo in
+        // YM_CODER_PROVIDER still gets the historical coder rather than none.
+        let p = coder_plan(&env(&[
+            ("YM_CODER_PROVIDER", "minmax"),
+            ("MINIMAX_API_KEY", "mm"),
+        ]))
+        .expect("a coder");
+        assert_eq!(p.base_url, "https://api.minimax.io/anthropic");
     }
 }

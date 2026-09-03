@@ -11418,7 +11418,10 @@ WINDOW: all-time, latest 200
                 let summary = s("summary");
                 let code = args.get("recipe").map(|r| r.to_string()).filter(|r| r.len() > 2).unwrap_or_else(|| "{}".to_string());
                 let tags: Vec<String> = summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() > 3).take(8).map(|w| w.to_string()).collect();
-                let sk = Skill { name: name.clone(), lang: "capability".into(), code, summary, tags, status: "active".into(), runs: 0, successes: 0, graded: 0, judged_ok: 0, created_ms: 0 };
+                // E.PROC1: `created_ms: 0` here, alone among the banking paths, put six of production's
+                // ten skills at 1970-01-01 -- the OLDEST records in the store, which is backwards for
+                // anything that breaks ties by age, and visible in the cockpit through `surface.rs`.
+                let sk = Skill { name: name.clone(), lang: "capability".into(), code, summary, tags, status: "active".into(), runs: 0, successes: 0, graded: 0, judged_ok: 0, created_ms: Self::now_ms() };
                 match self.memory.save_skill(sk).await {
                     Ok(_) => format!("Built + saved capability '{name}' — it's reusable now."),
                     Err(e) => format!("(couldn't save '{name}': {e})"),

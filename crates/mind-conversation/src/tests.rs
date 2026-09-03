@@ -14655,3 +14655,70 @@ fn cfg2_an_unreachable_provider_is_never_a_defect() {
     }
 }
 
+/// E.PROC1: EVERY path that banks a skill stamps its creation time.
+///
+/// `build_capability` alone passed `created_ms: 0`, and six of the ten skills on the family's
+/// production box therefore read 1970-01-01 -- the OLDEST records in the store, which is backwards
+/// for anything breaking ties by age, and visible in the cockpit through `surface.rs`. The other
+/// three banking paths all set `now`, so it was a lone omission rather than a convention.
+///
+/// A source scan rather than a behavioural test, deliberately: the defect is that ONE construction
+/// site out of four differed, which is a property of the SET of sites. A test exercising
+/// `build_capability` would have proved that one path correct and said nothing about the next path
+/// someone adds, and "the next one" is exactly how this happened.
+#[test]
+fn every_skill_banking_path_stamps_a_creation_time() {
+    const SRC: &[(&str, &str)] = &[
+        ("lib.rs", include_str!("lib.rs")),
+        ("pack.rs", include_str!("pack.rs")),
+        ("skills.rs", include_str!("skills.rs")),
+        ("import_skill.rs", include_str!("import_skill.rs")),
+        ("onboarding.rs", include_str!("onboarding.rs")),
+    ];
+    let mut zeroed = Vec::new();
+    for (name, src) in SRC {
+        // Everything from the first test MODULE on is fixtures, which may legitimately build an
+        // ancient record. Only production construction sites are the subject here.
+        //
+        // The cut is at `#[cfg(test)]` followed by `mod`, not at the attribute alone: a bare
+        // `#[cfg(test)]` on a helper appears near the TOP of large files, and cutting there hides
+        // most of the file from the scan. That truncation bug silently disarmed this guard -- a
+        // mutation reverting `build_capability` passed -- and it is the second time today the same
+        // mistake has appeared in a source scan.
+        // Only an INLINE test module ends the production part. `#[cfg(test)] mod name;` is a
+        // DECLARATION -- lib.rs has several near the top -- and cutting there hid the entire file,
+        // which silently disarmed this guard twice before this comment existed.
+        let prod = {
+            let mut cut = src.len();
+            let mut from = 0usize;
+            while let Some(rel) = src[from..].find("#[cfg(test)]
+mod ") {
+                let at = from + rel;
+                let decl_end = src[at..].find(|c| c == ';' || c == '{').map(|o| at + o);
+                if let Some(e) = decl_end {
+                    if src.as_bytes()[e] == b'{' {
+                        cut = at;
+                        break;
+                    }
+                }
+                from = at + 1;
+            }
+            &src[..cut]
+        };
+        for line in prod.lines() {
+            let t = line.trim();
+            if t.starts_with("//") {
+                continue;
+            }
+            if t.contains("created_ms: 0") {
+                zeroed.push(format!("{name}: {t}"));
+            }
+        }
+    }
+    assert!(
+        zeroed.is_empty(),
+        "a skill is banked without a creation time ({}); every other path sets now, and a zero makes the record the oldest in the store: {}",
+        zeroed.len(),
+        zeroed.join(" | ")
+    );
+}

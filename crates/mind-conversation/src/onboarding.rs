@@ -1030,7 +1030,10 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     successes: 0,
                     graded: 0,
                     judged_ok: 0,
-                    created_ms: 0,
+                    // E.PROC1: the SEEDED capabilities are the six that read 1970-01-01 on the
+                    // family's box. Fixing `build_capability` alone would have left this path --
+                    // the one that actually created them -- still stamping zero.
+                    created_ms: chrono::Utc::now().timestamp_millis() as u64,
                 })
                 .await;
         }

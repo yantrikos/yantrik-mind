@@ -679,6 +679,33 @@ impl CapabilityHandler for DashboardsCapability {
     ) -> Option<String> {
         use crate::PageServe;
         Some(match tool {
+            // E.FILES2: a whole project, not one document. The deliverable of a build is a set of
+            // files, and this is the only way the mind can produce one without an external CLI or
+            // somebody else's subscription — it runs on the mind's own inference path, which is
+            // OpenAI-compatible, so it works with the providers we actually have and inside
+            // containment, where the Anthropic-protocol coder cannot go at all.
+            "write_files" => {
+                let (project, stream) = (arg(args, "project"), arg(args, "stream"));
+                if project.trim().is_empty() {
+                    return Some("(a build needs a project name)".to_string());
+                }
+                match crate::publish_file_set(&project, &stream) {
+                    Ok((url, written, truncated)) => {
+                        let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
+                        if !truncated.is_empty() {
+                            // Never silent. A file lost to a budget is the expected failure here,
+                            // and a deliverable that is quietly missing one is worse than one that
+                            // says which.
+                            msg.push_str(&format!(
+                                " — INCOMPLETE: the generation was cut off inside {}",
+                                truncated.join(", ")
+                            ));
+                        }
+                        msg
+                    }
+                    Err(why) => format!("(couldn't write the project: {why})"),
+                }
+            }
             "publish_page" => {
                 let (name, html) = (arg(args, "name"), arg(args, "html"));
                 if html.len() < 10 {

@@ -224,29 +224,99 @@ async fn the_acknowledgement_is_bounded_by_the_routing_budget() {
     f.release();
 }
 
+/// A backend that only counts. The held one would block a test that is about a call which must
+/// never happen at all.
+struct CountingBackend {
+    calls: Arc<AtomicUsize>,
+}
+
+impl LLMBackend for CountingBackend {
+    fn chat(
+        &self,
+        _messages: &[ChatMessage],
+        _config: &GenerationConfig,
+        _tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<LLMResponse> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        anyhow::bail!("nothing should ask this backend anything")
+    }
+    fn chat_streaming(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        tools: Option<&[serde_json::Value]>,
+        _on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<LLMResponse> {
+        self.chat(messages, config, tools)
+    }
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        Ok(text.len() / 4)
+    }
+    fn backend_name(&self) -> &str {
+        "counting"
+    }
+    fn model_id(&self) -> &str {
+        "counting"
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn with_one_executor_the_router_is_not_consulted_at_all() {
-    // A menu of one needs no model. Worth pinning: a routing call for a decision with one possible
-    // answer would be pure latency on every delegation on a single-executor box.
+async fn a_page_brief_on_a_recipe_box_still_runs_as_a_page() {
+    // THIS TEST'S PREMISE CHANGED and the change is the point. It used to say "one executor, so no
+    // router" — but E.FILES2 makes the recipe engine provide TWO kinds, `page` and `build`, so a
+    // recipe-only box is no longer a menu of one and the router is legitimately consulted. What
+    // must not change is where a PAGE brief lands. The no-router-for-a-menu-of-one property moved
+    // to the test below, which uses a genuinely single-executor box.
     let f = fixture(false, std::time::Duration::from_millis(300));
-    let t0 = std::time::Instant::now();
     let _ = f
         .conv
         .delegate_cmd("solo: build a one page portfolio site")
         .await;
+    let rows = board(&f.mem).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["kind"], "page",
+        "a page brief must still be a page: E.FILES2 adds a kind, it does not steal one"
+    );
+    f.release();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_one_executor_the_router_is_not_consulted_at_all() {
+    // A menu of one needs no model, and a routing call for a decision with one possible answer is
+    // pure latency on every delegation. The fixture that used to be single-executor now offers two,
+    // so this builds a genuinely single-kind engine: a researcher and nothing else.
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CountingBackend {
+        calls: calls.clone(),
+    }) as Arc<dyn LLMBackend>;
+    let pool = InferencePool::new(backend, 2);
+    let conv = ConversationEngine::new(mem.clone(), pool.clone(), "JARVIS")
+        .with_researcher(Arc::new(mind_agents::SubAgent::new(
+            pool,
+            Arc::new(NoTools),
+            "JARVIS",
+            vec!["recall".into()],
+            2,
+        )))
+        .with_route_budget(std::time::Duration::from_millis(300));
+    assert_eq!(
+        conv.available_kinds_for_test(),
+        vec!["research"],
+        "the premise: exactly one kind"
+    );
+    let t0 = std::time::Instant::now();
+    let _ = conv.delegate_cmd("solo: find out what the neighbours pay for water").await;
     assert!(
         t0.elapsed() < std::time::Duration::from_secs(3),
         "no router, no wait"
     );
     assert_eq!(
-        f.calls.load(Ordering::Relaxed),
+        calls.load(Ordering::Relaxed),
         0,
         "the router must not be asked to choose from a menu of one"
     );
-    let rows = board(&f.mem).await;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["kind"], "page");
-    f.release();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -341,29 +411,36 @@ async fn a_single_executor_box_runs_the_job_even_when_the_classifier_names_anoth
         "the premise of this test: the brief classifies to a kind the fixture cannot run"
     );
 
-    // ONE executor: nothing to choose, so the job runs on it without asking anyone.
+    // NO CODER HERE. It must neither refuse nor quietly become a page: it runs as `build`, which
+    // produces a set of files through the mind's own inference path. Rebadging it as `page` is what
+    // this box used to do, and a graded reading measured the result — a Python CLI brief answered
+    // with one HTML document, scored zero, announced as live.
     let f = fixture(false, std::time::Duration::from_millis(300));
     let reply = f.conv.delegate_cmd(&format!("cb2-t1: {brief}")).await;
     assert!(
-        !reply.contains("configured"),
-        "a box with one executor must use it rather than refuse: {reply}"
+        !reply.contains("no code executor"),
+        "a box that can build must not refuse code work: {reply}"
     );
     let rows = board(&f.mem).await;
     assert_eq!(rows.len(), 1, "the job must exist: {rows:?}");
     assert_eq!(
-        rows[0]["kind"], "page",
-        "it runs on the only executor there is"
+        rows[0]["kind"], "build",
+        "code work with no coder routes to the executor that can still do it, not to a page"
     );
+    // The router IS consulted now, and correctly: this box offers `page` and `build`, so there IS
+    // something to choose between. It never answers (the fixture's backend hangs), the budget
+    // expires, and the floor stands — which is the property that matters. The old assertion of ZERO
+    // calls was pinning a premise that E.FILES2 changed, not a behaviour worth keeping.
     assert_eq!(
         f.calls.load(Ordering::Relaxed),
-        0,
-        "and still no routing call, because there was nothing to choose between"
+        1,
+        "one bounded routing call, and the floor survives it not answering"
     );
     f.release();
 
-    // TWO executors — page and research, which is the DEFAULT box, because the coder needs a key.
-    // The first fix covered only the one-executor case; review caught that this one still refused,
-    // and this is the case the graded harness actually runs in.
+    // THE DEFAULT BOX — page, research and now build, because the coder needs a key and build does
+    // not. This is the configuration the graded harness runs in, and the assertion below is the
+    // measured point of E.FILES2.
     let f2 = fixture(true, std::time::Duration::from_millis(200));
     let reply2 = f2.conv.delegate_cmd(&format!("cb2-t1: {brief}")).await;
     assert!(
@@ -376,12 +453,17 @@ async fn a_single_executor_box_runs_the_job_even_when_the_classifier_names_anoth
         1,
         "the job must exist on a two-executor box: {rows2:?}"
     );
-    // Not `!= "code"`: that passes when the board says "research" too, and a website brief routed to
-    // the researcher is the wrong executor silently chosen — exactly the failure this test is for.
-    // Name the executor the box HAS and the brief WANTS.
+    // THIS EXPECTATION CHANGED, and the old one is what scored 2/11. The T1 brief classifies as
+    // `code` — it asks for a run script, a server and an appending JSON store, none of which one
+    // HTML document can be. It used to land as `page` because no coder existed and the floor took
+    // the first executor it found. It lands as `build` now: the same deliverable the brief asked
+    // for, by the route that can actually produce it.
+    //
+    // Not `!= "page"`: that would pass for `research` too, and a build brief handed to the
+    // researcher is the same silent wrong-executor failure with a different name.
     assert_eq!(
-        rows2[0]["kind"], "page",
-        "a website brief on a page-capable box must be on the board as a page job: {rows2:?}"
+        rows2[0]["kind"], "build",
+        "a brief asking for a run script and a data file is build work: {rows2:?}"
     );
     f2.release();
 }
@@ -583,7 +665,7 @@ fn every_spawn_in_the_delegation_path_carries_its_opportunity() {
     // invisible to the scan fails here instead of passing quietly.
     assert_eq!(
         carried.len(),
-        6,
-        "expected six carrying spawns in delegate.rs (five wrapped plus bounded_route's inline carry); found {carried:?} — if a spawn was added or removed, decide about it here"
+        7,
+        "expected six carrying spawns in delegate.rs (five wrapped plus bounded_route's inline carry, plus E.FILES2's build arm); found {carried:?} — if a spawn was added or removed, decide about it here"
     );
 }

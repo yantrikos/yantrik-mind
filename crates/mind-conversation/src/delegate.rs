@@ -246,6 +246,7 @@ pub const KINDS: &[(&str, &str)] = &[
     ("page", "produce a NEW standalone web page and publish it at a URL the user can open (portfolio, landing page, resume, one-pager) — the deliverable is the link"),
     ("code", "write or change software — a script, CLI, program, library, or improving EXISTING source files; if the task points at existing code, a repo, or files to modify, it is code even when the thing being changed looks like a page or dashboard"),
     ("research", "find things out and report: search, read sources, compare, summarize, answer a question"),
+    ("build", "produce a SET of files as the deliverable — a script and its tests, a small app with a run script, anything whose answer is more than one file"),
 ];
 
 /// Parse the router's reply into a kind that is ACTUALLY RUNNABLE on this box.
@@ -274,6 +275,73 @@ pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
         }
     }
     best.map(|(_, k)| k)
+}
+
+/// E.FILES2: the BUILD chain — one model call that emits a whole project as a delimited stream,
+/// then a write that is all-or-nothing.
+///
+/// No research step. A page is a design problem and benefits from references; a task tracker with a
+/// contract in the brief is a specification problem, and a search would spend a model call on
+/// inspiration nobody asked for. If a build turns out to need references, that is a measured change
+/// with its own row, not a habit copied from the page lane.
+pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
+    let rules = pack_rules
+        .map(|r| format!("HOUSE RULES from a mounted knowledge pack — follow them:\n{r}\n\n"))
+        .unwrap_or_default();
+    Recipe {
+        id: "delegate-build".into(),
+        name: format!("build: {name}"),
+        steps: vec![
+            RecipeStep::Think {
+                prompt: format!(
+                    "{rules}Build this: {task}\n\n\
+                     Output ONLY files, in this exact format and nothing else — no preamble, no \
+                     explanation, no markdown fences:\n\
+                     === FILE: <relative/path>\n\
+                     <the complete contents of that file>\n\
+                     === FILE: <the next path>\n\
+                     <its contents>\n\n\
+                     FORMAT RULES, and a file that breaks them is lost:\n\
+                     - A path is relative, uses forward slashes, at most four levels deep, and its \
+                     parts use only letters, digits, dash, underscore and dot.\n\
+                     - NEVER begin a line inside a file's contents with `=== FILE:` — that is the \
+                     only sequence that ends a file, and a line starting with it will split yours.\n\
+                     - At most 32 files, none over 512 KB.\n\n\
+                     SUBSTANCE:\n\
+                     - Follow every requirement in the brief EXACTLY: the filenames it names, the \
+                     entry point it names, the field names, the output strings, the data shapes. A \
+                     brief that states a contract is telling you the acceptance test.\n\
+                     - Write the whole of every file. A file that stops early is worthless, so if \
+                     you are running long, write FEWER files completely rather than all of them \
+                     partially.\n\
+                     - No network at run time: no CDN, no package downloads, no remote fonts or \
+                     images. Use only the language's standard library unless the brief says \
+                     otherwise.\n\
+                     - If the brief asks for something runnable, include exactly what it asks for \
+                     (a run script, an entry point) and make it work with no build step."
+                ),
+                store_as: "files".into(),
+                on_error: ErrorAction::Fail,
+                max_tokens: Some(16_000usize),
+                // A build is a specification problem, not a reasoning showcase: the brief states
+                // the contract and the work is writing it out completely. Extended thinking here
+                // spends budget that the FILES need, and a file cut off is the failure that costs
+                // a whole deliverable.
+                think: Some(false),
+            },
+            RecipeStep::Tool {
+                tool_name: "write_files".into(),
+                args: serde_json::json!({ "project": project, "stream": "{{files}}" }),
+                store_as: "project_url".into(),
+                on_error: ErrorAction::Fail,
+            },
+            RecipeStep::Notify {
+                message: format!(
+                    "🛠️ [{name}] built — {{{{project_url}}}}\n\nOpen it, and tell me what to change."
+                ),
+            },
+        ],
+    }
 }
 
 /// Artifact nouns that are a hosted PAGE rather than a codebase.
@@ -1167,6 +1235,14 @@ pub fn route_timeouts() -> u64 {
 
 impl super::ConversationEngine {
     /// Which executors this box can actually run right now.
+    /// The kinds this engine can run, so a test can state its premise rather than assume it — the
+    /// single-executor test's premise silently stopped being true when E.FILES2 gave the recipe
+    /// engine a second kind.
+    #[cfg(test)]
+    pub(crate) fn available_kinds_for_test(&self) -> Vec<&'static str> {
+        self.available_kinds()
+    }
+
     fn available_kinds(&self) -> Vec<&'static str> {
         let mut v = Vec::new();
         if self.recipes.is_some() {
@@ -1177,6 +1253,14 @@ impl super::ConversationEngine {
         }
         if self.researcher.is_some() {
             v.push("research");
+        }
+        // BUILD needs only the recipe engine and a place to write. It is the executor that makes
+        // "route to a model" true when no coder is configured: the coder is the `claude` CLI, which
+        // speaks the Anthropic protocol, while this runs on the mind's own inference path and
+        // therefore works with whatever provider is configured — including inside containment,
+        // where the CLI cannot go.
+        if self.recipes.is_some() {
+            v.push("build");
         }
         v
     }
@@ -1554,7 +1638,7 @@ impl super::ConversationEngine {
         // claimed one thing and the code did another, which review caught.
         let runnable_kind = |k: &str| match k {
             "code" => self.coder.is_some(),
-            "page" => self.recipes.is_some(),
+            "page" | "build" => self.recipes.is_some(),
             _ => self.researcher.is_some(),
         };
         // THE FLOOR MUST BE A KIND THIS BOX CAN RUN.
@@ -1568,21 +1652,38 @@ impl super::ConversationEngine {
         // E.PORT1-B exists to abolish, arriving through the door the fix itself opened.
         let available = self.available_kinds();
         let classified = classify(&task);
-        // The floor is the classifier's answer WHEN THIS BOX CAN RUN IT, and otherwise the first
-        // executor that exists. Two earlier versions got this wrong in the same direction: the first
-        // checked the classifier's answer against the executors and refused, which halted a graded
-        // reading on a one-executor box; the second fixed only that case, and review caught that the
-        // DEFAULT box has two (page and research — the coder needs a key), so a `code` task would
-        // still have been refused by a box holding two executors that could have done it.
+        // ROUTE TO A MODEL; DO NOT RESTRICT. That is what the coder was always for, and this
+        // fallback used to violate it: "the first executor that exists" silently rebadged a `code`
+        // brief as a `page` on a box with no coder, so a Python CLI task was answered with an HTML
+        // document and announced as live. It scored zero on a graded reading, and the classifier had
+        // been RIGHT — it said `code`, and this line overruled it.
+        //
+        // The substitution that IS legitimate is one that still does the work: `code` falls to
+        // `build`, which produces a set of files through the mind's own inference path. That is the
+        // same kind of deliverable by a different route, not a different kind wearing its name.
+        // Anything else falls through to the refusal below, which says so out loud.
         let floor = if available.iter().any(|k| *k == classified) {
             classified
+        } else if classified == "code" && available.iter().any(|k| *k == "build") {
+            "build"
         } else {
-            available.first().copied().unwrap_or(classified)
+            classified
         };
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
-        // With the floor constrained to what exists, this can only fire when NOTHING exists.
+        // This now fires whenever nothing here can serve the KIND the brief actually is, which is
+        // the honest outcome: the previous behaviour was to run something else and call it done.
         if !runnable_kind(floor) {
-            return "(no delegation executor is configured on this box)".to_string();
+            // Name the KIND and what is missing. "No executor is configured" told an operator
+            // nothing about which one, and the alternative it replaced — quietly running a
+            // different kind — told them something false.
+            let have = if available.is_empty() {
+                "none is configured".to_string()
+            } else {
+                format!("this box has {}", available.join(", "))
+            };
+            return format!(
+                "(this reads like {floor} work and there is no {floor} executor here — {have})"
+            );
         }
         if !self.try_acquire_bg(3) {
             return "(the job board is full — a few delegations are already running; `ym jobs` to see them)".to_string();
@@ -1650,6 +1751,56 @@ impl super::ConversationEngine {
         // The executor's calls are the expensive ones; the job runs inside the same opportunity the
         // delegation was created under, or inside none if there was none.
         let opportunity = mind_inference::current_opportunity();
+        if kind == "build" {
+            let engine = self.recipes.clone().unwrap();
+            let pack_rules = self.memory.pack_context().await.ok().flatten();
+            // The project directory carries the job id, so two builds with the same name cannot
+            // overwrite each other's deliverable.
+            let project = format!("{name2}-{id2}");
+            tokio::spawn(in_opportunity(opportunity.clone(), async move {
+                scratch_note(&mem, &id2, &format!("task: {task2}")).await;
+                scratch_note(&mem, &id2, "chain: author files → write project").await;
+                let out = engine
+                    .run_with(
+                        &build_recipe(&name2, &project, &task2, pack_rules.as_deref()),
+                        std::collections::HashMap::new(),
+                    )
+                    .await;
+                // The PROJECT is the deliverable. A chain that "succeeded" without one built
+                // nothing, and a build that wrote a partial set is reported as incomplete rather
+                // than as done — the tool puts the truncated filenames in the message.
+                let url = out
+                    .vars
+                    .get("project_url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let built = out.ok && url.starts_with("http");
+                let msg = if built {
+                    scratch_note(&mem, &id2, &format!("built: {url}")).await;
+                    out.notifications
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| format!("🛠️ [{name2}] built — {url}"))
+                } else {
+                    let why = if url.is_empty() {
+                        out.error
+                            .unwrap_or_else(|| "the build step produced no files".into())
+                    } else {
+                        // The tool returns its refusal as the variable's value, so an operator sees
+                        // WHICH path or cap stopped the write rather than a generic failure.
+                        url.clone()
+                    };
+                    scratch_note(&mem, &id2, &format!("failed: {why}")).await;
+                    format!("🛠️ [{name2}] I couldn't finish the build: {why}")
+                };
+                ledger_update(&mem, &id2, if built { "done" } else { "failed" }, Some(msg.clone()))
+                    .await;
+                q.lock().unwrap().push(msg);
+                jobs.fetch_sub(1, Ordering::Relaxed);
+            }));
+            return format!("(building — `ym jobs` to watch it; id {id})");
+        }
         if kind == "page" {
             let engine = self.recipes.clone().unwrap();
             let pack_rules = self.memory.pack_context().await.ok().flatten();

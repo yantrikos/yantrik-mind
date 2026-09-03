@@ -4186,6 +4186,46 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
     Some(format!("{base}/{safe}.html"))
 }
 
+/// E.FILES2: write a whole PROJECT — a set of files — under the web directory and return its URL.
+///
+/// A project gets its OWN directory, never the web root. Two deliverables both writing `index.html`
+/// into one directory would silently overwrite each other, and a companion that hosts many things
+/// must not do that. It also makes the project's root a real place, which is what a brief means by
+/// "the project root".
+///
+/// Parsing, validation and writing are three separate steps on purpose: the parser recovers what the
+/// model said, `plan_file_set` decides what may be written, and only a set that passes WHOLE is
+/// written at all.
+pub(crate) fn publish_file_set(
+    project: &str,
+    stream: &str,
+) -> std::result::Result<(String, Vec<String>, Vec<String>), String> {
+    let parsed = crate::fileset::parse_file_stream(stream);
+    if parsed.entries.is_empty() {
+        return Err(format!(
+            "the build produced no files{}",
+            if parsed.preamble.trim().is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " — it wrote prose instead: {}",
+                    parsed.preamble.trim().chars().take(120).collect::<String>()
+                )
+            }
+        ));
+    }
+    let planned = crate::fileset::plan_file_set(&parsed.entries).map_err(|r| r.message())?;
+    let dir =
+        std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
+    let slug = published_stem(project);
+    let root = std::path::Path::new(&dir).join(&slug);
+    std::fs::create_dir_all(&root).map_err(|e| format!("could not make the project directory: {e}"))?;
+    let written = crate::fileset::write_file_set(&root, &planned).map_err(|e| e.to_string())?;
+    let base =
+        std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
+    Ok((format!("{base}/{slug}/"), written, parsed.truncated))
+}
+
 /// Result of fetching a just-published page back off the web server.
 #[derive(Debug, PartialEq, Eq)]
 enum PageServe {

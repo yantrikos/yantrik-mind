@@ -5150,3 +5150,22 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Recommendation, updated | **`deepseek-ai/deepseek-v4-pro-0813`.** Free, more capable than a 20b (which matters: a weak model bottlenecks both systems and compresses the very signal the head-to-head exists to measure), same containment. |
 | What must happen before the reading, not during it | **Run one pilot leg on pro and measure its wall time** before committing the sequence. If the tail latency puts a leg near 1800 s, raise the wall deliberately and record the change — do not let a slow model arrive as a timeout disqualification, which is indistinguishable from a system failure in the receipts. |
 | The correction worth keeping | I recommended by resemblance to a dead model and did not consider price at all. Pranab supplied the constraint I had dropped; the measurement then eliminated the option we would both have reached for first. |
+
+## E.CB2-D — the deepseek profile (PREREGISTERED)
+| Field | Value |
+| --- | --- |
+| Authority | Pranab's decision: deepseek, free on NIM. Measurement then selected `deepseek-v4-pro-0813` over flash, which fails our own void rule at a 60% 529 rate. |
+| The change | A NEW profile `nim-ds`, not an edit to `nim-cap24`. Readings 3–6 ran on that profile and must stay byte-reproducible; a benchmark whose profile changed under it cannot be re-derived, and this harness's whole claim is that it can. |
+| Kill criteria | (1) `nim.profile` and `nim-cap24.profile` are **byte-identical** afterwards. (2) `nim-ds` differs from `nim-cap24` in the MODEL LINE ONLY — same upstream, same resolve flag, same key file, same lane/provider/key-env, same cap — so a reading on it differs in one variable. (3) It passes E.MODEL1's liveness probe at load, proving the model answers before any leg starts. (4) `scratch/rederive.sh` still proves the tree re-derives byte-exactly from `cb2` plus the recorded patch. |
+| Not done here | Running the reading. The pilot leg and its wall-time measurement come first, and the wall is raised deliberately or not at all. |
+
+## E.CB2-D SHIPPED — the profile exists; the reading does not
+| Field | Value |
+| --- | --- |
+| Kill criterion 1 | MET. `nim.profile` and `nim-cap24.profile` are untouched — `git status` shows only the new file. Readings 3–6 stay byte-reproducible. |
+| Kill criterion 2 | MET. Ignoring comments, `nim-ds` differs from `nim-cap24` on **exactly one line**: the model. Same upstream, resolve flag, key file, lane, provider, key env and cap — so a reading on it differs in one variable. |
+| Kill criterion 3 | MET, on the box: the loader returned 0 and the run state records `model_alive: alive`, `model_alive_at: 2026-09-03T16:53:16Z`, `model_probe_ms: 3953`. |
+| Kill criterion 4 | MET. `rederive.sh`: *"cb2n re-derives exactly from cb2 + scratch/cb2n_patch.py"*. The profile was written from the patch's own literal so the two cannot drift. |
+| E.MODEL1 doing its job on its first real use | The profile that replaced a retired model was itself checked for liveness before any leg could start — which is the entire point of the morning's slice, arriving unprompted the first time a new profile was loaded. |
+| A coherence worth noting | The liveness probe took **3,953 ms** while realistic 400-token requests take 18–62 s. The probe measures REACHABILITY, not working latency, and conflating the two is exactly the mistake that made me recommend a model on a "reply with ready" ping. The wall risk is a property of the second number, not the first. |
+| What is deliberately NOT done | The reading. The pilot leg and its wall measurement come first, and the 1800 s wall is raised deliberately or not at all. Workspace 1765/1765. |

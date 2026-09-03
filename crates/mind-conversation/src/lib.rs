@@ -14552,6 +14552,41 @@ impl RecipeHost for MindRecipeHost {
             }
             // ResearchOps: multi-angle web search over one query → a consolidated, URL-carrying
             // findings blob for the ThinkCited reviewer/related-work steps to cite.
+            // E.FILES2's output step, and the reason it is HERE and not only in capabilities.rs:
+            // there are TWO tool dispatches. That one serves the conversation engine's own tool
+            // calls; this one is what a RECIPE reaches. The build recipe was wired to the first, so
+            // a leg ran, the model produced 2278 tokens of files, and the chain died on "unknown
+            // source 'write_files'" with the deliverable discarded. Same shape as E.PAGE1 shipping
+            // as a no-op: the rule was right, the wiring looked right, and no test asked whether the
+            // tool a recipe names actually resolves.
+            "write_files" => {
+                let project = _args
+                    .get("project")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let stream = _args
+                    .get("stream")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if project.trim().is_empty() {
+                    anyhow::bail!("a build needs a project name");
+                }
+                match publish_file_set(project, stream) {
+                    Ok((url, written, truncated)) => {
+                        let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
+                        if !truncated.is_empty() {
+                            // Never silent: a file lost to a budget is the expected failure here,
+                            // and a deliverable quietly missing one is worse than one that says so.
+                            msg.push_str(&format!(
+                                " — INCOMPLETE: the generation was cut off inside {}",
+                                truncated.join(", ")
+                            ));
+                        }
+                        Ok(msg)
+                    }
+                    Err(why) => anyhow::bail!("{why}"),
+                }
+            }
             // The chain's OUTPUT step. Without it a recipe could research, think and render, but had
             // no way to leave anything behind — which is why "build me a portfolio site" came back as
             // a list of links: the only steps available all ended in text.

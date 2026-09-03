@@ -471,3 +471,55 @@ body
     }
 }
 
+// ── the test that was missing, twice ─────────────────────────────────────────────────────────
+mod wiring {
+    /// EVERY tool a delegation recipe names must resolve in the dispatch a RECIPE reaches.
+    ///
+    /// This is the third time the same shape has cost a slice. E.PAGE1 shipped as a no-op because
+    /// no test asked what the file on disk was called. E.FILES2 shipped with `write_files`
+    /// registered in `capabilities.rs` — the conversation engine's own tool dispatch — while a
+    /// recipe reaches `call_tool` in lib.rs, so a graded leg ran, the model produced 2278 tokens of
+    /// files, and the chain died on "unknown source 'write_files'" with the deliverable discarded.
+    ///
+    /// A source scan, deliberately: the dispatch is an `async fn` on a type that needs a whole
+    /// engine to construct, and a test that cannot be written without one does not get written.
+    /// What it checks is exact — the tool names the recipes emit, against the arms that exist.
+    #[test]
+    fn every_tool_a_recipe_names_resolves_in_the_dispatch_a_recipe_reaches() {
+        const DELEGATE: &str = include_str!("delegate.rs");
+        const LIB: &str = include_str!("lib.rs");
+
+        // The dispatch a recipe reaches, isolated so an arm in the OTHER dispatch cannot satisfy
+        // this test — which is exactly the mistake being guarded against.
+        let start = LIB
+            .find("async fn call_tool(&self, tool: &str")
+            .expect("the recipe-facing dispatch exists");
+        let dispatch = &LIB[start..start + 40_000.min(LIB.len() - start)];
+
+        let mut named: Vec<String> = Vec::new();
+        for (i, _) in DELEGATE.match_indices("tool_name: \"") {
+            let rest = &DELEGATE[i + "tool_name: \"".len()..];
+            if let Some(end) = rest.find('"') {
+                let name = rest[..end].to_string();
+                if !named.contains(&name) {
+                    named.push(name);
+                }
+            }
+        }
+        assert!(
+            named.len() >= 3,
+            "the scan found almost no tool names, so it is not scanning: {named:?}"
+        );
+        for name in &named {
+            assert!(
+                dispatch.contains(&format!("\"{name}\" =>"))
+                    || dispatch.contains(&format!("| \"{name}\" =>")),
+                "the recipes name the tool {name:?} and the dispatch a recipe reaches has no arm                  for it — a chain will die on \"unknown source\" with its work already done"
+            );
+        }
+        // Anti-vacuity: the two that matter must actually be in the list the loop checked.
+        assert!(named.iter().any(|n| n == "write_files"), "{named:?}");
+        assert!(named.iter().any(|n| n == "publish_page"), "{named:?}");
+    }
+}
+

@@ -1335,6 +1335,59 @@ fn local_min_tokens() -> usize {
         .unwrap_or(8192)
 }
 
+/// The tokens-per-second a generation is assumed to sustain, for sizing a budget against a clock.
+///
+/// Measured 2026-09-03 across three NIM models on real build legs: 15.5, 16.2 and 21.6 tok/s on
+/// successful calls. The FLOOR is used, not the mean — sizing to an average guarantees the slow
+/// half is cut, and being early costs a little headroom while being late costs the whole call.
+const ASSUMED_TOKENS_PER_SECOND: usize = 15;
+
+/// Fraction of the deadline a single generation may plan to occupy. The rest absorbs the model
+/// being slower than the floor, queueing, and the round trip.
+const DEADLINE_BUDGET_NUMERATOR: usize = 7;
+const DEADLINE_BUDGET_DENOMINATOR: usize = 10;
+
+/// Never propose less than this. Below it a file set cannot be authored at all, and failing loudly
+/// on a deadline too short to work with beats emitting something guaranteed to be a fragment.
+const MIN_AUTHORING_TOKENS: usize = 1_500;
+
+/// A provider's declared per-request deadline in seconds, or `None` when none is declared.
+///
+/// `YM_PROVIDER_DEADLINE_S` is the TIGHTEST limit any configured provider imposes. It is deliberately
+/// one value rather than one per provider: the budget is chosen when a recipe is built, before the
+/// router has picked which link will serve the call, so a per-provider number could not be resolved
+/// at the point it is needed. One conservative number is honest; a per-provider number resolved
+/// against the wrong provider would not be.
+pub fn provider_deadline_seconds() -> Option<usize> {
+    std::env::var("YM_PROVIDER_DEADLINE_S")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+}
+
+/// Clamp an authoring budget to what the provider's deadline can actually deliver.
+///
+/// `build_recipe` asked for 16,000 tokens in one generation. That constant was chosen when the only
+/// model in use finished it in well under a minute. On 2026-09-03 NVIDIA NIM was measured cutting a
+/// request at **~302 s** — four 504s across two different models landing in 302,155–302,180 ms, a
+/// spread of 25 milliseconds — and at 15–22 tok/s, 16,000 tokens is 740–1,032 s. Every build that
+/// used its budget was guaranteed to be cut, and the Mind then retried three times at 302 s each.
+///
+/// This CLAMPS rather than replaces: callers keep saying what the work needs, and the provider's
+/// limit lowers it. With no deadline declared the request is returned untouched, so nothing changes
+/// for a provider that has not told us anything — and on a model fast enough for the whole set, the
+/// right split is no split at all, which is the shape reading 6 measured as the Mind's advantage.
+pub fn authoring_budget(requested: usize) -> usize {
+    match provider_deadline_seconds() {
+        None => requested,
+        Some(deadline) => {
+            let affordable = deadline * ASSUMED_TOKENS_PER_SECOND * DEADLINE_BUDGET_NUMERATOR
+                / DEADLINE_BUDGET_DENOMINATOR;
+            requested.min(affordable.max(MIN_AUTHORING_TOKENS))
+        }
+    }
+}
+
 /// Below this, a caller is asking for ONE WORD or ONE LINE, not writing a reply budget — the
 /// dispatch classifier that wants `yes` (12), a festival line (80). Those are exempt: raising them
 /// would let a chatty model return a paragraph where the code expects a token, and truncation is
@@ -4405,6 +4458,93 @@ mod tests {
         // Clean up so subsequent tests start from a known state.
         super::SURVIVAL_MODE.store(false, Ordering::SeqCst);
         *super::SURVIVAL_SINCE.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+mod authoring_budget_tests {
+    use super::*;
+
+    /// The env var is process-global, so these run under one lock and always restore it.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_deadline<T>(v: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("YM_PROVIDER_DEADLINE_S").ok();
+        match v {
+            Some(x) => std::env::set_var("YM_PROVIDER_DEADLINE_S", x),
+            None => std::env::remove_var("YM_PROVIDER_DEADLINE_S"),
+        }
+        let out = f();
+        match prev {
+            Some(x) => std::env::set_var("YM_PROVIDER_DEADLINE_S", x),
+            None => std::env::remove_var("YM_PROVIDER_DEADLINE_S"),
+        }
+        out
+    }
+
+    /// NO DEADLINE MEANS NO CHANGE. This is the property that makes the whole change safe to ship:
+    /// a provider that has declared nothing behaves exactly as it did, so the Mind keeps the
+    /// few-big-calls shape that reading 6 measured as its advantage (2 requests against Hermes's
+    /// 3-16) everywhere except where a provider has actually said it will cut us off.
+    #[test]
+    fn an_undeclared_deadline_leaves_the_request_untouched() {
+        with_deadline(None, || {
+            assert_eq!(authoring_budget(16_000), 16_000);
+            assert_eq!(authoring_budget(250), 250);
+        });
+    }
+
+    /// NIM's measured deadline must produce a budget that actually FITS it. 302s x 15 tok/s x 0.7
+    /// = 3,171 tokens, which at the measured floor of 15.5 tok/s is ~205s -- inside 302 with room
+    /// for the model being slower than the floor and for the round trip.
+    #[test]
+    fn nims_measured_deadline_yields_a_budget_that_fits_it() {
+        with_deadline(Some("302"), || {
+            let b = authoring_budget(16_000);
+            assert_eq!(b, 3_171, "302 * 15 * 7 / 10");
+            // The claim that matters is not the number, it is that generating it fits:
+            let seconds_at_the_measured_floor = b as f64 / 15.5;
+            assert!(
+                seconds_at_the_measured_floor < 302.0 * 0.8,
+                "a budget of {b} takes {seconds_at_the_measured_floor:.0}s at the measured floor,                  which does not leave the deadline enough room"
+            );
+        });
+    }
+
+    /// A caller asking for LESS than the deadline affords still gets what it asked for. The clamp
+    /// only ever lowers -- it must never inflate a deliberately small budget into a long call.
+    #[test]
+    fn the_clamp_only_lowers_and_never_raises() {
+        with_deadline(Some("302"), || {
+            assert_eq!(authoring_budget(900), 900);
+            assert_eq!(authoring_budget(12), 12);
+        });
+    }
+
+    /// A deadline too short to author anything still yields a workable request rather than a
+    /// fragment: failing loudly beats emitting something guaranteed to be incomplete.
+    #[test]
+    fn an_impossibly_short_deadline_does_not_produce_a_fragment() {
+        with_deadline(Some("5"), || {
+            assert_eq!(authoring_budget(16_000), MIN_AUTHORING_TOKENS);
+        });
+    }
+
+    /// Nonsense is not a deadline. Zero, negative and unparseable all mean "none declared" rather
+    /// than a budget of zero, which would ask a model for nothing at all.
+    #[test]
+    fn nonsense_is_treated_as_no_deadline_not_as_a_tiny_one() {
+        for bad in ["0", "-1", "abc", "", "  "] {
+            with_deadline(Some(bad), || {
+                assert_eq!(
+                    authoring_budget(16_000),
+                    16_000,
+                    "{bad:?} must read as no declared deadline"
+                );
+                assert_eq!(provider_deadline_seconds(), None, "{bad:?}");
+            });
+        }
     }
 }
 

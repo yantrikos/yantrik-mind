@@ -562,6 +562,57 @@ mod review {
     // `LLMResponse.stop_reason` carries it — it was dropped in the recipe's Think step, one move
     // before the only consumer that needs it. These pin the whole path.
 
+    /// E.CB2-B step 2 — THE RECIPE MUST ACTUALLY USE THE CLAMP, not merely have one available.
+    ///
+    /// Twice in one day a change was wired and never proven to carry a value: a `CB2_WALL` export
+    /// the legs needed, and the `Think` step's stop-reason hand-off. Both compiled, both read
+    /// correctly, both broke nothing when deleted. `authoring_budget` existing in mind-inference
+    /// says nothing about whether `build_recipe` calls it, so ask the recipe.
+    #[test]
+    fn every_authoring_step_is_clamped_to_the_providers_deadline() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("YM_PROVIDER_DEADLINE_S").ok();
+
+        // With NIM's measured deadline declared, no authoring step may ask for more than it affords.
+        std::env::set_var("YM_PROVIDER_DEADLINE_S", "302");
+        let affordable = mind_inference::authoring_budget(16_000);
+        let clamped: Vec<usize> = steps()
+            .iter()
+            .filter_map(|st| match st {
+                RecipeStep::Think { max_tokens, .. } => *max_tokens,
+                _ => None,
+            })
+            .collect();
+        assert!(!clamped.is_empty(), "the build recipe has no authoring step at all");
+        for b in &clamped {
+            assert!(
+                *b <= affordable,
+                "an authoring step asks for {b} tokens where the provider's deadline affords                  {affordable} — the constant is still hard-coded"
+            );
+        }
+
+        // And with NO deadline declared the recipe is unchanged, which is what makes it safe to
+        // ship: the Mind keeps its few-big-calls shape wherever a provider has said nothing.
+        std::env::remove_var("YM_PROVIDER_DEADLINE_S");
+        let unclamped: Vec<usize> = steps()
+            .iter()
+            .filter_map(|st| match st {
+                RecipeStep::Think { max_tokens, .. } => *max_tokens,
+                _ => None,
+            })
+            .collect();
+        assert!(
+            unclamped.iter().any(|b| *b > affordable),
+            "with no declared deadline the recipe must ask for the full budget, not the clamped one"
+        );
+
+        match prev {
+            Some(x) => std::env::set_var("YM_PROVIDER_DEADLINE_S", x),
+            None => std::env::remove_var("YM_PROVIDER_DEADLINE_S"),
+        }
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

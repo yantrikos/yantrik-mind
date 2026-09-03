@@ -323,7 +323,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                 ),
                 store_as: "files".into(),
                 on_error: ErrorAction::Fail,
-                max_tokens: Some(16_000usize),
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
                 // A build is a specification problem, not a reasoning showcase: the brief states
                 // the contract and the work is writing it out completely. Extended thinking here
                 // spends budget that the FILES need, and a file cut off is the failure that costs
@@ -377,7 +377,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                 ),
                 store_as: "reviewed".into(),
                 on_error: ErrorAction::Skip,
-                max_tokens: Some(16_000usize),
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
                 think: Some(false),
             },
             // Written with Skip, so a review that comes back unparseable or unsafe leaves the FIRST
@@ -484,7 +484,7 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
                 on_error: ErrorAction::Fail,
                 // A DOCUMENT budget, not a reply budget. The default 2048 produced a page that stopped
                 // mid-tag, and the chain published the fragment and announced it was live.
-                max_tokens: Some(16_000usize),
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
                 // Thinking OFF. On a thinking model the budget is shared between the reasoning
                 // preamble and the answer, and this step needs OUTPUT tokens: measured, the same
                 // prompt gave a complete 9-10k-character page with thinking off and ~900 characters
@@ -526,7 +526,7 @@ pub fn page_recipe(name: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
                 ),
                 store_as: "page".into(),
                 on_error: ErrorAction::Fail,
-                max_tokens: Some(16_000usize),
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
                 think: Some(false),
             },
             RecipeStep::Tool {

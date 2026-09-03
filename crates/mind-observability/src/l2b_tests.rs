@@ -527,3 +527,147 @@ fn equal_scores_are_broken_by_the_frozen_scope_order() {
         "the tie goes to the earlier loop in the frozen scope, not the longer wait"
     );
 }
+
+// ── E.L2B-R: the reader ───────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod l2b_reader_tests {
+    use crate::*;
+
+    fn wake(n: u64) -> CycleId {
+        CycleId::new(100, n)
+    }
+
+    fn tick(c: Option<CycleId>, id: LoopId, held: Option<HeldReason>, ts: u64) -> DecisionEvent {
+        let opp = LoopOpportunity::Window {
+            loop_id: id,
+            process_start_ms: 100,
+            key: ts,
+        };
+        let t = match held {
+            None => LoopTick::acted(opp, LoopHost::Process, LoopOutcome::Ran),
+            Some(h) => LoopTick::held(opp, LoopHost::Process, h),
+        };
+        match c {
+            Some(c) => t.in_wake(c).to_event(ts),
+            None => t.to_event(ts),
+        }
+    }
+
+    fn shadow(c: CycleId, considered: &[&str], chose: &str, ts: u64) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(&format!("attn-{}", c.render()), "attention_shadow");
+        ev.ts_ms = ts;
+        ev.object_id = Some(c.render());
+        ev.candidates = considered.iter().map(|s| s.to_string()).collect();
+        ev.chosen = Some(chose.into());
+        ev.verdict = Some("ranked".into());
+        ev
+    }
+
+    /// KILL 1: it names WHICH loops. A reader that says "3 buildable" is the feed's defect with
+    /// extra steps — the feed already shows counts, and that is exactly why the shadow was mute.
+    #[test]
+    fn it_names_the_loops_not_just_how_many() {
+        let evs = vec![
+            shadow(wake(1), &["ics", "lease-sweep"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            tick(Some(wake(1)), LoopId::LeaseSweep, None, 12),
+        ];
+        let out = render_attention_shadow_at(&evs, 20);
+        assert!(out.contains("ics"), "the loop is named: {out}");
+        assert!(out.contains("lease-sweep"), "and so is the other one: {out}");
+        assert!(out.contains(&wake(1).render()), "the wake is identified: {out}");
+    }
+
+    /// KILL 2, AND THE DEFINITION THAT MATTERS MOST: a HELD row is a DUE row.
+    ///
+    /// Comparing against acted rows alone reports a flattering zero and silently forgives every
+    /// gate whose loops are usually blocked — which on an idle box is most of them. The real first
+    /// reading on staging was exactly this shape: `ask` held on presence and `dmn` held by the idle
+    /// gate, both due, neither considered.
+    #[test]
+    fn a_held_loop_is_due_and_counts_against_the_shadow() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            tick(Some(wake(1)), LoopId::Dmn, Some(HeldReason::IdleGate), 12),
+        ];
+        let out = render_attention_shadow_at(&evs, 20);
+        assert!(
+            out.contains("UNSEEN     : dmn"),
+            "a held-but-due loop the shadow never considered is a shortfall: {out}"
+        );
+        assert!(
+            out.contains("1 carried a due loop the shadow never considered"),
+            "and it is counted: {out}"
+        );
+    }
+
+    /// KILL 2 again, the OTHER flattering zero: the denominator is every wake with loop activity,
+    /// not every wake that produced a shadow row. A wake where only unwired loops act writes NO
+    /// shadow row, so scoping to shadow rows hides the strongest case there is.
+    #[test]
+    fn a_wake_with_no_shadow_row_is_still_counted() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            // Wake 2: a loop acted and the shadow said nothing at all.
+            tick(Some(wake(2)), LoopId::Dmn, None, 20),
+        ];
+        let out = render_attention_shadow_at(&evs, 30);
+        assert!(
+            out.contains("NO SHADOW ROW"),
+            "the wake the shadow never saw must appear: {out}"
+        );
+        assert!(
+            out.contains("2 wake(s)"),
+            "and it must be in the denominator: {out}"
+        );
+        assert!(out.contains("UNSEEN     : dmn"), "{out}");
+    }
+
+    /// KILL 3: with nothing recorded it must SAY so — an empty table reads as "nothing was due",
+    /// which is the one thing the operator must not conclude from a shadow that is switched off.
+    #[test]
+    fn silence_is_reported_as_silence_not_as_an_empty_table() {
+        let out = render_attention_shadow_at(&[], 99);
+        assert!(out.contains("No attention shadow rows"), "{out}");
+        assert!(
+            out.contains("YM_ATTENTION_SHADOW"),
+            "it must say the shadow is off by default, or silence looks like evidence: {out}"
+        );
+    }
+
+    /// Rows that cannot be paired are REPORTED, never dropped. A denominator that quietly shrinks
+    /// to the rows that happen to pair is the censoring pattern that cost two earlier readings.
+    #[test]
+    fn rows_without_a_wake_are_reported_rather_than_dropped() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            tick(None, LoopId::Dmn, None, 12),
+            tick(None, LoopId::Knock, None, 13),
+        ];
+        let out = render_attention_shadow_at(&evs, 20);
+        assert!(
+            out.contains("2 loop row(s) carry no wake"),
+            "the unpairable rows are named in the report: {out}"
+        );
+        // And they must NOT be silently treated as a shortfall against a wake they never belonged to.
+        assert!(!out.contains("UNSEEN     : knock"), "{out}");
+    }
+
+    /// A window with no misses must not be reported as completeness. On an idle box a gate whose
+    /// loops never came due cannot be missed, and saying "0 unseen" without that caveat would let
+    /// a quiet night stand in for evidence the shadow is complete.
+    #[test]
+    fn a_clean_window_is_not_called_completeness() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+        ];
+        let out = render_attention_shadow_at(&evs, 20);
+        assert!(out.contains("weak evidence, not completeness"), "{out}");
+    }
+}
+

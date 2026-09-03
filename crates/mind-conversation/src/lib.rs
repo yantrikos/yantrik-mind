@@ -8168,6 +8168,12 @@ impl ConversationEngine {
                 if prefix == "loops" {
                     return verified_report(mind_observability::render_loop_ledger);
                 }
+                // E.L2B-R: the attention shadow, which had no reader at all. Its rows were being
+                // written to a feed that drops the three fields carrying their content, so the
+                // instrument was mute — the same defect as a check nobody runs.
+                if prefix == "attention" {
+                    return verified_report(mind_observability::render_attention_shadow);
+                }
                 // E.CFG1: what each configured function would actually call. The plain read makes no
                 // network call and says so; `roles verify` asks each distinct provider whether it
                 // serves the model the route names — the question the router never asks, and the one

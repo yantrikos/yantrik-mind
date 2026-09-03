@@ -6419,6 +6419,156 @@ fn join_counts(m: &std::collections::BTreeMap<String, usize>) -> String {
 }
 
 /// `ym why loops`: the last 24 hours of the mind's idle time, one loop per block, anchored to now.
+/// E.L2B-R: `ym why attention` — the attention shadow, readable at last.
+///
+/// The shadow has been writing rows since L2-B step 2a and NOTHING could read them: its only
+/// operator surface projects nine fields and drops `object_id`, `candidates` and `policy`, which
+/// are the cycle identity, the buildable loops and the ranked scores — the row's entire content.
+/// A shadow is not live when it writes; it is live when someone can read what it wrote.
+///
+/// THE SHORTFALL IS THE POINT. Step 2a shipped wired to four of eighteen gates on the promise that
+/// the read side would compare what the shadow considered against what the ledger says was due.
+/// Two definitions decide whether that number means anything, and BOTH wrong forms report a
+/// flattering zero while looking like reasonable code:
+///
+///   * The denominator is every wake that wrote a LOOP ROW — not every wake with a shadow row. A
+///     wake where only unwired loops act writes no shadow row at all, so scoping to shadow rows
+///     hides the strongest case there is.
+///   * DUE means acted OR HELD. A held row was due and was blocked; the shadow claims to rank
+///     everything due. Comparing against acted rows alone silently forgives every gate whose
+///     loops are usually blocked — which on an idle box is most of them.
+///
+/// Both were found by computing this number wrong, twice, on real rows.
+pub fn render_attention_shadow(events: &[DecisionEvent]) -> String {
+    let now = events.iter().map(|e| e.ts_ms).max().unwrap_or(0);
+    render_attention_shadow_at(events, now)
+}
+
+pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> String {
+    use std::collections::{BTreeMap, BTreeSet};
+    let since = now_ms.saturating_sub(24 * 60 * 60 * 1000);
+    let win = |e: &&DecisionEvent| e.ts_ms >= since && e.ts_ms <= now_ms;
+
+    let mut shadows: BTreeMap<CycleId, &DecisionEvent> = BTreeMap::new();
+    for e in events.iter().filter(|e| e.kind == "attention_shadow").filter(win) {
+        if let Some(c) = e.object_id.as_deref().and_then(CycleId::parse) {
+            shadows.insert(c, e);
+        }
+    }
+    // Due loops per wake, and the rows that carry no wake at all.
+    let mut due: BTreeMap<CycleId, BTreeMap<String, String>> = BTreeMap::new();
+    let mut unpairable = 0usize;
+    for e in events.iter().filter(|e| e.kind == "loop_tick").filter(win) {
+        let Some(tick) = parse_tick(e) else { continue };
+        let loop_id = tick.opportunity.loop_id().as_str().to_string();
+        let verdict = match &tick.result {
+            Ok(o) => o.as_str().to_string(),
+            Err(h) => format!("held:{}", h.as_str()),
+        };
+        match tick.cycle {
+            // Acted OR held: both are due. See the note above — this is one of the two
+            // definitions that decide whether the shortfall means anything.
+            Some(c) => {
+                due.entry(c).or_default().insert(loop_id, verdict);
+            }
+            None => unpairable += 1,
+        }
+    }
+
+    if shadows.is_empty() && due.is_empty() {
+        return format!(
+            "No attention shadow rows and no wake-stamped loop rows in the last 24 h (as of ts_ms {now_ms}).
+             The shadow is OFF unless YM_ATTENTION_SHADOW is 1/on/true, and it writes a row only on a              wake where at least one in-scope opportunity was due.
+             {unpairable} loop row(s) in the window carry no wake (an older era, or the Telegram host,              which has no wake counter) and can never be paired."
+        );
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "ATTENTION SHADOW — last 24 h (as of ts_ms {now_ms})
+         The shadow DECIDES NOTHING: every loop below ran or was held exactly as it would have          without it.
+
+"
+    ));
+
+    // The denominator: every wake with loop activity, plus any wake that produced a shadow row.
+    let wakes: BTreeSet<CycleId> = due.keys().chain(shadows.keys()).copied().collect();
+    let mut blind_wakes = 0usize;
+    let mut unseen_total: BTreeMap<String, usize> = BTreeMap::new();
+
+    for c in &wakes {
+        let shadow = shadows.get(c);
+        let considered: BTreeSet<String> = shadow
+            .map(|e| e.candidates.iter().cloned().collect())
+            .unwrap_or_default();
+        let empty = BTreeMap::new();
+        let due_here = due.get(c).unwrap_or(&empty);
+        let unseen: Vec<&String> = due_here.keys().filter(|l| !considered.contains(*l)).collect();
+        if !unseen.is_empty() {
+            blind_wakes += 1;
+            for l in &unseen {
+                *unseen_total.entry((*l).clone()).or_default() += 1;
+            }
+        }
+        out.push_str(&format!("  wake {} 
+", c.render()));
+        match shadow {
+            Some(e) => {
+                out.push_str(&format!(
+                    "    considered : {}
+    would pick : {}
+    scores     : {}
+",
+                    if considered.is_empty() { "—".into() } else { considered.iter().cloned().collect::<Vec<_>>().join(", ") },
+                    e.chosen.as_deref().unwrap_or("(abstained)"),
+                    if e.policy.is_empty() { "—".to_string() } else { e.policy.join(" ") },
+                ));
+            }
+            // The strongest shortfall there is, and the case a shadow-scoped denominator hides.
+            None => out.push_str("    considered : NO SHADOW ROW — the shadow saw nothing this wake
+"),
+        }
+        out.push_str(&format!(
+            "    due        : {}
+",
+            if due_here.is_empty() {
+                "—".to_string()
+            } else {
+                due_here.iter().map(|(l, v)| format!("{l}({v})")).collect::<Vec<_>>().join(", ")
+            }
+        ));
+        out.push_str(&format!(
+            "    UNSEEN     : {}
+",
+            if unseen.is_empty() { "—".to_string() } else { unseen.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ") }
+        ));
+    }
+
+    out.push_str(&format!(
+        "
+{} wake(s); {} carried a due loop the shadow never considered.
+",
+        wakes.len(),
+        blind_wakes
+    ));
+    if unseen_total.is_empty() {
+        out.push_str("No gate went unseen in this window. On an idle box that is weak evidence, not completeness: a gate whose loops never came due cannot be missed.
+");
+    } else {
+        out.push_str("Gates the shadow missed, by wake count — these are the ones step 2a left unwired:
+");
+        for (l, n) in &unseen_total {
+            out.push_str(&format!("  {l}: {n}
+"));
+        }
+    }
+    out.push_str(&format!(
+        "{unpairable} loop row(s) carry no wake and are excluded from every number above — an older          era, or the Telegram host, which has no wake counter. They are reported rather than          dropped: a denominator that quietly shrinks to the rows that happen to pair is how two          earlier readings were censored.
+"
+    ));
+    out
+}
+
 pub fn render_loop_ledger_at(events: &[DecisionEvent], now_ms: u64) -> String {
     let ledger = loop_ledger(events, now_ms, 24 * 60 * 60 * 1000);
     if ledger.loops.is_empty() {

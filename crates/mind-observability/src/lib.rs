@@ -4970,6 +4970,8 @@ impl LoopId {
 /// them is a new version and a new ledger row, never an edit of this one.
 #[cfg(test)]
 mod l2a_tests;
+#[cfg(test)]
+mod l2b_tests;
 
 pub const ATTENTION_POLICY: &str = "attention-policy-v1";
 
@@ -5103,6 +5105,335 @@ pub fn attention_rank(candidates: &mut [AttentionCandidate]) {
             .then_with(|| scope_index(a.loop_id).cmp(&scope_index(b.loop_id)))
             .then_with(|| a.last_ms.cmp(&b.last_ms))
     });
+}
+
+// ── L2-B: the per-wake signal set, and the attention shadow row it produces ───────────────────
+//
+// L2-A froze the arithmetic (constants, urgency, the exact integer score, the tie-break). This is
+// the collection point and the record: one typed entry per in-scope loop, filled by the site as it
+// evaluates its own gate, and one shadow row per wake that saw at least one due opportunity.
+//
+// NOTHING HERE IS WIRED INTO THE POLL LOOP. It is pure: signals in, a row out. The wiring is a
+// separate slice, so this one cannot change what the mind does even by accident — which matters,
+// because the shadow's single kill criterion is that the `attention_shadow` append is the ONLY
+// write attributable to it.
+//
+// WHY THE TYPES ARE SHAPED THIS WAY. The preregistration freezes, per loop, exactly which signals
+// its descriptor may read: "a descriptor may read no signal outside it and must have every signal
+// in it." A struct with exactly those fields makes both halves of that structural rather than a
+// rule someone has to remember — a site cannot fill an entry without having read every required
+// signal, and a descriptor cannot reach a signal the entry does not carry.
+//
+// `due` is reported BY THE SITE and never re-derived here. Each loop's due predicate lives at its
+// own gate, some of them bespoke; recomputing them in a second place is how two answers to one
+// question come to disagree. The other fields are the descriptor's inputs and the proof that the
+// required signals were present.
+
+/// A cadence timer's inputs, as the site read them. Urgency only — whether the timer fired is the
+/// site's `due`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeTimer {
+    pub last_ms: u64,
+    pub period_ms: u64,
+}
+
+impl WakeTimer {
+    /// The frozen window-loop urgency: how far past its period this loop is, per mille, capped.
+    /// Saturating throughout and never dividing by zero, so there is no input that panics.
+    pub fn urgency(&self, now_ms: u64) -> u64 {
+        let overdue = now_ms
+            .saturating_sub(self.last_ms)
+            .saturating_sub(self.period_ms);
+        (overdue.saturating_mul(1000) / self.period_ms.max(1)).min(1000)
+    }
+}
+
+/// The frozen idle-stretch urgency, used by Knock: how far past the required stretch we are.
+fn stretch_urgency(idle_elapsed_ms: u64, idle_required_ms: u64) -> u64 {
+    (idle_elapsed_ms
+        .saturating_sub(idle_required_ms)
+        .saturating_mul(1000)
+        / idle_required_ms.max(1))
+    .min(1000)
+}
+
+/// What the shadow needs from one gate on one wake, whatever shape that gate has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateReading {
+    pub due: bool,
+    /// Per mille, already clamped to [0, 1000].
+    pub urgency: u64,
+    /// The tie-break: the longest-waiting loop wins a tie.
+    pub last_ms: u64,
+}
+
+macro_rules! gate {
+    ($(#[$m:meta])* $name:ident { $($(#[$fm:meta])* $field:ident : $ty:ty),* $(,)? } urgency($self:ident, $now:ident) $body:block last($lself:ident) $last:block) => {
+        $(#[$m])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            /// The gate's own verdict this wake. Never recomputed here.
+            pub due: bool,
+            $($(#[$fm])* pub $field: $ty,)*
+        }
+        impl $name {
+            pub fn reading(&self, now_ms: u64) -> GateReading {
+                let $self = self;
+                let $now = now_ms;
+                let $lself = self;
+                GateReading { due: self.due, urgency: $body, last_ms: $last }
+            }
+        }
+    };
+}
+
+gate!(
+    /// Resolve, ProfileRefresh, Ics, LeaseSweep: `Timer` only.
+    TimerUnconditional { timer: WakeTimer }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// MemberBeat: `Timer` + `quiet`.
+    TimerQuiet { timer: WakeTimer, quiet: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// HomeWatch, Family, FollowUp, PriceWatch: `Timer` + `Presence` + `enabled`.
+    TimerChatQuiet { timer: WakeTimer, presence: bool, enabled: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// Patterns, lexically inside the proactive switch: `Timer` + `Presence` + idle inputs.
+    IdleGated {
+        timer: WakeTimer,
+        presence: bool,
+        /// `YM_PROACTIVE ∧ YM_PATTERNS`.
+        enabled: bool,
+        spoke: bool,
+        idle_ms: u64,
+    }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// TraditionPrep and unforced Whois: a persisted stamp + `Presence` + `receptive`.
+    PersistedReceptive { timer: WakeTimer, presence: bool, receptive: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// MailSweep: a persisted stamp + `Presence`.
+    PersistedChatQuiet { timer: WakeTimer, presence: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// Whois when the operator forces it: `at_ms` + `chat_present`. Urgency is the frozen 1000 —
+    /// a human asked for it now, and nothing the arithmetic could say would outrank that.
+    ForcedWhois { at_ms: u64, chat_present: bool }
+    urgency(_s, _now) { 1000 } last(l) { l.at_ms }
+);
+gate!(
+    /// Dmn's bespoke gate: `enabled` + `Timer` + an idle stretch. No chat and no quiet in its
+    /// predicate, which is why it is not one of the timer kinds.
+    DmnGate { enabled: bool, timer: WakeTimer, idle_ms: u64, idle_required_ms: u64 }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// Knock: the only Stretch-kind opportunity. Its urgency is the idle stretch, not a period.
+    KnockGate {
+        enabled: bool,
+        presence: bool,
+        idle_ms: u64,
+        idle_required_ms: u64,
+        last_activity_ms: u64,
+    }
+    urgency(s, _now) { stretch_urgency(s.idle_ms, s.idle_required_ms) }
+    last(l) { l.last_activity_ms }
+);
+gate!(
+    /// Digest: `enabled` + `spoke` + idle-ok + `Timer` + `receptive`.
+    DigestGate { enabled: bool, spoke: bool, idle_ok: bool, timer: WakeTimer, receptive: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+gate!(
+    /// Ask: `enabled` + `spoke` + ask-ok + `Timer` + `receptive`.
+    AskGate { enabled: bool, spoke: bool, ask_ok: bool, timer: WakeTimer, receptive: bool }
+    urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
+);
+
+/// One poll wake's signals: a typed slot per in-scope loop, `None` until that site fills it.
+///
+/// A `None` slot is the MISSING case and is not the same as "not due" — a site that recorded a
+/// loop row without filling its slot is a hole in the shadow's coverage, and the read side finds it
+/// by joining this row's `buildable` list against the loop ledger's own due rows for the same
+/// `cycle_id`. That distinction is the whole point of the struct being total over the scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WakeSignals {
+    pub resolve: Option<TimerUnconditional>,
+    pub profile_refresh: Option<TimerUnconditional>,
+    pub ics: Option<TimerUnconditional>,
+    pub lease_sweep: Option<TimerUnconditional>,
+    pub member_beat: Option<TimerQuiet>,
+    pub home_watch: Option<TimerChatQuiet>,
+    pub family: Option<TimerChatQuiet>,
+    pub follow_up: Option<TimerChatQuiet>,
+    pub price_watch: Option<TimerChatQuiet>,
+    pub patterns: Option<IdleGated>,
+    pub tradition_prep: Option<PersistedReceptive>,
+    /// Unforced Whois. A forced Whois fills `whois_forced` instead; both may not be set.
+    pub whois: Option<PersistedReceptive>,
+    pub whois_forced: Option<ForcedWhois>,
+    pub mail_sweep: Option<PersistedChatQuiet>,
+    pub dmn: Option<DmnGate>,
+    pub knock: Option<KnockGate>,
+    pub digest: Option<DigestGate>,
+    pub ask: Option<AskGate>,
+}
+
+impl WakeSignals {
+    /// Every slot this wake filled, in the frozen scope order, with its reading.
+    ///
+    /// The scope order is `ATTENTION_SCOPE`'s, which is also the ranking's second tie-break — so a
+    /// reader recomputing the order from a stored row gets the same answer without needing to know
+    /// how this struct's fields happen to be declared.
+    pub fn readings(&self, now_ms: u64) -> Vec<(LoopId, GateReading)> {
+        let mut out: Vec<(LoopId, GateReading)> = Vec::new();
+        let mut push = |id: LoopId, r: Option<GateReading>| {
+            if let Some(r) = r {
+                out.push((id, r));
+            }
+        };
+        push(LoopId::Dmn, self.dmn.map(|g| g.reading(now_ms)));
+        push(LoopId::Knock, self.knock.map(|g| g.reading(now_ms)));
+        push(LoopId::Digest, self.digest.map(|g| g.reading(now_ms)));
+        push(LoopId::Ask, self.ask.map(|g| g.reading(now_ms)));
+        push(LoopId::Patterns, self.patterns.map(|g| g.reading(now_ms)));
+        push(LoopId::HomeWatch, self.home_watch.map(|g| g.reading(now_ms)));
+        push(LoopId::Resolve, self.resolve.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::ProfileRefresh,
+            self.profile_refresh.map(|g| g.reading(now_ms)),
+        );
+        push(LoopId::Family, self.family.map(|g| g.reading(now_ms)));
+        push(LoopId::FollowUp, self.follow_up.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::PriceWatch,
+            self.price_watch.map(|g| g.reading(now_ms)),
+        );
+        push(
+            LoopId::MemberBeat,
+            self.member_beat.map(|g| g.reading(now_ms)),
+        );
+        push(LoopId::Ics, self.ics.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::LeaseSweep,
+            self.lease_sweep.map(|g| g.reading(now_ms)),
+        );
+        push(LoopId::MailSweep, self.mail_sweep.map(|g| g.reading(now_ms)));
+        // A forced Whois supersedes the unforced gate: the operator asked, so that is the reading.
+        push(
+            LoopId::Whois,
+            self.whois_forced
+                .map(|g| g.reading(now_ms))
+                .or_else(|| self.whois.map(|g| g.reading(now_ms))),
+        );
+        push(
+            LoopId::TraditionPrep,
+            self.tradition_prep.map(|g| g.reading(now_ms)),
+        );
+        let order = |id: LoopId| {
+            ATTENTION_SCOPE
+                .iter()
+                .position(|s| *s == id)
+                .unwrap_or(usize::MAX)
+        };
+        out.sort_by_key(|(id, _)| order(*id));
+        out
+    }
+}
+
+/// One wake's shadow: what the arbiter would have chosen, recorded at evaluation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionShadow {
+    pub cycle: CycleId,
+    /// The in-scope loops whose gate this wake reported DUE and whose slot the signal set holds.
+    /// This is the numerator of build completeness; the DENOMINATOR is the loop ledger's own due
+    /// rows for the same `cycle_id`, so it is reproducible from the ledger alone and a hole in this
+    /// list shows up as a shortfall rather than as a silently smaller denominator.
+    pub buildable: Vec<LoopId>,
+    /// Scored and ordered by the frozen policy; only candidates at or above the floor appear.
+    pub ranked: Vec<AttentionCandidate>,
+    /// Due opportunities existed and NOTHING cleared the floor. Distinct from "no row", which
+    /// means the wake had no due opportunity at all and is not an abstention.
+    pub abstained_empty: bool,
+}
+
+impl AttentionShadow {
+    /// The shadow's pick, or `None` when it abstained.
+    pub fn top(&self) -> Option<LoopId> {
+        self.ranked.first().map(|c| c.loop_id)
+    }
+
+    /// The ONE permitted write. Counts, ids and a version — no text, no context, no model call.
+    pub fn to_event(&self, ts_ms: u64) -> DecisionEvent {
+        let mut ev = DecisionEvent::new(&format!("attn-{}", self.cycle.render()), "attention_shadow");
+        ev.ts_ms = ts_ms;
+        ev.actor = Some("attention".into());
+        ev.lane = Some("shadow".into());
+        ev.object_id = Some(self.cycle.render());
+        ev.candidates = self
+            .buildable
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        ev.policy = self
+            .ranked
+            .iter()
+            .map(|c| format!("{}:{}", c.loop_id.as_str(), c.score))
+            .collect();
+        ev.chosen = self.top().map(|id| id.as_str().to_string());
+        ev.verdict = Some(if self.abstained_empty {
+            "abstained_empty".into()
+        } else {
+            "ranked".to_string()
+        });
+        ev.outcome = Some(format!("buildable:{}", self.buildable.len()));
+        ev.evaluator_id = Some(LOOP_LEDGER_V6.into());
+        ev
+    }
+}
+
+/// Build one wake's shadow, or `None` when the wake had no due opportunity the shadow could see.
+///
+/// `None` is NOT an abstention and must never be recorded as one: a wake with nothing due is a wake
+/// with nothing to decide, and counting it would put a denominator's worth of easy agreement into
+/// every metric.
+pub fn attention_shadow(signals: &WakeSignals, cycle: CycleId, now_ms: u64) -> Option<AttentionShadow> {
+    let due: Vec<(LoopId, GateReading)> = signals
+        .readings(now_ms)
+        .into_iter()
+        .filter(|(_, r)| r.due)
+        .collect();
+    if due.is_empty() {
+        return None;
+    }
+    let buildable: Vec<LoopId> = due.iter().map(|(id, _)| *id).collect();
+    let mut ranked: Vec<AttentionCandidate> = due
+        .iter()
+        .filter_map(|(id, r)| {
+            attention_constants(*id).map(|c| AttentionCandidate {
+                loop_id: *id,
+                score: attention_score(&c, r.urgency),
+                last_ms: r.last_ms,
+            })
+        })
+        .filter(|c| c.ranked())
+        .collect();
+    attention_rank(&mut ranked);
+    Some(AttentionShadow {
+        cycle,
+        abstained_empty: ranked.is_empty(),
+        buildable,
+        ranked,
+    })
 }
 
 /// L1d: a stable 64-bit key for an opportunity that is identified by a string (a support

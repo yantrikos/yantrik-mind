@@ -5401,3 +5401,23 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why 45 probe calls missed it | Every probe finished under the edge; the longest was 320.8 s and **succeeded**, so the deadline is not a blanket wall-clock cap on all traffic. The Mind's requests are what reach past it. A probe I designed to mimic the leg was still not the leg — the fourth time today a measurement under one configuration failed to speak for another. |
 | Not proposed | Any change to the void rule. |
 | The decision this creates | It belongs to Pranab: the constraint he set was "free in NIM", and no free NIM model can currently produce a gradeable leg. Options are to shorten what the Mind asks for in one request (a product change with its own consequences), to use a provider without that deadline, or to accept that this line produces no reading. I have not chosen among them. |
+
+## E.CB2-M — how HERMES handles the deadline (Pranab's question), and what it changes
+| Field | Value |
+| --- | --- |
+| The question | Pranab: "how is hermes handling it?" — the right question, and it reversed the change I had proposed an hour earlier. |
+| Reading 6's receipts, re-read for completion tokens **per request** | hermes T1 **16 requests / 5,908 tokens = 369 per request**; T2 **13 / 6,218 = 478**; T3 3 / 3,422 = 1,141. mind T1 **2 / 2,398 = 1,199**; T2 **2 / 3,223 = 1,612**; T3 2 / 1,426 = 713. |
+| Why Hermes survives | It is an agentic tool loop: each turn is a short decision plus a tool call, so the deliverable arrives in pieces. Against a fixed 302 s deadline it has **3–4× the headroom per call** — not by design intent, as a side effect of being agentic. The Mind puts the whole deliverable in one generation at up to 16,000 tokens. |
+| But it is NOT immune | `hermes_T2_void1` in reading 6 is a **voided Hermes leg** — 993 s, 76 s/request, killed by two upstream 429/5xx. In the qwen reading a Hermes T1 hung to the 1800 s wall. More headroom, not immunity. |
+| **The reversal** | The Mind's few-big-calls design **was its measured advantage**: reading 6 recorded cost as "the one column not close" — 2 requests per Mind leg against 3–16, 35–73 s against 108–413 s. Going per-file always would fix a slow-provider problem by permanently discarding the dimension where the Mind clearly won. |
+| The change that is actually right | **Derive the budget from the provider's deadline and observed throughput**, rather than a 16,000 constant: keep few-big-calls where the model is fast enough, split only where the provider forces it. On the retired 120b the whole Mind T1 was 34.8 s and nothing needed splitting. |
+| Why the same brief now costs 13× | gpt-oss-20b emitted **10,842** completion tokens where 120b emitted **2,398** — 4.5× more verbose — at roughly a third of the throughput (≈69 tok/s vs ≈16–26). 4.5 × 3 ≈ 13, and 34.8 s × 13 ≈ 450 s, which is what the oss20 legs actually measured. Two compounding effects, neither of them the Mind's design. |
+| Still unmeasured, being measured | Hermes on the slow models. Everything above about Hermes is from reading 6 on the retired 120b. |
+
+## An operational fault of mine — the deploy wiped the Hermes archive
+| Field | Value |
+| --- | --- |
+| What happened | The first Hermes leg refused instantly: `status: archive-mismatch, disqualified: true`, 0 requests. My redeploy used `find $D -mindepth 1 -maxdepth 1 ! -name '*.tar.gz' -exec rm -rf {} +`, which protects only **top-level** files — and `docker/hermes-3ce1cf2.tar.gz` sits one level down, inside a directory that was removed wholesale. The archive is deliberately **not in the repo** (28 MB), so no redeploy could restore it. |
+| Recovery | Restored from the frozen `/root/cb2/fixtures/docker/`, sha256 `30698554…aaac` — an **exact match to the pinned commit**, independently confirmed by my own earlier `fixtures.bak` copy. `cb2-hermes:latest` was untouched (it needs the archive only at build time). |
+| What made it survivable | The leg **failed closed and said why**. `hermes_leg.sh` verifies the archive against the pinned hash before doing anything and writes a typed disqualification. A harness that had merely built from whatever was there would have produced a leg on the wrong source, and nothing would have said so. |
+| The rule | An exclusion pattern written for top-level files does not protect the same pattern nested. Deploys must preserve `docker/` wholesale, since the one artefact that cannot be re-derived from the repo lives there. |

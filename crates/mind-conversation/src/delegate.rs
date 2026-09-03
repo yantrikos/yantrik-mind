@@ -356,7 +356,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
             RecipeStep::Think {
                 prompt: format!(
                     "You produced these files for the brief below. Check them against each other \
-                     and against the brief, then output the COMPLETE set again.\n\n\
+                     and against the brief, then output ONLY the files you are CHANGING.\n\n\
                      THE BRIEF: {task}\n\n\
                      WHAT YOU PRODUCED:\n{{{{files}}}}\n\n\
                      Check, in this order:\n\
@@ -367,13 +367,13 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                      - Does every requirement the brief STATES have something answering it — the \
                      exact filenames, the exact output strings, the exact data shapes?\n\
                      - Does anything reference a file that is not in the set?\n\n\
-                     Then output the whole set in the same format, with the same markers:\n\
+                     Then output ONLY the files you are changing, in the same format, with the same markers:\n\
                      === FILE: <relative/path>\n\
-                     <the complete contents>\n\n\
-                     Output ONLY files. If you find nothing to change, output the set UNCHANGED — \
-                     do not shorten it, do not summarise it, and do not drop a file you are not \
-                     rewriting. A file missing from your output is a file that keeps its old \
-                     contents, so omitting one is never how you delete it."
+                     <the complete contents of that one file>\n\n\
+                     Output ONLY files, never prose. If nothing needs changing, output nothing at all. \
+                     Any file you DO output must be complete, because it replaces the old one \
+                     wholesale. A file you do NOT output keeps its old \
+                     contents, so leaving a file out is how you leave it alone, never how you delete it."
                 ),
                 store_as: "reviewed".into(),
                 on_error: ErrorAction::Skip,
@@ -384,7 +384,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
             // set standing. The first write is the guarantee; this one is the improvement.
             RecipeStep::Tool {
                 tool_name: "write_files".into(),
-                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}", "stop_reason": "{{reviewed__stop_reason}}" }),
+                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}", "stop_reason": "{{reviewed__stop_reason}}", "allow_empty": true }),
                 store_as: "reviewed_url".into(),
                 on_error: ErrorAction::Skip,
             },

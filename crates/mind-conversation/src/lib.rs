@@ -14614,6 +14614,19 @@ impl RecipeHost for MindRecipeHost {
                 if project.trim().is_empty() {
                     anyhow::bail!("a build needs a project name");
                 }
+                // A REVIEW THAT CHANGES NOTHING IS A SUCCESS, not an empty build. The review step
+                // now emits only the files it is changing, so the common good case is an empty
+                // stream, and reporting that as "the build produced no files" would make the
+                // healthiest outcome look like a failure.
+                //
+                // Only a genuinely EMPTY stream is excused. Prose without markers still errors, so
+                // "it ignored the format" stays visible — the same reason `ParsedSet` keeps the
+                // preamble as evidence rather than discarding it.
+                if stream.trim().is_empty()
+                    && _args.get("allow_empty").and_then(|v| v.as_bool()) == Some(true)
+                {
+                    return Ok("the review changed nothing — the first set stands".to_string());
+                }
                 match publish_file_set(project, stream, truncated) {
                     Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));

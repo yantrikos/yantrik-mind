@@ -613,6 +613,60 @@ mod review {
         }
     }
 
+    /// E.CB2-B step 3 — the review emits a DELTA, and only the review may come back empty.
+    ///
+    /// Re-emitting the complete set made the review as large as the authoring step, which is what
+    /// put it over a provider deadline and created the hazard that matters: its `write_files` runs
+    /// on whatever parses, so a review cut mid-file overwrites a COMPLETE file with a partial one.
+    /// The semantics were always safe — the prompt itself says a file missing from the output keeps
+    /// its old contents — the prompt simply asked for everything anyway.
+    #[test]
+    fn the_review_asks_for_a_delta_and_only_the_review_may_be_empty() {
+        let s = steps();
+        let thinks: Vec<&str> = s
+            .iter()
+            .filter_map(|st| match st {
+                RecipeStep::Think { prompt, .. } => Some(prompt.as_str()),
+                _ => None,
+            })
+            .collect();
+        let review = thinks.last().expect("no review step");
+        assert!(
+            review.contains("ONLY the files you are CHANGING"),
+            "the review still asks for the whole set"
+        );
+        assert!(
+            !review.contains("output the COMPLETE set again"),
+            "the review still asks for the whole set"
+        );
+        // The safety property must survive the rewrite: omitting a file is how you leave it alone.
+        assert!(
+            review.contains("keeps its old") && review.contains("never how you delete it"),
+            "the review lost the rule that omitting a file is not deleting it"
+        );
+
+        let writes: Vec<&serde_json::Value> = s
+            .iter()
+            .filter_map(|st| match st {
+                RecipeStep::Tool { tool_name, args, .. } if tool_name == "write_files" => Some(args),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes.len(), 2);
+        // THE FIRST WRITE IS THE DELIVERABLE. An empty authoring result is a real failure and must
+        // stay one — only the review is allowed to legitimately change nothing.
+        assert_ne!(
+            writes[0].get("allow_empty").and_then(|v| v.as_bool()),
+            Some(true),
+            "an empty BUILD must not be excused: that write is the deliverable"
+        );
+        assert_eq!(
+            writes[1].get("allow_empty").and_then(|v| v.as_bool()),
+            Some(true),
+            "a review that changes nothing is the healthy case and must not read as a failed build"
+        );
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

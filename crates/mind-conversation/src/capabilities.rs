@@ -692,6 +692,17 @@ impl CapabilityHandler for DashboardsCapability {
                 if project.trim().is_empty() {
                     return Some("(a build needs a project name)".to_string());
                 }
+                // A REVIEW THAT CHANGES NOTHING IS A SUCCESS, not an empty build. The review step
+                // now emits only the files it is changing, so the common good case is an empty
+                // stream, and reporting that as "the build produced no files" would make the
+                // healthiest outcome look like a failure.
+                //
+                // Only a genuinely EMPTY stream is excused. Prose without markers still errors, so
+                // "it ignored the format" stays visible — the same reason `ParsedSet` keeps the
+                // preamble as evidence rather than discarding it.
+                if stream.trim().is_empty() && arg(args, "allow_empty") == "true" {
+                    return Some("the review changed nothing — the first set stands".to_string());
+                }
                 match crate::publish_file_set(&project, &stream, truncated) {
                     Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));

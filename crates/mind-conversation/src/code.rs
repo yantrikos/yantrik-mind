@@ -1293,7 +1293,25 @@ impl super::ConversationEngine {
                         let dir = Self::forge_dir(&id);
                         let mut written: Vec<String> = Vec::new();
                         let mut total = 0usize;
-                        for block in r.text.split("===== FILE:").skip(1) {
+                        // E.CB2-B2 — THE SAME TRUNCATION VERDICT THE BUILD LANE GOT, and this lane
+                        // needs it for a reason I created: clamping this call to a provider's
+                        // deadline makes a cut generation MORE likely, and here the blocks are
+                        // parsed inline rather than through `publish_file_set`, so a cut final file
+                        // was written silently. Reading 7 showed what that costs on the other lane.
+                        //
+                        // Only the LAST block can be the cut one: every earlier block was
+                        // terminated by the next marker, which is what makes it complete. And only
+                        // `stop_reason == "length"` drops anything — a missing trailing newline is
+                        // equally consistent with a model that simply ended, and dropping on THAT
+                        // deleted a complete test suite once already.
+                        let blocks: Vec<&str> = r.text.split("===== FILE:").skip(1).collect();
+                        let keep = if r.stop_reason == "length" && !blocks.is_empty() {
+                            blocks.len() - 1
+                        } else {
+                            blocks.len()
+                        };
+                        let cut_one = blocks.len() - keep;
+                        for block in blocks.into_iter().take(keep) {
                             let Some(hdr_end) = block.find("=====") else {
                                 continue;
                             };
@@ -1330,8 +1348,13 @@ impl super::ConversationEngine {
                             all[&id]["files"] = serde_json::json!(written);
                             all[&id]["stage"] = serde_json::json!("test");
                             format!(
-                                "⚒️ `{id}` built: {} file(s) → {}",
+                                "⚒️ `{id}` built: {} file(s){} → {}",
                                 written.len(),
+                                if cut_one > 0 {
+                                    " (one more was cut at the token limit and NOT written)"
+                                } else {
+                                    ""
+                                },
                                 dir.display()
                             )
                         }

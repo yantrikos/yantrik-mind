@@ -652,19 +652,21 @@ mod review {
                 _ => None,
             })
             .collect();
-        assert_eq!(writes.len(), 2);
+        assert!(writes.len() >= 2);
         // THE FIRST WRITE IS THE DELIVERABLE. An empty authoring result is a real failure and must
-        // stay one — only the review is allowed to legitimately change nothing.
+        // stay one; every LATER write is an improvement and may legitimately change nothing.
         assert_ne!(
             writes[0].get("allow_empty").and_then(|v| v.as_bool()),
             Some(true),
             "an empty BUILD must not be excused: that write is the deliverable"
         );
-        assert_eq!(
-            writes[1].get("allow_empty").and_then(|v| v.as_bool()),
-            Some(true),
-            "a review that changes nothing is the healthy case and must not read as a failed build"
-        );
+        for (n, w) in writes.iter().enumerate().skip(1) {
+            assert_eq!(
+                w.get("allow_empty").and_then(|v| v.as_bool()),
+                Some(true),
+                "write {n} improves an existing set, so changing nothing is the healthy case and                  must not read as a failed build"
+            );
+        }
     }
 
     /// E.CB2-B — EVERY large generation budget is either clamped or an EXPLAINED exception.
@@ -732,6 +734,35 @@ mod review {
         }
     }
 
+    /// E.CB2-B2 — BOTH lanes that author a file set refuse a cut file, not just the one that was
+    /// measured failing.
+    ///
+    /// The build lane got the truncation verdict because reading 7 showed what happens without it.
+    /// The VENTURE forge authors the same way, parses the blocks inline instead of through
+    /// `publish_file_set`, and had no verdict at all — and I had made it worse an hour earlier by
+    /// clamping its budget, which makes a cut generation more likely. A fix applied only where the
+    /// failure was observed is half a fix.
+    #[test]
+    fn every_lane_that_authors_a_file_set_refuses_a_cut_file() {
+        const CODE: &str = include_str!("code.rs");
+        // The forge parses `r.text` itself, so it must consult `r.stop_reason` itself.
+        assert!(
+            CODE.contains("r.stop_reason == \"length\""),
+            "the venture forge writes whatever parses, including a file cut mid-content"
+        );
+        // ...and drop only the LAST block, since every earlier one was terminated by the next
+        // marker. Dropping more would delete complete files.
+        assert!(
+            CODE.contains("blocks.len() - 1"),
+            "only the final block can be the cut one; dropping more deletes complete files"
+        );
+        // The caller must be told, or a short set looks like a model that wrote less.
+        assert!(
+            CODE.contains("cut at the token limit and NOT written"),
+            "a dropped file must be reported, not silently missing"
+        );
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();
@@ -739,7 +770,7 @@ mod review {
             .iter()
             .filter(|st| matches!(st, RecipeStep::Tool { tool_name, .. } if tool_name == "write_files"))
             .collect();
-        assert_eq!(writes.len(), 2);
+        assert!(writes.len() >= 2, "at least a deliverable write and an improving one");
         // The REVIEW write is the dangerous one: it re-emits the complete set, so a review cut
         // mid-file would otherwise overwrite a complete file with a partial one.
         for (n, w) in writes.iter().enumerate() {
@@ -809,13 +840,21 @@ print('cut off mid";
             .filter(|(_, st)| matches!(st, RecipeStep::Think { .. }))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(write_ix.len(), 2, "one write to guarantee, one to improve");
-        assert_eq!(think_ix.len(), 2, "authoring, then review — and no more");
+        assert!(write_ix.len() >= 2, "one write to guarantee, at least one to improve");
+        assert_eq!(write_ix.len(), think_ix.len(), "every generation is written, or it is lost");
+        assert!(
+            think_ix[0] < write_ix[0],
+            "the first write must follow the authoring generation it writes"
+        );
         assert!(
             write_ix[0] < think_ix[1],
             "the review must come AFTER the first write: reviewing first means an unparseable              review loses the whole draft"
         );
-        assert!(think_ix[1] < write_ix[1]);
+        // and EVERY later generation is written after the one before it — no pass may overtake
+        // another, which is what keeps "the first write is the guarantee" true as passes are added.
+        for i in 1..think_ix.len() {
+            assert!(write_ix[i - 1] < think_ix[i] && think_ix[i] < write_ix[i]);
+        }
     }
 
     #[test]
@@ -847,9 +886,18 @@ print('cut off mid";
     fn at_most_one_review_and_it_costs_at_most_one_extra_call() {
         let s = steps();
         let thinks = s.iter().filter(|st| matches!(st, RecipeStep::Think { .. })).count();
+        // RAISED FROM TWO TO THREE, deliberately: author, COMPLETE, review. The ceiling exists to
+        // stop an open repair loop, and three fixed calls is still a ceiling — what it is not is a
+        // loop that can run until the budget is gone.
+        //
+        // The third call is not free and was not added for elegance. Reading 7's T1 authoring
+        // generation hit the provider deadline clamp, its main file was correctly refused rather
+        // than shipped in pieces, and the leg delivered `run.sh` alone: 2/11 against Hermes's
+        // 11/11, which was the whole margin of that reading. A cut set with no way to finish is a
+        // failed task; one extra call is what a complete set costs.
         assert_eq!(
-            thinks, 2,
-            "an open repair loop is how a cost ceiling stops existing; the ceiling is two calls"
+            thinks, 3,
+            "an open repair loop is how a cost ceiling stops existing; the ceiling is three calls"
         );
     }
 

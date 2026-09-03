@@ -336,6 +336,51 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                 store_as: "project_url".into(),
                 on_error: ErrorAction::Fail,
             },
+            // E.CB2-B2 — THE COMPLETION PASS. Bounding the authoring budget to fit a provider's
+            // deadline means a generation can now be CUT, and a cut file is correctly refused by
+            // the writer rather than shipped in pieces. That turns "one oversized request that
+            // 504s" into "a deliverable missing its main file", which is better evidence and still
+            // a failed task.
+            //
+            // Measured, reading 7: T1's authoring call hit the limit, `server.py` was dropped, and
+            // the leg shipped `run.sh` alone — 2/11 against Hermes's 11/11, and the whole margin of
+            // that reading. The same clamp passed T1 twice at 11/11 in the gate, because neither
+            // gate leg ever truncated: the gate exercised the path the change IMPROVES and never
+            // the path it CREATES.
+            //
+            // So: ask once more for whatever is missing. It needs no conditional step, because the
+            // writer's own message says what happened — it names the files written and, when one
+            // was cut, says so — and an empty answer is already a success under `allow_empty`. A
+            // complete set therefore costs one cheap "nothing to add" call, and an incomplete one
+            // gets finished.
+            RecipeStep::Think {
+                prompt: format!(
+                    "{rules}You are finishing a build that may be INCOMPLETE.
+
+                     THE BRIEF: {task}
+
+                     WHAT WAS WRITTEN SO FAR — this message names the files that landed, and says                      so explicitly if one was cut off mid-file and refused:
+{{{{project_url}}}}
+
+                     Write ONLY the files that are missing or were cut, complete, in the same                      format:
+                     === FILE: <relative/path>
+                     <the complete contents of that one file>
+
+                     Rules: a file that already landed is finished — do not rewrite it. Write each                      file you do emit in FULL, because a second cut loses it again; if the brief                      needs more than you can finish here, write FEWER files completely. If nothing                      is missing, output nothing at all."
+                ),
+                store_as: "completion".into(),
+                on_error: ErrorAction::Skip,
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
+                think: Some(false),
+            },
+            // Skip, like the review: a completion pass that comes back unusable must leave the
+            // first set standing rather than fail a build that may already be fine.
+            RecipeStep::Tool {
+                tool_name: "write_files".into(),
+                args: serde_json::json!({ "project": project, "stream": "{{completion}}", "stop_reason": "{{completion__stop_reason}}", "allow_empty": true }),
+                store_as: "completion_url".into(),
+                on_error: ErrorAction::Skip,
+            },
             // E.FILES3 — THE REVIEW ROUND, and it comes AFTER the first write on purpose.
             //
             // Reading 6's only Mind failure was `pytest_passes` on T3: the model wrote a correct

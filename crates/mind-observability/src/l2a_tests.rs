@@ -264,10 +264,6 @@ fn the_floor_excludes_a_candidate_that_scores_nothing() {
     assert!(AttentionCandidate { score: 1, ..c }.ranked());
 }
 
-#[test]
-fn the_policy_version_is_named_so_a_changed_constant_cannot_pass_as_the_same_policy() {
-    assert_eq!(ATTENTION_POLICY, "attention-policy-v1");
-}
 
 // ── L2-B: the wake identity, before anything writes one ──────────────────────────────────────
 

@@ -35,11 +35,16 @@ say "cap_24_is_honoured" "$(cat "$T/o2")" "24"
 say "cap_is_in_the_run_state" \
     "$(python3 -c "import json;print(json.load(open('$T/s2.json')).get('cap'))" 2>/dev/null)" "24"
 
-# 3. A run state written at one cap REFUSES a load asking for another. A reading may not change
-#    its own budget halfway through — that is the difference between a budget and a negotiation.
+# 3. A run state written at one cap REFUSES a load asking for another, AND SAYS SO. The exit code
+#    alone is not the observable: `cb2_profile_load` returns 1 for an unknown profile, a bad key
+#    file, an unreadable state and an unresolved upstream too, so a case that only distinguishes
+#    LOADED from REFUSED reports "the cap wall works" for any failure at all. A reviewer running
+#    this suite on a host where several other cases were failing watched this one pass for a reason
+#    that had nothing to do with the cap. Assert the message.
 ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=8
-  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o3"
-say "a_reading_cannot_change_its_own_budget" "$(cat "$T/o3")" "REFUSED"
+  out=$(cb2_profile_load "$T/fixtures" 2>&1) && echo LOADED || echo "$out" ) > "$T/o3"
+if grep -q 'was written at cap 24, not 8' "$T/o3"; then R3=cap-refusal; else R3="other: $(head -c 80 "$T/o3")"; fi
+say "a_reading_cannot_change_its_own_budget" "$R3" "cap-refusal"
 
 # 4. ...and the same cap reloads cleanly, so the refusal is about the cap and not about reloading.
 ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=24
@@ -65,7 +70,7 @@ for f in run/hermes_leg.sh run/mind_leg.sh run/smoke_mind.sh run/smoke_hermes.sh
   load=$(grep -n 'cb2_profile_load' "$src" | head -1 | cut -d: -f1)
   first=$(grep -n 'CB2_CAP' "$src" | head -1 | cut -d: -f1)
   if [ -z "$first" ]; then
-    say "cap_read_after_load_in_$(basename "$f")" "no-cap-use" "no-cap-use"
+    continue   # nothing to order; a row here would be a constant compared with itself
   elif [ -z "$load" ]; then
     say "cap_read_after_load_in_$(basename "$f")" "reads-cap-without-loading" "impossible"
   elif [ "$first" -gt "$load" ]; then
@@ -77,7 +82,10 @@ done
 
 # 7. No literal 8 is left deciding the budget in any consumer.
 F="$HERE/.."
-for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh; do
+# run/verdict.py is in this list because it USED to hold `CAP = 8` and was not scanned — the one
+# file the case's own regex matched and its file list omitted. The cap is a required argument there
+# now, so nothing in it can decide a budget by itself.
+for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh run/verdict.py; do
   n=$(grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' "$F/$f" 2>/dev/null || true)
   say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"
 done

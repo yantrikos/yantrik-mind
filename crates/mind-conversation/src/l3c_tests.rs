@@ -432,8 +432,14 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
         .unwrap_or_default();
     // The REAL entry shape (`PendingSend`), not a bare string: a string does not deserialise into
     // an entry, so the resolver skipped it and the "re-grade" never happened — the fix for a check
-    // that cannot fail was itself a check that cannot fail, one layer down. Caught by deleting the
-    // immutability guard and watching this test stay green.
+    // that cannot fail was itself a check that cannot fail, one layer down.
+    //
+    // THE GUARD IS A CONJUNCTION AND THIS PROBE ONLY REACHED ONE HALF OF IT. `judgment_grade` skips
+    // a row unless `outcome` is null AND `resolution` is absent-or-pending. This probe re-arms a ref
+    // whose row has BOTH already set, so deleting the `outcome` clause alone leaves the `resolution`
+    // clause blocking the re-grade and the test stays green — a reviewer proved it. The comment here
+    // used to claim the single-clause deletion had been caught. It had not; only deleting both was.
+    // The second probe below reaches the other clause, so each conjunct is independently observable.
     conv.memory
         .profile_set(
             "proactive_pending",
@@ -455,6 +461,105 @@ async fn two_concurrent_commits_of_one_ref_write_one_row_and_a_resolver_cannot_e
         after_second[0]["outcome_at"], graded_at,
         "a second pass re-graded a beat that was already answered: {after_second:?}"
     );
+    // ── the OTHER conjunct ─────────────────────────────────────────────────────────────────────
+    // A row whose `resolution` is still pending but whose `outcome` is filled. Only the `outcome`
+    // clause can refuse this one, so deleting that clause alone now changes the answer.
+    let probe_ref = "digest:0badc0de0badc0de";
+    let probe_now = chrono::Utc::now().timestamp_millis();
+    {
+        let mut led: Vec<serde_json::Value> = conv
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        led.push(serde_json::json!({
+            "ref": probe_ref,
+            "kind": "digest",
+            "claim": "probe",
+            "made_at": probe_now - 1_000,
+            "outcome": 1,
+            "outcome_at": probe_now - 500,
+            "resolution": "pending",
+        }));
+        conv.memory
+            .profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap())
+            .await
+            .unwrap();
+    }
+    let probe_before = ledger_rows(&conv, probe_ref).await;
+    assert_eq!(probe_before.len(), 1, "the probe row exists: {probe_before:?}");
+    let probe_at = probe_before[0]["outcome_at"].clone();
+    conv.memory
+        .profile_set(
+            "proactive_pending",
+            &format!(
+                "[{{\"sent_ms\":{probe_now},\"ref\":\"{probe_ref}\",\"surface\":\"console\"}}]"
+            ),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+    conv.resolve_proactive(true).await;
+    let probe_after = ledger_rows(&conv, probe_ref).await;
+    assert_eq!(probe_after.len(), 1, "still one probe row: {probe_after:?}");
+    assert_eq!(
+        probe_after[0]["outcome_at"], probe_at,
+        "an answered row whose resolution is still pending was re-graded: {probe_after:?}"
+    );
+
+    // ── and the resolution conjunct, alone ─────────────────────────────────────────────────────
+    // A row that was CANCELLED: its outcome is still null, so the outcome clause would let it
+    // through, and only the resolution clause refuses. Without this, disabling that clause changed
+    // nothing observable — the same half-covered conjunction one step further along.
+    let cancelled_ref = "digest:cafebabecafebabe";
+    let cancelled_now = chrono::Utc::now().timestamp_millis();
+    {
+        let mut led: Vec<serde_json::Value> = conv
+            .memory
+            .profile_get("judgment_ledger")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        led.push(serde_json::json!({
+            "ref": cancelled_ref,
+            "kind": "digest",
+            "claim": "probe",
+            "made_at": cancelled_now - 1_000,
+            "outcome": serde_json::Value::Null,
+            "resolution": "cancelled",
+        }));
+        conv.memory
+            .profile_set("judgment_ledger", &serde_json::to_string(&led).unwrap())
+            .await
+            .unwrap();
+    }
+    conv.memory
+        .profile_set(
+            "proactive_pending",
+            &format!(
+                "[{{\"sent_ms\":{cancelled_now},\"ref\":\"{cancelled_ref}\",\"surface\":\"console\"}}]"
+            ),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+    conv.resolve_proactive(true).await;
+    let cancelled_after = ledger_rows(&conv, cancelled_ref).await;
+    assert_eq!(cancelled_after.len(), 1, "still one row: {cancelled_after:?}");
+    assert!(
+        cancelled_after[0]["outcome"].is_null(),
+        "a cancelled beat was graded anyway: {cancelled_after:?}"
+    );
+    assert_eq!(
+        cancelled_after[0]["resolution"], "cancelled",
+        "and its resolution must not have been overwritten: {cancelled_after:?}"
+    );
+
     // The probe put the ref back deliberately; an already-answered ref is not removed again, so
     // restore the state the rest of this test is about. (That an answered ref left in the pending
     // list stays there is real behaviour, not a leak this test invented — it is simply not what

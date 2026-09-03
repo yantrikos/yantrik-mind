@@ -47,6 +47,12 @@ bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy no
 BIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}; SRC=${CB2_MIND_SOURCE:-/root/codes/ym-autodeploy}
 [ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 2; }
 BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)
+# A preflight that smoked a DIFFERENT binary has cleared nothing. If a smoke recorded a sha in this
+# output root, this leg must be running that exact file.
+if [ -f "$OUT/smoked_binary.sha256" ]; then
+  SMOKED=$(cat "$OUT/smoked_binary.sha256")
+  [ "$SMOKED" = "$BIN_SHA" ] || { echo "refusing: the smoke cleared $SMOKED but this leg would run $BIN_SHA"; exit 2; }
+fi
 # A provenance claim is only worth recording if the tree it names matches the tree that was built.
 PROV_CLEAN=$(cd "$SRC" && git status --porcelain | wc -l)
 [ "$PROV_CLEAN" = 0 ] || PROV="$PROV+dirty"
@@ -82,16 +88,27 @@ docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1
 ENVLEAK=$(cb2_env_leak_hits "$NAME")
 docker rm -f "$NAME" >/dev/null 2>&1   # the parent stops the instance AFTER the driver wrote its receipt
 LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$ST" "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt") ))
+# The SAME download/install scan the Hermes leg has always run, over the same kind of transcript.
+# It was applied to one system only, which made it a rule about Hermes rather than about the run.
+DL=$(cat "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt" 2>/dev/null | grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " || true)
 CHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" <<'EOF'
-import json, sys
-src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s = sys.argv[1:]
+export CB2_FIX_RUN="$FIX/run"
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" "$DL" <<'EOF'
+import json, os, sys
+# The host-side independent rules are a TESTED function, not a boolean expression buried in a
+# heredoc. `selftest/verdict_cases.py` drives it; this file only supplies the observations.
+# This block is read from STDIN, so `__file__` does not exist and the fixtures path has to be
+# handed in. CB2_FIX_RUN is exported by the leg just above; on the host it is $FIX/run.
+sys.path.insert(0, os.environ["CB2_FIX_RUN"])
+from verdict import host_independent
+src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s, dl_s = sys.argv[1:]
 # The cap the PROXY enforced, carried through rather than re-derived by this reader: two places
 # deciding what the budget was is how a receipt comes to disagree with the run it describes.
 cap = int(cap_s)
+downloads = int(dl_s)
 ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
@@ -121,10 +138,14 @@ d.update({"binary_sha256": bin_sha, "binary_provenance": prov, "image": img, "tr
 # shape, model identity) only when the leg is not void.
 valid = ck.get("valid") == "true"
 void = valid and (ck.get("http_errors") != "0" or ck.get("transport_errors") != "0")
-dq_ind = bool(d.get("dq_independent")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0 or (not valid)
+host_bad, host_reasons = host_independent(capture_ok=capture_ok, symlinks=syml, specials=special,
+                                          key_leak_hits=int(leak), receipt_valid=valid,
+                                          downloads=downloads)
+dq_ind = bool(d.get("dq_independent")) or host_bad
 dq_dep = bool(d.get("dq_dependent")) or (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"
 d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "run_state_sha256": run_state_sha,
-          "cap": cap, "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
+          "cap": cap, "download_or_install_lines": downloads, "host_violations": host_reasons,
+          "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
           "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
           "upstream_client_errors": int(ck.get("client_errors", -1)), "client_disconnects": int(ck.get("disconnects", -1)),
           "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),

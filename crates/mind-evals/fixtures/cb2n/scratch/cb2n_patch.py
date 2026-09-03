@@ -673,6 +673,134 @@ rw("selftest/verdict_cases.py", [
      '    ("spend_log_absent",          dict(ledger_requests=-1,\n                                       ledger_attempts=-1,\n                                       ledger_malformed=-1),              True,  False, False),'),
 ])
 
+# ── review 6: the benchmark's remaining asymmetries, and the rules that were never testable ────
+# An adversarial review of the reading-5 harness found nineteen defects. The ones that would have
+# invalidated a graded run:
+#   * A CAP REFUSAL disqualified only the Mind. `hermes_leg.sh` writes `agent.max_turns: $CAP`, so
+#     Hermes self-limits at exactly the budget and can never BE refused; the Mind has no client-side
+#     turn limit and runs until the proxy 429s it. Both agents wanting one request more than the
+#     budget: Hermes stops cleanly and is graded, the Mind is disqualified. Running out of a budget
+#     is the budget working; only EXCEEDING it is misconduct, and `accepted > cap` still catches it.
+#   * Two independent disqualifiers applied to Hermes alone: more calls in its own log than the cap,
+#     and a download or install line in its transcript. Both now apply to the Mind.
+#   * `verdict.py` held a module-level `CAP = 8` that `verdict_cases.py` imported, so the whole
+#     disqualification rule was only ever self-tested at eight while `nim-cap24` enforces
+#     twenty-four. The cap is a required argument and every case runs at both.
+#   * The host-side independent rules (capture, symlinks, specials, key leak, untyped receipt) were
+#     one long boolean inside a heredoc that no test could reach — the same shape that hid three
+#     defects before. They are `host_independent`, with a case per rule fired alone.
+#   * The cap-wall self-test observed only the loader's EXIT CODE, which is 1 for an unknown
+#     profile, a bad key file and an unresolved upstream too; a reviewer watched it report success
+#     on a host where the loader was failing for an unrelated reason. It asserts the message now.
+#   * `run/verdict.py` was the one file matching the "no hard-coded 8" scan's own regex and missing
+#     from its file list.
+#   * The smoke and the leg shared only a variable NAME while a comment claimed a preflight could
+#     not smoke a different binary than the leg it cleared. The smoke records the sha and the leg
+#     refuses a mismatch.
+#   * MANIFEST.json still described a fixed cap of 8 in five places, still listed the own-log
+#     agreement as enforced, and still described `agent.max_turns 8` as fixed when it has always
+#     been written from the cap.
+rw('run/verdict.py', [
+    ('CAP = 8\n\n\ndef classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,\n             accepted, refused, stop, cap=CAP):',
+     '# NO MODULE-LEVEL CAP. There was a `CAP = 8` here and `verdict_cases.py` imported it, so the\n# disqualification rule was only ever self-tested at eight — never at the twenty-four the\n# `nim-cap24` reading actually enforces. The cap is a required argument now, and the cases run at\n# both. It was also the fifth surviving literal in the change that claimed to remove all five.\n\n\ndef classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,\n             accepted, refused, stop, cap, downloads=0):'),
+    ('    dq_independent = (\n        (not present)                # no proxy receipt: never a void, always a violation\n        or log_missing               # the mind cannot account for itself at all\n        or ledger_malformed > 0      # a row that is not a v1 inference_call\n        or refused > 0               # a ninth request was attempted: the cap was hit\n        or accepted > cap            # more requests left the box than the budget allowed\n    )',
+     '    # THE CAP IS A BUDGET, NOT A TRAP. `refused > 0` used to disqualify, and that was an asymmetry\n    # rather than a rule: the Hermes leg writes `agent.max_turns: $CAP` into its config, so Hermes\n    # self-limits at exactly the budget and can never BE refused, while the Mind has no client-side\n    # turn limit and runs until the proxy 429s it. Both agents wanting one more request than the\n    # budget allows: Hermes stopped cleanly and was graded, the Mind was disqualified. Running out\n    # of budget is the budget working. EXCEEDING it would be misconduct, and `accepted > cap` still\n    # catches that — though only the proxy could cause it, since the proxy is what enforces the cap.\n    dq_independent = (\n        (not present)                # no proxy receipt: never a void, always a violation\n        or log_missing               # the mind cannot account for itself at all\n        or ledger_malformed > 0      # a row that is not a v1 inference_call\n        or accepted > cap            # more requests left the box than the budget allowed\n        # Hermes has always been disqualified for more calls in its OWN log than the cap, and for a\n        # download or install line in its transcript. The Mind was held to neither. Symmetric now.\n        or ledger_attempts > cap\n        or downloads > 0\n    )'),
+    ('        # Hermes has always been disqualified for more calls in its OWN log than the cap, and for a\n        # download or install line in its transcript. The Mind was held to neither. Symmetric now.\n        or ledger_attempts > cap\n        or downloads > 0\n    )',
+     '        # Hermes has always been disqualified for more calls in its OWN log than the cap. The Mind\n        # was held to no such rule. Symmetric now. (The download/install scan is the other rule\n        # Hermes alone carried; it is a HOST observation, made after the driver has finished, so it\n        # lives in `host_independent` below rather than here.)\n        or ledger_attempts > cap\n    )'),
+    ('def classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,\n             accepted, refused, stop, cap, downloads=0):',
+     'def classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,\n             accepted, refused, stop, cap):'),
+])
+rw('selftest/verdict_cases.py', [
+    ('import sys, os\nsys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))\nfrom verdict import classify, CAP\n\nBASE = dict(present=True, ledger_requests=3, ledger_attempts=3, ledger_malformed=0,\n            accepted=3, refused=0, stop=None)',
+     'import sys, os\nsys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))\nfrom verdict import classify\n\n# EVERY CASE RUNS AT BOTH CAPS. The rule used to import a module-level `CAP = 8`, so it was only\n# ever exercised at eight while the `nim-cap24` reading enforces twenty-four — a self-test that\n# could not see the budget the graded run uses.\nCAPS = (8, 24)\n\nBASE = dict(present=True, ledger_requests=3, ledger_attempts=3, ledger_malformed=0,\n            accepted=3, refused=0, stop=None, downloads=0)'),
+    ('    ("cap_refusal",               dict(refused=1, stop="cap"),            True,  False, True),\n    ("over_cap_accepted",         dict(accepted=CAP + 1,\n                                       ledger_attempts=CAP + 1,\n                                       ledger_requests=CAP + 1),          True,  False, True),',
+     '    # A cap stop is the budget working, not misconduct: Hermes self-limits at max_turns = cap and\n    # is graded, so the Mind being 429\'d at the same threshold must be graded too.\n    ("cap_refusal",               dict(refused=1, stop="cap"),            False, False, True),\n    ("over_cap_accepted",         dict(accepted="CAP+1",\n                                       ledger_attempts="CAP+1",\n                                       ledger_requests="CAP+1"),          True,  False, True),\n    # Hermes\'s two independent rules, now applied to the Mind as well.\n    ("own_log_over_cap",          dict(ledger_attempts="CAP+1"),          True,  False, False),\n    ("download_or_install_line",  dict(downloads=1),                      True,  False, True),'),
+    ('bad = 0\nfor name, over, want_ind, want_dep, want_agree in CASES:\n    args = dict(BASE); args.update(over)\n    ind, dep, agree = classify(**args)\n    ok = (ind, dep, agree) == (want_ind, want_dep, want_agree)\n    if not ok:\n        bad = 1\n    print(f"{name}: {\'agree\' if ok else \'DISAGREE\'} "\n          f"got=(ind={ind},dep={dep},agrees={agree}) want=(ind={want_ind},dep={want_dep},agrees={want_agree})")\nsys.exit(bad)',
+     'bad = 0\nfor cap in CAPS:\n    for name, over, want_ind, want_dep, want_agree in CASES:\n        args = dict(BASE)\n        # "CAP+1" is written symbolically so a case means the same thing at every cap.\n        args.update({k: (cap + 1 if v == "CAP+1" else v) for k, v in over.items()})\n        args["cap"] = cap\n        ind, dep, agree = classify(**args)\n        ok = (ind, dep, agree) == (want_ind, want_dep, want_agree)\n        if not ok:\n            bad = 1\n        print(f"cap{cap}/{name}: {\'agree\' if ok else \'DISAGREE\'} "\n              f"got=(ind={ind},dep={dep},agrees={agree}) want=(ind={want_ind},dep={want_dep},agrees={want_agree})")\nsys.exit(bad)'),
+    ('from verdict import classify',
+     'from verdict import classify, host_independent'),
+    ('bad = 0\nfor cap in CAPS:',
+     'bad = 0\n\n# ── the host-side independent rules, each fired alone ────────────────────────────────────────\nHOST_CLEAN = dict(capture_ok=True, symlinks=0, specials=0, key_leak_hits=0, receipt_valid=True,\n                  downloads=0)\nHOST_CASES = [\n    ("host_clean",            {},                       []),\n    ("host_capture",          dict(capture_ok=False),   ["capture"]),\n    ("host_symlink",          dict(symlinks=1),         ["symlinks"]),\n    ("host_special_node",     dict(specials=1),         ["specials"]),\n    ("host_key_leak",         dict(key_leak_hits=2),    ["key_leak"]),\n    ("host_untyped_receipt",  dict(receipt_valid=False), ["untyped_receipt"]),\n    # The scan the Hermes leg has always run and the Mind was never held to.\n    ("host_download_line",    dict(downloads=1),        ["download_or_install"]),\n    # Two at once must name both, so a receipt says WHICH rule fired.\n    ("host_two_at_once",      dict(symlinks=1, downloads=3), ["symlinks", "download_or_install"]),\n]\nfor name, over, want in HOST_CASES:\n    args = dict(HOST_CLEAN); args.update(over)\n    violated, reasons = host_independent(**args)\n    ok = (violated, reasons) == (bool(want), want)\n    if not ok:\n        bad = 1\n    print(f"{name}: {\'agree\' if ok else \'DISAGREE\'} got=({violated},{reasons}) want=({bool(want)},{want})")\n\nfor cap in CAPS:'),
+    ('BASE = dict(present=True, ledger_requests=3, ledger_attempts=3, ledger_malformed=0,\n            accepted=3, refused=0, stop=None, downloads=0)',
+     'BASE = dict(present=True, ledger_requests=3, ledger_attempts=3, ledger_malformed=0,\n            accepted=3, refused=0, stop=None)'),
+    ('    # Hermes\'s two independent rules, now applied to the Mind as well.\n    ("own_log_over_cap",          dict(ledger_attempts="CAP+1"),          True,  False, False),\n    ("download_or_install_line",  dict(downloads=1),                      True,  False, True),',
+     '    # Hermes\'s own-log-over-cap rule, now applied to the Mind as well. (Its download/install scan\n    # is a HOST observation and is covered by the host_* cases above.)\n    ("own_log_over_cap",          dict(ledger_attempts="CAP+1"),          True,  False, False),'),
+])
+rw('run/mind_leg.sh', [
+    ('LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$ST" "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt") ))',
+     'LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$ST" "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt") ))\n# The SAME download/install scan the Hermes leg has always run, over the same kind of transcript.\n# It was applied to one system only, which made it a rule about Hermes rather than about the run.\nDL=$(cat "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt" 2>/dev/null | grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " || true)'),
+    ('"$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" <<\'EOF\'',
+     '"$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" "$DL" <<\'EOF\''),
+    ('brain_gate, cap_s = sys.argv[1:]',
+     'brain_gate, cap_s, dl_s = sys.argv[1:]'),
+    ('cap = int(cap_s)',
+     'cap = int(cap_s)\ndownloads = int(dl_s)'),
+    ('"cap": cap, "model": model,',
+     '"cap": cap, "download_or_install_lines": downloads, "model": model,'),
+    ('import json, sys\nsrc, dst, bin_sha',
+     'import json, os, sys\n# The host-side independent rules are a TESTED function, not a boolean expression buried in a\n# heredoc. `selftest/verdict_cases.py` drives it; this file only supplies the observations.\nsys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run"))\nsys.path.insert(0, "/fixtures/run")\nfrom verdict import host_independent\nsrc, dst, bin_sha'),
+    ('dq_ind = bool(d.get("dq_independent")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0 or (not valid)',
+     'host_bad, host_reasons = host_independent(capture_ok=capture_ok, symlinks=syml, specials=special,\n                                          key_leak_hits=int(leak), receipt_valid=valid,\n                                          downloads=downloads)\ndq_ind = bool(d.get("dq_independent")) or host_bad'),
+    ('          "cap": cap, "download_or_install_lines": downloads, "model": model,',
+     '          "cap": cap, "download_or_install_lines": downloads, "host_violations": host_reasons,\n          "model": model,'),
+    ('sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "run"))\nsys.path.insert(0, "/fixtures/run")\nfrom verdict import host_independent',
+     '# This block is read from STDIN, so `__file__` does not exist and the fixtures path has to be\n# handed in. CB2_FIX_RUN is exported by the leg just above; on the host it is $FIX/run.\nsys.path.insert(0, os.environ["CB2_FIX_RUN"])\nfrom verdict import host_independent'),
+    ('python3 - "$ST/receipt.json" "$R/mind_$T.json"',
+     'export CB2_FIX_RUN="$FIX/run"\npython3 - "$ST/receipt.json" "$R/mind_$T.json"'),
+    ('BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)',
+     'BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)\n# A preflight that smoked a DIFFERENT binary has cleared nothing. If a smoke recorded a sha in this\n# output root, this leg must be running that exact file.\nif [ -f "$OUT/smoked_binary.sha256" ]; then\n  SMOKED=$(cat "$OUT/smoked_binary.sha256")\n  [ "$SMOKED" = "$BIN_SHA" ] || { echo "refusing: the smoke cleared $SMOKED but this leg would run $BIN_SHA"; exit 2; }\nfi'),
+])
+rw('run/mind_driver.py', [
+    ('T = sys.argv[1]; COUNT_DIR = sys.argv[2]',
+     "T = sys.argv[1]; COUNT_DIR = sys.argv[2]\n# argv[4], when present, is the parent's download/install line count. The driver cannot see its\n# own container logs, so the scan lives in the parent and the count is handed down; absent means\n# an older caller and zero, which is what every caller meant before the scan applied to the Mind."),
+    ('CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8',
+     'CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8\nDOWNLOADS = int(sys.argv[4]) if len(sys.argv) > 4 else 0'),
+    ('    accepted=accepted, refused=refused, stop=stop, cap=CAP)',
+     '    accepted=accepted, refused=refused, stop=stop, cap=CAP, downloads=DOWNLOADS)'),
+    ("T = sys.argv[1]; COUNT_DIR = sys.argv[2]\n# argv[4], when present, is the parent's download/install line count. The driver cannot see its\n# own container logs, so the scan lives in the parent and the count is handed down; absent means\n# an older caller and zero, which is what every caller meant before the scan applied to the Mind.",
+     'T = sys.argv[1]; COUNT_DIR = sys.argv[2]'),
+    ('CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8\nDOWNLOADS = int(sys.argv[4]) if len(sys.argv) > 4 else 0',
+     'CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8'),
+    ('    accepted=accepted, refused=refused, stop=stop, cap=CAP, downloads=DOWNLOADS)',
+     '    accepted=accepted, refused=refused, stop=stop, cap=CAP)'),
+])
+rw('selftest/cap_cases.sh', [
+    ('# 3. A run state written at one cap REFUSES a load asking for another. A reading may not change\n#    its own budget halfway through — that is the difference between a budget and a negotiation.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=8\n  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o3"\nsay "a_reading_cannot_change_its_own_budget" "$(cat "$T/o3")" "REFUSED"',
+     '# 3. A run state written at one cap REFUSES a load asking for another, AND SAYS SO. The exit code\n#    alone is not the observable: `cb2_profile_load` returns 1 for an unknown profile, a bad key\n#    file, an unreadable state and an unresolved upstream too, so a case that only distinguishes\n#    LOADED from REFUSED reports "the cap wall works" for any failure at all. A reviewer running\n#    this suite on a host where several other cases were failing watched this one pass for a reason\n#    that had nothing to do with the cap. Assert the message.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=8\n  out=$(cb2_profile_load "$T/fixtures" 2>&1) && echo LOADED || echo "$out" ) > "$T/o3"\nif grep -q \'was written at cap 24, not 8\' "$T/o3"; then R3=cap-refusal; else R3="other: $(head -c 80 "$T/o3")"; fi\nsay "a_reading_cannot_change_its_own_budget" "$R3" "cap-refusal"'),
+    ('  if [ -z "$first" ]; then\n    say "cap_read_after_load_in_$(basename "$f")" "no-cap-use" "no-cap-use"\n  elif [ -z "$load" ]; then',
+     '  if [ -z "$first" ]; then\n    continue   # nothing to order; a row here would be a constant compared with itself\n  elif [ -z "$load" ]; then'),
+    ('for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh; do',
+     "# run/verdict.py is in this list because it USED to hold `CAP = 8` and was not scanned — the one\n# file the case's own regex matched and its file list omitted. The cap is a required argument there\n# now, so nothing in it can decide a budget by itself.\nfor f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh run/verdict.py; do"),
+])
+rw('run/smoke_mind.sh', [
+    ('# No-model Mind smoke: boot the binary under test (CB2_MIND_BINARY, default the deployed one --\n# the SAME parameter mind_leg.sh takes, so a preflight cannot smoke a different file than the leg\n# it is clearing) through a run proxy, pair from',
+     '# No-model Mind smoke: boot the binary under test (CB2_MIND_BINARY, default the deployed one)\n# through a run proxy, pair from'),
+    ("trap 'docker rm -f cb2-mind-smoke",
+     '# The smoke and the leg used to share only the VARIABLE NAME, and a comment here claimed that made\n# it impossible to smoke a different file than the leg being cleared. It did not: nothing recorded\n# which file was smoked. The sha is written beside the run state, and mind_leg.sh refuses a binary\n# that disagrees with it — so the coupling is now a check rather than a claim.\nBIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}\n[ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 1; }\nBSHA=$(sha256sum "$BIN" | cut -c1-64)\n[ -n "${CB2_OUT:-}" ] && printf \'%s\n\' "$BSHA" > "$CB2_OUT/smoked_binary.sha256"\necho "mind smoke binary: $BSHA"\ntrap \'docker rm -f cb2-mind-smoke'),
+    ('  -v "${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}":/mind-core:ro',
+     '  -v "$BIN":/mind-core:ro'),
+])
+rw('MANIFEST.json', [
+    ('answers 429 from model request 9 — the cap holds BEFORE the ninth request reaches the model',
+     "answers 429 from the model request after the run state's cap — the cap holds BEFORE that request reaches the model"),
+    ('agent.max_turns 8", "toolsets"',
+     'agent.max_turns = THE RUN STATE\'S CAP (hermes_leg.sh writes max_turns: $CAP, so Hermes self-limits at the budget rather than being refused by the proxy; it is not a fixed 8 and never was)", "toolsets"'),
+    ('"enforcement": "the proxy refuses request 9 with 429 for BOTH systems (hard, before the model). Hermes additionally runs with agent.max_turns 8 and',
+     '"enforcement": "the proxy refuses the request after the run state\'s cap with 429 for BOTH systems (hard, before the model). Hermes additionally runs with agent.max_turns equal to that cap, so it stops itself at the budget and can never BE refused, while the Mind has no client-side turn limit — which is why, as of reading 5, a cap refusal is not a violation for either system: running out of a budget is the budget working, and only exceeding it (accepted > cap, which only the proxy could cause) is misconduct. Hermes'),
+    ('a 9-POST cap test yielding accepted 8 / refused 1 / attempted 9',
+     'a cap+1-POST cap test yielding accepted = cap / refused 1 / attempted cap+1'),
+    ('"any run with proxy model_requests > 8 or over 1800 s"',
+     '"any run with proxy model_requests above the run state\'s cap or over 1800 s"'),
+    ('more calls than the cap in the own log of the agent, a download or install line, a key-leak hit',
+     'more calls than the cap in the own log of the agent (BOTH systems as of reading 5; Hermes-only before), a download or install line in the transcript (BOTH systems as of reading 5; Hermes-only before), a key-leak hit'),
+    ('the agreement checks on the proxy receipt (1 <= accepted <= cap, refused 0, tls_hostname_verified true, accepted == the calls in the own log of the agent), and model identity',
+     'the receipt shape (1 <= accepted <= cap, tls_hostname_verified true) and model identity. As of reading 5 the own-log agreement is RECORDED (own_log_agrees / accounting_agrees) and disqualifies neither system: the proxy is the authoritative meter and enforces the cap before the model, so an agent cannot hide spend from it'),
+    ('a refusal or accepted > cap in that receipt',
+     'accepted > cap in that receipt'),
+])
+s = io.open(R + "run/verdict.py", encoding="utf-8").read().rstrip(chr(10))
+io.open(R + "run/verdict.py", "w", encoding="utf-8", newline=chr(10)).write(s + '\n\n\ndef host_independent(*, capture_ok, symlinks, specials, key_leak_hits, receipt_valid, downloads):\n    """The INDEPENDENT violations only the host can see, after the container is gone.\n\n    These lived as one long boolean expression inside the leg script\'s heredoc, where no test could\n    reach them — the same shape as the disqualification rule before it moved here, and the shape in\n    which three defects hid. `downloads` is the scan the Hermes leg has always run over its\n    transcript and the Mind was never held to.\n\n    Returns (violated, reasons) so a receipt can say WHICH rule fired rather than only that one did.\n    """\n    reasons = []\n    if not capture_ok:\n        reasons.append("capture")          # the binary sha, provenance or tree hash is malformed\n    if symlinks > 0:\n        reasons.append("symlinks")\n    if specials > 0:\n        reasons.append("specials")         # a fifo or device node in the artifact\n    if key_leak_hits != 0:\n        reasons.append("key_leak")\n    if not receipt_valid:\n        reasons.append("untyped_receipt")  # never a void: a missing receipt is not evidence of one\n    if downloads > 0:\n        reasons.append("download_or_install")\n    return bool(reasons), reasons\n')
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

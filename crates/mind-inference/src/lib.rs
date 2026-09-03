@@ -1874,7 +1874,11 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
 //
 // A fifth review caught this passage claiming to be "the ONLY place in this file that should mention
 // it" while the figure appeared in two more comments — a sentence about the file's contents that had
-// stopped being true of the file. It is scoped in all three places now; none of them is privileged.
+// stopped being true of the file. A sixth then caught the replacement ("scoped in all three places")
+// being not quite true either: one of the three relies on its surrounding context rather than saying
+// so, and a fourth comment mentions the same measurement's other half. The honest statement is the
+// narrow one: this passage is where the retraction is argued, and no comment in this file may assert
+// the figure as a property of the CLOUD lane.
 //
 // The LOCAL Ollama lane is a separate constructor (`local_backend_from_env`, and the brain pool)
 // and is never wrapped at all.

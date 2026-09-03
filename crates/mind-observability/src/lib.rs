@@ -5199,29 +5199,33 @@ gate!(
 );
 gate!(
     /// HomeWatch, Family, FollowUp, PriceWatch: `Timer` + `Presence` + `enabled`.
-    TimerChatQuiet { timer: WakeTimer, presence: bool, enabled: bool }
+    ///
+    /// `presence` is the WHOLE `Presence`, not a boolean. A first version collapsed it to one
+    /// `presence: bool` and dropped `quiet` from five of the eleven types — including the two whose
+    /// names end in "ChatQuiet" — while the module header claimed a descriptor could reach every
+    /// signal its gate reads. A descriptor that must tell "quiet hours" from "nobody here" had no
+    /// signal for it.
+    TimerChatQuiet { timer: WakeTimer, presence: Presence, enabled: bool }
     urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
 );
 gate!(
-    /// Patterns, lexically inside the proactive switch: `Timer` + `Presence` + idle inputs.
-    IdleGated {
-        timer: WakeTimer,
-        presence: bool,
-        /// `YM_PROACTIVE ∧ YM_PATTERNS`.
-        enabled: bool,
-        spoke: bool,
-        idle_ms: u64,
-    }
+    /// Patterns, lexically inside the proactive switch: `Timer` + `Presence` + `IdleInputs`.
+    ///
+    /// It carries the gate's OWN `IdleInputs`, whose `idle` is already thresholded, rather than a
+    /// raw `idle_ms` with no threshold beside it. The first version carried the raw milliseconds and
+    /// no `idle_required_ms`, so a descriptor could not reproduce the predicate the site evaluated —
+    /// while `DmnGate` and `KnockGate` both carried their thresholds.
+    IdleGated { timer: WakeTimer, presence: Presence, idle: IdleInputs }
     urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
 );
 gate!(
     /// TraditionPrep and unforced Whois: a persisted stamp + `Presence` + `receptive`.
-    PersistedReceptive { timer: WakeTimer, presence: bool, receptive: bool }
+    PersistedReceptive { timer: WakeTimer, presence: Presence, receptive: bool }
     urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
 );
 gate!(
     /// MailSweep: a persisted stamp + `Presence`.
-    PersistedChatQuiet { timer: WakeTimer, presence: bool }
+    PersistedChatQuiet { timer: WakeTimer, presence: Presence }
     urgency(s, now) { s.timer.urgency(now) } last(l) { l.timer.last_ms }
 );
 gate!(
@@ -5240,7 +5244,7 @@ gate!(
     /// Knock: the only Stretch-kind opportunity. Its urgency is the idle stretch, not a period.
     KnockGate {
         enabled: bool,
-        presence: bool,
+        presence: Presence,
         idle_ms: u64,
         idle_required_ms: u64,
         last_activity_ms: u64,
@@ -5295,39 +5299,42 @@ impl WakeSignals {
     /// reader recomputing the order from a stored row gets the same answer without needing to know
     /// how this struct's fields happen to be declared.
     pub fn readings(&self, now_ms: u64) -> Vec<(LoopId, GateReading)> {
+        // Collected in the STRUCT's field order, which is deliberately not the scope order: the
+        // first version pushed in scope order and then "sorted into" it, so the sort could be
+        // deleted without any test noticing, and a reviewer proved exactly that. Now the two orders
+        // differ, so the derivation below is load-bearing and its removal is observable.
         let mut out: Vec<(LoopId, GateReading)> = Vec::new();
         let mut push = |id: LoopId, r: Option<GateReading>| {
             if let Some(r) = r {
                 out.push((id, r));
             }
         };
-        push(LoopId::Dmn, self.dmn.map(|g| g.reading(now_ms)));
-        push(LoopId::Knock, self.knock.map(|g| g.reading(now_ms)));
-        push(LoopId::Digest, self.digest.map(|g| g.reading(now_ms)));
-        push(LoopId::Ask, self.ask.map(|g| g.reading(now_ms)));
-        push(LoopId::Patterns, self.patterns.map(|g| g.reading(now_ms)));
-        push(LoopId::HomeWatch, self.home_watch.map(|g| g.reading(now_ms)));
         push(LoopId::Resolve, self.resolve.map(|g| g.reading(now_ms)));
         push(
             LoopId::ProfileRefresh,
             self.profile_refresh.map(|g| g.reading(now_ms)),
-        );
-        push(LoopId::Family, self.family.map(|g| g.reading(now_ms)));
-        push(LoopId::FollowUp, self.follow_up.map(|g| g.reading(now_ms)));
-        push(
-            LoopId::PriceWatch,
-            self.price_watch.map(|g| g.reading(now_ms)),
-        );
-        push(
-            LoopId::MemberBeat,
-            self.member_beat.map(|g| g.reading(now_ms)),
         );
         push(LoopId::Ics, self.ics.map(|g| g.reading(now_ms)));
         push(
             LoopId::LeaseSweep,
             self.lease_sweep.map(|g| g.reading(now_ms)),
         );
-        push(LoopId::MailSweep, self.mail_sweep.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::MemberBeat,
+            self.member_beat.map(|g| g.reading(now_ms)),
+        );
+        push(LoopId::HomeWatch, self.home_watch.map(|g| g.reading(now_ms)));
+        push(LoopId::Family, self.family.map(|g| g.reading(now_ms)));
+        push(LoopId::FollowUp, self.follow_up.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::PriceWatch,
+            self.price_watch.map(|g| g.reading(now_ms)),
+        );
+        push(LoopId::Patterns, self.patterns.map(|g| g.reading(now_ms)));
+        push(
+            LoopId::TraditionPrep,
+            self.tradition_prep.map(|g| g.reading(now_ms)),
+        );
         // A forced Whois supersedes the unforced gate: the operator asked, so that is the reading.
         push(
             LoopId::Whois,
@@ -5335,18 +5342,25 @@ impl WakeSignals {
                 .map(|g| g.reading(now_ms))
                 .or_else(|| self.whois.map(|g| g.reading(now_ms))),
         );
-        push(
-            LoopId::TraditionPrep,
-            self.tradition_prep.map(|g| g.reading(now_ms)),
+        push(LoopId::MailSweep, self.mail_sweep.map(|g| g.reading(now_ms)));
+        push(LoopId::Dmn, self.dmn.map(|g| g.reading(now_ms)));
+        push(LoopId::Knock, self.knock.map(|g| g.reading(now_ms)));
+        push(LoopId::Digest, self.digest.map(|g| g.reading(now_ms)));
+        push(LoopId::Ask, self.ask.map(|g| g.reading(now_ms)));
+        drop(push);
+        // The order is DERIVED from `ATTENTION_SCOPE`. `unwrap_or(usize::MAX)` used to sit in a
+        // comparator here and was dead: every pushed id is in scope by construction.
+        let mut ordered: Vec<(LoopId, GateReading)> = Vec::with_capacity(out.len());
+        for id in ATTENTION_SCOPE {
+            if let Some(pos) = out.iter().position(|(got, _)| got == &id) {
+                ordered.push(out.swap_remove(pos));
+            }
+        }
+        debug_assert!(
+            out.is_empty(),
+            "a slot reported a loop outside the frozen scope: {out:?}"
         );
-        let order = |id: LoopId| {
-            ATTENTION_SCOPE
-                .iter()
-                .position(|s| *s == id)
-                .unwrap_or(usize::MAX)
-        };
-        out.sort_by_key(|(id, _)| order(*id));
-        out
+        ordered
     }
 }
 
@@ -5354,6 +5368,12 @@ impl WakeSignals {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttentionShadow {
     pub cycle: CycleId,
+    /// Every in-scope loop whose slot this wake FILLED, due or not. Without it the row could not
+    /// distinguish a slot that was never filled from one filled and not due — the very distinction
+    /// the struct's doc called "the whole point of being total over the scope", which was
+    /// unobservable because `readings()` filters on `due` and nothing ever inspected `is_none()`.
+    /// A hole in coverage is now visible in the row itself, not only by joining against the ledger.
+    pub filled: Vec<LoopId>,
     /// The in-scope loops whose gate this wake reported DUE and whose slot the signal set holds.
     /// This is the numerator of build completeness; the DENOMINATOR is the loop ledger's own due
     /// rows for the same `cycle_id`, so it is reproducible from the ledger alone and a hole in this
@@ -5363,6 +5383,14 @@ pub struct AttentionShadow {
     pub ranked: Vec<AttentionCandidate>,
     /// Due opportunities existed and NOTHING cleared the floor. Distinct from "no row", which
     /// means the wake had no due opportunity at all and is not an abstention.
+    ///
+    /// UNREACHABLE UNDER `attention-policy-v1`, and that is a finding about the policy rather than
+    /// a bug here. The floor is `score >= 1` and the LOWEST score any in-scope loop can take — Ask,
+    /// at urgency 0 — is 131. So the shadow always proposes something on any due wake, and the
+    /// preregistered "shadow false negative" metric (legacy acted while the shadow abstained) is
+    /// degenerate at zero before any evidence is collected. The field stays because the schema is
+    /// preregistered and because a policy v2 with a real floor would make it live;
+    /// `the_floor_cannot_bind_under_policy_v1` computes the minimum and pins the claim.
     pub abstained_empty: bool,
 }
 
@@ -5395,8 +5423,21 @@ impl AttentionShadow {
         } else {
             "ranked".to_string()
         });
-        ev.outcome = Some(format!("buildable:{}", self.buildable.len()));
-        ev.evaluator_id = Some(LOOP_LEDGER_V6.into());
+        ev.outcome = Some(format!(
+            "buildable:{} filled:{}",
+            self.buildable.len(),
+            self.filled.len()
+        ));
+        // The POLICY, not the loop-ledger schema version. A shadow row is not a loop row: it is
+        // never read by `loop_ledger` (which filters `kind == "loop_tick"`), so a v6 stamp on it
+        // walled nothing and paired nothing, while `ATTENTION_POLICY` — the thing that decides
+        // every number in the row — was written into no row anywhere. An `attention-policy-v2`
+        // with different constants would have been indistinguishable from v1.
+        ev.evaluator_id = Some(ATTENTION_POLICY.into());
+        // The row's SCHEMA version rides in `policy`, alongside the per-loop scores, because
+        // `evaluator_id` now carries the policy and a row needs both to be re-readable: which
+        // arithmetic produced the numbers, and which wire shape they are written in.
+        ev.policy.insert(0, LOOP_LEDGER_V6.to_string());
         ev
     }
 }
@@ -5407,11 +5448,9 @@ impl AttentionShadow {
 /// with nothing to decide, and counting it would put a denominator's worth of easy agreement into
 /// every metric.
 pub fn attention_shadow(signals: &WakeSignals, cycle: CycleId, now_ms: u64) -> Option<AttentionShadow> {
-    let due: Vec<(LoopId, GateReading)> = signals
-        .readings(now_ms)
-        .into_iter()
-        .filter(|(_, r)| r.due)
-        .collect();
+    let all = signals.readings(now_ms);
+    let filled: Vec<LoopId> = all.iter().map(|(id, _)| *id).collect();
+    let due: Vec<(LoopId, GateReading)> = all.into_iter().filter(|(_, r)| r.due).collect();
     if due.is_empty() {
         return None;
     }
@@ -5431,6 +5470,7 @@ pub fn attention_shadow(signals: &WakeSignals, cycle: CycleId, now_ms: u64) -> O
     Some(AttentionShadow {
         cycle,
         abstained_empty: ranked.is_empty(),
+        filled,
         buildable,
         ranked,
     })
@@ -5850,11 +5890,16 @@ impl CycleId {
     }
 }
 
-/// The version a row carrying a wake identity WILL declare. NOTHING WRITES IT YET — L2-B is the
-/// slice that adds the writer, and until it lands `LOOP_LEDGER_VERSION` below is what every row
-/// carries. The name exists now so the reader, the fixtures and the wall can be built against a
-/// spelling that will not move. Its rule when it does arrive: a v5 row is never paired with a v6
-/// row, because only a v6 row knows which wake it belongs to.
+/// The wire version a row carrying a wake identity declares.
+///
+/// The `attention_shadow` row writes it (in `policy[0]`; its `evaluator_id` carries the POLICY, so
+/// a reader can tell which arithmetic produced the numbers and which shape they are stored in).
+/// NO LOOP ROW carries it yet: `LOOP_LEDGER_VERSION` below is still what every `loop_tick` row
+/// declares, and L2-B step 2 is the slice that changes that. An earlier version of this comment
+/// said "NOTHING WRITES IT YET" and shipped in the same commit as the writer — review caught it.
+///
+/// Its rule: a v5 row is never paired with a v6 row, because only a v6 row knows which wake it
+/// belongs to. `loop_ledger` enforces that today by refusing any label but v5.
 pub const LOOP_LEDGER_V6: &str = "loop-ledger-v6";
 
 /// L1d: v5 = v4 + sixteen loop ids + the lifecycle phase; v4 rows keep reading.

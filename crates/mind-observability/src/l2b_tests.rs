@@ -31,6 +31,12 @@ fn one_due(overdue_by_ms: u64) -> WakeSignals {
     }
 }
 
+/// Someone is in the chat and it is not quiet hours. The WHOLE presence, because five entry types
+/// used to collapse it to one boolean and drop `quiet` — including the two named "ChatQuiet".
+fn here() -> crate::Presence {
+    crate::Presence { chat_present: true, quiet: false }
+}
+
 fn cycle() -> CycleId {
     CycleId::new(7, 3)
 }
@@ -79,7 +85,7 @@ fn the_knock_measures_an_idle_stretch_and_a_forced_whois_is_always_maximal() {
     let knock = KnockGate {
         due: true,
         enabled: true,
-        presence: true,
+        presence: here(),
         idle_ms: 90 * 60_000,
         idle_required_ms: 45 * 60_000,
         last_activity_ms: NOW - 90 * 60_000,
@@ -133,10 +139,11 @@ fn a_wake_with_nothing_due_records_nothing_and_is_not_an_abstention() {
 
 #[test]
 fn an_unfilled_slot_is_not_the_same_as_a_slot_that_is_not_due() {
-    // Both wakes have exactly one due loop and must produce the same row; the difference is that
-    // one of them never filled MemberBeat's slot. The hole is invisible HERE by design — the read
-    // side finds it by joining `buildable` against the ledger's own due rows — so what this test
-    // pins is that the writer does not invent a `buildable` entry for a slot it never saw.
+    // THIS TEST ONCE ASSERTED THE OPPOSITE OF ITS OWN NAME. It ended `assert_eq!(a, b)` — the two
+    // rows were identical, because the only record of a slot was `buildable`, which filters on due.
+    // A slot never filled and a slot filled-and-not-due produced byte-identical rows, while the
+    // struct's doc called telling them apart "the whole point of being total over the scope".
+    // `filled` makes the hole visible in the row itself.
     let not_due = WakeSignals {
         member_beat: Some(TimerQuiet {
             due: false,
@@ -148,22 +155,50 @@ fn an_unfilled_slot_is_not_the_same_as_a_slot_that_is_not_due() {
     let missing = one_due(60_000);
     let a = attention_shadow(&not_due, cycle(), NOW).expect("a row");
     let b = attention_shadow(&missing, cycle(), NOW).expect("a row");
+    // Neither is proposed: only a due gate is buildable.
     assert_eq!(a.buildable, vec![LoopId::Resolve]);
-    assert_eq!(a, b, "a not-due slot and an unfilled slot both stay out");
+    assert_eq!(b.buildable, vec![LoopId::Resolve]);
+    // But the coverage differs, and the row says so.
+    assert_eq!(a.filled, vec![LoopId::Resolve, LoopId::MemberBeat]);
+    assert_eq!(b.filled, vec![LoopId::Resolve]);
+    assert_ne!(
+        a, b,
+        "a wake that evaluated two gates is not a wake that evaluated one"
+    );
+    assert_ne!(a.to_event(NOW).outcome, b.to_event(NOW).outcome);
 }
 
 #[test]
-fn a_due_wake_where_nothing_clears_the_floor_abstains_and_says_so() {
-    // Resolve's constants are 300/900/0/1000. At urgency 0 the score is well above the floor of
-    // one, so to reach an empty ranking the loop must be out of the policy's scope entirely.
-    // ProfileRefresh is in scope, so instead assert the shape directly: a row exists, it names
-    // what was buildable, and `abstained_empty` is true exactly when the ranking is empty.
-    let s = one_due(0);
-    let row = attention_shadow(&s, cycle(), NOW).expect("a row");
-    assert!(!row.ranked.is_empty(), "Resolve scores above the floor");
+fn the_floor_cannot_bind_under_policy_v1_so_the_shadow_never_abstains() {
+    // The test that stood here was named for an abstention it could not produce, and its central
+    // assertion was `abstained_empty == ranked.is_empty()` — true by construction, one line after
+    // the field is assigned from exactly that expression.
+    //
+    // The real fact: the floor is `score >= 1`, and the LOWEST score any in-scope loop can take at
+    // any urgency is far above it, so `ranked` is never empty when `due` is not. Compute it rather
+    // than recall it, so a constants change that made abstention possible fails here and gets a
+    // policy version instead of passing unnoticed.
+    let mut worst = u64::MAX;
+    let mut worst_id = None;
+    for id in ATTENTION_SCOPE {
+        let c = attention_constants(id).expect("every scope member has constants");
+        for urgency in [0u64, 1, 500, 999, 1000] {
+            let sc = crate::attention_score(&c, urgency);
+            if sc < worst {
+                worst = sc;
+                worst_id = Some(id);
+            }
+        }
+    }
+    assert!(
+        worst >= 1,
+        "the floor CAN bind now ({worst_id:?} scores {worst}): abstention is live, and that is a new policy version with its own ledger row, not a silent change"
+    );
+    // The consequence, recorded where a reader of the metric will find it: the preregistered
+    // "shadow false negative" metric — legacy acted while the shadow abstained — is degenerate at
+    // zero under attention-policy-v1, because the shadow proposes something on every due wake.
+    let row = attention_shadow(&one_due(0), cycle(), NOW).expect("a row");
     assert!(!row.abstained_empty);
-    // The invariant, stated as an invariant rather than trusted: these two can never disagree.
-    assert_eq!(row.abstained_empty, row.ranked.is_empty());
     assert_eq!(row.top(), Some(LoopId::Resolve));
 }
 
@@ -174,7 +209,16 @@ fn exactly_one_row_per_wake_and_it_carries_that_wakes_identity() {
     assert_eq!(row.cycle, CycleId::new(11, 4));
     let ev = row.to_event(NOW);
     assert_eq!(ev.kind, "attention_shadow");
-    assert_eq!(ev.evaluator_id.as_deref(), Some(LOOP_LEDGER_V6));
+    assert_eq!(
+        ev.evaluator_id.as_deref(),
+        Some(crate::ATTENTION_POLICY),
+        "the row is stamped with the POLICY that produced its numbers; a v2 with different constants must not be indistinguishable from v1"
+    );
+    assert_eq!(
+        ev.policy.first().map(String::as_str),
+        Some(LOOP_LEDGER_V6),
+        "and the wire shape rides alongside it"
+    );
     assert_eq!(
         ev.object_id.as_deref(),
         Some("cycle:11:4"),
@@ -184,7 +228,7 @@ fn exactly_one_row_per_wake_and_it_carries_that_wakes_identity() {
     assert_eq!(ev.lane.as_deref(), Some("shadow"));
     assert_eq!(ev.chosen.as_deref(), Some("resolve"));
     assert_eq!(ev.verdict.as_deref(), Some("ranked"));
-    assert_eq!(ev.outcome.as_deref(), Some("buildable:1"));
+    assert_eq!(ev.outcome.as_deref(), Some("buildable:1 filled:1"));
     // Counts and ids only. A shadow row that carried text would be a second write in disguise.
     assert!(ev.subject.is_none());
     assert!(ev.purpose.is_none());
@@ -205,9 +249,11 @@ fn the_ranking_is_by_score_and_not_by_the_order_the_signals_were_collected_in() 
     // THIS TEST WAS VACUOUS ONCE. Its first version paired HomeWatch with Resolve, and HomeWatch
     // both scores higher AND comes earlier in the frozen scope — so the row was already in the
     // right order before anything sorted it, and deleting the ranking call left the test green.
-    // The pair has to DISAGREE. Ask (500/500/500/400) is scope index 3 and scores about 5.3e11;
-    // HomeWatch (800/800/300/700) is scope index 5 and scores about 1.85e12. Collection order and
-    // score order point opposite ways, so only a real sort puts HomeWatch first.
+    // The pair has to DISAGREE. Ask (500/500/500/400) is scope index 3 and scores 262 at urgency
+    // 1000; HomeWatch (800/800/300/700) is scope index 5 and scores 924. (An earlier version of
+    // this comment quoted 5.3e11 and 1.85e12 — the raw numerator before the divisor, a number the
+    // code never produces.) Collection order and score order point opposite ways, so only a real
+    // sort puts HomeWatch first.
     let s = WakeSignals {
         ask: Some(AskGate {
             due: true,
@@ -220,7 +266,7 @@ fn the_ranking_is_by_score_and_not_by_the_order_the_signals_were_collected_in() 
         home_watch: Some(TimerChatQuiet {
             due: true,
             timer: timer(60_000, 60_000),
-            presence: true,
+            presence: here(),
             enabled: true,
         }),
         ..Default::default()
@@ -250,7 +296,7 @@ fn a_forced_whois_supersedes_the_unforced_gate_rather_than_appearing_twice() {
         whois: Some(PersistedReceptive {
             due: true,
             timer: timer(86_400_000, 0),
-            presence: true,
+            presence: here(),
             receptive: true,
         }),
         whois_forced: Some(ForcedWhois {
@@ -286,22 +332,20 @@ fn every_loop_the_signal_set_can_report_is_one_the_policy_can_score() {
         ics: Some(TimerUnconditional { due: true, timer: t }),
         lease_sweep: Some(TimerUnconditional { due: true, timer: t }),
         member_beat: Some(TimerQuiet { due: true, timer: t, quiet: true }),
-        home_watch: Some(TimerChatQuiet { due: true, timer: t, presence: true, enabled: true }),
-        family: Some(TimerChatQuiet { due: true, timer: t, presence: true, enabled: true }),
-        follow_up: Some(TimerChatQuiet { due: true, timer: t, presence: true, enabled: true }),
-        price_watch: Some(TimerChatQuiet { due: true, timer: t, presence: true, enabled: true }),
+        home_watch: Some(TimerChatQuiet { due: true, timer: t, presence: here(), enabled: true }),
+        family: Some(TimerChatQuiet { due: true, timer: t, presence: here(), enabled: true }),
+        follow_up: Some(TimerChatQuiet { due: true, timer: t, presence: here(), enabled: true }),
+        price_watch: Some(TimerChatQuiet { due: true, timer: t, presence: here(), enabled: true }),
         patterns: Some(IdleGated {
             due: true,
             timer: t,
-            presence: true,
-            enabled: true,
-            spoke: true,
-            idle_ms: 60_000,
+            presence: here(),
+            idle: crate::IdleInputs { enabled: true, spoke: true, idle: true },
         }),
-        tradition_prep: Some(PersistedReceptive { due: true, timer: t, presence: true, receptive: true }),
-        whois: Some(PersistedReceptive { due: true, timer: t, presence: true, receptive: true }),
+        tradition_prep: Some(PersistedReceptive { due: true, timer: t, presence: here(), receptive: true }),
+        whois: Some(PersistedReceptive { due: true, timer: t, presence: here(), receptive: true }),
         whois_forced: None,
-        mail_sweep: Some(PersistedChatQuiet { due: true, timer: t, presence: true }),
+        mail_sweep: Some(PersistedChatQuiet { due: true, timer: t, presence: here() }),
         dmn: Some(DmnGate {
             due: true,
             enabled: true,
@@ -312,7 +356,7 @@ fn every_loop_the_signal_set_can_report_is_one_the_policy_can_score() {
         knock: Some(KnockGate {
             due: true,
             enabled: true,
-            presence: true,
+            presence: here(),
             idle_ms: 90 * 60_000,
             idle_required_ms: 45 * 60_000,
             last_activity_ms: NOW - 90 * 60_000,
@@ -383,21 +427,47 @@ fn the_shadow_reads_the_sites_verdict_and_never_recomputes_it() {
 }
 
 #[test]
-fn a_shadow_row_is_completely_recomputable_from_its_signals() {
-    // Determinism is what lets two readers of one ledger row agree. Same inputs, same row, twice.
+fn the_stored_row_carries_enough_to_rebuild_the_ranking() {
+    // The test here called one pure function twice on the same input and asserted the results were
+    // equal — guaranteed by construction, and it would have passed with the whole ranking feature
+    // deleted. What matters is that the ROW a reader finds in the ledger contains the ranking, so a
+    // second reader can rebuild it without ever seeing the signals.
     let s = WakeSignals {
         family: Some(TimerChatQuiet {
             due: true,
             timer: timer(3_600_000, 1_800_000),
-            presence: true,
+            presence: here(),
             enabled: true,
         }),
         ..one_due(60_000)
     };
-    let a: AttentionShadow = attention_shadow(&s, cycle(), NOW).expect("a row");
-    let b: AttentionShadow = attention_shadow(&s, cycle(), NOW).expect("a row");
-    assert_eq!(a, b);
-    assert_eq!(a.to_event(NOW).policy, b.to_event(NOW).policy);
+    let row: AttentionShadow = attention_shadow(&s, cycle(), NOW).expect("a row");
+    let ev = row.to_event(NOW);
+    // Rebuild from the event alone: skip the leading schema token, then read "<loop>:<score>".
+    let rebuilt: Vec<(String, u64)> = ev
+        .policy
+        .iter()
+        .skip(1)
+        .filter_map(|p| {
+            let (name, score) = p.rsplit_once(':')?;
+            Some((name.to_string(), score.parse().ok()?))
+        })
+        .collect();
+    assert_eq!(
+        rebuilt.len(),
+        row.ranked.len(),
+        "every ranked loop must be in the row: {:?}",
+        ev.policy
+    );
+    for (i, c) in row.ranked.iter().enumerate() {
+        assert_eq!(rebuilt[i].0, c.loop_id.as_str());
+        assert_eq!(rebuilt[i].1, c.score);
+    }
+    // ...and the order survives the round trip, which is the part a reader depends on.
+    let scores: Vec<u64> = rebuilt.iter().map(|(_, s)| *s).collect();
+    let mut sorted = scores.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(scores, sorted, "the stored order must be the ranked order");
 }
 
 #[test]

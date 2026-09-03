@@ -433,9 +433,12 @@ pub struct CoderPlan {
     pub oauth: Option<String>,
 }
 
-/// An environment-variable name an operator may name as the holder of the coder key. Deliberately
-/// strict: `YM_CODER_KEY_ENV` is an indirection, and an indirection that accepts anything is a way
-/// to read a variable nobody meant to expose.
+/// A SYNTACTIC sanity check on the variable name an operator points `YM_CODER_KEY_ENV` at — not an
+/// allow-list, and the doc here used to overclaim that. `PATH`, `HOME` and any other real variable
+/// pass it; what it rejects is a name that is not shaped like an environment variable at all, which
+/// is the sign of a mistyped or injected value rather than of a deliberate choice. The operator is
+/// naming a variable in their own process, so the check that matters is that they meant to: the
+/// value is used ONLY as the coder's bearer token and never logged or echoed.
 fn is_plausible_env_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -1435,11 +1438,23 @@ mod coder_plan_tests {
     fn the_key_variable_must_be_named_like_a_key_variable() {
         // Kill criterion 3. The indirection is the point of the feature and also its risk: an
         // indirection that accepts anything is a way to read a variable nobody meant to expose.
+        // These are the shapes a real env var never has. `PATH` and `HOME` DO pass — the guard is
+        // syntactic, and the near-miss "PATH-ISH" in the first version of this list read as though
+        // the plain name were covered when it is not. Review caught the implication.
         for bad in ["my_house_key", "PATH-ISH", "1KEY", "", " ", "A B"] {
             let mut pairs = custom(&[("YM_CODER_KEY_ENV", bad)]);
             pairs.push((bad.to_string(), "sk-sneaky".to_string()));
             assert_eq!(plan_from(pairs), None, "accepted key env name {bad:?}");
         }
+        // A plain, real variable name is ACCEPTED, and the test says so out loud so nobody reads
+        // the list above as an allow-list.
+        let mut ok = custom(&[("YM_CODER_KEY_ENV", "PATH")]);
+        ok.push(("PATH".to_string(), "sk-operator-chose-this".to_string()));
+        assert_eq!(
+            plan_from(ok).map(|p| p.token),
+            Some("sk-operator-chose-this".to_string()),
+            "the guard is syntactic; naming an existing variable is the operator's call"
+        );
         // A long name is refused rather than truncated.
         let long = "A".repeat(65);
         let mut pairs = custom(&[("YM_CODER_KEY_ENV", long.as_str())]);

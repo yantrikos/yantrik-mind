@@ -5311,3 +5311,22 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What is actually established | The pilot leg saw two 504s. Nothing host-side reproduces them at either request size, streaming or buffered. The untested differences are our **counting proxy's chunk relay** and the **container network's egress path** — the leg's requests traverse both and the probes traverse neither. |
 | The isolation now running | The same heavy streaming request, from a client container on `cb2net`, through the run's proxy at `172.30.0.8` — the leg's exact path minus the Mind. It reports a **mid-stream cut separately from a bad status**, because *"the stream ended without a newline"* (what the Mind reported about its own artifact) is a cut and shows no bad status at all — the specific hole in all three earlier probes. |
 | Standing until it lands | The benchmark line is blocked on **an unisolated failure on the leg path**, not on "the model". If the proxy path reproduces it, this is the fifth harness defect the pilot has found rather than a verdict about deepseek. |
+
+## E.CB2-D — the isolation: 26 calls, four configurations, none reproduces the leg's 504s
+| Configuration | Result |
+| --- | --- |
+| Host-side, buffered, 600 max_tokens | **8/8** 200, p50 61 s, max 95 s |
+| Host-side, buffered, 3000 max_tokens, ~2,250-token prompt | **6/6** 200, 134–229 s |
+| Host-side, **streaming**, same heavy prompt | **6/6** clean `[DONE]`, ~485–509 chunks, 139–224 s |
+| **Through the run's proxy, from a client container on `cb2net`** — the leg's exact path minus the Mind | **6/6** clean `[DONE]`, 472–518 chunks, 122–321 s; proxy receipt `http_errors=0 transport_errors=0`, all 6 responses the expected model |
+| Conclusion | The two 504s exist **only in leg 1**. The proxy's chunk relay and the container egress path — the two differences the earlier probes did not traverse — are exonerated. Nothing I can probe reproduces it, so the remaining candidates are the Mind's own request shape (multi-turn context, tool schemas) or a transient provider window at 17:58–18:13Z. |
+| What that means for method | More probes cannot settle this; **only the configuration that failed can**. Pilot leg 2 is running in a fresh out dir, leg 1's receipts untouched. A second void implicates the leg configuration; a clean run makes leg 1 a transient window. |
+
+## E.CB2-D pilot finding — the images can be STALE, and nothing said so
+| Field | Value |
+| --- | --- |
+| The gap | `proxy/proxy.py`, `checks/check_web.mjs`, `checks/check_t3.py` and `seed/` are **baked into** `cb2n-proxy` and `cb2-check`, not mounted. Editing one changes **nothing** until that image is rebuilt. |
+| It bit twice in one evening | The checker's crash fix was inert until `cb2-check` was rebuilt. Then the proxy's wall + `proxy_request_timeouts` change was inert throughout the isolation — noticed only because the diagnostic printed `proxy_timeouts=None`, a key the new code always writes. Had I not printed it, I would have recorded "the proxy path is clean" as evidence about code that was not running. |
+| Why `rederive.sh` does not cover it | Re-derivation proves the **tree matches the patch**. It says nothing about what is **executing**. Those are different claims and I had been treating the first as though it implied the second. |
+| Fix | `selftest/image_freshness.sh` compares the sha256 of each baked file inside the image against the fixture it was built from, via `docker create` + `docker cp` so it does not depend on what the image contains. **Fail-closed**: a missing image or missing docker is a failure, not a skip — a case that quietly skips is a case that cannot fail. |
+| Evidence, unmutated | Run against the current box it reports `cb2n-proxy:proxy.py` **DISAGREE** with both hashes, and `cb2-check`'s four files **agree**. That is a real, present staleness caught by the guard on its first run — no mutant required, because the defect was already there. |

@@ -28,6 +28,9 @@ if bash "$FIX/selftest/cap_cases.sh"; then echo "cap_cases: agree"; else echo "c
 if bash "$FIX/selftest/model_cases.sh"; then echo "model_cases: agree"; else echo "model_cases: DISAGREE"; BAD=1; fi
 # The grader must FAIL a hostile artifact, not crash on one. Structural, and it says so.
 if python3 "$FIX/selftest/scan_checker_guard.py" "$FIX/checks/check_web.mjs"; then echo "checker_guard: agree"; else echo "checker_guard: DISAGREE"; BAD=1; fi
+# Four fixture files are BAKED into images, so editing one changes nothing until a rebuild.
+# rederive.sh proves the tree matches the patch; this proves the images match the tree.
+if bash "$FIX/selftest/image_freshness.sh"; then echo "image_freshness: agree"; else echo "image_freshness: DISAGREE"; BAD=1; fi
 # The receipt decision, driven through every classification without a graded leg.
 if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi
 S=$(mktemp -d /tmp/cb2-tree-self-XXXX)

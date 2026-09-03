@@ -112,6 +112,9 @@ pub(crate) use mind_recipes::{extract_document, is_complete_html, looks_like_htm
 mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;
+pub mod fileset;
+#[cfg(test)]
+mod fileset_tests;
 #[cfg(test)]
 mod page1_tests;
 #[cfg(test)]

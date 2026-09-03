@@ -62,6 +62,19 @@ fn runner_period_secs() -> u64 {
         .unwrap_or(5)
 }
 
+/// L2-B step 2a: is the attention shadow recording this wake?
+///
+/// DEFAULT OFF. The shadow's whole claim is that its append is the only thing it does, and a
+/// feature that decides nothing should not arrive switched on. Read ONCE per wake in one place;
+/// no gate consults it, which is what makes "a shadow row can never change what a loop does" a
+/// property of the code's shape rather than a promise.
+fn attention_shadow_on() -> bool {
+    matches!(
+        std::env::var("YM_ATTENTION_SHADOW").ok().as_deref(),
+        Some("1") | Some("on") | Some("true")
+    )
+}
+
 async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
     let process_start_ms = now_ms();
     // Legacy boot stamps: profile refresh and patterns do not fire right after boot.
@@ -74,19 +87,38 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
     };
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(runner_period_secs()));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut wake_no: u64 = 0;
     loop {
         tick.tick().await;
+        // One identity per wake, so a shadow row and the loop rows of the same wake can be paired
+        // by identity rather than by guessing from timestamps.
+        wake_no += 1;
+        let cycle = mind_observability::CycleId::new(process_start_ms, wake_no);
+        let mut signals = mind_observability::WakeSignals::default();
         // L3c: engagement housekeeping first — the stale resolvers and the shown-marker outbox —
         // so an unanswered claim closes on every box within a minute of its deadline.
         state.last_housekeeping = run_housekeeping(&conv, state.last_housekeeping).await;
         // Serial, legacy order; no spawn.
-        state.last_ics = run_ics(&conv, process_start_ms, state.last_ics).await;
+        state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals).await;
         state.last_lease_sweep =
-            run_lease_sweep(&conv, process_start_ms, state.last_lease_sweep).await;
+            run_lease_sweep(&conv, process_start_ms, state.last_lease_sweep, &mut signals).await;
         state.last_resolve =
-            run_resolve(&conv, &delivery, process_start_ms, state.last_resolve).await;
+            run_resolve(&conv, &delivery, process_start_ms, state.last_resolve, &mut signals).await;
         state.last_profile =
-            run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile).await;
+            run_profile_refresh(&conv, &delivery, process_start_ms, state.last_profile, &mut signals).await;
+        // L2-B step 2a — THE ONE PERMITTED WRITE, and the only place the switch is read.
+        //
+        // Four of eighteen gates fill the signal set so far, so this row is a partial view of the
+        // wake by construction; the read side compares `buildable` against the loop ledger's own
+        // due rows and sees the shortfall. That is the design, not a bug: the alternative was
+        // wiring eighteen sites at once and hoping.
+        if attention_shadow_on() {
+            if let Some(shadow) =
+                mind_observability::attention_shadow(&signals, cycle, now_ms())
+            {
+                conv.record_attention_shadow(&shadow);
+            }
+        }
         run_engagement(&conv, &delivery, process_start_ms, &mut state).await;
         run_patterns(&conv, &delivery, process_start_ms, &mut state).await;
         run_dmn(&conv, process_start_ms, &mut state).await;
@@ -152,6 +184,7 @@ pub(crate) async fn run_resolve(
     delivery: &Delivery,
     process_start_ms: u64,
     last_resolve: u64,
+    signals: &mut mind_observability::WakeSignals,
 ) -> u64 {
     let period: u64 = std::env::var("YM_RESOLVE_SECS")
         .ok()
@@ -164,6 +197,15 @@ pub(crate) async fn run_resolve(
         period_ms: period * 1000,
     });
     let rs_decision = rs_gate.decide();
+    // L2-B: the signal set records what THIS gate decided — never a second evaluation. `due` is
+    // the site's own verdict; the timer is what the descriptor needs to score urgency.
+    signals.resolve = Some(mind_observability::TimerUnconditional {
+        due: rs_gate.decide() == mind_observability::GateDecision::Act,
+        timer: mind_observability::WakeTimer {
+            last_ms: last_resolve,
+            period_ms: period * 1000,
+        },
+    });
     if rs_decision != mind_observability::GateDecision::Act {
         return last_resolve;
     }
@@ -213,6 +255,7 @@ pub(crate) async fn run_profile_refresh(
     delivery: &Delivery,
     process_start_ms: u64,
     last_profile: u64,
+    signals: &mut mind_observability::WakeSignals,
 ) -> u64 {
     let period: u64 = std::env::var("YM_PROFILE_REFRESH_SECS")
         .ok()
@@ -225,6 +268,15 @@ pub(crate) async fn run_profile_refresh(
         period_ms: period * 1000,
     });
     let pr_decision = pr_gate.decide();
+    // L2-B: the signal set records what THIS gate decided — never a second evaluation. `due` is
+    // the site's own verdict; the timer is what the descriptor needs to score urgency.
+    signals.profile_refresh = Some(mind_observability::TimerUnconditional {
+        due: pr_gate.decide() == mind_observability::GateDecision::Act,
+        timer: mind_observability::WakeTimer {
+            last_ms: last_profile,
+            period_ms: period * 1000,
+        },
+    });
     if pr_decision != mind_observability::GateDecision::Act {
         return last_profile;
     }
@@ -938,6 +990,7 @@ pub(crate) async fn run_ics(
     conv: &ConversationEngine,
     process_start_ms: u64,
     last_ics: u64,
+    signals: &mut mind_observability::WakeSignals,
 ) -> u64 {
     let period: u64 = std::env::var("YM_ICS_SECS")
         .ok()
@@ -950,6 +1003,14 @@ pub(crate) async fn run_ics(
         period_ms: period * 1000,
     });
     let ics_decision = ics_gate.decide();
+    // L2-B: the signal set records what THIS gate decided — never a second evaluation.
+    signals.ics = Some(mind_observability::TimerUnconditional {
+        due: ics_gate.decide() == mind_observability::GateDecision::Act,
+        timer: mind_observability::WakeTimer {
+            last_ms: last_ics,
+            period_ms: period * 1000,
+        },
+    });
     if ics_decision == mind_observability::GateDecision::Act {
         let ics_t0 = now_ms();
         let n = conv.refresh_ics().await;
@@ -982,6 +1043,7 @@ pub(crate) async fn run_lease_sweep(
     conv: &ConversationEngine,
     process_start_ms: u64,
     last_lease_sweep: u64,
+    signals: &mut mind_observability::WakeSignals,
 ) -> u64 {
     let period: u64 = std::env::var("YM_LEASE_SWEEP_SECS")
         .ok()
@@ -994,6 +1056,14 @@ pub(crate) async fn run_lease_sweep(
         period_ms: period * 1000,
     });
     let ls_decision = ls_gate.decide();
+    // L2-B: the signal set records what THIS gate decided — never a second evaluation.
+    signals.lease_sweep = Some(mind_observability::TimerUnconditional {
+        due: ls_gate.decide() == mind_observability::GateDecision::Act,
+        timer: mind_observability::WakeTimer {
+            last_ms: last_lease_sweep,
+            period_ms: period * 1000,
+        },
+    });
     if ls_decision == mind_observability::GateDecision::Act {
         let ls_t0 = now_ms();
         let mut swept: u32 = 0;
@@ -1462,5 +1532,142 @@ mod tests {
             }
             assert!(runner.len() >= poll.len(), "period {period_ms}");
         }
+    }
+}
+
+#[cfg(test)]
+mod l2b_wiring_tests {
+    //! L2-B step 2a's kill criteria. Where a criterion is about the SHAPE of the poll loop it is a
+    //! source scan, deliberately: the loop is an infinite `async fn` over a live engine, and a test
+    //! that cannot be written without one does not get written — which is how `write_files` shipped
+    //! registered in the wrong dispatch earlier today.
+
+    /// The file WITHOUT this test module. A scan that includes its own source matches the strings
+    /// it is searching for — both of these tests failed that way on their first run, which is the
+    /// same defect as a self-test whose regex matched its own explanatory comment earlier today.
+    fn loops_src() -> &'static str {
+        const FULL: &str = include_str!("loops.rs");
+        match FULL.find("mod l2b_wiring_tests") {
+            Some(i) => &FULL[..i],
+            None => FULL,
+        }
+    }
+
+    fn wake_body() -> &'static str {
+        let start = loops_src().find("async fn run_loops(").expect("the poll loop exists");
+        let end = loops_src()[start..]
+            .find("\n/// The timer states")
+            .map(|e| start + e)
+            .unwrap_or(loops_src().len());
+        &loops_src()[start..end]
+    }
+
+    /// KILL 1: default OFF. A feature that decides nothing does not arrive switched on.
+    #[test]
+    fn the_shadow_is_off_unless_explicitly_enabled() {
+        assert!(
+            super::attention_shadow_on() == false || std::env::var("YM_ATTENTION_SHADOW").is_ok(),
+            "the shadow must be off with no environment set"
+        );
+        // And the values that turn it on are explicit, not "any non-empty string" — a stray
+        // YM_ATTENTION_SHADOW=off would otherwise enable it.
+        for (val, want) in [("1", true), ("on", true), ("true", true), ("off", false), ("0", false), ("", false)] {
+            std::env::set_var("YM_ATTENTION_SHADOW", val);
+            assert_eq!(super::attention_shadow_on(), want, "value {val:?}");
+        }
+        std::env::remove_var("YM_ATTENTION_SHADOW");
+        assert!(!super::attention_shadow_on());
+    }
+
+    /// KILL 4: a shadow row can never change what a loop does. The switch is read in ONE place,
+    /// and that place is the append — no gate consults it.
+    #[test]
+    fn the_switch_is_read_once_and_only_at_the_append() {
+        // The DEFINITION is one occurrence and is not a read — counting it as one is how this
+        // assertion failed on its first run.
+        let defs = loops_src().matches("fn attention_shadow_on()").count();
+        let total = loops_src().matches("attention_shadow_on()").count();
+        assert_eq!(defs, 1, "one definition");
+        assert_eq!(
+            total - defs,
+            1,
+            "the switch is READ more than once; a second reader is a gate that could consult it"
+        );
+        let body = wake_body();
+        assert!(
+            body.contains("if attention_shadow_on()"),
+            "the single read must be the append's own condition"
+        );
+    }
+
+    /// KILL 2: the append is the ONLY new write. Nothing else may ride in on this slice.
+    #[test]
+    fn the_only_new_write_is_the_shadow_append() {
+        let body = wake_body();
+        let i = body.find("if attention_shadow_on()").expect("the append exists");
+        let guarded = &body[i..i + 400.min(body.len() - i)];
+        assert!(
+            guarded.contains("record_attention_shadow"),
+            "the guarded block must be the append"
+        );
+        for forbidden in [
+            "profile_set",
+            "deliver(",
+            "chat(",
+            "within_opportunity",
+            "record_loop_tick",
+            "spawn",
+        ] {
+            assert!(
+                !guarded.contains(forbidden),
+                "the shadow's block reached for {forbidden:?} — its whole claim is that appending \
+                 a row is all it does"
+            );
+        }
+    }
+
+    /// KILL 5: one identity per wake, and it is minted from the wake counter rather than a clock.
+    #[test]
+    fn each_wake_mints_its_own_identity() {
+        let body = wake_body();
+        assert!(body.contains("wake_no += 1"), "the wake counter advances");
+        assert!(
+            body.contains("CycleId::new(process_start_ms, wake_no)"),
+            "the identity is the process start and the wake number, so a restart cannot reuse one"
+        );
+        // The signal set is FRESH per wake: carrying one across would attribute a gate to the
+        // wrong cycle.
+        assert!(
+            body.contains("let mut signals = mind_observability::WakeSignals::default();"),
+            "a signal set carried across wakes would report last wake's gates as this wake's"
+        );
+        let decl = body.find("let mut signals").expect("declared");
+        let tick = body.find("tick.tick().await").expect("the wake starts at the tick");
+        assert!(decl > tick, "the signal set is built inside the wake, not outside the loop");
+    }
+
+    /// The four sites that fill a slot must each report the gate's OWN verdict, not a second
+    /// evaluation of the same inputs — two answers to one question is how they come to disagree.
+    #[test]
+    fn every_filled_slot_reports_its_own_gates_verdict() {
+        for (field, gate) in [
+            ("signals.resolve", "rs_gate"),
+            ("signals.profile_refresh", "pr_gate"),
+            ("signals.ics", "ics_gate"),
+            ("signals.lease_sweep", "ls_gate"),
+        ] {
+            let i = loops_src().find(field).unwrap_or_else(|| panic!("{field} is filled"));
+            let block = &loops_src()[i..i + 320.min(loops_src().len() - i)];
+            assert!(
+                block.contains(&format!("{gate}.decide()")),
+                "{field} must take its `due` from {gate}, the gate that site already evaluated"
+            );
+        }
+        assert_eq!(
+            loops_src().matches("signals.").count(),
+            4,
+            "step 2a wires FOUR of eighteen sites; a fifth arriving without its own row is how a \
+             staged slice stops being staged"
+        );
     }
 }

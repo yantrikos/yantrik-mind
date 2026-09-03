@@ -952,6 +952,14 @@ impl super::ConversationEngine {
         let _ = self.recorder.record_once(tick.to_event(now));
     }
 
+    /// L2-B: the attention shadow's ONE permitted write. A row per poll wake that had at least
+    /// one due in-scope opportunity, carrying what the arbiter WOULD have chosen. It decides
+    /// nothing: no caller reads it back, and the loops that ran had already run.
+    pub fn record_attention_shadow(&self, shadow: &mind_observability::AttentionShadow) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.recorder.record(shadow.to_event(now));
+    }
+
     /// L3b: one record per delivery decision — kind, outcome, receipt id, size; never the text.
     pub fn record_delivery(&self, tick: mind_observability::DeliveryTick) {
         let now = chrono::Utc::now().timestamp_millis() as u64;

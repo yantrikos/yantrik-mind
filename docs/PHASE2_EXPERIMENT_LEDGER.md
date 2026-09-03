@@ -5330,3 +5330,19 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why `rederive.sh` does not cover it | Re-derivation proves the **tree matches the patch**. It says nothing about what is **executing**. Those are different claims and I had been treating the first as though it implied the second. |
 | Fix | `selftest/image_freshness.sh` compares the sha256 of each baked file inside the image against the fixture it was built from, via `docker create` + `docker cp` so it does not depend on what the image contains. **Fail-closed**: a missing image or missing docker is a failure, not a skip — a case that quietly skips is a case that cannot fail. |
 | Evidence, unmutated | Run against the current box it reports `cb2n-proxy:proxy.py` **DISAGREE** with both hashes, and `cb2-check`'s four files **agree**. That is a real, present staleness caught by the guard on its first run — no mutant required, because the defect was already there. |
+
+## E.CB2-D leg 2 — the failure IS reproducible on the leg path, and nowhere else
+| Field | Value |
+| --- | --- |
+| Leg 2 | `status: failed`, `files_added: 0`, **3 of 4 model requests returned 504**, `void: true`, `disqualified: false`, `accounting_agrees: true`, wall 913 s. Leg 1 was 2 of 5 and completed; leg 2 is worse and did not. |
+| Against 26 clean probe calls | Buffered light 8/8, buffered heavy 6/6, streaming heavy 6/6, streaming heavy **through this exact proxy from `cb2net`** 6/6 with a zero-error receipt. So the failure is real and specific to what the *Mind* does, not to the model, the network, or the proxy relay. |
+| The lead | The Mind boots with `2 concurrent model call(s) permitted (YM_INFER_PERMITS)`; **every probe so far was strictly sequential**. Two concurrent streamed generations share one proxy process and one upstream key. A 2-concurrent probe through the same proxy is running — pairs run one after another so the concurrency is exactly two, the number the leg is configured for, not a burst the leg never produces. |
+| Also | One leg-2 call ran **908,187 ms** — 908 of the leg's 911 seconds of model time in a single call, serving 1 of 4. Leg calls are far longer than any probe's (max 321 s), consistent with much larger agent context. |
+
+## CORRECTION — `timeout=600` bounds a socket operation, not a call
+| Field | Value |
+| --- | --- |
+| What I wrote | In the E.CB2-W follow-up 3 row and commit `b2d8d5c`: the proxy's `timeout=600` "became the binding constraint" and "a call past 600 s becomes a 502 and a transport void". |
+| Why that is wrong | `http.client`'s `timeout` is the **socket** timeout, applied per blocking operation. A streamed response that keeps delivering chunks resets it on every read, so a long call never trips it — only a **stall** longer than 600 s would. |
+| The proof is in leg 2, not a docstring | A call ran **908,187 ms** through a proxy running `timeout=600`, and the receipt shows `upstream_transport_errors: 0`. Had the timeout bounded the call, it would have fired. It did not. |
+| What still stands | Deriving the ceiling from the run state instead of a literal, and counting `proxy_request_timeouts` separately so our stall ceiling is not recorded as the upstream's transport failure. Both are right for the reason given — one number, and two causes must not wear one label. Only the **urgency** was wrong: the ceiling is a stall guard, and it was never as close to binding as I said. |

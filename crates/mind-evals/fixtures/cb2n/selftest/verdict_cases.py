@@ -4,9 +4,9 @@ disagreement. Runs inside the checker image with no network.
 Each case names the flags it expects, so a change that makes the decision more lenient in one place
 fails here instead of quietly letting a leg through. The clean case is first and must be clean: a
 suite whose only cases are failures cannot notice a rule that rejects everything."""
-import sys, os
+import json, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))
-from verdict import classify, host_independent, receipt_shape_ok, reported_project
+from verdict import classify, host_independent, receipt_shape_ok, reported_project, call_latencies
 
 # EVERY CASE RUNS AT BOTH CAPS. The rule used to import a module-level `CAP = 8`, so it was only
 # ever exercised at eight while the `nim-cap24` reading enforces twenty-four — a self-test that
@@ -79,6 +79,57 @@ for name, over, want in HOST_CASES:
     if not ok:
         bad = 1
     print(f"{name}: {'agree' if ok else 'DISAGREE'} got=({violated},{reasons}) want=({bool(want)},{want})")
+
+# ── per-call latency, so a leg carries its own timing evidence ────────────────────────────────
+# E.LAT1 could not say where a leg's 420 seconds went, and reconstructing it from probes hours
+# later produced a confounded comparison and a withdrawn claim. The mind already records
+# latency_ms and the callsite on every spend row; this is the summary that reaches the receipt.
+def _row(site, ms, verdict_s="served"):
+    return json.dumps({"event": {"kind": "inference_call",
+                                 "trigger": "callsite:" + site,
+                                 "latency_ms": ms,
+                                 "verdict": verdict_s}})
+
+
+LAT_ROWS = [
+    _row("delegate:build", 120000),
+    _row("delegate:build", 90000),
+    _row("delegate:route", 20000, "failed"),
+    json.dumps({"event": {"kind": "loop_tick"}}),
+    "not json at all",
+]
+_got = call_latencies(LAT_ROWS)
+LAT_CASES = [
+    ("two calls from one callsite are summed", _got.get("delegate:build", {}).get("calls"), 2),
+    ("their total is carried", _got.get("delegate:build", {}).get("total_ms"), 210000),
+    ("and the worst single call", _got.get("delegate:build", {}).get("max_ms"), 120000),
+    ("a failed call counts but is not served", _got.get("delegate:route", {}).get("served"), 0),
+    ("a loop row is not a spend row", "loop_tick" in _got, False),
+    ("a malformed line is skipped, not fatal", len(_got), 2),
+    # THE DISTINCTION THIS HARNESS HAS ALREADY GOT WRONG ONCE: "no log" is not "no calls".
+    ("no log is None, not an empty summary", call_latencies(None), None),
+    ("no calls is an empty summary", call_latencies([]), {}),
+]
+# The except is NARROW on purpose, and this is what makes that observable. A malformed LINE is
+# expected and skipped; anything else is a defect and must surface. A bare `except Exception` here
+# swallowed a NameError (the module had no `import json`) and the function returned an empty
+# summary for every input, with nothing in the output saying it had failed.
+try:
+    call_latencies([12345])          # not a string: json.loads raises TypeError, not a decode error
+    _surfaced = False
+except json.JSONDecodeError:
+    _surfaced = False                 # would mean the narrow except caught the wrong thing
+except Exception:
+    _surfaced = True
+LAT_CASES_EXTRA = [
+    ("a non-line defect surfaces instead of emptying the summary", _surfaced, True),
+]
+
+for name, got, want in LAT_CASES + LAT_CASES_EXTRA:
+    ok = got == want
+    if not ok:
+        bad = 1
+    print(f"latency/{name}: {'agree' if ok else 'DISAGREE'} got={got!r} want={want!r}")
 
 # ── which root gets graded ────────────────────────────────────────────────────────────────────
 # The rule that decides what the checker reads. It lived inside the driver, which no test can

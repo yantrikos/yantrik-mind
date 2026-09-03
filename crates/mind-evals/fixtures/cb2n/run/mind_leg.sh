@@ -46,6 +46,7 @@ bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy no
 # produced this file rather than whatever HEAD the deploy clone happens to sit at.
 BIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}; SRC=${CB2_MIND_SOURCE:-/root/codes/ym-autodeploy}
 [ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 2; }
+export CB2_FIX_RUN="$FIX/run"
 BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)
 # A preflight that smoked a DIFFERENT binary has cleared nothing. If a smoke recorded a sha in this
 # output root, this leg must be running that exact file.
@@ -93,11 +94,24 @@ LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$ST" "$OUT/raw/mind_${T}_stdout.tx
 # It was applied to one system only, which made it a rule about Hermes rather than about the run.
 DL=$(cat "$OUT/raw/mind_${T}_stdout.txt" "$OUT/raw/mind_${T}_driver.txt" 2>/dev/null | grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " || true)
 CHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")
+# E.LAT2 — read the spend rows while the state still EXISTS. The trap removes it, and every leg
+# until now threw away the only per-call timing this system records.
+LAT=$(python3 -c "
+import sys, json, os
+sys.path.insert(0, os.environ['CB2_FIX_RUN'])
+from verdict import call_latencies
+p = os.path.join('$ST', 'mind.db.decisions.jsonl')
+lines = None
+try:
+    lines = open(p, encoding='utf-8').read().splitlines()
+except Exception:
+    pass
+print(json.dumps(call_latencies(lines)))
+" 2>/dev/null || echo null)
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-export CB2_FIX_RUN="$FIX/run"
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" "$DL" <<'EOF'
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" "$DL" "$LAT" <<'EOF'
 import json, os, sys
 # The host-side independent rules are a TESTED function, not a boolean expression buried in a
 # heredoc. `selftest/verdict_cases.py` drives it; this file only supplies the observations.
@@ -105,11 +119,17 @@ import json, os, sys
 # handed in. CB2_FIX_RUN is exported by the leg just above; on the host it is $FIX/run.
 sys.path.insert(0, os.environ["CB2_FIX_RUN"])
 from verdict import host_independent, receipt_shape_ok
-src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s, dl_s = sys.argv[1:]
+src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s, dl_s, lat_s = sys.argv[1:]
 # The cap the PROXY enforced, carried through rather than re-derived by this reader: two places
 # deciding what the budget was is how a receipt comes to disagree with the run it describes.
 cap = int(cap_s)
 downloads = int(dl_s)
+# None means the spend log could not be read — NOT an empty summary. "no calls" and "no log"
+# are different facts and this harness has conflated them once already.
+try:
+    call_latency = json.loads(lat_s)
+except Exception:
+    call_latency = None
 ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
@@ -149,6 +169,7 @@ dq_ind = bool(d.get("dq_independent")) or host_bad
 dq_dep = bool(d.get("dq_dependent")) or (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"
 d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "run_state_sha256": run_state_sha,
           "cap": cap, "download_or_install_lines": downloads, "host_violations": host_reasons,
+          "call_latency": call_latency,
           "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
           "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
           "upstream_client_errors": int(ck.get("client_errors", -1)), "client_disconnects": int(ck.get("disconnects", -1)),

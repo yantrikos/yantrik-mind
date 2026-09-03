@@ -13,6 +13,8 @@ when the leg is not void, because an infrastructure outage must not be charged t
 void never rescues an independent violation, and this function never decides voidness: that is
 the proxy receipt's business, upstream, in `receipt_checks.py`.
 """
+
+import json
 # NO MODULE-LEVEL CAP. There was a `CAP = 8` here and `verdict_cases.py` imported it, so the
 # disqualification rule was only ever self-tested at eight — never at the twenty-four the
 # `nim-cap24` reading actually enforces. The cap is a required argument now, and the cases run at
@@ -140,3 +142,46 @@ def reported_project(result_text):
     if name.strip(".") == "":
         return None
     return name
+
+
+def call_latencies(lines):
+    """Per-callsite latency from the mind's own spend rows. Counts and integers only.
+
+    E.LAT2. The mind already records `latency_ms` and the callsite on every `inference_call` row;
+    the harness deleted them with the state at teardown, so a leg's timing had to be reconstructed
+    from separate probes hours later — which produced a confounded comparison and a withdrawn
+    claim. A leg should carry its own timing evidence beside its own wall clock.
+
+    `lines` is the decision log's lines, or None when the log was not readable. None is NOT an
+    empty summary: "no calls" and "no log" are different facts, and conflating them is a mistake
+    this harness has already made once.
+    """
+    if lines is None:
+        return None
+    per = {}
+    for line in lines:
+        try:
+            ev = json.loads(line).get("event", {})
+        except json.JSONDecodeError:
+            # A malformed LINE is expected and skipped. Anything else — a missing import, a bad
+            # attribute — is a defect and must surface: a bare `except Exception` here swallowed a
+            # NameError (this module had no `import json`) and the function silently returned an
+            # empty summary for every input. It was caught by exercising it; nothing about the
+            # output said it had failed.
+            continue
+        if ev.get("kind") != "inference_call":
+            continue
+        trigger = str(ev.get("trigger") or "")
+        site = trigger.split("callsite:", 1)[1] if "callsite:" in trigger else "unattributed"
+        # The callsite is a static string the code authored; take the leading segment so the
+        # summary stays small and no free text can ride in on it.
+        site = site.split()[0][:60] if site.split() else "unattributed"
+        ms = ev.get("latency_ms")
+        ms = int(ms) if isinstance(ms, int) else 0
+        row = per.setdefault(site, {"calls": 0, "total_ms": 0, "max_ms": 0, "served": 0})
+        row["calls"] += 1
+        row["total_ms"] += ms
+        row["max_ms"] = max(row["max_ms"], ms)
+        if ev.get("verdict") == "served":
+            row["served"] += 1
+    return per

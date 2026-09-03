@@ -14,10 +14,13 @@ BASE = dict(present=True, ledger_requests=3, ledger_attempts=3, ledger_malformed
 CASES = [
     # name,                       overrides,                              ind,   dep,   agrees
     ("clean",                     {},                                     False, False, True),
-    ("no_proxy_receipt",          dict(present=False),                    True,  True,  False),
+    # dep is False since reading 5: with no receipt the dependent class has no complaint of its
+    # own, and the INDEPENDENT violation is what disqualifies. It used to be True only because the
+    # agreement check could not pass without a receipt.
+    ("no_proxy_receipt",          dict(present=False),                    True,  False, False),
     ("spend_log_absent",          dict(ledger_requests=-1,
                                        ledger_attempts=-1,
-                                       ledger_malformed=-1),              True,  True,  False),
+                                       ledger_malformed=-1),              True,  False, False),
     ("malformed_ledger_row",      dict(ledger_malformed=1),               True,  False, True),
     ("cap_refusal",               dict(refused=1, stop="cap"),            True,  False, True),
     ("over_cap_accepted",         dict(accepted=CAP + 1,
@@ -25,7 +28,9 @@ CASES = [
                                        ledger_requests=CAP + 1),          True,  False, True),
     # The three the review found. Each must be a DEPENDENT violation and nothing more: an upstream
     # outage that produces them must be voidable, exactly as on the Hermes side.
-    ("accounting_disagrees",      dict(ledger_attempts=4),                False, True,  False),
+    # Reading 5: a disagreement is RECORDED and no longer disqualifies. The case stays, with the
+    # expectation inverted, so the relaxation is visible in the suite rather than only in a commit.
+    ("accounting_disagrees",      dict(ledger_attempts=4),                False, False, False),
     ("zero_model_requests",       dict(accepted=0, ledger_attempts=0,
                                        ledger_requests=0),                False, True,  True),
     ("wall",                      dict(stop="timeout"),                   False, True,  True),

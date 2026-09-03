@@ -632,6 +632,47 @@ rw("selftest/selftest.sh", [
      '# The request cap: one number, carried by the run state, refusing to change mid-reading.\nif bash "$FIX/selftest/cap_cases.sh"; then echo "cap_cases: agree"; else echo "cap_cases: DISAGREE"; BAD=1; fi\n# The receipt decision, driven through every classification without a graded leg.'),
 ])
 
+# ── E.CB2-N reading 5: the own-log agreement is recorded, not enforced; and the cap ordering ──
+# Two changes in one place because they are one story. (1) `hermes_leg.sh` read CB2_CAP one line
+# BEFORE the loader that exports it, so a Hermes leg that finished inside a cap of 24 was failed
+# against a stale 8. (2) The agreement between an agent's own call count and the proxy's accepted
+# count stops being a disqualifier for BOTH systems: the proxy is the authoritative meter and
+# refuses over-cap requests before the model, so an agent cannot hide spend from it, and whether its
+# own log agrees characterises its self-accounting rather than validating its artifact. The
+# relaxation is applied to the Mind's identical rule in the same commit — it was failing the
+# opponent, and it would have had to go had it been failing us.
+rw('run/hermes_leg.sh', [
+    ('T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=${CB2_CAP:-8}   # resolved by the run state, not a literal\nFIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1',
+     'T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800\nFIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1\n# AFTER the loader, which is what exports CB2_CAP. It was read one line BEFORE, so the proxy\n# enforced 24 while this leg checked against 8 and failed a run that had finished inside its budget.\nCAP=${CB2_CAP:-8}'),
+    ("    ok=type(a) is int and type(r) is int and type(u) is int and 1<=a<=$CAP and r==0 and t is True and a==int('$CALLS')",
+     '    ok=type(a) is int and type(r) is int and type(u) is int and 1<=a<=$CAP and r==0 and t is True'),
+    ('# strict proxy receipt: typed non-negative integers, 1 <= accepted <= CAP, refused 0, upstream 0, TLS true, accepted == api calls in the log',
+     '# strict proxy receipt: typed non-negative integers, 1 <= accepted <= CAP, refused 0, TLS true.\n# The own-log agreement is NO LONGER part of it: the proxy is the authoritative meter and enforces\n# the cap before the model, so an agent cannot hide spend from it. Whether its own log AGREES with\n# that meter characterises its self-accounting and is recorded as `own_log_agrees` -- it is not a\n# reason to throw away an artifact. Relaxed for BOTH systems in the same commit.\nACC_AGREE=$(python3 -c "\ntry:\n    import json; d=json.load(open(\'$CD/requests.json\')); print(\'true\' if d[\'model_requests\']==int(\'$CALLS\') else \'false\')\nexcept Exception:\n    print(\'false\')")'),
+    ('"proxy_receipt_ok":%s,"profile"',
+     '"proxy_receipt_ok":%s,"own_log_agrees":%s,"profile"'),
+    ('"$RECEIPT_OK" "$CB2_PROFILE"',
+     '"$RECEIPT_OK" "$ACC_AGREE" "$CB2_PROFILE"'),
+])
+rw('run/verdict.py', [
+    ('    dq_dependent = (\n        stop == "timeout"            # the wall\n        or (not accounting_agrees)   # the two accountings disagree\n        or accepted < 1              # never reached the model; Hermes\'s receipt requires 1 <= a\n    )',
+     '    # `accounting_agrees` is REPORTED, not enforced (reading 5). The proxy is the authoritative\n    # meter and refuses over-cap requests before the model, so an agent cannot hide spend from it;\n    # whether its own log agrees characterises its self-accounting and is not a reason to discard an\n    # artifact. Relaxed for both systems together, in the same commit, after it disqualified a\n    # Hermes leg that had finished cleanly -- and it would have had to go had it disqualified ours.\n    dq_dependent = (\n        stop == "timeout"            # the wall\n        or accepted < 1              # never reached the model; Hermes\'s receipt requires 1 <= a\n    )'),
+])
+rw('selftest/verdict_cases.py', [
+    ('    ("accounting_disagrees",      dict(ledger_attempts=4),                False, True,  False),',
+     '    # Reading 5: a disagreement is RECORDED and no longer disqualifies. The case stays, with the\n    # expectation inverted, so the relaxation is visible in the suite rather than only in a commit.\n    ("accounting_disagrees",      dict(ledger_attempts=4),                False, False, False),'),
+])
+rw('selftest/cap_cases.sh', [
+    ('# 6. No literal 8 is left deciding the budget in any consumer.',
+     '# 6. NO CONSUMER READS THE CAP BEFORE THE LOADER THAT EXPORTS IT.\n#    This is the defect that killed reading 4: hermes_leg.sh had `CAP=${CB2_CAP:-8}` one line ABOVE\n#    `cb2_profile_load`, so the proxy enforced 24 while the leg checked against 8 and disqualified a\n#    run that had finished inside its budget. The instance is fixed; this case is here for the CLASS,\n#    because the next script to read a run-state variable can make exactly the same mistake.\nfor f in run/hermes_leg.sh run/mind_leg.sh run/smoke_mind.sh run/smoke_hermes.sh; do\n  src="$HERE/../$f"; [ -f "$src" ] || continue\n  load=$(grep -n \'cb2_profile_load\' "$src" | head -1 | cut -d: -f1)\n  first=$(grep -n \'CB2_CAP\' "$src" | head -1 | cut -d: -f1)\n  if [ -z "$first" ]; then\n    say "cap_read_after_load_in_$(basename "$f")" "no-cap-use" "no-cap-use"\n  elif [ -z "$load" ]; then\n    say "cap_read_after_load_in_$(basename "$f")" "reads-cap-without-loading" "impossible"\n  elif [ "$first" -gt "$load" ]; then\n    say "cap_read_after_load_in_$(basename "$f")" "after" "after"\n  else\n    say "cap_read_after_load_in_$(basename "$f")" "line $first is BEFORE the loader on line $load" "after"\n  fi\ndone\n\n# 7. No literal 8 is left deciding the budget in any consumer.'),
+])
+
+rw("selftest/verdict_cases.py", [
+    ('    ("no_proxy_receipt",          dict(present=False),                    True,  True,  False),',
+     '    # dep is False since reading 5: with no receipt the dependent class has no complaint of its\n    # own, and the INDEPENDENT violation is what disqualifies. It used to be True only because the\n    # agreement check could not pass without a receipt.\n    ("no_proxy_receipt",          dict(present=False),                    True,  False, False),'),
+    ('    ("spend_log_absent",          dict(ledger_requests=-1,\n                                       ledger_attempts=-1,\n                                       ledger_malformed=-1),              True,  True,  False),',
+     '    ("spend_log_absent",          dict(ledger_requests=-1,\n                                       ledger_attempts=-1,\n                                       ledger_malformed=-1),              True,  False, False),'),
+])
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

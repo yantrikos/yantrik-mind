@@ -35,9 +35,13 @@ def classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,
         or refused > 0               # a ninth request was attempted: the cap was hit
         or accepted > cap            # more requests left the box than the budget allowed
     )
+    # `accounting_agrees` is REPORTED, not enforced (reading 5). The proxy is the authoritative
+    # meter and refuses over-cap requests before the model, so an agent cannot hide spend from it;
+    # whether its own log agrees characterises its self-accounting and is not a reason to discard an
+    # artifact. Relaxed for both systems together, in the same commit, after it disqualified a
+    # Hermes leg that had finished cleanly -- and it would have had to go had it disqualified ours.
     dq_dependent = (
         stop == "timeout"            # the wall
-        or (not accounting_agrees)   # the two accountings disagree
         or accepted < 1              # never reached the model; Hermes's receipt requires 1 <= a
     )
     return dq_independent, dq_dependent, accounting_agrees

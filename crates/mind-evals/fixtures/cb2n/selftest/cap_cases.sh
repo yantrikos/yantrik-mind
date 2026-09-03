@@ -55,7 +55,27 @@ for bad in 0 -1 abc 3.5 ""; do
   say "cap_rejects_${bad:-empty}" "$(cat "$T/o5")" "$want"
 done
 
-# 6. No literal 8 is left deciding the budget in any consumer.
+# 6. NO CONSUMER READS THE CAP BEFORE THE LOADER THAT EXPORTS IT.
+#    This is the defect that killed reading 4: hermes_leg.sh had `CAP=${CB2_CAP:-8}` one line ABOVE
+#    `cb2_profile_load`, so the proxy enforced 24 while the leg checked against 8 and disqualified a
+#    run that had finished inside its budget. The instance is fixed; this case is here for the CLASS,
+#    because the next script to read a run-state variable can make exactly the same mistake.
+for f in run/hermes_leg.sh run/mind_leg.sh run/smoke_mind.sh run/smoke_hermes.sh; do
+  src="$HERE/../$f"; [ -f "$src" ] || continue
+  load=$(grep -n 'cb2_profile_load' "$src" | head -1 | cut -d: -f1)
+  first=$(grep -n 'CB2_CAP' "$src" | head -1 | cut -d: -f1)
+  if [ -z "$first" ]; then
+    say "cap_read_after_load_in_$(basename "$f")" "no-cap-use" "no-cap-use"
+  elif [ -z "$load" ]; then
+    say "cap_read_after_load_in_$(basename "$f")" "reads-cap-without-loading" "impossible"
+  elif [ "$first" -gt "$load" ]; then
+    say "cap_read_after_load_in_$(basename "$f")" "after" "after"
+  else
+    say "cap_read_after_load_in_$(basename "$f")" "line $first is BEFORE the loader on line $load" "after"
+  fi
+done
+
+# 7. No literal 8 is left deciding the budget in any consumer.
 F="$HERE/.."
 for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh; do
   n=$(grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' "$F/$f" 2>/dev/null || true)

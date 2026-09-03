@@ -5421,3 +5421,21 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Recovery | Restored from the frozen `/root/cb2/fixtures/docker/`, sha256 `30698554…aaac` — an **exact match to the pinned commit**, independently confirmed by my own earlier `fixtures.bak` copy. `cb2-hermes:latest` was untouched (it needs the archive only at build time). |
 | What made it survivable | The leg **failed closed and said why**. `hermes_leg.sh` verifies the archive against the pinned hash before doing anything and writes a typed disqualification. A harness that had merely built from whatever was there would have produced a leg on the wrong source, and nothing would have said so. |
 | The rule | An exclusion pattern written for top-level files does not protect the same pattern nested. Deploys must preserve `docker/` wholesale, since the one artefact that cannot be re-derived from the repo lives there. |
+
+## E.CB2-M — MEASURED: Hermes on gpt-oss-20b, the same model the Mind cannot be graded on
+| | Mind (oss20 #1 / #2) | **Hermes (oss20)** |
+| --- | --- | --- |
+| wall | 420 s / 471 s | **92 s** |
+| model requests | 3 / 4 | 4 |
+| completion tokens per request | ~3,600 | **772** |
+| **longest single model call** | **302,173 ms → 504** | **34,009 ms** |
+| upstream 5xx | 0 / 1 | **0** |
+| verdict | void false / **void true** | **void false, disqualified false** |
+
+| Field | Value |
+| --- | --- |
+| The answer | **Hermes handles it by never getting close.** 34 s against a 302 s deadline is 9× headroom. It built `index.html` + `server.py`, `rc 0`, `timed_out false`, `own_log_agrees true`, `model_ok true`. On the model where the Mind cannot produce a gradeable leg, Hermes produces one comfortably. |
+| The mechanism, in one number | **772 completion tokens per request against the Mind's ~3,600.** It is not that Hermes is cheaper — it sends **20,317 prompt tokens** to the Mind's ~4,700, because a tool loop resends schemas and history every turn. It is differently shaped, and that shape is deadline-safe by construction rather than by intent. |
+| So the asymmetry is real, not a harness artifact | This is the first leg-level evidence that the two systems differ in a way that *matters to whether a reading can happen at all*. It is not something to fix in the harness. |
+| Incidental | 16 of Hermes's 19 non-model requests are **404s** — it probes `/api/tags`, `/v1/props`, `/props`, `/version`, `/api/v1/models`, hunting for an Ollama or llama.cpp server that NVIDIA does not serve. Free (not model requests, not errors, no cap cost) but ~2.5 s of wasted round-trips per leg. Recorded, not chased. |
+| What it settles | The budget-from-deadline change stands, and per-file-always is dropped. Hermes shows the deadline is survivable without abandoning few-big-calls — the Mind simply needs its single call sized to the provider it is talking to, which on a fast model is no split at all. |

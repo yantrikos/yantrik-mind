@@ -4221,6 +4221,18 @@ pub(crate) fn publish_file_set(
     } else {
         Vec::new()
     };
+    // EVERYTHING WAS CUT is not the same failure as WROTE PROSE, and conflating them makes the
+    // recovery path unreachable exactly when it is needed. Measured: at a tight deadline the
+    // authoring generation produced one file, it was cut, it was correctly refused -- and the
+    // write then failed hard, killing the chain BEFORE the completion pass that exists to finish
+    // it. The set is empty either way; the difference is whether there is anything to recover.
+    if parsed.entries.is_empty() && !dropped.is_empty() {
+        return Ok((
+            String::new(),
+            Vec::new(),
+            dropped,
+        ));
+    }
     if parsed.entries.is_empty() {
         return Err(format!(
             "the build produced no files{}",
@@ -14628,6 +14640,15 @@ impl RecipeHost for MindRecipeHost {
                     return Ok("the review changed nothing — the first set stands".to_string());
                 }
                 match publish_file_set(project, stream, truncated) {
+                    // Nothing landed because everything was cut. The chain must CONTINUE so the
+                    // completion pass can finish what the budget could not, which is the whole
+                    // point of having one.
+                    Ok((url, written, unterminated)) if url.is_empty() && written.is_empty() => Ok(
+                        format!(
+                            "nothing was written: the generation hit its token limit and {} was cut",
+                            unterminated.join(", ")
+                        ),
+                    ),
                     Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
                         if !unterminated.is_empty() {

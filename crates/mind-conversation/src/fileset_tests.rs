@@ -763,6 +763,39 @@ mod review {
         );
     }
 
+    /// E.CB2-B2 — "everything was cut" must stay RECOVERABLE, and "wrote prose" must not.
+    ///
+    /// Found by forcing the failure instead of awaiting it: at a tight deadline the authoring
+    /// generation produced one file, it was cut, it was correctly refused — and the write then
+    /// failed hard, killing the chain BEFORE the completion pass that exists to finish it. The
+    /// recovery path was unreachable exactly when it was needed, and a clean-path gate could never
+    /// have shown that.
+    ///
+    /// The set is empty in both cases; the difference is whether there is anything to recover.
+    #[test]
+    fn an_all_cut_generation_is_recoverable_but_prose_still_fails() {
+        let dir = mind_types::scratch::dir("fset_allcut");
+        std::env::set_var("YM_WEB_DIR", dir.path());
+
+        // ONE file, cut. Nothing can be written, but the brief is still buildable.
+        let cut = "=== FILE: server.py
+print('this file was cut off mid";
+        let (url, written, reported) =
+            crate::publish_file_set("allcut", cut, true).expect("an all-cut set must NOT be an error");
+        assert!(url.is_empty() && written.is_empty(), "nothing may be written from a cut file");
+        assert_eq!(reported, vec!["server.py".to_string()], "and the caller must be told what was lost");
+
+        // Prose with no markers is a FORMAT failure, not a budget one — nothing to recover, and it
+        // must stay an error so "it ignored the format" is not silently retried forever.
+        let prose = "Sure! Here is your web application, I hope you like it.";
+        assert!(
+            crate::publish_file_set("prose", prose, true).is_err(),
+            "a model that ignored the format must still fail, cut or not"
+        );
+        // ...and the same prose without truncation is equally an error.
+        assert!(crate::publish_file_set("prose2", prose, false).is_err());
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

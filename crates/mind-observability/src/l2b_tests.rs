@@ -657,6 +657,43 @@ mod l2b_reader_tests {
         assert!(!out.contains("UNSEEN     : knock"), "{out}");
     }
 
+    /// The one separator the aligned label columns use.
+    fn american_colon() -> &'static str {
+        ": "
+    }
+
+    /// The report is READ BY A PERSON. A Rust string continuation that does not collapse leaves a
+    /// run of spaces mid-sentence; that shipped to staging in E.CFG2's notice this morning, was
+    /// fixed and guarded THERE, and I reintroduced it here the same day. So the guard travels with
+    /// the habit rather than with the one string that taught it.
+    #[test]
+    fn no_line_carries_a_run_of_whitespace_mid_sentence() {
+        let evs = vec![
+            shadow(wake(1), &["ics"], "ics", 10),
+            tick(Some(wake(1)), LoopId::Ics, None, 11),
+            tick(None, LoopId::Dmn, None, 12),
+        ];
+        for out in [
+            render_attention_shadow_at(&evs, 20),
+            render_attention_shadow_at(&[], 20),
+        ] {
+            for line in out.lines() {
+                // A padded label column ("scores     : ...") is deliberate alignment, so only the
+                // VALUE after the colon is prose. Everything else is checked whole.
+                let body = line.trim_start();
+                let prose = match body.split_once(american_colon()) {
+                    Some((label, value)) if label.chars().all(|c| c.is_ascii_alphabetic() || c == ' ') => value,
+                    _ => body,
+                };
+                assert!(
+                    !prose.contains("  "),
+                    "a run of spaces mid-sentence: {line:?}"
+                );
+                assert_eq!(line.trim_end(), line, "trailing whitespace: {line:?}");
+            }
+        }
+    }
+
     /// A window with no misses must not be reported as completeness. On an idle box a gate whose
     /// loops never came due cannot be missed, and saying "0 unseen" without that caveat would let
     /// a quiet night stand in for evidence the shadow is complete.

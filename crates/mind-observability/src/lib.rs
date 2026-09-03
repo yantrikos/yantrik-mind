@@ -6478,18 +6478,19 @@ pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> Stri
     if shadows.is_empty() && due.is_empty() {
         return format!(
             "No attention shadow rows and no wake-stamped loop rows in the last 24 h (as of ts_ms {now_ms}).
-             The shadow is OFF unless YM_ATTENTION_SHADOW is 1/on/true, and it writes a row only on a              wake where at least one in-scope opportunity was due.
-             {unpairable} loop row(s) in the window carry no wake (an older era, or the Telegram host,              which has no wake counter) and can never be paired."
+{}
+{}",
+            "The shadow is OFF unless YM_ATTENTION_SHADOW is 1/on/true, and it writes a row only on a wake where at least one in-scope opportunity was due.",
+            format!("{unpairable} loop row(s) in the window carry no wake (an older era, or the Telegram host, which has no wake counter) and can never be paired."),
         );
     }
 
     let mut out = String::new();
-    out.push_str(&format!(
-        "ATTENTION SHADOW — last 24 h (as of ts_ms {now_ms})
-         The shadow DECIDES NOTHING: every loop below ran or was held exactly as it would have          without it.
+    out.push_str(&format!("ATTENTION SHADOW — last 24 h (as of ts_ms {now_ms})
+"));
+    out.push_str("The shadow DECIDES NOTHING: every loop below ran or was held exactly as it would have without it.
 
-"
-    ));
+");
 
     // The denominator: every wake with loop activity, plus any wake that produced a shadow row.
     let wakes: BTreeSet<CycleId> = due.keys().chain(shadows.keys()).copied().collect();
@@ -6510,7 +6511,7 @@ pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> Stri
                 *unseen_total.entry((*l).clone()).or_default() += 1;
             }
         }
-        out.push_str(&format!("  wake {} 
+        out.push_str(&format!("  wake {}
 ", c.render()));
         match shadow {
             Some(e) => {
@@ -6563,7 +6564,7 @@ pub fn render_attention_shadow_at(events: &[DecisionEvent], now_ms: u64) -> Stri
         }
     }
     out.push_str(&format!(
-        "{unpairable} loop row(s) carry no wake and are excluded from every number above — an older          era, or the Telegram host, which has no wake counter. They are reported rather than          dropped: a denominator that quietly shrinks to the rows that happen to pair is how two          earlier readings were censored.
+        "{unpairable} loop row(s) carry no wake and are excluded from every number above (an older era, or the Telegram host, which has no wake counter). They are reported rather than dropped: a denominator that quietly shrinks to the rows that happen to pair is how two earlier readings were censored.
 "
     ));
     out

@@ -237,4 +237,93 @@ for f in "$HERE/../run/mind_leg.sh" "$HERE/../run/smoke_mind.sh"; do
 done
 say "no_pinned_port_lands_on_another_surfaces_default" "$clash" "0"
 
+# ── E.CB2-B: the PROVIDER DEADLINE is a run parameter too ──────────────────────────────────────
+# It decides how large a single generation the Mind will ask for, so a reading that changed it
+# mid-run would be measuring two different systems and calling them one. Same treatment as the cap
+# and the wall, including the child-process check -- the legs are separate processes, and a value
+# that never leaves this shell reaches none of them.
+
+# D1. UNSET is a real answer, not a missing one: an owned gateway declares no deadline, and 0 says
+#     so explicitly rather than defaulting to some number that would silently clamp it.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/d1.json"; unset CB2_PROVIDER_DEADLINE_S
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_PROVIDER_DEADLINE_S" || echo LOADFAIL ) > "$T/od1"
+say "no_declared_deadline_is_zero_not_a_default" "$(cat "$T/od1")" "0"
+say "and_zero_is_recorded_in_the_run_state"     "$(python3 -c "import json;print(json.load(open('$T/d1.json')).get('provider_deadline_s'))" 2>/dev/null)" "0"
+
+# D2. A declared deadline is carried.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/d2.json" CB2_PROVIDER_DEADLINE_S=302
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_PROVIDER_DEADLINE_S" || echo LOADFAIL ) > "$T/od2"
+say "a_declared_deadline_is_honoured" "$(cat "$T/od2")" "302"
+say "the_deadline_is_in_the_run_state"     "$(python3 -c "import json;print(json.load(open('$T/d2.json')).get('provider_deadline_s'))" 2>/dev/null)" "302"
+
+# D3. And a reading may not change it mid-run -- asserted on the MESSAGE, because the loader
+#     returns 1 for half a dozen unrelated reasons and a LOADED/REFUSED case would report success
+#     for any of them.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/d2.json"; unset CB2_PROVIDER_DEADLINE_S
+  out=$(cb2_profile_load "$T/fixtures" 2>&1) && echo LOADED || echo "$out" ) > "$T/od3"
+if grep -q 'was written against a provider deadline of 302s, not 0s' "$T/od3"; then RD=deadline-refusal; else RD="other: $(head -c 80 "$T/od3")"; fi
+say "a_reading_cannot_change_what_it_is_sized_against" "$RD" "deadline-refusal"
+
+# D4. The same deadline reloads, so the refusal is about the deadline and not about reloading.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/d2.json" CB2_PROVIDER_DEADLINE_S=302
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/od4"
+say "the_same_deadline_reloads" "$(cat "$T/od4")" "LOADED"
+
+# D5. Nonsense is refused rather than coerced -- a deadline of "abc" clamping a budget to something
+#     arbitrary is worse than a run that will not start.
+for bad in -1 abc 3.5; do
+  ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/d5-$RANDOM.json" CB2_PROVIDER_DEADLINE_S="$bad"
+    cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/od5"
+  say "deadline_rejects_$bad" "$(cat "$T/od5")" "REFUSED"
+done
+
+# D6. THE LEGS ARE SEPARATE PROCESSES. A deadline that never leaves this shell clamps nothing, and
+#     that is the hole an unexported CB2_WALL had -- found by mutation, not by reading.
+cp "$T/fixtures/profiles/synthetic.profile" "$T/fixtures/profiles/syndeadline.profile"
+echo 'CB2_PROVIDER_DEADLINE_S=302' >> "$T/fixtures/profiles/syndeadline.profile"
+( export CB2_PROFILE=syndeadline CB2_RUN_STATE="$T/d6.json"; unset CB2_PROVIDER_DEADLINE_S
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1
+  bash -c 'echo "${CB2_PROVIDER_DEADLINE_S:-unset}"' ) > "$T/od6"
+say "the_deadline_reaches_a_child_process" "$(cat "$T/od6")" "302"
+
+# ── EVERY LOADER-ASSIGNED EXPORT must reach a child, and this is the FOURTH time ───────────────
+#
+# A deleted `export` has now survived a mutation four times in one day: CB2_WALL, the recipe's
+# stop_reason hand-off, the provider deadline, and it would have survived again here. The reason is
+# always the same and always invisible: the loader sources the profile under `set -a`, so anything
+# a profile FILE declares is exported as a side effect, and a case that declares its value in the
+# profile proves nothing about the export line. Only a value the LOADER ITSELF assigns -- outside
+# that block -- depends on it.
+#
+# Two instance-shaped cases (W8, D7) were written and the same hole reappeared with a new variable,
+# so this closes the CLASS: intersect the names the loader ASSIGNS with the names it EXPORTS, and
+# require every one to arrive in a child. A variable added to either line tomorrow is covered by a
+# check that already exists -- the move `scan_literals.py` made against a file list.
+#
+# It is deliberately NOT "every exported name": the first version was, and it flagged CB2_KEY_FILE,
+# which real profiles supply and the synthetic one does not. That is a false alarm, and a guard
+# that cries wolf is one that gets deleted.
+assigned=$(grep -oE '^  CB2_[A-Z_]+=' "$HERE/../run/profile.sh" | tr -d ' =' | sort -u)
+# The watch list is derived from what the loader ASSIGNS, deliberately NOT from the export line:
+# a guard that reads the line under test cannot catch a name being REMOVED from it, because the
+# removal un-watches it. The first version intersected the two and caught a deleted export only by
+# accident, through the "watches at least four" assertion below.
+watched=$assigned
+n_watched=$(printf '%s' "$watched" | grep -c .)
+# A guard watching nothing passes forever; assert it has something to watch.
+if [ "$n_watched" -ge 4 ]; then say "the_export_guard_watches_the_loaders_own_values" "ok" "ok"
+else say "the_export_guard_watches_the_loaders_own_values" "only $n_watched" "ok"; fi
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/dx.json"
+  # Nothing pre-set: every value must come from the loader, so a name that would otherwise arrive
+  # via `set -a` from the profile file cannot mask a missing export.
+  unset CB2_CAP CB2_WALL CB2_PROVIDER_DEADLINE_S
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1
+  for v in $watched; do
+    got=$(bash -c "printf '%s' \"\${$v-MISSING}\"")
+    [ "$got" = "MISSING" ] && echo "$v"
+  done ) > "$T/odx"
+missing=$(grep -c . < "$T/odx")
+say "every_loader_assigned_export_reaches_a_child" "$missing" "0"
+[ "$missing" != "0" ] && sed 's/^/    never arrives: /' "$T/odx"
+
 exit $BAD

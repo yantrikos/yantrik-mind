@@ -5384,3 +5384,20 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What would make me stop | If both candidates void, the blocker is not the model and the question goes to Pranab as "the leg path fails against every NIM model tried", with the three exonerated hypotheses attached. |
 | Not being decided here | The void rule. It stays exactly as written. |
 | Prediction, recorded to be wrong | I expect 20b to be void-free and fast, and flash to void on overload. My last three predictions of provider behaviour have all been wrong, which is why this is written down rather than acted on. |
+
+## E.CB2-M — RESULT: it was never the model. NIM cuts a request at ~302 seconds.
+| Leg | Model | Outcome |
+| --- | --- | --- |
+| oss20 #1 | `openai/gpt-oss-20b` | `done`, 4 files, **void FALSE** — 3 POSTs, zero errors |
+| oss20 #2 | `openai/gpt-oss-20b` | `done`, 4 files, **void true** — one **504 at 302,173 ms** on an 11,074-byte request |
+| flash | `deepseek-v4-flash-0731` | `failed`, 0 files, **void true** — three **504s at 302,155 / 302,180 ms** on 6,172-byte requests |
+| pilot 1–3 | `deepseek-v4-pro-0813` | all three **void true** |
+
+| Field | Value |
+| --- | --- |
+| **The measurement** | Four 504s across **two different models** land in the band **302,155–302,180 ms — a spread of 25 milliseconds**. That is not load and not chance: it is a fixed server-side deadline of about 302 seconds. Successes on the same legs are far below it (33 s, 115 s, 149 s, 223 s). |
+| So the framing was wrong all day | This is not "deepseek is unreliable". Every NIM model tried hits the same edge, `gpt-oss-20b` included. The failure is a **structural incompatibility**: the Mind issues single generations that run past NIM's per-request deadline, and any 5xx voids the leg under the harness's rule. Choosing a different NIM model does not fix it — which is exactly why the preregistered criterion demanded **two consecutive** void-free legs. 20b passed one and failed the second. |
+| It also resolves the accounting puzzle | Flash's receipt shows the Mind reporting `max_ms 908,110` for a logical call while the proxy's longest single request was 302,180 ms. The two accountings measure different things, so the subtraction I did on leg 2 — which produced the bogus "~930 ms fast rejection" — could never have been valid. Second instance of the same lesson today. |
+| Why 45 probe calls missed it | Every probe finished under the edge; the longest was 320.8 s and **succeeded**, so the deadline is not a blanket wall-clock cap on all traffic. The Mind's requests are what reach past it. A probe I designed to mimic the leg was still not the leg — the fourth time today a measurement under one configuration failed to speak for another. |
+| Not proposed | Any change to the void rule. |
+| The decision this creates | It belongs to Pranab: the constraint he set was "free in NIM", and no free NIM model can currently produce a gradeable leg. Options are to shorten what the Mind asks for in one request (a product change with its own consequences), to use a provider without that deadline, or to accept that this line produces no reading. I have not chosen among them. |

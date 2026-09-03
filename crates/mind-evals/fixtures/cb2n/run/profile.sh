@@ -18,6 +18,15 @@ cb2_profile_load() {
   # nothing noticing. It now enters the run state beside profile, upstream and model, so every
   # consumer reads the same resolved value and a state written at one cap refuses a load at another.
   # Unset means 8, so the existing profiles are unchanged in effect.
+  # E.CB2-W: THE WALL IS ONE NUMBER, for the reason the cap is. It was a literal in three
+  # consumers (hermes_leg, mind_leg, mind_driver) which can drift apart with nothing noticing, and
+  # the deepseek reading needs a different one -- measured at 1,163 s of model time for 24 calls,
+  # 65% of the old 1800. Unset means 1800, so every earlier profile is unchanged in effect.
+  CB2_WALL=${CB2_WALL:-1800}
+  case "$CB2_WALL" in ''|*[!0-9]*) echo "profile: CB2_WALL must be a positive integer"; return 1;; esac
+  # The 60 s floor is not decoration: a wall of 30 parses, is positive, and voids every leg it
+  # governs -- a setting that turns a reading into a row of timeouts is a typo, not a budget.
+  [ "$CB2_WALL" -ge 60 ] || { echo "profile: CB2_WALL must be at least 60 seconds"; return 1; }
   CB2_CAP=${CB2_CAP:-8}
   case "$CB2_CAP" in ''|*[!0-9]*) echo "profile: CB2_CAP must be a positive integer"; return 1;; esac
   [ "$CB2_CAP" -ge 1 ] || { echo "profile: CB2_CAP must be at least 1"; return 1; }
@@ -31,10 +40,11 @@ cb2_profile_load() {
     local got
     got=$(python3 -c "import json,sys
 d=json.load(open('$state'))
-print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']), d.get('cap', 8), d.get('model_alive', 'unchecked'), d.get('model_probe_ms', -1))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
-    read -r sp su sm sip sat sips scap salive sprobe <<< "$got"
+print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']), d.get('cap', 8), d.get('model_alive', 'unchecked'), d.get('model_probe_ms', -1), d.get('wall', 1800))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
+    read -r sp su sm sip sat sips scap salive sprobe swall <<< "$got"
     [ "$sp" = "$name" ] && [ "$su" = "$CB2_UPSTREAM" ] && [ "$sm" = "$CB2_MODEL" ] || { echo "profile: run state $state belongs to profile '$sp' ($su, $sm), not '$name' — use another out dir"; return 1; }
     [ "$scap" = "$CB2_CAP" ] || { echo "profile: run state $state was written at cap $scap, not $CB2_CAP — a reading may not change its budget mid-run; use another out dir"; return 1; }
+    [ "$swall" = "$CB2_WALL" ] || { echo "profile: run state $state was written at wall ${swall}s, not ${CB2_WALL}s — a reading may not change its timeout mid-run; use another out dir"; return 1; }
     CB2_UPSTREAM_IP=$sip; CB2_RESOLVED_AT=$sat; CB2_UPSTREAM_IPS=${sips//|/ }
     # Inherited, not re-probed: one liveness answer per reading, and every leg reports the same one.
     CB2_MODEL_ALIVE=$salive; CB2_MODEL_PROBE_MS=$sprobe
@@ -86,11 +96,11 @@ print(v, r.replace(chr(10), ' ')[:200])
     fi
     mkdir -p "$(dirname "$state")" || return 1
     python3 -c "import json,sys
-json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP'), 'model_alive': '$CB2_MODEL_ALIVE', 'model_alive_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'model_probe_ms': int('$CB2_MODEL_PROBE_MS')}, open('$state.tmp', 'w'), indent=1)" || return 1
+json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP'), 'wall': int('$CB2_WALL'), 'model_alive': '$CB2_MODEL_ALIVE', 'model_alive_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'model_probe_ms': int('$CB2_MODEL_PROBE_MS')}, open('$state.tmp', 'w'), indent=1)" || return 1
     mv "$state.tmp" "$state" && chmod 444 "$state" || return 1
   fi
   CB2_RUN_STATE_SHA=$(sha256sum "$state" | cut -c1-64)
-  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_CAP CB2_MODEL_ALIVE CB2_MODEL_PROBE_MS CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
+  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_CAP CB2_WALL CB2_MODEL_ALIVE CB2_MODEL_PROBE_MS CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
 }
 # Key-leak COUNT over the given paths (files, recursive): grep takes the key file itself as its
 # pattern file; nothing here reads the key. Empty key file setting -> 0.

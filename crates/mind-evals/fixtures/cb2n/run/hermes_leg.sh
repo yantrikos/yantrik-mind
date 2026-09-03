@@ -5,7 +5,7 @@
 # mounts, 1800 s wall. Cleanup guaranteed by a trap. Receipt: counts only; raw stdout kept in a
 # separate file. Fails closed on a missing session id or log.
 set -u
-T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800
+T=$1; OUT=${2:-/root/cb2n/out}; WALL=${CB2_WALL:-1800}
 FIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1
 # AFTER the loader, which is what exports CB2_CAP. It was read one line BEFORE, so the proxy
 # enforced 24 while this leg checked against 8 and failed a run that had finished inside its budget.

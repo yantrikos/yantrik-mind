@@ -100,4 +100,80 @@ for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh run/verdict.py; do
   n=$(sed 's/#.*//' "$F/$f" 2>/dev/null | grep -iE 'cap' | grep -E '8' | grep -cvE 'CB2_CAP|argv' || true)
   say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"
 done
+
+
+# ── E.CB2-W: the WALL is one number, for the same reason ───────────────────────────────────────
+# It was a literal in three consumers (hermes_leg, mind_leg, mind_driver). Same three claims as the
+# cap, driven the same way — including asserting the REFUSAL MESSAGE, because `cb2_profile_load`
+# returns 1 for half a dozen unrelated reasons and a LOADED/REFUSED case would report "the wall
+# wall works" for any of them. That lesson was paid for once already, in case 3 above.
+
+# W1. Unset means 1800 — every profile written before today is unchanged in effect.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w1.json"; unset CB2_WALL
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_WALL" || echo LOADFAIL ) > "$T/ow1"
+say "wall_defaults_to_1800" "$(cat "$T/ow1")" "1800"
+say "the_default_wall_is_in_the_run_state"     "$(python3 -c "import json;print(json.load(open('$T/w1.json')).get('wall'))" 2>/dev/null)" "1800"
+
+# W2. A profile that names a wall gets it, and it lands in the run state.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w2.json" CB2_WALL=3600
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_WALL" || echo LOADFAIL ) > "$T/ow2"
+say "wall_3600_is_honoured" "$(cat "$T/ow2")" "3600"
+say "wall_is_in_the_run_state"     "$(python3 -c "import json;print(json.load(open('$T/w2.json')).get('wall'))" 2>/dev/null)" "3600"
+
+# W3. A reading may not change its own timeout mid-run, and the refusal says which number it is.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w2.json" CB2_WALL=1800
+  out=$(cb2_profile_load "$T/fixtures" 2>&1) && echo LOADED || echo "$out" ) > "$T/ow3"
+if grep -q 'was written at wall 3600s, not 1800s' "$T/ow3"; then RW3=wall-refusal; else RW3="other: $(head -c 80 "$T/ow3")"; fi
+say "a_reading_cannot_change_its_own_timeout" "$RW3" "wall-refusal"
+
+# W4. ...and the same wall reloads, so the refusal is about the wall and not about reloading.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w2.json" CB2_WALL=3600
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/ow4"
+say "the_same_wall_reloads" "$(cat "$T/ow4")" "LOADED"
+
+# W5. A wall that is not a plausible number of seconds is refused rather than coerced. 30 is the
+#     interesting one: it parses, it is positive, and a run at it would void every leg.
+for bad in 0 30 abc 3.5 ""; do
+  ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w5-$RANDOM.json" CB2_WALL="$bad"
+    cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/ow5"
+  want=REFUSED; [ -z "$bad" ] && want=LOADED
+  say "wall_rejects_${bad:-empty}" "$(cat "$T/ow5")" "$want"
+done
+
+# W6. And no consumer may keep a wall of its own. This is the case that would have caught the
+#     original defect: three files agreeing on 1800 by coincidence, with nothing checking.
+for f in hermes_leg.sh mind_leg.sh mind_driver.py; do
+  n=$(grep -cE 'WALL *= *1800' "$HERE/../run/$f")
+  say "no_second_wall_in_$f" "${n:-0}" "0"
+done
+# The driver must be HANDED the wall, not left to guess it.
+n=$(grep -c 'sys.argv\[4\]' "$HERE/../run/mind_driver.py")
+say "the_driver_takes_the_wall_as_an_argument" "${n:-0}" "1"
+n=$(grep -c '"$CB2_CAP" "$WALL"' "$HERE/../run/mind_leg.sh")
+say "the_leg_hands_it_down" "${n:-0}" "1"
+
+# W7. Found by mutation, and the FIRST version of this case did not catch it either: it exported
+#     CB2_WALL itself before calling the loader, so the child saw the test's own export and the
+#     loader's was redundant. The observable has to be a wall the loader alone could have exported,
+#     which is also how a real profile uses it — nim-ds sets CB2_WALL in the profile FILE, with a
+#     clean environment. Deleting the loader's `export` reaches every leg (separate processes),
+#     drops them all to 1800, and shows nothing in the output. This closes the same hole for the
+#     cap and the model, which had it too.
+cp "$T/fixtures/profiles/synthetic.profile" "$T/fixtures/profiles/synthwall.profile"
+echo 'CB2_WALL=3600' >> "$T/fixtures/profiles/synthwall.profile"
+( export CB2_PROFILE=synthwall CB2_RUN_STATE="$T/w7.json"; unset CB2_WALL CB2_CAP
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1
+  bash -c 'echo "${CB2_WALL:-unset}/${CB2_CAP:-unset}/${CB2_MODEL:-unset}"' ) > "$T/ow7"
+say "a_profile_set_wall_reaches_a_child_process" "$(cat "$T/ow7")" "3600/8/cap/test-model"
+
+# W8. And the DEFAULTED wall, which is the case the explicit export actually carries. Line 15 of
+#     the loader sources the profile under `set -a`, so anything the profile FILE sets is exported
+#     as a side effect — W7 passes even with the export deleted. A default is a plain assignment
+#     outside that block, so the export on the last line is the only thing that puts 1800 in front
+#     of a leg. That is the majority case: qwen, nim and nim-cap24 all name no wall.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/w8.json"; unset CB2_WALL CB2_CAP
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1
+  bash -c 'echo "${CB2_WALL:-unset}/${CB2_CAP:-unset}"' ) > "$T/ow8"
+say "a_defaulted_wall_reaches_a_child_process" "$(cat "$T/ow8")" "1800/8"
+
 exit $BAD

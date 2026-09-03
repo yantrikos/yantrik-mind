@@ -5181,3 +5181,39 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The fix, and why the wall rather than the cap | The cap exists to stop runaway SPEND; the wall exists to stop a HUNG leg. The model is free, so spend is not the binding constraint and the cap should stay at 24 — the budget being measured is unchanged. The wall should rise to accommodate a slower model: at 3600 s the same model time is 32%, leaving real room for the agent. |
 | How it should be done, following the harness's own precedent | The wall is currently a literal in the driver (`WALL = 1800`). The cap was once five literals and was made ONE number carried by the immutable run state, refused if a consumer disagrees. **The wall deserves the same treatment** — a per-profile value in the run state, not an edit that silently changes every profile including the ones readings 3–6 must stay reproducible against. |
 | Status | Preregistered as the next slice, not taken. Reading remains blocked, deliberately, on a number I now have rather than a risk I was guessing at. |
+
+## E.CB2-W — the wall becomes one number (PREREGISTERED)
+| Field | Value |
+| --- | --- |
+| Why now | The wall probe showed pro consuming 65% of an 1800 s wall in model time alone. The wall must move before a reading, and moving it by editing a literal would change every profile — including the ones readings 3–6 must stay reproducible against. |
+| The shape, taken from the cap | `WALL = 1800` is a literal in **three** consumers: `hermes_leg.sh`, `mind_leg.sh`, `mind_driver.py`. The cap was once five such literals and became ONE number carried by the immutable run state, validated at load, refused when a consumer disagrees. The wall gets the same treatment, for the same reason: a number duplicated in three places is not a parameter, it is three parameters that happen to agree today. |
+| Kill criteria | (1) The wall reaches every consumer **from the run state**, and no consumer carries a different default. (2) A run state written at one wall **refuses** a load at another, exactly as the cap does — a reading may not change its timeout mid-run. (3) `qwen`, `nim` and `nim-cap24` keep an **effective wall of 1800**, so readings 3–6 are unaffected; unset means 1800. (4) `nim-ds` sets **3600**, which puts the measured 1,163 s of model time at 32% and leaves the agent real room. (5) `rederive.sh` still proves the tree derives byte-exactly. (6) The self-test exercises it, as `cap_cases.sh` does for the cap. |
+| Kill criterion 3 is the one that protects the past | The whole value of this harness is that a finished reading can be re-derived. A wall change that silently altered the profiles those readings ran under would destroy that, and it would do it invisibly. |
+
+## E.CB2-W — RESULT: the wall is one number, and every claim was watched to fail
+| Field | Value |
+| --- | --- |
+| Outcome | **All six kill criteria met.** `cb2n re-derives exactly from cb2 + scratch/cb2n_patch.py`. Self-test 34/34; the whole cb2n suite 147 checks, 0 disagreements. Workspace 1765/1765. |
+| The numbers | `qwen`, `nim`, `nim-cap24` name no wall and keep an effective 1800 — the three profile files are **byte-identical to HEAD**, so readings 3–6 are untouched. `nim-ds` carries 3600, which puts its measured 1,163 s of model time at 32% of the wall instead of 65%. |
+| Mutation, six of six | Each claim was broken and watched to die: a consumer keeping its own literal; the driver guessing instead of being told; the leg not handing it down; the run state not carrying it; the mid-run refusal removed; a 30-second wall accepted. |
+| What mutation found that reading would not | **Deleting the loader's `export CB2_WALL` broke nothing.** The self-test loads the profile in its own shell, where an unexported variable is still visible — but the legs are separate processes, so unexported, the wall reaches none of them and every leg silently drops to 1800. The failure this slice exists to prevent, invisible in the output. |
+| And the first fix for it was also wrong | The case I wrote exported `CB2_WALL` itself before loading, so the child saw the *test's* export and the mutant survived again. The loader sources the profile FILE under `set -a`, so a profile-set wall is exported as a side effect; only a **defaulted** wall depends on that line — and defaulted is the majority case (three of four profiles). W8 drives that path. |
+| Two mutants that were not mutants | `sed` through two layers of shell quoting silently failed to match, and the harness reported SURVIVED for both. A mutation that does not apply is not a test result. The rule: **verify the mutant actually changed the file** before reading its verdict. |
+
+## E.FLAKE1 — the redaction flake was never a redaction failure
+| Field | Value |
+| --- | --- |
+| The open item | `coverage_oracle::the_extractor_lifts_live_queries_without_touching_them` failed roughly 1 run in 11 with `the RECORDER must not hold it`, unexplained, queued for Codex. |
+| Diagnosis | The assertion was `!file.contains("4471")` — a **four-decimal-digit** probe against the whole file. Every DecisionLog line carries a 64-char chain hash (hex, so digits qualify) and a nanosecond timestamp. Measured over real DecisionLog files: ~9.8 distinct 4-digit substrings **per line**, so a six-record log holds ~59 of the 10,000 possible — a specific probe collides about **once in 170 runs**. |
+| Why the recorder was never suspect on the evidence | `contains_secret` is a pure function with no env gate and no global state; it cannot redact intermittently. 60 isolated runs and 20 full-lib runs produced zero failures, which is what a ~0.6% coincidence rate looks like. |
+| Fix | Probe `4471-9302`, `4471930211228890`, `9302-1122-8890` — none can occur in hex or in a timestamp — keeping the "anywhere in the file" strength without the dice. **And assert the redaction HAPPENED**: `raw.contains(REDACTED_GOAL)`. The old assertion would have passed just as well if the recorder had written nothing at all. |
+| Watched to fail | With `contains_secret` short-circuited to false, the test dies on `the RECORDER must not hold it: 4471-9302`. |
+| The general lesson | A probe drawn from the payload must be **unforgeable by the machinery under test**. Four digits are not; a separator is. |
+
+## E.FLAKE2 — a one-second budget that only holds when the suite runs alone
+| Field | Value |
+| --- | --- |
+| Symptom | `lane_experiment::a_restart_reconciles_every_durable_lease_state` failed a full-workspace run with `could not delete …wages.ydbpack — the test's premise never held`; 12/12 green in isolation and 3/3 for its own suite. |
+| Cause | `must_delete` already retried — 50 × 20 ms = **one second**. That holds for one suite and not for `cargo test --workspace`, where 17 test binaries compete for the disk and Windows keeps the mapped file open past the budget. |
+| Fix | Back off to ~10 s, and name the **OS reason** in the panic — including Windows's deferred delete, where `remove_file` succeeds and the path keeps resolving until the last handle closes, which the old loop counted as a plain failure. A passing run still costs one attempt, so only the case that would otherwise fail pays the ceiling. |
+| Why both of these matter beyond themselves | Two full-suite reruns were spent on failures that had nothing to do with the change under test. A flaky gate does not just cost time — it trains you to wave red suites through, which is the failure mode that lets a real one past. |

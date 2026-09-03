@@ -37,3 +37,7 @@ CB2_MIND_LANE=roles
 CB2_MIND_PROVIDER=nim
 CB2_MIND_KEY_ENV=NVIDIA_API_KEY
 CB2_CAP=24
+# Measured, not guessed: 24 sequential 600-token calls on this model took 1,163 s -- 65% of the old
+# 1800 s wall in model time alone, before any agent or tool time, with a p90 of 80 s and a 110 s
+# tail. At 3600 s that same model time is 32%.
+CB2_WALL=3600

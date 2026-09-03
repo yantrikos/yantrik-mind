@@ -5,7 +5,7 @@
 # off. The driver runs INSIDE the container (console API is loopback there). Cleanup by trap;
 # the state volume is removed after a counts-only teardown receipt.
 set -u
-T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800
+T=$1; OUT=${2:-/root/cb2n/out}; WALL=${CB2_WALL:-1800}
 FIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1
 cb2_rerun_prepare mind "$T" "$OUT" || exit 2
 A="$OUT/artifacts/mind_$T"; R="$OUT/receipts"; CD="$OUT/proxy/mind_$T"; ST="$OUT/state/mind_$T"
@@ -84,7 +84,7 @@ if [ "$CB2_MIND_LANE" = roles ]; then
     printf '{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"routed_kind":null,"disqualified":true,"void":false}\n' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5
   fi
 fi
-timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count "$CB2_CAP" > "$OUT/raw/mind_${T}_driver.txt" 2>&1
+timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count "$CB2_CAP" "$WALL" > "$OUT/raw/mind_${T}_driver.txt" 2>&1
 RC=$?
 docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1
 ENVLEAK=$(cb2_env_leak_hits "$NAME")

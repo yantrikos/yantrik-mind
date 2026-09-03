@@ -14,7 +14,11 @@ from verdict import classify as _classify
 # literal here is a fifth place the number can drift; a missing argument means the caller is old
 # and 8 is what every caller meant before the cap became configurable.
 T = sys.argv[1]; COUNT_DIR = sys.argv[2]
-BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800
+BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state")
+# E.CB2-W: argv[4] is the run state's wall, handed down like the cap. A literal here would be a
+# second wall that agrees with the loader's only by luck; a missing argument means an older caller,
+# and 1800 is what every caller meant before the wall became configurable.
+WALL = int(sys.argv[4]) if len(sys.argv) > 4 else 1800
 CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verdict import reported_project

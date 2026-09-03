@@ -16,6 +16,8 @@ from verdict import classify as _classify
 T = sys.argv[1]; COUNT_DIR = sys.argv[2]
 BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800
 CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from verdict import reported_project
 FIX = pathlib.Path("/fixtures")
 cj = http.cookiejar.CookieJar(); op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
@@ -114,8 +116,41 @@ art = STATE / "artifact"; art.mkdir(exist_ok=True)
 (art / "RESULT.md").write_text(result, encoding="utf-8")
 after = snapshot()
 added = [p for p, h in after.items() if before.get(p) != h]   # created OR content-changed since the baseline
+
+
+def project_root():
+    """The directory the mind says it BUILT, or None. The NAMING rule is `reported_project` in
+    verdict.py, where the self-test drives it — a rule that decides what gets graded does not live
+    in a file no test can import.
+
+    A reported project whose directory is missing or empty is an ERROR, not a reason to quietly
+    capture the web root instead: that fallback would hide a build that produced nothing behind
+    whatever else happened to be lying around.
+    """
+    name = reported_project(result)
+    if not name:
+        return None
+    root = STATE / "public" / name
+    if not root.is_dir() or not any(p.is_file() for p in root.rglob("*")):
+        raise SystemExit(
+            f"the mind reported the project {name!r} and its directory is missing or empty"
+        )
+    return root
+
+
+proj = project_root()
+capture_root = proj if proj is not None else (STATE / "public")
+captured_from = str(capture_root.relative_to(STATE / "public")) if proj is not None else "."
 for p in added:
-    dst = art / p.relative_to(STATE / "public"); dst.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(p, dst)
+    try:
+        rel = p.relative_to(capture_root)
+    except ValueError:
+        # Outside the captured project: a page published by an earlier step, or state the build did
+        # not produce. Not part of THIS deliverable.
+        continue
+    dst = art / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(p, dst)
 # Proxy FIRST, own log SECOND. Both are read after the job ended, but a request accepted at the
 # proxy writes its ledger row only when it completes, so reading the log last narrows the window in
 # which the two disagree for a reason that is not misconduct.
@@ -130,6 +165,8 @@ dq_ind, dq_dep, accounting_agrees = _classify(
 receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
            "stop_reason": stop or "",
            "files_added": len(added), "result_bytes": len(result.encode("utf-8")), "routed_kind": routed_kind,
+           # WHICH root was graded, so the two cases are distinguishable from the receipt alone.
+           "captured_from": captured_from,
            "ledger_requests": req, "ledger_attempts": att, "ledger_malformed": bad,
            "proxy_receipt_present": present, "proxy_accepted": accepted, "proxy_refused": refused,
            "proxy_attempted": (accepted + refused) if present else -1,

@@ -113,3 +113,30 @@ def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap):
         and refused >= 0
     )
     return typed and 1 <= accepted <= cap and tls_verified is True
+
+
+def reported_project(result_text):
+    """The project directory a system SAYS it built, from its own result, or None.
+
+    Hermes works in /work and its artifact IS /work — project root and graded root are the same
+    directory by construction. A Mind build writes into its own project directory, so this is what
+    gives both systems the same relationship between where the agent built and what is graded.
+
+    The name comes from the system's own report, never from the brief and never guessed. A URL
+    ending in a FILE (the page lane's `.../index.html`) is not a project: that lane's deliverable is
+    the web root, exactly as before.
+    """
+    import re
+
+    m = re.search(r"https?://[^\s]+?/([A-Za-z0-9._-]+)/(?:\s|$)", result_text or "")
+    if not m:
+        return None
+    name = m.group(1)
+    # A NAME OF DOTS IS NOT A NAME. The charset allows `.` so that `v1.2` is a legal project, and a
+    # URL of `.../../` therefore extracted `..` — which the caller would have joined onto the web
+    # directory, capturing its PARENT as the artifact: the whole state directory, database included.
+    # The self-test case written to prove the charset stopped traversal is what found this; the
+    # charset stops a separator INSIDE a name and never stopped the name being a traversal itself.
+    if name.strip(".") == "":
+        return None
+    return name

@@ -6,7 +6,7 @@ fails here instead of quietly letting a leg through. The clean case is first and
 suite whose only cases are failures cannot notice a rule that rejects everything."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))
-from verdict import classify, host_independent, receipt_shape_ok
+from verdict import classify, host_independent, receipt_shape_ok, reported_project
 
 # EVERY CASE RUNS AT BOTH CAPS. The rule used to import a module-level `CAP = 8`, so it was only
 # ever exercised at eight while the `nim-cap24` reading enforces twenty-four — a self-test that
@@ -79,6 +79,38 @@ for name, over, want in HOST_CASES:
     if not ok:
         bad = 1
     print(f"{name}: {'agree' if ok else 'DISAGREE'} got=({violated},{reasons}) want=({bool(want)},{want})")
+
+# ── which root gets graded ────────────────────────────────────────────────────────────────────
+# The rule that decides what the checker reads. It lived inside the driver, which no test can
+# import; a rule that decides a score does not get to live somewhere unreachable.
+PROJECT_CASES = [
+    # The result a build actually emits. The URL ends in a directory, and the newline after it
+    # is what the pattern needs; a space is the same signal and keeps this table free of escapes.
+    ("a build reports its project",
+     "built - http://127.0.0.1:8099/cb2-t1-a1b2c3/ then more text", "cb2-t1-a1b2c3"),
+    # The PAGE lane's URL ends in a file, so it is not a project and the web root stays graded.
+    ("a published page is not a project",
+     "it is live - http://127.0.0.1:8099/index.html and more", None),
+    ("a bare project url at the end of the text", "http://127.0.0.1:8099/proj-9/", "proj-9"),
+    ("a failure message names nothing", "I could not finish the build: no files", None),
+    ("no result at all", "", None),
+    # A NAME OF DOTS IS NOT A NAME. This case was written believing the charset stopped traversal;
+    # it does not — it stops a separator inside a name, and `..` is a legal name under it. The URL
+    # below returned `..`, which the driver would have joined onto the web directory and captured
+    # its PARENT: the whole state directory, database included. Found here, before any run.
+    ("a dot-only name is refused", "http://127.0.0.1:8099/../ ", None),
+    ("so is a single dot", "http://127.0.0.1:8099/./ ", None),
+    # A real segment after a traversal is a legal NAME and cannot escape: it has no separator, so
+    # joining it onto the web directory stays inside it. It will simply not exist, and a reported
+    # project whose directory is missing is an error rather than a silent fallback.
+    ("a real segment after a traversal is just a name", "http://127.0.0.1:8099/../etc/ ", "etc"),
+]
+for name, result, want in PROJECT_CASES:
+    got = reported_project(result)
+    ok = got == want
+    if not ok:
+        bad = 1
+    print(f"project/{name}: {'agree' if ok else 'DISAGREE'} got={got!r} want={want!r}")
 
 # ── the proxy receipt's SHAPE, at both caps ────────────────────────────────────────────────────
 # This rule lived inside each leg's heredoc where no case could reach it, and review 7 found it

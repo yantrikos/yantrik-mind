@@ -12,16 +12,23 @@ else
   LANE=(-e YM_PRIMARY_BRAIN="$SPEC" -e "YM_PROVIDER_BASE_URL_$PU=http://172.30.0.7:8080/v1" -e "$CB2_MIND_KEY_ENV=none" -e YM_PRIVATE_PROVIDERS= -e YM_HOUSEHOLD_PROVIDERS="$CB2_MIND_PROVIDER,chain"
         -e YM_ROLE_CHAT="$SPEC" -e YM_ROLE_RESEARCH="$SPEC" -e YM_ROLE_UTIL="$SPEC" -e YM_ROLE_VERIFY="$SPEC" -e YM_ROLE_CODE="$SPEC" -e YM_ROLE_CONSOLIDATE="$SPEC"); BOOTLINE="cloud provider '$SPEC'"
 fi
-# The smoke and the leg used to share only the VARIABLE NAME, and a comment here claimed that made
-# it impossible to smoke a different file than the leg being cleared. It did not: nothing recorded
-# which file was smoked. The sha is written beside the run state, and mind_leg.sh refuses a binary
-# that disagrees with it — so the coupling is now a check rather than a claim.
+# The smoke and the leg used to share only the VARIABLE NAME while a comment claimed that made it
+# impossible to smoke a different file than the leg being cleared. The first fix wrote the sha only
+# when CB2_OUT happened to be set — which no caller exports before a smoke — so it recorded nothing
+# and the leg treated the absent file as a pass: the check still failed OPEN and the comment still
+# overstated it. Now the path comes from the run state (the one thing every caller must set), the
+# smoke FAILS if it cannot write it, and the leg refuses a binary that disagrees.
+#
+# What it still does NOT do, stated so that this comment is true: a leg run with no smoke at all
+# finds no file and proceeds. The check couples a smoke to the leg it clears; it does not require
+# a smoke to have happened.
 BIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}
 [ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 1; }
 BSHA=$(sha256sum "$BIN" | cut -c1-64)
-[ -n "${CB2_OUT:-}" ] && printf '%s
-' "$BSHA" > "$CB2_OUT/smoked_binary.sha256"
-echo "mind smoke binary: $BSHA"
+SHAFILE="$(dirname "$CB2_RUN_STATE")/smoked_binary.sha256"
+printf '%s
+' "$BSHA" > "$SHAFILE" || { echo "refusing: cannot record the smoked binary at $SHAFILE"; exit 1; }
+echo "mind smoke binary: $BSHA (recorded at $SHAFILE)"
 trap 'docker rm -f cb2-mind-smoke >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down cb2proxy-mind-smoke >/dev/null 2>&1; rm -rf "$OUT"' EXIT
 mkdir -p "$OUT/state/public" "$OUT/count"; chown -R 10003:10003 "$OUT/state"
 bash "$FIX/run/proxy.sh" up cb2proxy-mind-smoke "$OUT/count" 172.30.0.7 >/dev/null || { echo "proxy not ready"; exit 1; }

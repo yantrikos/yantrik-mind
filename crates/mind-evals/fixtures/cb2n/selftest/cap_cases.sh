@@ -90,7 +90,14 @@ for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh run/verdict.py; do
   # the sentence explaining that its `CAP = 8` had been REMOVED — a scan failing on its own
   # changelog. Everything from the first `#` is stripped before matching (both shell and Python use
   # it), so only a literal that could still decide a budget counts.
-  n=$(sed 's/#.*//' "$F/$f" 2>/dev/null | grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' || true)
+  # WHAT THIS CASE ACTUALLY PROTECTS, restated because its first two versions got it wrong. The
+  # old regex matched only a bare CAP=8, and every budget literal actually present is written as a
+  # DEFAULT for the unset case, so changing the driver's `else 8` to `else 0` did not move the
+  # observable - a check that does not exist. But a default is LEGITIMATE and deliberate: unset
+  # means 8, which is what keeps the existing profiles unchanged in effect. The rule worth
+  # enforcing is narrower: a line may carry an 8 only as the FALLBACK of the run-state value. So
+  # flag a cap-context 8 on a line mentioning NEITHER CB2_CAP nor argv - a literal deciding alone.
+  n=$(sed 's/#.*//' "$F/$f" 2>/dev/null | grep -iE 'cap' | grep -E '8' | grep -cvE 'CB2_CAP|argv' || true)
   say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"
 done
 exit $BAD

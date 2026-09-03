@@ -126,7 +126,7 @@ accepted, refused, disconnects, present = proxy_count(); req, att, bad = spend_r
 # carry several. Dependent, exactly as `a == CALLS` is dependent on the Hermes side.
 dq_ind, dq_dep, accounting_agrees = _classify(
     present=present, ledger_requests=req, ledger_attempts=att, ledger_malformed=bad,
-    accepted=accepted, refused=refused, stop=stop, cap=CAP)
+    accepted=accepted, stop=stop, cap=CAP)
 receipt = {"system": "mind", "task": T, "started": started, "finished": finished, "wall_s": wall, "status": status,
            "stop_reason": stop or "",
            "files_added": len(added), "result_bytes": len(result.encode("utf-8")), "routed_kind": routed_kind,
@@ -140,6 +140,10 @@ receipt = {"system": "mind", "task": T, "started": started, "finished": finished
            # The driver's own reasons, split; the rule itself is verdict.classify above.
            "dq_independent": dq_ind,
            "dq_dependent": dq_dep,
-           # `stop is not None` stays: a cap stop or a wall stop ends the leg whatever else holds.
-           "disqualified": dq_ind or dq_dep or stop is not None}
+           # NOT `or stop is not None`. That still disqualified on a cap stop — the exact rule
+           # `classify` was refactored to drop — while the comment beside it defended doing so. The
+           # wall is already `dq_dep` via `stop == "timeout"`. The parent overwrites this field, so
+           # the stale version survived only in /state/receipt.json and the driver log: two
+           # artifacts a reader takes for the driver's verdict.
+           "disqualified": dq_ind or dq_dep}
 (STATE / "receipt.json").write_text(json.dumps(receipt, indent=1)); print(json.dumps(receipt))

@@ -46,6 +46,13 @@ if [ -z "$SID" ] || [ ! -f "$LOG" ]; then VALID=false; CALLS=-1; TOKS="absent"; 
   TOKS=$(grep "\[$SID\] agent.conversation_loop: API call #" "$LOG" | sed -E 's/.*in=([0-9]+) out=([0-9]+).*/\1 \2/' | awk '{i+=$1;o+=$2} END {print i" "o}')
 fi
 if [ -f "$CD/requests.json" ] && read -r PACC PREF PTLS PUPE <<< "$(python3 -c "import json;d=json.load(open('$CD/requests.json'));print(int(d['model_requests']), int(d['refused_over_cap']), d.get('tls_hostname_verified'), int(d['upstream_errors']))" 2>/dev/null)"; then PPRESENT=true; else PACC=-1; PREF=-1; PTLS=absent; PUPE=-1; PPRESENT=false; fi
+# RECORDED, NOT ENFORCED. This is a regex over a whole transcript, so it counts MENTIONS: a curl
+# example in a generated README, an HTTP error page echoing a prompt, a model reasoning aloud
+# about whether wget exists. It fired on `curl -s http://0.0.0.0:8123/` — an agent fetching its
+# own local server to verify a page it had just built, on a task that ASKS for a runnable server.
+# The act it names is impossible here (internal network, no DNS, the proxy forwards only to the
+# run state's upstream) and a real attempt would appear as a blocked connection, which the
+# network layer and the proxy counters already record. Keep the number; stop deciding with it.
 DL=$(grep -ciE "pip install|pip3 install|npm install|npm i |apt-get|apt install|curl |wget " "$RAW/hermes_${T}_stdout.txt")
 LEAK=$(( ${ENVLEAK:-0} + $(cb2_key_leak_hits "$W" "$H" "$RAW/hermes_${T}_stdout.txt") ))
 read -r RC_VALID PHTTP PTRANS PCLIENT PDISC RC_ACC RC_REF MODEL_OK NMODELS UP UC UN <<< "$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL" | sed -E 's/[a-z_]+=//g')"
@@ -60,9 +67,13 @@ IMG=$(docker image inspect cb2-hermes --format '{{.Id}}')
 # on its own: a refusal or an over-cap count is the agent exceeding its budget whatever the
 # upstream was doing at the time. DEPENDENT ones (exit code/wall, receipt shape, model identity)
 # only when the leg is not void.
-DQ_IND=false; [ "$VALID" = false ] && DQ_IND=true; [ "$CALLS" -gt $CAP ] && DQ_IND=true; [ "$DL" -gt 0 ] && DQ_IND=true; [ "$LEAK" != 0 ] && DQ_IND=true
+# A CAP REFUSAL IS NOT A VIOLATION, on this side either. It was removed from the Mind's rule and
+# left here, which made the asymmetry point the other way — at the opponent — one commit after
+# the commit that claimed to remove it. `DL` is likewise RECORDED and no longer disqualifies:
+# see the note above ACC_AGREE for why a transcript scan is not evidence of a download.
+DQ_IND=false; [ "$VALID" = false ] && DQ_IND=true; [ "$CALLS" -gt $CAP ] && DQ_IND=true; [ "$LEAK" != 0 ] && DQ_IND=true
 [ "$RC_VALID" = true ] || DQ_IND=true          # missing/malformed proxy receipt: independent, never a void
-if [ "$RC_VALID" = true ]; then { [ "$RC_REF" -gt 0 ] || [ "$RC_ACC" -gt $CAP ]; } && DQ_IND=true; fi
+if [ "$RC_VALID" = true ]; then [ "$RC_ACC" -gt $CAP ] && DQ_IND=true; fi   # exceeding the cap, not reaching it
 DQ_DEP=false; [ $RC -ne 0 ] && DQ_DEP=true; [ "$MODEL_OK" = true ] || DQ_DEP=true
 # strict proxy receipt: typed non-negative integers, 1 <= accepted <= CAP, refused 0, TLS true.
 # The own-log agreement is NO LONGER part of it: the proxy is the authoritative meter and enforces
@@ -75,9 +86,13 @@ try:
 except Exception:
     print('false')")
 RECEIPT_OK=$(python3 -c "import json,sys
+sys.path.insert(0, '$FIX/run')
+from verdict import receipt_shape_ok
 try:
-    d=json.load(open('$CD/requests.json')); a=d['model_requests']; r=d['refused_over_cap']; u=d['upstream_errors']; t=d.get('tls_hostname_verified')
-    ok=type(a) is int and type(r) is int and type(u) is int and 1<=a<=$CAP and r==0 and t is True
+    d=json.load(open('$CD/requests.json'))
+    ok=receipt_shape_ok(accepted=d['model_requests'], refused=d['refused_over_cap'],
+                        upstream_errors=d['upstream_errors'],
+                        tls_verified=d.get('tls_hostname_verified'), cap=$CAP)
 except Exception:
     ok=False
 print('true' if ok else 'false')")

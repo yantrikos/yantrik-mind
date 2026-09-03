@@ -5423,10 +5423,18 @@ impl AttentionShadow {
         } else {
             "ranked".to_string()
         });
+        // The filled IDS, not just how many. The doc on `filled` says a hole in coverage is visible
+        // in the row itself; with only a count it was not — two wakes differing in WHICH slot was
+        // missed produced byte-identical events, and which slot it was still needed the join.
         ev.outcome = Some(format!(
-            "buildable:{} filled:{}",
+            "buildable:{} filled:{} filled_ids:{}",
             self.buildable.len(),
-            self.filled.len()
+            self.filled.len(),
+            self.filled
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
         // The POLICY, not the loop-ledger schema version. A shadow row is not a loop row: it is
         // never read by `loop_ledger` (which filters `kind == "loop_tick"`), so a v6 stamp on it
@@ -5892,11 +5900,15 @@ impl CycleId {
 
 /// The wire version a row carrying a wake identity declares.
 ///
-/// The `attention_shadow` row writes it (in `policy[0]`; its `evaluator_id` carries the POLICY, so
-/// a reader can tell which arithmetic produced the numbers and which shape they are stored in).
-/// NO LOOP ROW carries it yet: `LOOP_LEDGER_VERSION` below is still what every `loop_tick` row
-/// declares, and L2-B step 2 is the slice that changes that. An earlier version of this comment
-/// said "NOTHING WRITES IT YET" and shipped in the same commit as the writer — review caught it.
+/// NO ROW CARRIES IT YET. `AttentionShadow::to_event` WOULD place it in `policy[0]` — and its
+/// `evaluator_id` carries the POLICY, so a reader can tell which arithmetic produced the numbers
+/// and which shape they are stored in — but nothing in the mind calls `attention_shadow()`, which
+/// is the whole point of L2-B step 1 and is stated at the top of that module. Every `loop_tick`
+/// row still declares `LOOP_LEDGER_VERSION` below; L2-B step 2 is the slice that changes that.
+///
+/// Two corrections deep, recorded because the second was worse than the first: the original said
+/// "NOTHING WRITES IT YET" and was TRUE; review 6 read `to_event` and replaced it with a claim that
+/// the row is written, which review 7 then caught by grepping for a caller and finding none.
 ///
 /// Its rule: a v5 row is never paired with a v6 row, because only a v6 row knows which wake it
 /// belongs to. `loop_ledger` enforces that today by refusing any label but v5.

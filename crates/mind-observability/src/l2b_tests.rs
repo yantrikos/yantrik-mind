@@ -166,6 +166,15 @@ fn an_unfilled_slot_is_not_the_same_as_a_slot_that_is_not_due() {
         "a wake that evaluated two gates is not a wake that evaluated one"
     );
     assert_ne!(a.to_event(NOW).outcome, b.to_event(NOW).outcome);
+    // ...and the EVENT names which slots were filled, so a reader finds the hole without the join.
+    assert_eq!(
+        a.to_event(NOW).outcome.as_deref(),
+        Some("buildable:1 filled:2 filled_ids:resolve,member-beat")
+    );
+    assert_eq!(
+        b.to_event(NOW).outcome.as_deref(),
+        Some("buildable:1 filled:1 filled_ids:resolve")
+    );
 }
 
 #[test]
@@ -228,7 +237,10 @@ fn exactly_one_row_per_wake_and_it_carries_that_wakes_identity() {
     assert_eq!(ev.lane.as_deref(), Some("shadow"));
     assert_eq!(ev.chosen.as_deref(), Some("resolve"));
     assert_eq!(ev.verdict.as_deref(), Some("ranked"));
-    assert_eq!(ev.outcome.as_deref(), Some("buildable:1 filled:1"));
+    assert_eq!(
+        ev.outcome.as_deref(),
+        Some("buildable:1 filled:1 filled_ids:resolve")
+    );
     // Counts and ids only. A shadow row that carried text would be a second write in disguise.
     assert!(ev.subject.is_none());
     assert!(ev.purpose.is_none());
@@ -432,14 +444,26 @@ fn the_stored_row_carries_enough_to_rebuild_the_ranking() {
     // equal — guaranteed by construction, and it would have passed with the whole ranking feature
     // deleted. What matters is that the ROW a reader finds in the ledger contains the ranking, so a
     // second reader can rebuild it without ever seeing the signals.
+    // The PAIR MATTERS. The first version used Resolve and Family, whose scope order and score
+    // order already agree, so the closing "the stored order must be the ranked order" assertion
+    // held with the ranking deleted — a vacuous assertion inside the test written to replace a
+    // vacuous test. Ask (scope index 3, score 262) and HomeWatch (index 5, score 924) disagree.
     let s = WakeSignals {
-        family: Some(TimerChatQuiet {
+        ask: Some(AskGate {
             due: true,
-            timer: timer(3_600_000, 1_800_000),
+            enabled: true,
+            spoke: true,
+            ask_ok: true,
+            timer: timer(60_000, 60_000),
+            receptive: true,
+        }),
+        home_watch: Some(TimerChatQuiet {
+            due: true,
+            timer: timer(60_000, 60_000),
             presence: here(),
             enabled: true,
         }),
-        ..one_due(60_000)
+        ..Default::default()
     };
     let row: AttentionShadow = attention_shadow(&s, cycle(), NOW).expect("a row");
     let ev = row.to_event(NOW);

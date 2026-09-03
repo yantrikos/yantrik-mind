@@ -20,10 +20,14 @@ the proxy receipt's business, upstream, in `receipt_checks.py`.
 
 
 def classify(*, present, ledger_requests, ledger_attempts, ledger_malformed,
-             accepted, refused, stop, cap):
+             accepted, stop, cap):
     """present: the proxy receipt was readable. ledger_*: the mind's own spend log (-1 = the log
-    was absent, which is not a count). accepted/refused: the proxy's counts. stop: None, "cap" or
-    "timeout". Returns (dq_independent, dq_dependent, accounting_agrees)."""
+    was absent, which is not a count). accepted: the proxy's count. stop: None, "cap" or "timeout".
+    Returns (dq_independent, dq_dependent, accounting_agrees).
+
+    There is deliberately NO `refused` parameter. It used to be one and was unused, which made the
+    self-test's `cap_refusal` case inert: it passed at both caps while the real leg disqualified the
+    run through `receipt_shape_ok` below. A parameter nothing reads is a case nothing tests."""
     log_missing = ledger_requests < 0 or ledger_attempts < 0
 
     # One attempt is one HTTP request to the provider; one `inference_call` row may carry several,
@@ -82,6 +86,30 @@ def host_independent(*, capture_ok, symlinks, specials, key_leak_hits, receipt_v
         reasons.append("key_leak")
     if not receipt_valid:
         reasons.append("untyped_receipt")  # never a void: a missing receipt is not evidence of one
-    if downloads > 0:
-        reasons.append("download_or_install")
+    # `downloads` is RECORDED, not enforced — see the note in hermes_leg.sh. The scan counts
+    # MENTIONS of a fetch, it fired on an agent verifying its own local server over loopback, and
+    # the act it names is prevented by the network rather than by this rule. The count still rides
+    # in the receipt; it just no longer decides anything.
+    _ = downloads
     return bool(reasons), reasons
+
+
+def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap):
+    """Is the proxy receipt the shape a valid leg produces?
+
+    This lived as one expression inside each leg's heredoc — the third rule in this harness to be
+    written where no test could reach it, and the third to be wrong there. It is what review 7
+    found still enforcing `refused == 0` after the independent rule had been removed: a cap 429
+    never touches the upstream, so the leg was not void and the DEPENDENT class disqualified it
+    anyway, by a path the case table could not see.
+
+    `refused` is TYPED and RECORDED and does not decide: reaching the cap is the budget working.
+    Exceeding it (`accepted > cap`) is the only misconduct here, and only the proxy could cause it.
+    """
+    typed = (
+        type(accepted) is int
+        and type(refused) is int
+        and type(upstream_errors) is int
+        and refused >= 0
+    )
+    return typed and 1 <= accepted <= cap and tls_verified is True

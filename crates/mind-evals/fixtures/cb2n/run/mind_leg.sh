@@ -49,8 +49,9 @@ BIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}; SRC=${CB2_MIND_SOURCE:-/roo
 BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)
 # A preflight that smoked a DIFFERENT binary has cleared nothing. If a smoke recorded a sha in this
 # output root, this leg must be running that exact file.
-if [ -f "$OUT/smoked_binary.sha256" ]; then
-  SMOKED=$(cat "$OUT/smoked_binary.sha256")
+SHAFILE="$(dirname "$CB2_RUN_STATE")/smoked_binary.sha256"
+if [ -f "$SHAFILE" ]; then
+  SMOKED=$(cat "$SHAFILE")
   [ "$SMOKED" = "$BIN_SHA" ] || { echo "refusing: the smoke cleared $SMOKED but this leg would run $BIN_SHA"; exit 2; }
 fi
 # A provenance claim is only worth recording if the tree it names matches the tree that was built.
@@ -103,7 +104,7 @@ import json, os, sys
 # This block is read from STDIN, so `__file__` does not exist and the fixtures path has to be
 # handed in. CB2_FIX_RUN is exported by the leg just above; on the host it is $FIX/run.
 sys.path.insert(0, os.environ["CB2_FIX_RUN"])
-from verdict import host_independent
+from verdict import host_independent, receipt_shape_ok
 src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s, dl_s = sys.argv[1:]
 # The cap the PROXY enforced, carried through rather than re-derived by this reader: two places
 # deciding what the budget was is how a receipt comes to disagree with the run it describes.
@@ -121,9 +122,12 @@ except Exception:
 try:
     p = json.load(open(prx)); tls = p.get("tls_hostname_verified") is True; upe = int(p["upstream_errors"])
     acc = p["model_requests"]; ref = p["refused_over_cap"]
-    # `1 <= acc`, not `acc >= 0`: Hermes's receipt check requires at least one model request and
-    # the Mind's accepted zero, so a leg that never reached the model passed on one side only.
-    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= cap and ref >= 0 and ref == 0 and tls
+    # The tested rule, not an expression written here. `1 <= acc` because a leg that never reached
+    # the model must fail on both sides; no `ref == 0`, because reaching the cap is the budget
+    # working and that clause was still disqualifying every capped leg through the DEPENDENT class
+    # after the independent rule had been removed — a second path I never looked at.
+    receipt_ok = receipt_shape_ok(accepted=acc, refused=ref, upstream_errors=p["upstream_errors"],
+                                  tls_verified=p.get("tls_hostname_verified"), cap=cap)
 except Exception:
     tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0

@@ -6,7 +6,7 @@
 
 use crate::{
     attention_constants, attention_rank, attention_score, idle_urgency, window_urgency,
-    AttentionCandidate, AttentionConstants, LoopId, ATTENTION_POLICY, ATTENTION_SCOPE,
+    AttentionCandidate, AttentionConstants, LoopId, ATTENTION_SCOPE,
 };
 use mind_types::ScoreAxes;
 
@@ -336,4 +336,54 @@ fn wake_identity_is_ordered_within_a_process_and_unique_across_restarts() {
     // a bare wake number restarts at zero on every boot and would pair two different wakes.
     assert_ne!(CycleId::new(boot_a, 0), CycleId::new(boot_b, 0));
     assert!(CycleId::new(boot_a, 9_999) < CycleId::new(boot_b, 0));
+}
+
+#[test]
+fn the_whole_constant_table_is_pinned_beside_the_policy_name() {
+    // `assert_eq!(ATTENTION_POLICY, "attention-policy-v1")` used to stand for this and was a
+    // constant compared to its own literal. Its replacement — asserting the row carries the policy
+    // — was messaged "a v2 with different constants must not be indistinguishable from v1", and
+    // nothing tied the NAME to the TABLE, so editing a constant without renaming the policy was
+    // still silent. This pins all seventeen rows. Changing any number here without bumping
+    // ATTENTION_POLICY fails, which is exactly what the message claims.
+    use crate::{attention_constants, ATTENTION_POLICY, ATTENTION_SCOPE};
+    let expected: &[(&str, u64, u64, u64, u64)] = &[
+        ("dmn", 600, 600, 300, 500),
+        ("knock", 900, 700, 400, 600),
+        ("digest", 700, 700, 300, 600),
+        ("ask", 500, 500, 500, 400),
+        ("patterns", 600, 500, 400, 500),
+        ("home-watch", 800, 800, 300, 700),
+        ("resolve", 300, 900, 0, 1000),
+        ("profile-refresh", 200, 900, 0, 1000),
+        ("family", 700, 700, 300, 600),
+        ("follow-up", 800, 800, 400, 700),
+        ("price-watch", 600, 800, 300, 600),
+        ("member-beat", 300, 900, 0, 1000),
+        ("ics", 300, 900, 0, 1000),
+        ("lease-sweep", 200, 900, 0, 1000),
+        // 700/600/300/600, from the preregistered table. My first attempt at this pin transcribed
+        // it as 200/900/0/1000 from a truncated ledger line, and the test failed on its first run
+        // against the correct code -- which is the pin working before it had pinned anything.
+        ("mail-sweep", 700, 600, 300, 600),
+        ("whois", 500, 600, 600, 400),
+        ("tradition-prep", 600, 700, 300, 600),
+    ];
+    assert_eq!(
+        ATTENTION_POLICY, "attention-policy-v1",
+        "the table below is v1's; a different table is a different policy"
+    );
+    assert_eq!(
+        ATTENTION_SCOPE.len(),
+        expected.len(),
+        "the scope and the pinned table must cover the same loops"
+    );
+    for (id, want) in ATTENTION_SCOPE.iter().zip(expected) {
+        let c = attention_constants(*id).expect("every scope member has constants");
+        assert_eq!(
+            (id.as_str(), c.expected_value, c.confidence, c.annoyance_risk, c.acceptance_rate),
+            *want,
+            "constants changed without a new policy version"
+        );
+    }
 }

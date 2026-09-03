@@ -38,9 +38,20 @@ cleanup() {
 }
 trap cleanup EXIT
 bash "$FIX/run/proxy.sh" up "$PROXY" "$CD" "$PIP" >/dev/null || { echo "proxy not ready — leg aborted, nothing graded"; printf '{"system":"mind","task":"%s","status":"proxy-not-ready","routed_kind":null,"void":true,"dq_independent":false,"dq_dependent":false,"disqualified":false}\n' "$T" | tee "$R/mind_$T.json"; exit 4; }
-BIN_SHA=$(sha256sum /opt/yantrik-mind/mind-core | cut -c1-64); PROV=$(cd /root/codes/ym-autodeploy && git rev-parse --short HEAD)
+# WHICH BINARY IS UNDER TEST is a parameter, and it defaults to the deployed one. It used to be
+# hard-coded to /opt/yantrik-mind/mind-core, which silently coupled a graded reading to a
+# production deploy: testing a code change meant replacing the binary the live companion would pick
+# up on its next restart. The two decisions are unrelated and are now separable. CB2_MIND_SOURCE is
+# the checkout the binary was built from, so `binary_provenance` names the commit that actually
+# produced this file rather than whatever HEAD the deploy clone happens to sit at.
+BIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}; SRC=${CB2_MIND_SOURCE:-/root/codes/ym-autodeploy}
+[ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 2; }
+BIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)
+# A provenance claim is only worth recording if the tree it names matches the tree that was built.
+PROV_CLEAN=$(cd "$SRC" && git status --porcelain | wc -l)
+[ "$PROV_CLEAN" = 0 ] || PROV="$PROV+dirty"
 docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
-  -v /opt/yantrik-mind/mind-core:/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
+  -v "$BIN":/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
   -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8078 \
   -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata "${LANE[@]}" -e YM_INFER_PERMITS=2 \
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off \

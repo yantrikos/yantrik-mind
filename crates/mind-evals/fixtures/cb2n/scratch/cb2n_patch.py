@@ -560,6 +560,19 @@ rw("MANIFEST.json", [
      'run receipts carry counts, ids, hashes (artifact tree, binary, archive), image ids, timings and statuses only; the Mind receipt carries accounting_agrees beside ledger_attempts and proxy_accepted, so the agreement this manifest requires of BOTH systems is visible in the receipt and not merely asserted (it was implemented on the Hermes leg alone until an adversarial review found it missing);'),
 ])
 
+# ── the binary under test is a parameter, not the deployed one by construction ────────────────
+# mind_leg.sh mounted /opt/yantrik-mind/mind-core, the binary the live companion runs. Testing a
+# code change therefore REQUIRED replacing production's binary, which is a separate decision with a
+# separate authority. It defaults to the same path, so a reading that means to test the deployed
+# binary still does, and `binary_provenance` now names the checkout the file was built from and
+# marks it dirty when that checkout has uncommitted changes.
+rw("run/mind_leg.sh", [
+    ('BIN_SHA=$(sha256sum /opt/yantrik-mind/mind-core | cut -c1-64); PROV=$(cd /root/codes/ym-autodeploy && git rev-parse --short HEAD)',
+     '# WHICH BINARY IS UNDER TEST is a parameter, and it defaults to the deployed one. It used to be\n# hard-coded to /opt/yantrik-mind/mind-core, which silently coupled a graded reading to a\n# production deploy: testing a code change meant replacing the binary the live companion would pick\n# up on its next restart. The two decisions are unrelated and are now separable. CB2_MIND_SOURCE is\n# the checkout the binary was built from, so `binary_provenance` names the commit that actually\n# produced this file rather than whatever HEAD the deploy clone happens to sit at.\nBIN=${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}; SRC=${CB2_MIND_SOURCE:-/root/codes/ym-autodeploy}\n[ -x "$BIN" ] || { echo "refusing: CB2_MIND_BINARY=$BIN is not an executable file"; exit 2; }\nBIN_SHA=$(sha256sum "$BIN" | cut -c1-64); PROV=$(cd "$SRC" && git rev-parse --short HEAD)\n# A provenance claim is only worth recording if the tree it names matches the tree that was built.\nPROV_CLEAN=$(cd "$SRC" && git status --porcelain | wc -l)\n[ "$PROV_CLEAN" = 0 ] || PROV="$PROV+dirty"'),
+    ('  -v /opt/yantrik-mind/mind-core:/mind-core:ro',
+     '  -v "$BIN":/mind-core:ro'),
+])
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

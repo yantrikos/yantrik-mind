@@ -8356,6 +8356,22 @@ async fn emq5_v3_sealed_router_eval_on_owned_local_model() {
         let input = row["input"].as_str().expect("row input");
         let expected = row["expected"].as_str();
         let (_, routed) = ConversationEngine::route_claim_with(&pool, input).await;
+        // Per-row detail. The counts alone say the candidate failed but not WHERE, and a sealed
+        // suite is burned for evaluation once disclosed — so a run that does not say which rows
+        // moved wastes the only thing the disclosure bought. This prints; it does not judge.
+        println!(
+            "EMQ5_V3_ROW id={} expected={:?} routed={:?} verdict={}",
+            row["id"].as_str().unwrap_or("?"),
+            expected,
+            routed,
+            match (expected, routed) {
+                (Some(t), Some(r)) if t == r => "hit",
+                (Some(_), Some(_)) => "MISROUTED",
+                (Some(_), None) => "MISSED",
+                (None, None) => "abstained",
+                (None, Some(_)) => "FALSE-FIRE",
+            }
+        );
         match expected {
             Some(target) => {
                 in_scope += 1;

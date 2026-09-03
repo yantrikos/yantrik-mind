@@ -147,3 +147,55 @@ fn a_single_writer_is_unchanged() {
     assert_eq!(lines(&path), 55, "a second handle in one process still writes");
     assert!(DecisionLog::open(&path).read_all_verified().is_ok());
 }
+
+/// Not about locking: about the operator-facing STRINGS this crate emits.
+///
+/// Three separate messages shipped today carrying a run of spaces mid-sentence — E.CFG2's config
+/// notice, E.L2B-R's attention report, and E.OBS2's own refusal. Each time I fixed the one string
+/// and added a guard next to it, and each time I wrote the next one the same way. Guarding
+/// individual strings was treating the symptom; the habit is the defect, so the guard belongs
+/// where any of them would trip it.
+///
+/// An aligned label column (`scores     : …`) is deliberate and allowed — the run is followed by a
+/// colon. Anything else is prose that will be read by a person.
+#[test]
+fn no_operator_string_in_this_crate_carries_a_run_of_spaces() {
+    const SRC: &str = include_str!("../src/lib.rs");
+    let mut bad = Vec::new();
+    for (n, line) in SRC.lines().enumerate() {
+        let t = line.trim_start();
+        // Comments are prose for developers and wrap freely; only string literals are shipped.
+        if t.starts_with("//") || !line.contains('"') {
+            continue;
+        }
+        let Some(start) = line.find('"') else { continue };
+        let Some(end) = line.rfind('"') else { continue };
+        if end <= start {
+            continue;
+        }
+        let inner = &line[start + 1..end];
+        let bytes = inner.as_bytes();
+        for i in 2..bytes.len().saturating_sub(1) {
+            if bytes[i] == b' ' && bytes[i - 1] == b' ' && bytes[i - 2] != b' ' {
+                // Walk to the end of the run; an alignment column ends at a colon.
+                let mut j = i;
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
+                if bytes.get(j) != Some(&b':') {
+                    bad.push(format!("line {}: {}", n + 1, line.trim()));
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "operator-facing strings with a run of spaces mid-sentence ({}):
+{}",
+        bad.len(),
+        bad.join("
+")
+    );
+}
+

@@ -416,7 +416,7 @@ impl DecisionLog {
             let claim = take_claim(&p);
             if claim.is_err() {
                 eprintln!(
-                    "[flight-recorder] REFUSING TO WRITE {}: another process holds this decision                      log. Two writers interleave the hash chain and permanently break every                      verified report on this box. This instance will record nothing; cognition is                      unaffected. If this is a second mind-core started by hand, stop it.",
+                    "[flight-recorder] REFUSING TO WRITE {}: another process holds this decision log. Two writers interleave the hash chain and permanently break every verified report on this box. This instance will record nothing; cognition is unaffected. If this is a second mind-core started by hand, stop it.",
                     p.display()
                 );
             }
@@ -707,7 +707,6 @@ fn lock_key(path: &Path) -> PathBuf {
 /// missing directory is an environment problem, and turning it into silent blindness would be a
 /// worse outcome than the corruption this prevents, which needs a second writer to occur at all.
 fn take_claim(path: &Path) -> Result<std::fs::File, ()> {
-    use fs4::FileExt;
     let lock_path = path.with_extension(match path.extension() {
         Some(e) => format!("{}.lock", e.to_string_lossy()),
         None => "lock".to_string(),
@@ -2694,10 +2693,10 @@ pub fn render_trace(events: &[DecisionEvent]) -> String {
             e.actor.as_deref().unwrap_or("?")
         ));
         if let Some(id) = &e.event_id {
-            out.push_str(&format!("\n    span: {id}"));
+            out.push_str(&format!("\n span: {id}"));
         }
         if let Some(lane) = &e.lane {
-            out.push_str(&format!("\n    lane: {lane}"));
+            out.push_str(&format!("\n lane: {lane}"));
         }
         if let Some(s) = &e.subject {
             out.push_str(&format!(" · subject {s}"));
@@ -2706,34 +2705,34 @@ pub fn render_trace(events: &[DecisionEvent]) -> String {
             out.push_str(&format!(" · purpose {p}"));
         }
         if let Some(context) = &e.context_fingerprint {
-            out.push_str(&format!("\n    context: {context}"));
+            out.push_str(&format!("\n context: {context}"));
         }
         if let Some(goal_id) = &e.goal_id {
-            out.push_str(&format!("\n    goal id: {goal_id}"));
+            out.push_str(&format!("\n goal id: {goal_id}"));
         }
         let field = |out: &mut String, label: &str, v: &Option<String>| {
             if let Some(x) = v {
-                out.push_str(&format!("\n    {label}: {x}"));
+                out.push_str(&format!("\n {label}: {x}"));
             }
         };
         field(&mut out, "goal", &e.goal);
         field(&mut out, "trigger", &e.trigger);
         if !e.evidence_ids.is_empty() {
-            out.push_str(&format!("\n    evidence: {}", e.evidence_ids.join(", ")));
+            out.push_str(&format!("\n evidence: {}", e.evidence_ids.join(", ")));
         }
         if !e.candidates.is_empty() {
-            out.push_str(&format!("\n    considered: {}", e.candidates.join("; ")));
+            out.push_str(&format!("\n considered: {}", e.candidates.join("; ")));
         }
         field(&mut out, "chose", &e.chosen);
         if !e.rejected.is_empty() {
-            out.push_str(&format!("\n    rejected: {}", e.rejected.join("; ")));
+            out.push_str(&format!("\n rejected: {}", e.rejected.join("; ")));
         }
         if !e.policy.is_empty() {
-            out.push_str(&format!("\n    policy: {}", e.policy.join(", ")));
+            out.push_str(&format!("\n policy: {}", e.policy.join(", ")));
         }
         if e.predicted.is_some() || e.confidence.is_some() {
             out.push_str(&format!(
-                "\n    predicted: {} (confidence {})",
+                "\n predicted: {} (confidence {})",
                 e.predicted.as_deref().unwrap_or("?"),
                 e.confidence
                     .map_or_else(|| "?".into(), |c| format!("{c:.2}"))
@@ -2742,35 +2741,35 @@ pub fn render_trace(events: &[DecisionEvent]) -> String {
         field(&mut out, "outcome", &e.outcome);
         field(&mut out, "verdict", &e.verdict);
         if let Some(err) = e.prediction_error {
-            out.push_str(&format!("\n    prediction error: {err:+.3}"));
+            out.push_str(&format!("\n prediction error: {err:+.3}"));
         }
         if let Some(brier) = e.brier {
-            out.push_str(&format!("\n    brier: {brier:.3}"));
+            out.push_str(&format!("\n brier: {brier:.3}"));
         }
         if let Some(success) = e.semantic_success {
-            out.push_str(&format!("\n    semantic success: {success}"));
+            out.push_str(&format!("\n semantic success: {success}"));
         }
         if let Some(latency_ms) = e.latency_ms {
-            out.push_str(&format!("\n    latency: {latency_ms} ms"));
+            out.push_str(&format!("\n latency: {latency_ms} ms"));
         }
         if let Some(tool_version) = &e.tool_version {
-            out.push_str(&format!("\n    tool version: {tool_version}"));
+            out.push_str(&format!("\n tool version: {tool_version}"));
         }
         if let Some(model_route) = &e.model_route {
-            out.push_str(&format!("\n    model route: {model_route}"));
+            out.push_str(&format!("\n model route: {model_route}"));
         }
         if let Some(model_calls) = e.model_calls {
-            out.push_str(&format!("\n    model calls: {model_calls}"));
+            out.push_str(&format!("\n model calls: {model_calls}"));
         }
         if let Some(evaluator) = &e.evaluator_id {
-            out.push_str(&format!("\n    evaluator: {evaluator}"));
+            out.push_str(&format!("\n evaluator: {evaluator}"));
         }
         field(&mut out, "lesson", &e.lesson);
         if let Some(obj) = &e.object_id {
-            out.push_str(&format!("\n    object: {obj}"));
+            out.push_str(&format!("\n object: {obj}"));
         }
         if let Some(p) = &e.parent_event_id {
-            out.push_str(&format!("\n    parent span: {p}"));
+            out.push_str(&format!("\n parent span: {p}"));
         }
     }
     out
@@ -6669,7 +6668,7 @@ pub fn render_loop_ledger_at(events: &[DecisionEvent], now_ms: u64) -> String {
             )
         };
         out.push_str(&format!(
-            "  {:<16} host {:<9} opportunities {:>4} · acted {:>3} · held [{}] · model calls {} · wall {} ms · counted {}\n      outcomes: {}\n      considered: {}\n      policy: {}\n",
+            "  {:<16} host {:<9} opportunities {:>4} · acted {:>3} · held [{}] · model calls {} · wall {} ms · counted {}\n outcomes: {}\n considered: {}\n policy: {}\n",
             r.loop_id,
             r.hosts.iter().cloned().collect::<Vec<_>>().join("+"),
             r.opportunities,
@@ -8642,7 +8641,7 @@ fn render_spend_ledger_report(
     );
     for r in &l.rows {
         out.push_str(&format!(
-            "  {:<44} {:<14} {:<12} req {:>4}  served {:>4}  failed {:>3}  refused {:>3}  attempts {:>4}  wall {:>7} ms  streaming {}\n",
+            "  {:<44} {:<14} {:<12} req {:>4} served {:>4} failed {:>3} refused {:>3} attempts {:>4} wall {:>7} ms streaming {}\n",
             r.callsite,
             r.loop_id.as_deref().unwrap_or("-"),
             r.attribution,
@@ -8662,7 +8661,7 @@ fn render_spend_ledger_report(
         out.push_str(&format!(" {k} {r}/{a}"));
     }
     out.push_str(&format!(
-        "; unattributed {}\n  requests per hour (oldest first): {:?}\n",
+        "; unattributed {}\n requests per hour (oldest first): {:?}\n",
         l.unattributed_requests, l.per_hour
     ));
     out

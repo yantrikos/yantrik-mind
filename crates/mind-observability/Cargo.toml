@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-fs4 = "1.1.0"
 mind-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

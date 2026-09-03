@@ -32,11 +32,45 @@ COUNT_FILE = os.environ.get("CB2_COUNT_FILE", "/count/requests.json")
 KEY_PATH = os.environ.get("CB2_KEY_PATH", "")
 KEY = open(KEY_PATH, encoding="utf-8").read().strip() if KEY_PATH else ""
 lock = threading.Lock()
-state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "upstream_client_errors": 0, "proxy_request_timeouts": 0, "client_disconnects": 0,
+state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "upstream_client_errors": 0, "proxy_request_timeouts": 0, "client_disconnects": 0, "by_status": {},
          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {},
          "profile": os.environ.get("CB2_PROFILE", ""), "model_expected": os.environ.get("CB2_MODEL", ""), "upstream": UPSTREAM, "upstream_ip": UPSTREAM_IP,
          "upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),
          "response_models": {}, "usage": {"responses_with_usage": 0, "prompt_tokens": 0, "completion_tokens": 0}}
+
+
+def observe(status_key, t_start, req_bytes):
+    """One BUCKET PER STATUS, never one row per request.
+
+    Five hypotheses were walked and 45 probe calls run without reproducing a failure that both
+    pilot legs produce. The receipt could not help, because it counts outcomes and records nothing
+    ABOUT them: leg 2's three 504s had to be inferred as ~930 ms each by subtracting `max_ms` from
+    `total_ms` in the Mind's own accounting. Had the proxy recorded latency and request size per
+    status, one leg would have answered what five probes could not.
+
+    Bucketed by status code, which is a handful of keys whatever the traffic -- a per-request log
+    would grow without bound and is the shape this repo has already learned to refuse. No bodies,
+    no headers: sizes, durations and counts only, which is what the receipt contract allows.
+    """
+    ms = int((time.time() - t_start) * 1000)
+    with lock:
+        _observe_locked(status_key, ms, req_bytes)
+
+
+def _observe_locked(status_key, ms, req_bytes):
+    b = state["by_status"].setdefault(
+        status_key, {"n": 0, "total_ms": 0, "min_ms": ms, "max_ms": ms,
+                     "min_req_bytes": req_bytes, "max_req_bytes": req_bytes})
+    b["n"] += 1
+    b["total_ms"] += ms
+    b["min_ms"] = min(b["min_ms"], ms)
+    b["max_ms"] = max(b["max_ms"], ms)
+    b["min_req_bytes"] = min(b["min_req_bytes"], req_bytes)
+    b["max_req_bytes"] = max(b["max_req_bytes"], req_bytes)
+    # PERSIST, like every other writer here. Without this the buckets live only in memory and the
+    # LAST request's is always missing from the file -- caught by a live cap test reporting n=8 for
+    # nine requests, which is exactly the kind of off-by-one an unexercised counter keeps forever.
+    persist()
 
 
 def persist():
@@ -73,6 +107,7 @@ class H(BaseHTTPRequestHandler):
             persist()
         n = int(self.headers.get("Content-Length", "0") or 0)
         body = self.rfile.read(n) if n else None
+        t_start = time.time()
         ctx = ssl.create_default_context()
         # by HOSTNAME (SNI and certificate match); the container resolves it through its hosts entry
         conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=WALL, context=ctx)
@@ -87,6 +122,7 @@ class H(BaseHTTPRequestHandler):
             conn.request(self.command, self.path, body=body, headers=headers)
             resp = conn.getresponse()
         except Exception as exc:
+            observe("transport", t_start, n)
             # OUR CEILING IS NOT THEIR FAILURE. A socket timeout here is this proxy giving up; a
             # reset or TLS fault is the upstream failing. Both used to land in upstream_errors, so
             # a receipt could not tell "NVIDIA dropped it" from "we stopped waiting" -- and with a
@@ -106,6 +142,11 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 state["upstream_http_errors" if (resp.status == 429 or resp.status >= 500) else "upstream_client_errors"] += 1
                 persist()
+        # An error is COMPLETE at its headers; a streamed 200 is not. Timing a success here would
+        # record time-to-first-byte and make every success look instant -- destroying the very
+        # comparison this exists to make. Successes are observed after the body relay, below.
+        if resp.status >= 400:
+            observe(str(resp.status), t_start, n)
         self.send_response(resp.status)
         chunked = False
         seen = bytearray()
@@ -154,6 +195,11 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 state["client_disconnects"] += 1
                 persist()
+        # NOW the success is complete: headers, the whole streamed body, and the terminating
+        # chunk. A 200 timed here is comparable to a 504 timed at its headers, because both are
+        # then "how long until this request was finished with".
+        if resp.status < 400:
+            observe(str(resp.status), t_start, n)
         if is_model_request and resp.status < 400 and seen:
             self._tally(bytes(seen))
 

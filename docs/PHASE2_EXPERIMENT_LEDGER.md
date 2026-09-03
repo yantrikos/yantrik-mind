@@ -5346,3 +5346,20 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why that is wrong | `http.client`'s `timeout` is the **socket** timeout, applied per blocking operation. A streamed response that keeps delivering chunks resets it on every read, so a long call never trips it — only a **stall** longer than 600 s would. |
 | The proof is in leg 2, not a docstring | A call ran **908,187 ms** through a proxy running `timeout=600`, and the receipt shows `upstream_transport_errors: 0`. Had the timeout bounded the call, it would have fired. It did not. |
 | What still stands | Deriving the ceiling from the run state instead of a literal, and counting `proxy_request_timeouts` separately so our stall ceiling is not recorded as the upstream's transport failure. Both are right for the reason given — one number, and two causes must not wear one label. Only the **urgency** was wrong: the ceiling is a stall guard, and it was never as close to binding as I said. |
+
+## E.CB2-D — five hypotheses walked, 45 clean probe calls, and the leg still fails
+| Configuration (all on the leg's path unless noted) | Calls | Result |
+| --- | --- | --- |
+| Host-side buffered, 600 max_tokens | 8 | all 200, p50 61 s |
+| Host-side buffered, 3000 max_tokens | 6 | all 200, 134–229 s |
+| Host-side **streaming** | 6 | all clean `[DONE]` |
+| **Through the run's proxy from `cb2net`**, streaming | 6 | all clean, receipt zero errors |
+| **Two concurrent** streams through the proxy (`YM_INFER_PERMITS=2`) | 6 | all clean, receipt zero errors |
+| **Context-size ladder** through the proxy: 10k → 38k → 102k → 204k → **382k characters** | 5 | all clean |
+| **Overlap** — one long generation held open, five short calls issued underneath it | 6 | all clean, receipt zero errors |
+| Against which | — | leg 1: **2 of 5** 504s; leg 2: **3 of 4** 504s, `status failed`, `files_added 0` |
+| Honest position | The failure is real, reproducible on the leg, and reproduced by **nothing else I can construct**. Concurrency, context size, streaming, the proxy relay and the container egress are each exonerated. My hypotheses are exhausted. |
+| The clue I did have, and could barely read | Leg 2's `call_latency` gives `calls 4, total_ms 910,982, max_ms 908,187` — so the other three shared **2,795 ms**, about 930 ms each. Those 504s came back in about a second: **gateway rejections, not timeouts**. I had to derive that by subtraction from the *Mind's* accounting, because the proxy receipt counts outcomes and records nothing about them. |
+| So: stop guessing, instrument | `by_status` now buckets **latency and request size per status code** in the proxy receipt. A handful of keys whatever the traffic — never one row per request, which is the shape this repo already refuses. One instrumented leg will say directly what five probes could not: how long each 504 took and how big the request was. |
+| Two details that matter | Successes are timed **after the whole streamed body**; timing them at their headers would record time-to-first-byte and make every success look instant, destroying the comparison. Errors are timed at their headers, where they are complete. And `observe` **persists** — without it the last request's bucket never reaches the file, caught by a live cap test reporting `n=8` for nine requests. |
+| Aside, recorded not chased | Under `nim-ds` the harness's own `captest_client.py` gets **nine 400s** where it expects eight 200s and a 429 — it sends `max_tokens: 4`, which this model rejects. `net/captest.sh` therefore cannot pass on this profile for two independent reasons (that, and cap 24 never refusing at nine requests). Not blocking the pilot; it would block a reading that runs the live cap proof. |

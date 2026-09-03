@@ -35,9 +35,18 @@ def main():
         # deliberately NOT added to the printed line, which hermes_leg.sh parses POSITIONALLY --
         # an extra token there would spill into the last variable and silently corrupt usage_n.
         ptimeouts = d.get("proxy_request_timeouts", 0)
+        # by_status is bucketed by status code -- a handful of keys whatever the traffic -- so it
+        # can be typed exhaustively without the receipt growing with the run. `.get(..., {})` for
+        # the same reason as above: receipts written before it existed must still validate.
+        buckets = d.get("by_status", {})
         acc, ref = d["model_requests"], d["refused_over_cap"]
         models, usage = d["response_models"], d["usage"]
         valid = (all(nn(x) for x in (http_err, trans, client, disc, acc, ref, ptimeouts))
+                 and isinstance(buckets, dict)
+                 and all(isinstance(k, str) and isinstance(v, dict)
+                         and all(nn(v.get(f)) for f in ("n", "total_ms", "min_ms", "max_ms",
+                                                        "min_req_bytes", "max_req_bytes"))
+                         for k, v in buckets.items())
                  and isinstance(models, dict)
                  and all(isinstance(k, str) and type(v) is int and v > 0 for k, v in models.items())
                  and isinstance(usage, dict)

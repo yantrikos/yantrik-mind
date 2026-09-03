@@ -1170,3 +1170,34 @@ rw('selftest/selftest.sh', [
     ('if python3 "$FIX/selftest/scan_checker_guard.py" "$FIX/checks/check_web.mjs"; then echo "checker_guard: agree"; else echo "checker_guard: DISAGREE"; BAD=1; fi\n',
      'if python3 "$FIX/selftest/scan_checker_guard.py" "$FIX/checks/check_web.mjs"; then echo "checker_guard: agree"; else echo "checker_guard: DISAGREE"; BAD=1; fi\n# Four fixture files are BAKED into images, so editing one changes nothing until a rebuild.\n# rederive.sh proves the tree matches the patch; this proves the images match the tree.\nif bash "$FIX/selftest/image_freshness.sh"; then echo "image_freshness: agree"; else echo "image_freshness: DISAGREE"; BAD=1; fi\n'),
 ])
+
+# ── E.CB2-D: make the NEXT leg carry its own evidence ─────────────────────────────────────────
+# Five hypotheses walked, 45 probe calls, zero failures -- against two pilot legs that both fail.
+# The receipt could not help: it counts outcomes and records nothing ABOUT them, so leg 2's three
+# 504s had to be inferred as ~930 ms each by subtracting max_ms from total_ms in the MIND's own
+# accounting. `by_status` buckets latency and request size per status code -- a handful of keys
+# whatever the traffic, never one row per request, which is the shape this repo already refuses.
+# Successes are timed after the whole streamed body (timing them at their headers would record
+# time-to-first-byte and make every success look instant); errors are timed at their headers, where
+# they ARE complete. `observe` persists, because without it the LAST request's bucket never reaches
+# the file -- caught by a live cap test reporting n=8 for nine requests.
+rw('proxy/proxy.py', [
+    ('"upstream_client_errors": 0, "proxy_request_timeouts": 0, "client_disconnects": 0,',
+     '"upstream_client_errors": 0, "proxy_request_timeouts": 0, "client_disconnects": 0, "by_status": {},'),
+    ('def persist():',
+     'def observe(status_key, t_start, req_bytes):\n    """One BUCKET PER STATUS, never one row per request.\n\n    Five hypotheses were walked and 45 probe calls run without reproducing a failure that both\n    pilot legs produce. The receipt could not help, because it counts outcomes and records nothing\n    ABOUT them: leg 2\'s three 504s had to be inferred as ~930 ms each by subtracting `max_ms` from\n    `total_ms` in the Mind\'s own accounting. Had the proxy recorded latency and request size per\n    status, one leg would have answered what five probes could not.\n\n    Bucketed by status code, which is a handful of keys whatever the traffic -- a per-request log\n    would grow without bound and is the shape this repo has already learned to refuse. No bodies,\n    no headers: sizes, durations and counts only, which is what the receipt contract allows.\n    """\n    ms = int((time.time() - t_start) * 1000)\n    with lock:\n        _observe_locked(status_key, ms, req_bytes)\n\n\ndef _observe_locked(status_key, ms, req_bytes):\n    b = state["by_status"].setdefault(\n        status_key, {"n": 0, "total_ms": 0, "min_ms": ms, "max_ms": ms,\n                     "min_req_bytes": req_bytes, "max_req_bytes": req_bytes})\n    b["n"] += 1\n    b["total_ms"] += ms\n    b["min_ms"] = min(b["min_ms"], ms)\n    b["max_ms"] = max(b["max_ms"], ms)\n    b["min_req_bytes"] = min(b["min_req_bytes"], req_bytes)\n    b["max_req_bytes"] = max(b["max_req_bytes"], req_bytes)\n    # PERSIST, like every other writer here. Without this the buckets live only in memory and the\n    # LAST request\'s is always missing from the file -- caught by a live cap test reporting n=8 for\n    # nine requests, which is exactly the kind of off-by-one an unexercised counter keeps forever.\n    persist()\n\n\ndef persist():'),
+    ('        n = int(self.headers.get("Content-Length", "0") or 0)\n        body = self.rfile.read(n) if n else None',
+     '        n = int(self.headers.get("Content-Length", "0") or 0)\n        body = self.rfile.read(n) if n else None\n        t_start = time.time()'),
+    ('        except Exception as exc:\n',
+     '        except Exception as exc:\n            observe("transport", t_start, n)\n'),
+    ('        self.send_response(resp.status)\n        chunked = False',
+     '        # An error is COMPLETE at its headers; a streamed 200 is not. Timing a success here would\n        # record time-to-first-byte and make every success look instant -- destroying the very\n        # comparison this exists to make. Successes are observed after the body relay, below.\n        if resp.status >= 400:\n            observe(str(resp.status), t_start, n)\n        self.send_response(resp.status)\n        chunked = False'),
+    ('        if is_model_request and resp.status < 400 and seen:\n            self._tally(bytes(seen))',
+     '        # NOW the success is complete: headers, the whole streamed body, and the terminating\n        # chunk. A 200 timed here is comparable to a 504 timed at its headers, because both are\n        # then "how long until this request was finished with".\n        if resp.status < 400:\n            observe(str(resp.status), t_start, n)\n        if is_model_request and resp.status < 400 and seen:\n            self._tally(bytes(seen))'),
+])
+rw('run/receipt_checks.py', [
+    ('        ptimeouts = d.get("proxy_request_timeouts", 0)',
+     '        ptimeouts = d.get("proxy_request_timeouts", 0)\n        # by_status is bucketed by status code -- a handful of keys whatever the traffic -- so it\n        # can be typed exhaustively without the receipt growing with the run. `.get(..., {})` for\n        # the same reason as above: receipts written before it existed must still validate.\n        buckets = d.get("by_status", {})'),
+    ('                 and isinstance(models, dict)',
+     '                 and isinstance(buckets, dict)\n                 and all(isinstance(k, str) and isinstance(v, dict)\n                         and all(nn(v.get(f)) for f in ("n", "total_ms", "min_ms", "max_ms",\n                                                        "min_req_bytes", "max_req_bytes"))\n                         for k, v in buckets.items())\n                 and isinstance(models, dict)'),
+])

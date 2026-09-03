@@ -1038,6 +1038,11 @@ impl InferencePool {
 /// asserted with zero real model. This is the injectable seam BUILD.md calls for.
 pub struct ScriptedLLM {
     reply: String,
+    /// What the backend claims about HOW the generation ended. Scriptable because "the API said it
+    /// hit the token limit" is now a load-bearing fact — it is the only thing that can tell a
+    /// truncated file from a model that ended without a trailing newline — and a stub that can
+    /// only ever say "stop" cannot exercise the branch that acts on it.
+    stop_reason: String,
     last_system: std::sync::Mutex<String>,
     last_user: std::sync::Mutex<String>,
     last_all: std::sync::Mutex<String>,
@@ -1047,11 +1052,18 @@ impl ScriptedLLM {
     pub fn new(reply: impl Into<String>) -> Self {
         Self {
             reply: reply.into(),
+            stop_reason: "stop".into(),
             last_system: std::sync::Mutex::new(String::new()),
             last_user: std::sync::Mutex::new(String::new()),
             last_all: std::sync::Mutex::new(String::new()),
         }
     }
+    /// Script the stop reason: `"stop"`, `"length"`, `"eos"` or `"tool_calls"`.
+    pub fn with_stop_reason(mut self, reason: impl Into<String>) -> Self {
+        self.stop_reason = reason.into();
+        self
+    }
+
     /// The concatenated system-role content from the most recent call.
     pub fn last_system_prompt(&self) -> String {
         self.last_system.lock().unwrap().clone()
@@ -1101,7 +1113,7 @@ impl LLMBackend for ScriptedLLM {
             completion_tokens: 0,
             tool_calls: vec![],
             api_tool_calls: vec![],
-            stop_reason: "stop".into(),
+            stop_reason: self.stop_reason.clone(),
         })
     }
     fn chat_streaming(

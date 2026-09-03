@@ -686,17 +686,27 @@ impl CapabilityHandler for DashboardsCapability {
             // containment, where the Anthropic-protocol coder cannot go at all.
             "write_files" => {
                 let (project, stream) = (arg(args, "project"), arg(args, "stream"));
+                // Same rule as the recipe tool: ONLY the exact string "length" drops anything, so a
+                // caller that passes no stop reason behaves exactly as before.
+                let truncated = arg(args, "stop_reason") == "length";
                 if project.trim().is_empty() {
                     return Some("(a build needs a project name)".to_string());
                 }
-                match crate::publish_file_set(&project, &stream) {
+                match crate::publish_file_set(&project, &stream, truncated) {
                     Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
                         if !unterminated.is_empty() {
-                            msg.push_str(&format!(
-                                " — NOTE: the stream ended without a newline, so {} may be incomplete",
-                                unterminated.join(", ")
-                            ));
+                            msg.push_str(&if truncated {
+                                format!(
+                                    " — the generation hit its token limit, so {} was cut and NOT written",
+                                    unterminated.join(", ")
+                                )
+                            } else {
+                                format!(
+                                    " — NOTE: the stream ended without a newline, so {} may be incomplete",
+                                    unterminated.join(", ")
+                                )
+                            });
                         }
                         msg
                     }

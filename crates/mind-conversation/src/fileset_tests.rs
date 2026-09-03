@@ -554,6 +554,76 @@ mod review {
         build_recipe("t", "proj", "build a task tracker with tests", None).steps
     }
 
+    // ── E.CB2-B: truncation becomes a VERDICT instead of a guess ─────────────────────────────
+    //
+    // `parse_file_stream` refuses to decide whether the last file is finished, and says why: a
+    // missing trailing newline is equally consistent with a cut-off generation and a model that
+    // ended without one, and "only the API's finish_reason could settle it". It was never absent —
+    // `LLMResponse.stop_reason` carries it — it was dropped in the recipe's Think step, one move
+    // before the only consumer that needs it. These pin the whole path.
+
+    #[test]
+    fn both_writes_are_told_how_the_generation_ended() {
+        let s = steps();
+        let writes: Vec<&RecipeStep> = s
+            .iter()
+            .filter(|st| matches!(st, RecipeStep::Tool { tool_name, .. } if tool_name == "write_files"))
+            .collect();
+        assert_eq!(writes.len(), 2);
+        // The REVIEW write is the dangerous one: it re-emits the complete set, so a review cut
+        // mid-file would otherwise overwrite a complete file with a partial one.
+        for (n, w) in writes.iter().enumerate() {
+            match w {
+                RecipeStep::Tool { args, .. } => {
+                    let sr = args.get("stop_reason").and_then(|v| v.as_str()).unwrap_or("");
+                    assert!(
+                        sr.starts_with("{{") && sr.ends_with("__stop_reason}}"),
+                        "write {n} does not receive the generation's stop reason: {args}"
+                    );
+                    // and it must be THAT step's own reason, not the other one's
+                    let stream = args.get("stream").and_then(|v| v.as_str()).unwrap_or("");
+                    let var = stream.trim_start_matches("{{").trim_end_matches("}}");
+                    assert_eq!(
+                        sr,
+                        format!("{{{{{var}__stop_reason}}}}"),
+                        "write {n} is told about a DIFFERENT step's generation"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it() {
+        let dir = mind_types::scratch::dir("fset_trunc");
+        std::env::set_var("YM_WEB_DIR", dir.path());
+        // Two files: the first is terminated by the second's marker and is therefore complete; the
+        // second has no terminator, which is exactly the ambiguous case.
+        let stream = "=== FILE: a.py
+print('complete')
+=== FILE: b.py
+print('cut off mid";
+
+        // The API said it stopped at the token limit: b.py IS partial. Drop it.
+        let (_, written, reported) =
+            crate::publish_file_set("trunc-cut", stream, true).expect("write");
+        assert_eq!(written, vec!["a.py".to_string()], "the cut file must not be written");
+        assert_eq!(reported, vec!["b.py".to_string()], "and the caller must be told WHICH");
+
+        // The API said it finished. The missing newline means nothing on its own — keeping a
+        // probably-complete file beats deleting it, which is the rule that once threw away a
+        // complete test suite.
+        let (_, written2, reported2) =
+            crate::publish_file_set("trunc-keep", stream, false).expect("write");
+        assert_eq!(
+            written2,
+            vec!["a.py".to_string(), "b.py".to_string()],
+            "without the API's verdict nothing may be dropped"
+        );
+        assert_eq!(reported2, vec!["b.py".to_string()], "reported as an observation, still written");
+    }
+
     #[test]
     fn the_review_comes_after_a_write_so_a_bad_review_cannot_lose_the_draft() {
         let s = steps();

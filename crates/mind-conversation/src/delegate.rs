@@ -332,7 +332,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
             },
             RecipeStep::Tool {
                 tool_name: "write_files".into(),
-                args: serde_json::json!({ "project": project, "stream": "{{files}}" }),
+                args: serde_json::json!({ "project": project, "stream": "{{files}}", "stop_reason": "{{files__stop_reason}}" }),
                 store_as: "project_url".into(),
                 on_error: ErrorAction::Fail,
             },
@@ -384,7 +384,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
             // set standing. The first write is the guarantee; this one is the improvement.
             RecipeStep::Tool {
                 tool_name: "write_files".into(),
-                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}" }),
+                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}", "stop_reason": "{{reviewed__stop_reason}}" }),
                 store_as: "reviewed_url".into(),
                 on_error: ErrorAction::Skip,
             },

@@ -2534,6 +2534,20 @@ impl RecipeEngine {
                 };
                 match self.inference.chat_grounded(messages, cfg).await {
                     Ok(r) => {
+                        // THE STOP REASON IS THE ONLY THING THAT CAN SETTLE TRUNCATION, and this
+                        // line used to drop it. `fileset::parse_file_stream` says so in its own
+                        // doc comment: a missing trailing newline cannot distinguish a cut-off file
+                        // from a model that simply ended without one, "and this function does not
+                        // have it". It was never absent — `LLMResponse.stop_reason` carries the
+                        // API's finish_reason ("stop" | "length" | "eos" | "tool_calls") — it was
+                        // discarded here, one step before the only consumer that needs it.
+                        //
+                        // Stored beside the text under a derived name so no existing recipe
+                        // changes behaviour: a step that does not ask for it is unaffected.
+                        vars.insert(
+                            format!("{store_as}__stop_reason"),
+                            Value::String(r.stop_reason.clone()),
+                        );
                         vars.insert(store_as.clone(), Value::String(r.text));
                         StepResult::Continue
                     }
@@ -3030,6 +3044,47 @@ mod tests {
                 "broken" => anyhow::bail!("simulated tool failure"),
                 _ => "(none)".into(),
             })
+        }
+    }
+
+    /// E.CB2-B — THE THINK STEP MUST HAND ON HOW THE GENERATION ENDED.
+    ///
+    /// `LLMResponse.stop_reason` carries the API's finish_reason, and this step used to drop it one
+    /// move before the only consumer that needs it: `fileset::parse_file_stream` explicitly refuses
+    /// to decide whether the last file is finished because "only the API's finish_reason could
+    /// settle it, and this function does not have it".
+    ///
+    /// This case exists because deleting that hand-off broke NOTHING. The recipe interpolates
+    /// `{{files__stop_reason}}` into the writer's args, so a missing variable simply resolves to
+    /// nothing and truncation silently reverts to undetectable — wiring that is declared but never
+    /// proven to carry a value, which is the same hole a `wall` export had earlier the same day.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_think_step_records_how_its_generation_ended() {
+        for reason in ["length", "stop"] {
+            let scripted = Arc::new(ScriptedLLM::new("=== FILE: a.py
+print(1)").with_stop_reason(reason));
+            let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
+            let eng = RecipeEngine::new(pool, Arc::new(ScriptedHost), "JARVIS");
+            let rec = Recipe {
+                id: "sr".into(),
+                name: "sr".into(),
+                steps: vec![RecipeStep::Think {
+                    prompt: "author".into(),
+                    store_as: "files".into(),
+                    on_error: ErrorAction::Fail,
+                    max_tokens: Some(64),
+                    think: Some(false),
+                }],
+            };
+            let out = eng.run_with(&rec, std::collections::HashMap::new()).await;
+            assert!(out.ok, "chain failed: {:?}", out.error);
+            assert_eq!(
+                out.vars.get("files__stop_reason").and_then(|v| v.as_str()),
+                Some(reason),
+                "the Think step did not record how its generation ended"
+            );
+            // and the text is still stored under the plain name, unchanged
+            assert!(out.vars.get("files").and_then(|v| v.as_str()).unwrap_or("").contains("a.py"));
         }
     }
 

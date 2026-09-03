@@ -4196,11 +4196,31 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
 /// Parsing, validation and writing are three separate steps on purpose: the parser recovers what the
 /// model said, `plan_file_set` decides what may be written, and only a set that passes WHOLE is
 /// written at all.
+/// `truncated` is the API's verdict, not a guess: `true` only when the generation stopped at the
+/// token limit (`stop_reason == "length"`). It settles what the parser explicitly refuses to decide
+/// — a missing trailing newline is equally consistent with a cut-off file and a model that ended
+/// without one, so dropping on THAT signal deleted a complete `test_tracker.py` once. Dropping on
+/// this one is safe: the API said the text stops mid-token, so the last file genuinely is partial.
+///
+/// It matters because a partial file is written over a complete one on the review pass, and it is
+/// the QUIET failure — a file that looks written and does not parse — where a refused generation
+/// is loud. E.CB2-B: bounding the build's token budget to fit a provider deadline makes truncation
+/// more common, so it must become detectable in the same change.
 pub(crate) fn publish_file_set(
     project: &str,
     stream: &str,
+    truncated: bool,
 ) -> std::result::Result<(String, Vec<String>, Vec<String>), String> {
-    let parsed = crate::fileset::parse_file_stream(stream);
+    let mut parsed = crate::fileset::parse_file_stream(stream);
+    // Only the final file can be the cut one: every earlier file was terminated by the next
+    // marker, which is what makes it complete.
+    let dropped: Vec<String> = if truncated {
+        let cut: Vec<String> = parsed.unterminated.drain(..).collect();
+        parsed.entries.retain(|e| !cut.contains(&e.path));
+        cut
+    } else {
+        Vec::new()
+    };
     if parsed.entries.is_empty() {
         return Err(format!(
             "the build produced no files{}",
@@ -4223,7 +4243,11 @@ pub(crate) fn publish_file_set(
     let written = crate::fileset::write_file_set(&root, &planned).map_err(|e| e.to_string())?;
     let base =
         std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
-    Ok((format!("{base}/{slug}/"), written, parsed.unterminated))
+    // A dropped file is reported in the same slot the observation used to occupy, so a caller that
+    // says "may be incomplete" now says "was cut and not written" — the difference between a note
+    // and a fact.
+    let reported = if dropped.is_empty() { parsed.unterminated } else { dropped };
+    Ok((format!("{base}/{slug}/"), written, reported))
 }
 
 /// Result of fetching a just-published page back off the web server.
@@ -14582,20 +14606,36 @@ impl RecipeHost for MindRecipeHost {
                     .get("stream")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // ONLY the exact string "length" drops anything. An absent argument, an unresolved
+                // `{{...}}` placeholder from a recipe that does not pass one, or any other stop
+                // reason all mean "not known to be cut" and behave exactly as before — so this
+                // cannot change an existing caller, and it fails toward keeping files.
+                let truncated = _args.get("stop_reason").and_then(|v| v.as_str()) == Some("length");
                 if project.trim().is_empty() {
                     anyhow::bail!("a build needs a project name");
                 }
-                match publish_file_set(project, stream) {
+                match publish_file_set(project, stream, truncated) {
                     Ok((url, written, unterminated)) => {
                         let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
                         if !unterminated.is_empty() {
-                            // An observation, not a verdict: the stream did not end with a newline,
-                            // so the last file MAY be incomplete. It is written either way — the
-                            // rule that deleted it threw away a complete test suite once already.
-                            msg.push_str(&format!(
-                                " — NOTE: the stream ended without a newline, so {} may be incomplete",
-                                unterminated.join(", ")
-                            ));
+                            msg.push_str(&if truncated {
+                                // A VERDICT now, from the API: the generation stopped at the token
+                                // limit, so that file is partial and was NOT written. Saying which
+                                // file is missing is what lets a later pass finish the set.
+                                format!(
+                                    " — the generation hit its token limit, so {} was cut and NOT written",
+                                    unterminated.join(", ")
+                                )
+                            } else {
+                                // Still only an observation where the API did not say: the stream
+                                // lacked a trailing newline, which models do routinely. Written
+                                // either way — the rule that deleted it threw away a complete test
+                                // suite once already.
+                                format!(
+                                    " — NOTE: the stream ended without a newline, so {} may be incomplete",
+                                    unterminated.join(", ")
+                                )
+                            });
                         }
                         Ok(msg)
                     }

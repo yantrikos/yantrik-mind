@@ -839,3 +839,103 @@ mod g2r_reader_tests {
     }
 }
 
+// ── E.CAL2: the calibration report's semantic family ──────────────────────────────────────────
+
+#[cfg(test)]
+mod cal2_tests {
+    use crate::*;
+
+    fn predicted(id: &str, conf: f64, ts: u64) -> DecisionEvent {
+        let mut e = DecisionEvent::new("t", "tool_predicted");
+        e.ts_ms = ts;
+        e.event_id = Some(id.into());
+        e.confidence = Some(conf);
+        e
+    }
+
+    /// `verdict` drives EXECUTION success (ok|empty = ran), `semantic_success` drives SEMANTIC
+    /// success (only ok returned something usable). The divergence between them is the point.
+    fn observed(parent: &str, verdict: &str, semantic: Option<bool>, ts: u64) -> DecisionEvent {
+        let mut e = DecisionEvent::new("t", "tool_observed");
+        e.ts_ms = ts;
+        e.parent_event_id = Some(parent.into());
+        e.verdict = Some(verdict.into());
+        e.semantic_success = semantic;
+        e
+    }
+
+    /// KILL 1 + 3: both families appear, each stating what counts as success.
+    #[test]
+    fn both_families_are_reported_and_each_says_what_success_means() {
+        let evs = vec![
+            predicted("p1", 0.9, 1),
+            observed("p1", "ok", Some(true), 2),
+            predicted("p2", 0.9, 3),
+            observed("p2", "empty", Some(false), 4),
+        ];
+        let out = render_calibration(&evs);
+        assert!(out.contains("tool execution"), "{out}");
+        assert!(
+            out.contains("execution = ran without breaking; semantics = returned something usable"),
+            "the legend states each family's success criterion: {out}"
+        );
+        assert!(out.contains("tool semantics"), "{out}");
+    }
+
+    /// KILL 1, the one that matters: adding a family must not move the family that was already
+    /// there. A report that silently redefined its own headline while gaining a column would be
+    /// worse than the gap it closed.
+    #[test]
+    fn the_execution_family_is_unchanged_by_the_semantic_one() {
+        let evs = vec![
+            predicted("p1", 0.9, 1),
+            observed("p1", "ok", Some(true), 2),
+            predicted("p2", 0.9, 3),
+            observed("p2", "empty", Some(false), 4),
+        ];
+        let out = render_calibration(&evs);
+        let exec = out
+            .split("tool execution")
+            .nth(1)
+            .and_then(|s| s.split("tool semantics").next())
+            .expect("the execution family is present");
+        // Both rows RAN (ok and empty), so execution observes 1.00 on both.
+        assert!(exec.contains("n= 2"), "execution counts both rows: {exec}");
+        assert!(exec.contains("observed 1.00"), "both ran: {exec}");
+        // And semantics sees one success in two.
+        let sem = out.split("tool semantics").nth(1).expect("semantic family");
+        assert!(sem.contains("observed 0.50"), "one of two was usable: {sem}");
+    }
+
+    /// KILL 2: a row the system could not classify semantically must not enter the semantic
+    /// denominator, or the two families are quietly incomparable.
+    #[test]
+    fn an_unclassifiable_row_counts_for_execution_but_not_for_semantics() {
+        let evs = vec![
+            predicted("p1", 0.8, 1),
+            observed("p1", "ok", Some(true), 2),
+            predicted("p2", 0.8, 3),
+            observed("p2", "ok", None, 4), // ran, but nothing judged its semantics
+        ];
+        let out = render_calibration(&evs);
+        let exec = out.split("tool execution").nth(1).and_then(|s| s.split("tool semantics").next()).unwrap();
+        let sem = out.split("tool semantics").nth(1).unwrap();
+        assert!(exec.contains("n= 2"), "execution counts both: {exec}");
+        assert!(sem.contains("n= 1"), "semantics counts only the classified one: {sem}");
+    }
+
+    /// KILL 5: with nothing semantically classifiable the family is ABSENT, never shown as zero —
+    /// a 0.00 success rate reads as "it never worked", which is a different claim from "nobody
+    /// looked".
+    #[test]
+    fn with_nothing_classifiable_the_semantic_family_is_absent_not_zero() {
+        let evs = vec![predicted("p1", 0.8, 1), observed("p1", "ok", None, 2)];
+        let out = render_calibration(&evs);
+        assert!(out.contains("tool execution"), "{out}");
+        assert!(
+            !out.contains("tool semantics"),
+            "an absent family must not be rendered at all: {out}"
+        );
+    }
+}
+

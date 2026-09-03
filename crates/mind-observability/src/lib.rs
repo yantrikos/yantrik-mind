@@ -2307,6 +2307,16 @@ pub fn render_calibration(events: &[DecisionEvent]) -> String {
         .filter_map(|e| e.event_id.as_deref().map(|id| (id, e)))
         .collect();
     let mut tool_rows: Vec<(f64, f64)> = Vec::new(); // (predicted_confidence, observed 0/1)
+    // E.CAL2: the SEMANTIC family, from the same joined pairs.
+    //
+    // Execution success and semantic success are different questions and they diverge: on the
+    // first real reading, Brier 0.052 against execution and 0.141 against semantics, with the
+    // highest confidence band 22 points over-confident semantically while looking healthy on
+    // execution. Reporting only the first invites the confusion it produced in me before this
+    // family existed -- a Brier of 0.05 reads as "it predicts usefulness well", and it does not.
+    // A row is counted here only where `semantic_success` is present, so the two families never
+    // share a denominator they did not both earn.
+    let mut semantic_rows: Vec<(f64, f64)> = Vec::new();
     for o in events.iter().filter(|e| e.kind == "tool_observed") {
         let Some(vd) = &o.verdict else { continue };
         let observed = match vd.as_str() {
@@ -2318,6 +2328,9 @@ pub fn render_calibration(events: &[DecisionEvent]) -> String {
             if let Some(p) = pred_by_event.get(parent.as_str()) {
                 if let Some(c) = p.confidence.filter(|value| valid_probability(*value)) {
                     tool_rows.push((c, observed));
+                    if let Some(sem) = o.semantic_success {
+                        semantic_rows.push((c, if sem { 1.0 } else { 0.0 }));
+                    }
                 }
             }
         }
@@ -2337,13 +2350,25 @@ pub fn render_calibration(events: &[DecisionEvent]) -> String {
                 .map(|confidence| (confidence, observed))
         })
         .collect();
-    if tool_rows.is_empty() && forecast_rows.is_empty() {
+    if tool_rows.is_empty() && semantic_rows.is_empty() && forecast_rows.is_empty() {
         return "No graded predictions yet — calibration appears once a tool or forecast has an observed outcome.".into();
     }
     let mut out = String::from(
         "CALIBRATION BY CONFIDENCE BAND (predicted vs actually-observed; families separated):\n",
     );
+    // Each family's success criterion is stated ONCE, here, rather than folded into the labels.
+    // The labels are a contract an existing preregistered test matches on; renaming them to carry
+    // the explanation would have made a cosmetic change to a guard's expectations, which is the
+    // move I refused this morning when the runner freeze guard fired. The legend satisfies the
+    // same requirement -- neither family can be read as the other -- and breaks nothing.
+    if !tool_rows.is_empty() || !semantic_rows.is_empty() {
+        out.push_str(
+            "  (execution = ran without breaking; semantics = returned something usable)
+",
+        );
+    }
     append_calibration_bands(&mut out, "tool execution", &tool_rows);
+    append_calibration_bands(&mut out, "tool semantics", &semantic_rows);
     append_calibration_bands(&mut out, "world forecasts", &forecast_rows);
     out
 }

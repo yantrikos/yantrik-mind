@@ -135,7 +135,9 @@
       { "name": "long-horizon agency", "rung": "none", "status": "ABSENT" },
       { "name": "causal reasoning", "rung": "none", "status": "ABSENT" },
       { "name": "calibrated uncertainty", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.T1", "gap": "scored on tool success only, never on answers; E.P2 is the standing warning" },
-      { "name": "multi-agent cooperation", "rung": "ACTIVE", "status": "IMPLEMENTED-UNWITNESSED", "gap": "the Mind/Codex arrangement runs unmeasured against no solo baseline" },
+      { "name": "multi-agent cooperation", "rung": "ACTIVE", "status": "IMPLEMENTED-UNWITNESSED", "gap": "the Mind/Codex arrangement runs unmeasured against no solo baseline",
+        "solo_baseline": "E.MA1 (2026-09-03, counting rule fixed before counting): one full solo session, 27 commits, six slices, no peer review at any point. Of 15 defects I introduced, 6 were caught by my own tests or mutations, 2 by the full workspace suite, and 7 survived every filter I own and were caught only by deploying and looking -- 47%. Severity of those 7: five cosmetic, one materially misleading, one operational and irreversible. Deliberately NOT claimed: that peer review would have caught any of them.",
+        "solo_baseline_ledger": "4f737e5 (prereg), 627b62c (result)" },
       { "name": "safe self-improvement", "rung": "DEFINED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.C1", "gap": "no promotion has ever been blinded or scored against a hidden holdout" }
     ]
   },

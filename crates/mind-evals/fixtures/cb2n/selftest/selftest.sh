@@ -26,6 +26,8 @@ done
 # The request cap: one number, carried by the run state, refusing to change mid-reading.
 if bash "$FIX/selftest/cap_cases.sh"; then echo "cap_cases: agree"; else echo "cap_cases: DISAGREE"; BAD=1; fi
 if bash "$FIX/selftest/model_cases.sh"; then echo "model_cases: agree"; else echo "model_cases: DISAGREE"; BAD=1; fi
+# The grader must FAIL a hostile artifact, not crash on one. Structural, and it says so.
+if python3 "$FIX/selftest/scan_checker_guard.py" "$FIX/checks/check_web.mjs"; then echo "checker_guard: agree"; else echo "checker_guard: DISAGREE"; BAD=1; fi
 # The receipt decision, driven through every classification without a graded leg.
 if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi
 S=$(mktemp -d /tmp/cb2-tree-self-XXXX)

@@ -45,58 +45,80 @@ let consoleErrors = 0, externalRequests = 0, loadErrors = 0;
 page.on("console", m => { if (m.type() === "error") { consoleErrors++; note("console", m.text()); } });
 page.on("pageerror", e => { consoleErrors++; note("pageerror", e); });
 page.on("request", r => { const u = r.url(); if (!u.startsWith(base) && !u.startsWith("data:") && !u.startsWith("about:")) { externalRequests++; note("external", u); } });
-let loaded = false;
-try { await page.goto(base + "/", { timeout: 10000, waitUntil: "load" }); loaded = true; } catch (e) { loadErrors++; note("load", e); }
-check("loads_without_console_error_or_external_request", loaded && consoleErrors === 0 && externalRequests === 0, { console_errors: consoleErrors, external_requests: externalRequests, load_errors: loadErrors });
-const hrefs = loaded ? await page.$$eval("a[href]", as => as.map(a => a.getAttribute("href"))) : [];
-const local = hrefs.filter(h => h && !/^(https?:|mailto:|tel:|#|data:)/.test(h));
-let broken = 0;
-for (const h of local) { const r = await fetch(base + (h.startsWith("/") ? h : "/" + h)).catch(() => ({ status: 0 })); if (r.status !== 200) { broken++; note("broken-link", h); } }
-check("relative_links_resolve", broken === 0, { checked: local.length, broken });
+// A BROKEN ARTIFACT MUST FAIL THE CHECKS, NOT CRASH THE GRADER. Nearly every page interaction
+// below is individually guarded, but `page.$` and `page.evaluate` were not -- and the pilot's
+// artifact, whose server.py was truncated mid-string after repeating one block 49 times, made the
+// page navigate under `page.$("form#cb2-lead-form")`. Playwright threw "Execution context was
+// destroyed", node died with an uncaught exception, and check.sh wrote a ZERO-BYTE verdict.json
+// while exiting 1 -- the same exit code an honestly failing artifact produces, with none of the
+// evidence. A grader that cannot say what it found is worse than one that says "it failed".
+//
+// This can only turn a MISSING verdict into a FAILING one: `checker_completed` is added solely on
+// the crash path, so a run that completes is byte-identical to before and readings 3-6 stay
+// reproducible. It can never turn a failure into a pass.
+let checkerCrash = null;
+try {
+  let loaded = false;
+  try { await page.goto(base + "/", { timeout: 10000, waitUntil: "load" }); loaded = true; } catch (e) { loadErrors++; note("load", e); }
+  check("loads_without_console_error_or_external_request", loaded && consoleErrors === 0 && externalRequests === 0, { console_errors: consoleErrors, external_requests: externalRequests, load_errors: loadErrors });
+  const hrefs = loaded ? await page.$$eval("a[href]", as => as.map(a => a.getAttribute("href"))) : [];
+  const local = hrefs.filter(h => h && !/^(https?:|mailto:|tel:|#|data:)/.test(h));
+  let broken = 0;
+  for (const h of local) { const r = await fetch(base + (h.startsWith("/") ? h : "/" + h)).catch(() => ({ status: 0 })); if (r.status !== 200) { broken++; note("broken-link", h); } }
+  check("relative_links_resolve", broken === 0, { checked: local.length, broken });
 
-if (task === "t2") {
-  const c = await page.evaluate(() => ({
-    projects: document.querySelectorAll("section#projects article").length,
-    writing: document.querySelectorAll("section#writing article").length,
-    contact: !!document.querySelector("section#contact") && (!!document.querySelector("section#contact a[href^='mailto:']") || !!document.querySelector("section#contact form")),
-  }));
-  verdict.counts = { projects_articles: c.projects, writing_articles: c.writing };
-  check("projects_section_has_4_articles", c.projects >= 4, { articles: c.projects });
-  check("writing_section_has_3_articles", c.writing >= 3, { articles: c.writing });
-  check("contact_section_reachable", c.contact);
-}
-if (task === "t1") {
-  const store = path.join(dir, "data", "leads.json");
-  const form = await page.$("form#cb2-lead-form");
-  check("form_cb2_lead_form_present", !!form);
-  const sample = { name: "Checker Lead", email: "checker@example.in", phone: "+91 9876543210", business: "Checker Traders", message: "Checker message." };
-  let appendedExactly = false, recordMatches = false, createdAtIso = false, len = -1;
-  if (form) {
-    for (const [k, v] of Object.entries(sample)) { const el = await form.$(`[name="${k}"]`); if (el) await el.fill(v).catch(() => {}); }
-    const btn = await form.$("button[type=submit], input[type=submit], button");
-    if (btn) await btn.click().catch(() => {});
-    await new Promise(r => setTimeout(r, 3000));
-    try {
-      const arr = JSON.parse(fs.readFileSync(store, "utf8")); len = Array.isArray(arr) ? arr.length : -1;
-      appendedExactly = Array.isArray(arr) && arr.length === expected.total + 1;
-      const last = arr[arr.length - 1] || {};
-      recordMatches = Object.entries(sample).every(([k, v]) => last[k] === v) && Object.keys(last).sort().join(",") === "business,created_at,email,message,name,phone";
-      createdAtIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(String(last.created_at || ""));
-    } catch (e) { note("store", e); }
+  if (task === "t2") {
+    const c = await page.evaluate(() => ({
+      projects: document.querySelectorAll("section#projects article").length,
+      writing: document.querySelectorAll("section#writing article").length,
+      contact: !!document.querySelector("section#contact") && (!!document.querySelector("section#contact a[href^='mailto:']") || !!document.querySelector("section#contact form")),
+    }));
+    verdict.counts = { projects_articles: c.projects, writing_articles: c.writing };
+    check("projects_section_has_4_articles", c.projects >= 4, { articles: c.projects });
+    check("writing_section_has_3_articles", c.writing >= 3, { articles: c.writing });
+    check("contact_section_reachable", c.contact);
   }
-  check("submit_appends_exactly_one_record", appendedExactly, { store_length_after: len, expected_length: expected.total + 1 });
-  check("appended_record_matches_submission_and_schema", recordMatches && createdAtIso);
-  fs.writeFileSync(store, seed);
-  let d = null;
-  try { await page.goto(base + "/dashboard", { timeout: 10000, waitUntil: "load" }); d = JSON.parse(await page.$eval("script#cb2-dashboard", s => s.textContent)); } catch (e) { note("dashboard", e); }
-  verdict.counts.dashboard = d ? { total: d.total, per_day_keys: Object.keys(d.per_day || {}).length, recent: (d.recent || []).length } : null;
-  check("dashboard_json_block_present", !!d);
-  check("dashboard_total_exact", !!d && d.total === expected.total, { expected: expected.total });
-  const sameMap = (a, b) => !!a && !!b && Object.keys(a).length === Object.keys(b).length && Object.keys(b).every(k => Number.isInteger(a[k]) && a[k] === b[k]);   // order-insensitive
-  check("dashboard_per_day_exact_14_bins", !!d && sameMap(d.per_day, expected.per_day), { keys: d ? Object.keys(d.per_day || {}).length : 0 });
-  check("dashboard_recent_five_exact_order", !!d && JSON.stringify(d.recent) === JSON.stringify(expected.five_most_recent));
+  if (task === "t1") {
+    const store = path.join(dir, "data", "leads.json");
+    const form = await page.$("form#cb2-lead-form");
+    check("form_cb2_lead_form_present", !!form);
+    const sample = { name: "Checker Lead", email: "checker@example.in", phone: "+91 9876543210", business: "Checker Traders", message: "Checker message." };
+    let appendedExactly = false, recordMatches = false, createdAtIso = false, len = -1;
+    if (form) {
+      for (const [k, v] of Object.entries(sample)) { const el = await form.$(`[name="${k}"]`); if (el) await el.fill(v).catch(() => {}); }
+      const btn = await form.$("button[type=submit], input[type=submit], button");
+      if (btn) await btn.click().catch(() => {});
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const arr = JSON.parse(fs.readFileSync(store, "utf8")); len = Array.isArray(arr) ? arr.length : -1;
+        appendedExactly = Array.isArray(arr) && arr.length === expected.total + 1;
+        const last = arr[arr.length - 1] || {};
+        recordMatches = Object.entries(sample).every(([k, v]) => last[k] === v) && Object.keys(last).sort().join(",") === "business,created_at,email,message,name,phone";
+        createdAtIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(String(last.created_at || ""));
+      } catch (e) { note("store", e); }
+    }
+    check("submit_appends_exactly_one_record", appendedExactly, { store_length_after: len, expected_length: expected.total + 1 });
+    check("appended_record_matches_submission_and_schema", recordMatches && createdAtIso);
+    fs.writeFileSync(store, seed);
+    let d = null;
+    try { await page.goto(base + "/dashboard", { timeout: 10000, waitUntil: "load" }); d = JSON.parse(await page.$eval("script#cb2-dashboard", s => s.textContent)); } catch (e) { note("dashboard", e); }
+    verdict.counts.dashboard = d ? { total: d.total, per_day_keys: Object.keys(d.per_day || {}).length, recent: (d.recent || []).length } : null;
+    check("dashboard_json_block_present", !!d);
+    check("dashboard_total_exact", !!d && d.total === expected.total, { expected: expected.total });
+    const sameMap = (a, b) => !!a && !!b && Object.keys(a).length === Object.keys(b).length && Object.keys(b).every(k => Number.isInteger(a[k]) && a[k] === b[k]);   // order-insensitive
+    check("dashboard_per_day_exact_14_bins", !!d && sameMap(d.per_day, expected.per_day), { keys: d ? Object.keys(d.per_day || {}).length : 0 });
+    check("dashboard_recent_five_exact_order", !!d && JSON.stringify(d.recent) === JSON.stringify(expected.five_most_recent));
+  }
+} catch (e) {
+  checkerCrash = e;
 }
-await browser.close(); if (server) server.close(); if (child) child.kill("SIGKILL");
+try { await browser.close(); } catch {}
+try { if (server) server.close(); } catch {}
+try { if (child) child.kill("SIGKILL"); } catch {}
+if (checkerCrash) {
+  check("checker_completed", false, {});
+  note("checker-crash", (checkerCrash && checkerCrash.message) ? checkerCrash.message : checkerCrash);
+}
 verdict.pass = Object.values(verdict.checks).every(c => c.pass);
 if (excerptsFile) fs.writeFileSync(excerptsFile, excerpts.join("\n") + "\n");
 console.log(JSON.stringify(verdict, null, 1));

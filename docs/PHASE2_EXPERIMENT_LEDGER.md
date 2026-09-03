@@ -5217,3 +5217,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Cause | `must_delete` already retried — 50 × 20 ms = **one second**. That holds for one suite and not for `cargo test --workspace`, where 17 test binaries compete for the disk and Windows keeps the mapped file open past the budget. |
 | Fix | Back off to ~10 s, and name the **OS reason** in the panic — including Windows's deferred delete, where `remove_file` succeeds and the path keeps resolving until the last handle closes, which the old loop counted as a plain failure. A passing run still costs one attempt, so only the case that would otherwise fail pays the ceiling. |
 | Why both of these matter beyond themselves | Two full-suite reruns were spent on failures that had nothing to do with the change under test. A flaky gate does not just cost time — it trains you to wave red suites through, which is the failure mode that lets a real one past. |
+
+## E.CB2-D pilot — PREREGISTERED before the harness is deployed
+| Field | Value |
+| --- | --- |
+| Why a pilot and not a reading | Four benchmark readings have died from harness defects whose FIRST run was a graded one. The model is new to this harness, the wall is new, and `nim-ds` has never executed a leg. This run exists to find defects, and **its numbers do not enter any comparison** — stated here, before I see them, because the temptation to promote a pilot that happens to look clean is exactly how a confounded reading gets published. |
+| Preflight, before any leg | (1) The self-test suite passes on the box. (2) `nim-ds` loads, the liveness probe returns **alive** for `deepseek-ai/deepseek-v4-pro-0813`, and the run state records `wall: 3600`. (3) A child process sees `CB2_WALL=3600` — the mutation-found hole, checked on the real box and not only in the fixture tree. |
+| Then one Mind leg and one Hermes leg | Same task, cap 24, wall 3600, its own out dir. |
+| What would stop the sequence | The probe says **gone** → refuse, the model is retired. A leg **voids** (5xx or transport) → exactly one declared rerun, per the standing rule; a second void stops it. |
+| The wall question this answers, stated as a threshold now | If a leg's **wall utilisation exceeds 70% of 3600 s**, 3600 is still the wrong number and no sequence runs on it. Between 40% and 70% the wall stands. Below 40% it is comfortable. Writing the threshold down first is the point: after seeing "2,900 s, it finished" I would be arguing for it rather than measuring it. |
+| What I expect | 1,163 s of model time was measured at cap 24 with no agent or tool overhead. A real leg adds both. I expect 40–65% and will be unsurprised by a void. |

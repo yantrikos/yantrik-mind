@@ -67,7 +67,7 @@ PROV_CLEAN=$(cd "$SRC" && git status --porcelain | wc -l)
 # The product's five defaults do not collide; the harness had moved CTL on top of FRAME.
 docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
   -v "$BIN":/mind-core:ro -v "$ST:/state" -v "$FIX:/fixtures:ro" -v "$CD:/count:ro" \
-  -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8077 \
+  -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8077 -e YM_PROVIDER_DEADLINE_S="${CB2_PROVIDER_DEADLINE_S:-}" \
   -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata "${LANE[@]}" -e YM_INFER_PERMITS=2 \
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off \
   cb2-mind /mind-core > "$OUT/raw/mind_${T}_stdout.txt" 2>&1 || true

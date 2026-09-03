@@ -5485,3 +5485,20 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Only the review, and only a truly empty stream | The **first** write is the deliverable: an empty authoring result stays a real failure, asserted directly. And `allow_empty` excuses only a **blank** stream — prose without markers still errors, so "it ignored the format" stays visible, the same reason `ParsedSet` keeps the preamble as evidence rather than discarding it. |
 | Four mutants, each verified to change the file before its verdict was read | The review reverting to the whole set; the review losing the omission-is-not-deletion rule; the **build** write being excused an empty result; the review write no longer allowing one. All caught. |
 | Standing | Workspace **1775/1775**. All three code steps of E.CB2-B are in; the corrected gate is what remains. |
+
+## E.CB2-B — GATE MET: two consecutive void-free legs, both at reading 6's score
+| Leg (all `nim-oss20`, T1) | wall | requests | longest call | 5xx | void | **T1 score** |
+| --- | --- | --- | --- | --- | --- | --- |
+| oss20 #1 — **before** | 420 s | 3 | 222,689 ms | 0 | false | not run |
+| oss20 #2 — **before** | 471 s | 4 | **302,173 ms → 504** | 1 | **true** | not run |
+| **gate1 — after** | **226 s** | 3 | **143,387 ms** | 0 | **false** | **11/11** |
+| **gate2 — after** | **145 s** | 3 | **81,378 ms** | 0 | **false** | **11/11** |
+
+| Field | Value |
+| --- | --- |
+| Both preregistered conditions | **Void-free** — `upstream_http_errors 0`, `upstream_transport_errors 0` on both legs. **And no score regression** — 11/11 on both, exactly reading 6's baseline. The second condition is the one I added after catching that the first is gameable by producing *less*; it is what makes these numbers mean anything. |
+| The mechanism, proven rather than inferred | The improvement alone proves nothing — a shorter call is equally consistent with the model just being brief. The chain was checked at every link: the profile declares 302 → the loader **exports** `CB2_PROVIDER_DEADLINE_S=302` → a **child container** reports `YM_PROVIDER_DEADLINE_S=302` → the unit test pins `authoring_budget(16_000) = 3,171` at that deadline → the wiring test pins that `build_recipe` uses the clamp rather than the constant. **Third time today** that "declared but never proven to carry a value" would have fooled me, so it was measured at the container rather than read off the diff. |
+| Binary | Built from `a400391` on the build host, `sha256 87788793f0e6ade4`, transferred hash-verified, installed on the benchmark box. **Production's installed binary was not touched** — the build script installs and sets up systemd, so it was deliberately not run; only `cargo build` was. |
+| What is NOT claimed | That voids are now impossible. n=2 after against n=2 before, and a model slower than the assumed 15 tok/s floor could still overrun. The gate was preregistered at two consecutive legs and is met; that is the claim, and no more. |
+| Also fixed in passing | The redeploy now preserves `docker/` wholesale, so the Hermes archive survived this time — verified by hash before the suite ran. |
+| Follow-up owed before any GRADED reading | `CB2_PROVIDER_DEADLINE_S` lives in the profile but **not** in the immutable run state. The cap and the wall both had to move there so a reading cannot change its own parameters mid-run; this one is the same kind of parameter and should join them. Recorded now so it is not discovered later. |

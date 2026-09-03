@@ -41,3 +41,8 @@ CB2_CAP=24
 # 1800 s wall in model time alone, before any agent or tool time, with a p90 of 80 s and a 110 s
 # tail. At 3600 s that same model time is 32%.
 CB2_WALL=3600
+# E.CB2-B: NVIDIA NIM cuts a request at ~302 s -- measured, four 504s across two models landing in
+# 302,155-302,180 ms, a spread of 25 ms. The Mind reads this as YM_PROVIDER_DEADLINE_S and clamps
+# any single authoring generation to what that deadline can deliver. Unset means "no declared
+# limit" and nothing is clamped, which is why qwen does not carry it.
+CB2_PROVIDER_DEADLINE_S=302

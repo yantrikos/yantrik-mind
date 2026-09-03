@@ -5236,3 +5236,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why W6 missed it | W6 greps three files — `hermes_leg.sh`, `mind_leg.sh`, `mind_driver.py` — the three I thought of when I wrote it. **A completeness check is only as complete as its list.** The manifest is a consumer in the sense that matters most and was not on it. |
 | Fix | The manifest now names the run state's wall in all three places, exactly as it already did for the cap ("the run state's cap"). W9 asserts both: no literal `1800 s` in the kill list, and `wall_clock_seconds` naming the run state. Both mutants — restoring the literal declaration, restoring the literal kill — were watched to fail, and each was verified to have actually changed the file first. |
 | The habit this should change | When a parameter is threaded through code, ask what **documents** carry it too. The kill list is executable in the only sense that counts: it decides whether a reading survives. |
+
+## E.CB2-W follow-up 2 — the guard stops depending on a list
+| Field | Value |
+| --- | --- |
+| Why | Case 6 and W6 each grep three files. The manifest was on neither, and the manifest is what nearly killed a reading. `selftest/scan_literals.py` walks the whole tree instead, so a file nobody has thought of yet is already covered. |
+| It scans code, not prose | The first version fired on two comments — `verdict.py`'s note that it deliberately has no module-level `CAP`, and `captest.sh` describing its throwaway proxy. A guard that fires on prose is one that gets commented out within a week rather than obeyed. |
+| **A check that cannot fail reports success** | The version before that was a heredoc inside `$( )`. Python never received it, and it printed **0 hits for a clean tree and for two deliberately broken trees alike** — it looked like a passing check. Only running the mutations caught it. It is a separate file now precisely so it can be run alone and made to fail on demand. |
+| Watched to fail, both ways | A literal restored in a **listed** file (`hermes_leg.sh`) and a literal planted in a file **no list covers** (`receipt_checks.py`); the tree-wide case catches both and names the file and line. |
+| Standing | 150 checks, 0 disagreements; `cb2n re-derives exactly`. |

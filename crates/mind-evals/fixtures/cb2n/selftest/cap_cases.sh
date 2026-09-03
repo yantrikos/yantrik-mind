@@ -192,4 +192,17 @@ k = ' '.join(json.load(open('$m'))['kill'])
 print('ok' if (\"run state\" in str(w) and \"run state's wall\" in k) else 'literal')")
 say "the_manifest_wall_names_the_run_state" "$r" "ok"
 
+# W10. THE SAME CHECK, TAKING NO LIST. W6 and case 6 each grep three files; the MANIFEST was on
+#      neither, and it is what nearly killed a reading. `scan_literals.py` walks the whole tree
+#      instead, so a file that does not exist yet is already covered.
+#
+#      Its FIRST version was a heredoc inside `$( )`: python never received it and the case
+#      reported zero hits for a clean tree and for two deliberately broken ones alike. It is a
+#      separate file now precisely so it can be run alone and made to fail on demand -- a check
+#      that cannot fail does not report nothing, it reports success.
+hits=$(python3 "$HERE/scan_literals.py" "$HERE/..")
+say "no_budget_or_timeout_is_a_bare_literal_anywhere" "$(printf '%s' "$hits" | grep -c .)" "0"
+[ -n "$hits" ] && printf '    %s
+' "$hits"
+
 exit $BAD

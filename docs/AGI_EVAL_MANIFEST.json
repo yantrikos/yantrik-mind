@@ -11,6 +11,7 @@
     "No number here is cost- or latency-normalised. Nothing in this repository is, yet.",
     "Suites marked evidence:ledger were NOT re-run for this manifest; they are quoted from the entry named, which recorded them when they were run."
   ],
+
   "workspace": {
     "evidence": "re-run",
     "command": "cargo test --workspace --no-fail-fast",
@@ -19,6 +20,7 @@
     "crate_result_lines": 42,
     "note": "The whole-workspace count is a regression floor, not a capability measure. It is recorded because a roadmap phase that lowers it has broken something."
   },
+
   "suites": [
     {
       "id": "coverage_oracle",
@@ -37,11 +39,7 @@
         "top1_agreement": ">= 0.80 (a tie counts as wrong)",
         "abstention": ">= 0.90 (a tie counts as right)"
       },
-      "last_result": {
-        "agreement": "35/38",
-        "abstention": "12/12",
-        "verdict": "bar met on the first run"
-      },
+      "last_result": { "agreement": "35/38", "abstention": "12/12", "verdict": "bar met on the first run" },
       "evidence": "ledger",
       "ledger": "E.PK3",
       "known_weakness": "The labels are not independent of the coverage authors (same lineage), so this bar measures self-consistency, not correctness. Stated in the suite's own header."
@@ -51,13 +49,8 @@
       "path": "crates/mind-evals/src/coverage_oracle.rs",
       "scores": "Whether mounting real expertise packs pollutes answers to questions no pack covers.",
       "gate": "YM_PACK_DIST=<dir of .ydbpack files>",
-      "corpus": {
-        "queries": 12,
-        "source": "the no-pack half of the coverage corpus"
-      },
-      "preregistered_bar": {
-        "rows_clearing_the_floor": "0 on every query, with every pack mounted"
-      },
+      "corpus": { "queries": 12, "source": "the no-pack half of the coverage corpus" },
+      "preregistered_bar": { "rows_clearing_the_floor": "0 on every query, with every pack mounted" },
       "last_result": {
         "packs_mounted": 13,
         "queries": 12,
@@ -74,13 +67,8 @@
       "path": "crates/mind-evals/src/executive_oracle.rs",
       "scores": "Whether the executive's vocabulary can REPRESENT a set of hand-authored decisions. Representability, not correctness.",
       "gate": "YM_EXEC_3B=1",
-      "corpus": {
-        "decisions": 37,
-        "frozen_baseline": "0/37 representable at EX0"
-      },
-      "last_result": {
-        "representable": "26/37"
-      },
+      "corpus": { "decisions": 37, "frozen_baseline": "0/37 representable at EX0" },
+      "last_result": { "representable": "26/37" },
       "evidence": "ledger",
       "ledger": "E.EX4-R2",
       "known_weakness": "Representability is a floor, not a capability: a decision the vocabulary can express may still be decided wrongly. Nothing here has ever controlled live behaviour."
@@ -90,16 +78,8 @@
       "path": "crates/mind-evals/src/world_oracle.rs",
       "scores": "The temporal-epistemic world model: bi-temporal cuts, epistemic state, retraction.",
       "gate": "YM_WORLD_3A=1",
-      "corpus": {
-        "oracles": 9,
-        "metamorphic_transitions": "~78",
-        "adversarial_month_events": 65
-      },
-      "last_result": {
-        "oracles": "9/9",
-        "adversarial_month": "11/11",
-        "frozen_as": "world-state-v1.1 (immutable)"
-      },
+      "corpus": { "oracles": 9, "metamorphic_transitions": "~78", "adversarial_month_events": 65 },
+      "last_result": { "oracles": "9/9", "adversarial_month": "11/11", "frozen_as": "world-state-v1.1 (immutable)" },
       "evidence": "ledger",
       "ledger": "E.W7-c, E.W8",
       "known_weakness": "BENCHMARKED and never reachable: no live decision consults it."
@@ -128,220 +108,57 @@
       "note": "Model-dependent; excluded from any regression floor by design."
     }
   ],
+
   "capability_baseline": {
     "legend": {
       "ladder": "DEFINED -> TESTED -> BENCHMARKED -> REACHABLE -> SHADOWED -> ACTIVE -> OUTCOME-VALIDATED (E.D1)",
       "status": "EVIDENCED = a ledger entry and a production trace; IMPLEMENTED-UNWITNESSED = code exists, nothing has observed it doing its job; ABSENT = not built"
     },
     "capabilities": [
-      {
-        "name": "persistent episodic/semantic memory",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.1",
-        "gap": "no held-out continuity measurement"
-      },
-      {
-        "name": "hash-chained decision record",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.4"
-      },
-      {
-        "name": "closed learning chain (tool calls)",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.L1, E.T1, E.R2"
-      },
-      {
-        "name": "outcome attribution",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.PK2b, E.PK2d, E.PK2e, E.PK2f"
-      },
-      {
-        "name": "abstention",
-        "rung": "SHADOWED",
-        "status": "EVIDENCED",
-        "witness": "E.PK3",
-        "gap": "decides nothing; exists elsewhere only as refusal"
-      },
-      {
-        "name": "self-observation",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.PK2",
-        "gap": "self-model accuracy never measured"
-      },
-      {
-        "name": "expertise routing",
-        "rung": "SHADOWED",
-        "status": "EVIDENCED",
-        "witness": "E.PK3, E.PK3b"
-      },
-      {
-        "name": "expertise attachment (leases)",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.PK4, E.PK4a",
-        "gap": "efficacy explicitly not claimed"
-      },
-      {
-        "name": "bounded planning",
-        "rung": "BENCHMARKED",
-        "status": "IMPLEMENTED-UNWITNESSED",
-        "witness": "E.EX4-R2, E.EX4-LIVE-A",
-        "gap": "one shadow decision, which decided nothing"
-      },
-      {
-        "name": "temporal/world model",
-        "rung": "BENCHMARKED",
-        "status": "IMPLEMENTED-UNWITNESSED",
-        "witness": "E.W7-c, E.W8",
-        "observation": {
-          "what": "First live observation of the world model answering. 9,889 shadow consults on the staging canary over 37 h, recorded at real decision moments and on a fixed tick, never pooled.",
-          "result": "headless-cadence (251 rows / 37.4 h): unknown 70.9%, stale 25.5%, known 3.6%. knock-receptivity (9,638 rows / 15.0 h): unknown 58.8%, stale 39.7%, known 1.5%.",
-          "why_it_answers_unknown": "Its ONLY input is handle_turn_as asserting user/presence when the primary sends a conversational turn. A live cockpit -- which is what gated the 9,638 evaluations into existence -- never reaches the model. It was not wrong; it had never been told.",
-          "agreement_measurement": "UNCOMPUTABLE on this box. All 9,638 paired evaluations exited before the receptivity gate (chosen=no_packets), so the legacy verdict to compare against was never produced. The paired sample then stopped entirely at 02:59:56Z when console presence ended.",
-          "status_unchanged_because": "The legend requires a PRODUCTION trace for EVIDENCED, and this is a staging canary. The capability was observed doing its job -- answering under access gating, 9,889 times -- so 'nothing has observed it' is no longer true either. The label is left alone rather than inflated or invented; whether a canary trace can move it is a question for Pranab and Codex, not a call to make while reporting on my own work.",
-          "reader": "ym why world (E.G2-R)",
-          "ledger": "220dd99, 28f6256, 00c945e, 594d3a1",
-          "source": "re-run on the box, not quoted from an earlier ledger entry"
-        }
-      },
-      {
-        "name": "safety walls",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.PK4 hostile-pack invariant"
-      },
-      {
-        "name": "procedure learning",
-        "rung": "TESTED",
-        "status": "IMPLEMENTED-UNWITNESSED",
-        "gap": "no evidence a banked procedure was ever reused to a better outcome"
-      },
-      {
-        "name": "cross-domain transfer",
-        "rung": "none",
-        "status": "ABSENT"
-      },
-      {
-        "name": "tool learning from contracts",
-        "rung": "none",
-        "status": "ABSENT",
-        "gap": "the mind is given schemas and held to them; never scored on an unseen tool"
-      },
-      {
-        "name": "long-horizon agency",
-        "rung": "none",
-        "status": "ABSENT"
-      },
-      {
-        "name": "causal reasoning",
-        "rung": "none",
-        "status": "ABSENT"
-      },
-      {
-        "name": "calibrated uncertainty",
-        "rung": "ACTIVE",
-        "status": "EVIDENCED",
-        "witness": "E.T1",
-        "gap": "scored on tool success only, never on answers; E.P2 is the standing warning"
-      },
-      {
-        "name": "multi-agent cooperation",
-        "rung": "ACTIVE",
-        "status": "IMPLEMENTED-UNWITNESSED",
-        "gap": "the Mind/Codex arrangement runs unmeasured against no solo baseline"
-      },
-      {
-        "name": "safe self-improvement",
-        "rung": "DEFINED",
-        "status": "IMPLEMENTED-UNWITNESSED",
-        "witness": "E.C1",
-        "gap": "no promotion has ever been blinded or scored against a hidden holdout"
-      }
+      { "name": "persistent episodic/semantic memory", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.1", "gap": "no held-out continuity measurement" },
+      { "name": "hash-chained decision record", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.4" },
+      { "name": "closed learning chain (tool calls)", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.L1, E.T1, E.R2" },
+      { "name": "outcome attribution", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK2b, E.PK2d, E.PK2e, E.PK2f" },
+      { "name": "abstention", "rung": "SHADOWED", "status": "EVIDENCED", "witness": "E.PK3", "gap": "decides nothing; exists elsewhere only as refusal" },
+      { "name": "self-observation", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK2", "gap": "self-model accuracy never measured" },
+      { "name": "expertise routing", "rung": "SHADOWED", "status": "EVIDENCED", "witness": "E.PK3, E.PK3b" },
+      { "name": "expertise attachment (leases)", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK4, E.PK4a", "gap": "efficacy explicitly not claimed" },
+      { "name": "bounded planning", "rung": "BENCHMARKED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.EX4-R2, E.EX4-LIVE-A", "gap": "one shadow decision, which decided nothing" },
+      { "name": "temporal/world model", "rung": "BENCHMARKED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.W7-c, E.W8",
+        "observed": "E.G2 (re-run on the box, not quoted): 9,889 live consults over 37 h, samples never pooled — knock-receptivity 9,638 rows known 1.5% / stale 39.7% / unknown 58.8%; headless-cadence 251 rows known 3.6% / stale 25.5% / unknown 70.9%. It answers unknown because its ONLY input is a conversational turn: the live cockpit that gated those evaluations into existence never reaches it. Agreement UNCOMPUTABLE — all 9,638 paired evaluations exited before the receptivity gate, and the paired sample stopped at 02:59:56Z when console presence ended.",
+        "status_unchanged_because": "EVIDENCED needs a PRODUCTION trace and this is a canary; equally, 'nothing has observed it' is no longer true. Label left alone rather than inflated or invented — a call for Pranab and Codex, not for me while reporting on my own work.",
+        "observed_reader": "ym why world (E.G2-R)", "observed_ledger": "220dd99, 28f6256, 00c945e, 594d3a1" },
+      { "name": "safety walls", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.PK4 hostile-pack invariant" },
+      { "name": "procedure learning", "rung": "TESTED", "status": "IMPLEMENTED-UNWITNESSED", "gap": "no evidence a banked procedure was ever reused to a better outcome" },
+      { "name": "cross-domain transfer", "rung": "none", "status": "ABSENT" },
+      { "name": "tool learning from contracts", "rung": "none", "status": "ABSENT", "gap": "the mind is given schemas and held to them; never scored on an unseen tool" },
+      { "name": "long-horizon agency", "rung": "none", "status": "ABSENT" },
+      { "name": "causal reasoning", "rung": "none", "status": "ABSENT" },
+      { "name": "calibrated uncertainty", "rung": "ACTIVE", "status": "EVIDENCED", "witness": "E.T1", "gap": "scored on tool success only, never on answers; E.P2 is the standing warning" },
+      { "name": "multi-agent cooperation", "rung": "ACTIVE", "status": "IMPLEMENTED-UNWITNESSED", "gap": "the Mind/Codex arrangement runs unmeasured against no solo baseline" },
+      { "name": "safe self-improvement", "rung": "DEFINED", "status": "IMPLEMENTED-UNWITNESSED", "witness": "E.C1", "gap": "no promotion has ever been blinded or scored against a hidden holdout" }
     ]
   },
+
   "event_schema_gaps": {
     "note": "Phase A. Measured against mind_observability::DecisionEvent as it exists at the baseline commit.",
-    "present": [
-      "trace_id",
-      "parent_event_id",
-      "actor",
-      "lane",
-      "goal_id",
-      "goal (free text)",
-      "context_fingerprint",
-      "policy",
-      "predicted",
-      "confidence",
-      "object_id (redacted)",
-      "evidence_ids",
-      "outcome",
-      "verdict",
-      "semantic_success",
-      "latency_ms",
-      "tool_version",
-      "model_route",
-      "model_calls",
-      "evaluator_id",
-      "prediction_error",
-      "brier",
-      "lesson",
-      "event_id (stable where set)"
-    ],
-    "partial": [
-      "goal_id propagates GoalSpec.id through compilation, bounded-run tool spans, contribution grades, refusals, and completion; ym why goals measures coverage, while legacy free-form turns remain unstamped",
-      "semantic_success is emitted for tool observations, goal-contribution grades, and pack-evidence grades; ym why semantics measures coverage by outcome kind",
-      "lane is explicit on compilation, bounded-run completion/refusal, shadow-route events, both tool loops, and goal-contribution grades as primary|member; ym why lanes measures stamped versus missing events",
-      "context_fingerprint is a domain-separated opaque hash shared by compilation, bounded-run completion/refusal, tool prediction/observation, and goal-contribution grades; ym why contexts measures coverage across those families without printing identifiers, while other decision families remain unstamped",
-      "latency_ms is emitted by both execution loops for tool calls, compilation, and completed bounded runs; ym why latency measures tool coverage/distribution and ym why resources separates compile and bounded-run wall time, while grounding-assembly and legacy full-turn latency remain unstamped",
-      "model_calls records one logical compilation request separately from end-to-end bounded-run requests (decision, replan, synthesis, configured grounding); the latter enforce one hard ceiling and ym why resources reports both phases, while provider failover attempts, tokens, and monetary cost remain absent",
-      "tool_version stamps the mind-conversation dispatcher crate/version on both tool loops; ym why versions measures coverage, while per-capability implementation versions remain absent",
-      "compilation, bounded cognitive runs, and both tool loops stamp configured model routes and ym why models measures coverage; explicit YM_ROLE_* pools retain provider:model instead of scripted, while actual serving-link model identity remains absent",
-      "tool, evidence-use, pack, and forecast grades stamp versioned evaluator identities; forecasts distinguish ledger-receipt-v1 from grounded-forecast-judge-v1; ym why evaluators measures stamped versus missing outcome grades",
-      "all aggregate ym why analytics require a fully verified decision-log hash chain; ym why chains measures complete prediction-observation provenance over the latest 200 tool calls, including orphan observations, predictions that never closed, and duplicate observation cardinality, and no live baseline has been captured yet",
-      "inference spend (L4-0, inference-ledger-v1): one terminal row per LOGICAL inference request at the pool seam — refused / failed / served, provider attempts at a stated observable boundary (chain links and leaf invocations; hidden transport retries excluded), latency, lane, selected route, served-by link, static callsite and the loop opportunity id when the host set one; ym why spend measures requests and attempts per callsite, per loop and per hour; tokens are ABSENT on every row until a backend reports them with provenance, and the loop ledger's model_calls stays None (never inferred from the budget)"
-    ],
-    "missing": [
-      "token and monetary cost",
-      "per-capability implementation version",
-      "actual serving-link model version stamps"
-    ]
+    "present": ["trace_id", "parent_event_id", "actor", "lane", "goal_id", "goal (free text)", "context_fingerprint", "policy", "predicted", "confidence", "object_id (redacted)", "evidence_ids", "outcome", "verdict", "semantic_success", "latency_ms", "tool_version", "model_route", "model_calls", "evaluator_id", "prediction_error", "brier", "lesson", "event_id (stable where set)"],
+    "partial": ["goal_id propagates GoalSpec.id through compilation, bounded-run tool spans, contribution grades, refusals, and completion; ym why goals measures coverage, while legacy free-form turns remain unstamped", "semantic_success is emitted for tool observations, goal-contribution grades, and pack-evidence grades; ym why semantics measures coverage by outcome kind", "lane is explicit on compilation, bounded-run completion/refusal, shadow-route events, both tool loops, and goal-contribution grades as primary|member; ym why lanes measures stamped versus missing events", "context_fingerprint is a domain-separated opaque hash shared by compilation, bounded-run completion/refusal, tool prediction/observation, and goal-contribution grades; ym why contexts measures coverage across those families without printing identifiers, while other decision families remain unstamped", "latency_ms is emitted by both execution loops for tool calls, compilation, and completed bounded runs; ym why latency measures tool coverage/distribution and ym why resources separates compile and bounded-run wall time, while grounding-assembly and legacy full-turn latency remain unstamped", "model_calls records one logical compilation request separately from end-to-end bounded-run requests (decision, replan, synthesis, configured grounding); the latter enforce one hard ceiling and ym why resources reports both phases, while provider failover attempts, tokens, and monetary cost remain absent", "tool_version stamps the mind-conversation dispatcher crate/version on both tool loops; ym why versions measures coverage, while per-capability implementation versions remain absent", "compilation, bounded cognitive runs, and both tool loops stamp configured model routes and ym why models measures coverage; explicit YM_ROLE_* pools retain provider:model instead of scripted, while actual serving-link model identity remains absent", "tool, evidence-use, pack, and forecast grades stamp versioned evaluator identities; forecasts distinguish ledger-receipt-v1 from grounded-forecast-judge-v1; ym why evaluators measures stamped versus missing outcome grades", "all aggregate ym why analytics require a fully verified decision-log hash chain; ym why chains measures complete prediction-observation provenance over the latest 200 tool calls, including orphan observations, predictions that never closed, and duplicate observation cardinality, and no live baseline has been captured yet", "inference spend (L4-0, inference-ledger-v1): one terminal row per LOGICAL inference request at the pool seam — refused / failed / served, provider attempts at a stated observable boundary (chain links and leaf invocations; hidden transport retries excluded), latency, lane, selected route, served-by link, static callsite and the loop opportunity id when the host set one; ym why spend measures requests and attempts per callsite, per loop and per hour; tokens are ABSENT on every row until a backend reports them with provenance, and the loop ledger's model_calls stays None (never inferred from the budget)"],
+    "missing": ["token and monetary cost", "per-capability implementation version", "actual serving-link model version stamps"]
   },
+
   "metric_definitions": {
     "note": "Every rate is published with the denominator an adversary would accept, and with its observation rate beside it (Doctrine 2).",
     "metrics": [
-      {
-        "name": "router agreement",
-        "formula": "top-1 = label / labelled pack-applies queries"
-      },
-      {
-        "name": "router abstention",
-        "formula": "abstained / no-pack queries"
-      },
-      {
-        "name": "attach harm",
-        "formula": "corpus rows clearing the floor / no-pack queries, library mounted"
-      },
-      {
-        "name": "pack local efficacy",
-        "formula": "graded-good / graded, shown with surfaced, used and censoring = 1 - graded/used"
-      },
-      {
-        "name": "lease precision",
-        "formula": "leases whose pack evidence was used / leases granted",
-        "caveat": "the used-proxy is word overlap, not causal use"
-      },
-      {
-        "name": "tool reliability",
-        "formula": "successes / calls that count toward reliability",
-        "caveat": "Malformed and Denied are excluded in both directions by design"
-      }
+      { "name": "router agreement", "formula": "top-1 = label / labelled pack-applies queries" },
+      { "name": "router abstention", "formula": "abstained / no-pack queries" },
+      { "name": "attach harm", "formula": "corpus rows clearing the floor / no-pack queries, library mounted" },
+      { "name": "pack local efficacy", "formula": "graded-good / graded, shown with surfaced, used and censoring = 1 - graded/used" },
+      { "name": "lease precision", "formula": "leases whose pack evidence was used / leases granted", "caveat": "the used-proxy is word overlap, not causal use" },
+      { "name": "tool reliability", "formula": "successes / calls that count toward reliability", "caveat": "Malformed and Denied are excluded in both directions by design" }
     ]
   },
+
   "reproduction": {
     "workspace": "cargo test --workspace --no-fail-fast   # read EVERY crate's test result line, not the last one",
     "coverage_router": "YM_COVERAGE_P3=1 cargo test -p mind-evals -- --nocapture",

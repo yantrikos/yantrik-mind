@@ -573,6 +573,13 @@ rw("run/mind_leg.sh", [
      '  -v "$BIN":/mind-core:ro'),
 ])
 
+rw("run/smoke_mind.sh", [
+    ('  -v /opt/yantrik-mind/mind-core:/mind-core:ro',
+     '  -v "${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}":/mind-core:ro'),
+    ('# No-model Mind smoke: boot the containerised staging binary through a run proxy, pair from',
+     '# No-model Mind smoke: boot the binary under test (CB2_MIND_BINARY, default the deployed one --\n# the SAME parameter mind_leg.sh takes, so a preflight cannot smoke a different file than the leg\n# it is clearing) through a run proxy, pair from'),
+])
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

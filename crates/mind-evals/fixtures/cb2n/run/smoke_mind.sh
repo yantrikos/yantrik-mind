@@ -1,5 +1,7 @@
 #!/bin/bash
-# No-model Mind smoke: boot the containerised staging binary through a run proxy, pair from
+# No-model Mind smoke: boot the binary under test (CB2_MIND_BINARY, default the deployed one --
+# the SAME parameter mind_leg.sh takes, so a preflight cannot smoke a different file than the leg
+# it is clearing) through a run proxy, pair from
 # inside, submit NOTHING, and prove the proxy saw zero model requests. Counts only. Exit non-zero
 # unless boot lines, pairing 200 and a zero-request receipt are all present.
 set -u
@@ -15,7 +17,7 @@ trap 'docker rm -f cb2-mind-smoke >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down
 mkdir -p "$OUT/state/public" "$OUT/count"; chown -R 10003:10003 "$OUT/state"
 bash "$FIX/run/proxy.sh" up cb2proxy-mind-smoke "$OUT/count" 172.30.0.7 >/dev/null || { echo "proxy not ready"; exit 1; }
 docker run -d --name cb2-mind-smoke --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
-  -v /opt/yantrik-mind/mind-core:/mind-core:ro -v "$OUT/state:/state" -v "$OUT/count:/count:ro" \
+  -v "${CB2_MIND_BINARY:-/opt/yantrik-mind/mind-core}":/mind-core:ro -v "$OUT/state:/state" -v "$OUT/count:/count:ro" \
   -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8078 \
   -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata "${LANE[@]}" -e YM_INFER_PERMITS=2 \
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off cb2-mind /mind-core >/dev/null || { echo "container did not start"; exit 1; }

@@ -10,8 +10,12 @@ import json, os, pathlib, shutil, sys, time, urllib.request, http.cookiejar, has
 # those cases a test of the shipped rule rather than a test of a copy of it.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from verdict import classify as _classify
+# argv[3] is the run state's cap. It is an ARGUMENT rather than a default in this file because a
+# literal here is a fifth place the number can drift; a missing argument means the caller is old
+# and 8 is what every caller meant before the cap became configurable.
 T = sys.argv[1]; COUNT_DIR = sys.argv[2]
-BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800; CAP = 8
+BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800
+CAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8
 FIX = pathlib.Path("/fixtures")
 cj = http.cookiejar.CookieJar(); op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 

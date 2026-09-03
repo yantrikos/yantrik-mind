@@ -13,6 +13,14 @@ cb2_profile_load() {
   local fix=$1 name=${CB2_PROFILE:-qwen} state=${CB2_RUN_STATE:-${CB2_OUT:-/root/cb2n/out}/run_state.json}
   [ -f "$fix/profiles/$name.profile" ] || { echo "profile: unknown profile '$name'"; return 1; }
   set -a; . "$fix/profiles/$name.profile"; set +a
+  # THE CAP IS ONE NUMBER. It was five independent literals — the proxy's 429, the Hermes leg, the
+  # Mind driver, the Mind leg's receipt check and the manifest's prose — which can drift apart with
+  # nothing noticing. It now enters the run state beside profile, upstream and model, so every
+  # consumer reads the same resolved value and a state written at one cap refuses a load at another.
+  # Unset means 8, so the existing profiles are unchanged in effect.
+  CB2_CAP=${CB2_CAP:-8}
+  case "$CB2_CAP" in ''|*[!0-9]*) echo "profile: CB2_CAP must be a positive integer"; return 1;; esac
+  [ "$CB2_CAP" -ge 1 ] || { echo "profile: CB2_CAP must be at least 1"; return 1; }
   # The key is validated FIRST: a missing or wrongly-owned key must not leave a resolved run state
   # pinned behind it, or a later corrected load would silently inherit the first resolution.
   if [ -n "${CB2_KEY_FILE:-}" ]; then
@@ -23,9 +31,10 @@ cb2_profile_load() {
     local got
     got=$(python3 -c "import json,sys
 d=json.load(open('$state'))
-print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
-    read -r sp su sm sip sat sips <<< "$got"
+print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'], '|'.join(d['upstream_ips']), d.get('cap', 8))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }
+    read -r sp su sm sip sat sips scap <<< "$got"
     [ "$sp" = "$name" ] && [ "$su" = "$CB2_UPSTREAM" ] && [ "$sm" = "$CB2_MODEL" ] || { echo "profile: run state $state belongs to profile '$sp' ($su, $sm), not '$name' — use another out dir"; return 1; }
+    [ "$scap" = "$CB2_CAP" ] || { echo "profile: run state $state was written at cap $scap, not $CB2_CAP — a reading may not change its budget mid-run; use another out dir"; return 1; }
     CB2_UPSTREAM_IP=$sip; CB2_RESOLVED_AT=$sat; CB2_UPSTREAM_IPS=${sips//|/ }
   else
     CB2_RESOLVED_AT=static
@@ -37,11 +46,11 @@ print(d['profile'], d['upstream'], d['model'], d['upstream_ip'], d['resolved_at'
     [ -n "${CB2_UPSTREAM_IP:-}" ] && [ -n "${CB2_UPSTREAM_IPS:-}" ] || { echo "profile: upstream address unset"; return 1; }
     mkdir -p "$(dirname "$state")" || return 1
     python3 -c "import json,sys
-json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL'}, open('$state.tmp', 'w'), indent=1)" || return 1
+json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP')}, open('$state.tmp', 'w'), indent=1)" || return 1
     mv "$state.tmp" "$state" && chmod 444 "$state" || return 1
   fi
   CB2_RUN_STATE_SHA=$(sha256sum "$state" | cut -c1-64)
-  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
+  export CB2_PROFILE=$name CB2_RUN_STATE=$state CB2_RUN_STATE_SHA CB2_UPSTREAM CB2_UPSTREAM_IP CB2_UPSTREAM_IPS CB2_RESOLVED_AT CB2_MODEL CB2_CAP CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV
 }
 # Key-leak COUNT over the given paths (files, recursive): grep takes the key file itself as its
 # pattern file; nothing here reads the key. Empty key file setting -> 0.

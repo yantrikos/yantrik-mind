@@ -1,0 +1,64 @@
+#!/bin/bash
+# The request cap is ONE number carried by the run state. These cases prove the three things that
+# make that true, using a synthetic profile in a temporary fixtures tree so nothing touches a real
+# profile, a real key file or a real output root. Exit non-zero on any disagreement.
+#
+# They exist because the cap used to be five independent literals. A number duplicated in five
+# places is not a parameter, it is five parameters that happen to agree today.
+set -u
+HERE="$(cd "$(dirname "$0")" && pwd)"; BAD=0
+T=$(mktemp -d /tmp/cb2-cap-self-XXXX); trap 'rm -rf "$T"' EXIT
+mkdir -p "$T/fixtures/profiles"
+cat > "$T/fixtures/profiles/synthetic.profile" <<'PROF'
+CB2_UPSTREAM=cap.test.invalid
+CB2_UPSTREAM_IP=203.0.113.7
+CB2_UPSTREAM_IPS=203.0.113.7
+CB2_UPSTREAM_RESOLVE=0
+CB2_MODEL=cap/test-model
+CB2_MIND_LANE=roles
+CB2_MIND_PROVIDER=nim
+CB2_MIND_KEY_ENV=NVIDIA_API_KEY
+PROF
+. "$HERE/../run/profile.sh"
+
+say() { if [ "$2" = "$3" ]; then echo "$1: agree [$2]"; else echo "$1: DISAGREE got=[$2] want=[$3]"; BAD=1; fi; }
+
+# 1. Unset means 8 — the existing profiles are unchanged in effect.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s1.json"; unset CB2_CAP
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_CAP" || echo LOADFAIL ) > "$T/o1"
+say "cap_defaults_to_8" "$(cat "$T/o1")" "8"
+
+# 2. A profile that names a cap gets that cap, and it lands in the run state.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=24
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_CAP" || echo LOADFAIL ) > "$T/o2"
+say "cap_24_is_honoured" "$(cat "$T/o2")" "24"
+say "cap_is_in_the_run_state" \
+    "$(python3 -c "import json;print(json.load(open('$T/s2.json')).get('cap'))" 2>/dev/null)" "24"
+
+# 3. A run state written at one cap REFUSES a load asking for another. A reading may not change
+#    its own budget halfway through — that is the difference between a budget and a negotiation.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=8
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o3"
+say "a_reading_cannot_change_its_own_budget" "$(cat "$T/o3")" "REFUSED"
+
+# 4. ...and the same cap reloads cleanly, so the refusal is about the cap and not about reloading.
+( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=24
+  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o4"
+say "the_same_cap_reloads" "$(cat "$T/o4")" "LOADED"
+
+# 5. A cap that is not a positive integer is refused rather than coerced to something.
+for bad in 0 -1 abc 3.5 ""; do
+  ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s5-$RANDOM.json" CB2_CAP="$bad"
+    cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o5"
+  # An EMPTY CB2_CAP is the unset case and correctly becomes 8; the rest must be refused.
+  want=REFUSED; [ -z "$bad" ] && want=LOADED
+  say "cap_rejects_${bad:-empty}" "$(cat "$T/o5")" "$want"
+done
+
+# 6. No literal 8 is left deciding the budget in any consumer.
+F="$HERE/.."
+for f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh; do
+  n=$(grep -cE 'CAP *= *8|CB2_CAP=8|cap *= *8' "$F/$f" 2>/dev/null || true)
+  say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"
+done
+exit $BAD

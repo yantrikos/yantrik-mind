@@ -580,6 +580,58 @@ rw("run/smoke_mind.sh", [
      '# No-model Mind smoke: boot the binary under test (CB2_MIND_BINARY, default the deployed one --\n# the SAME parameter mind_leg.sh takes, so a preflight cannot smoke a different file than the leg\n# it is clearing) through a run proxy, pair from'),
 ])
 
+# ── E.CB2-N reading 4: the request cap becomes ONE resolved number ────────────────────────────
+# It was five independent literals: the proxy's 429 threshold, the Hermes leg's CAP, the Mind
+# driver's CAP, the Mind leg's receipt check and the manifest's prose. Five places holding one
+# number can drift apart and nothing notices. It now enters the immutable run state beside profile,
+# upstream and model; a state written at one cap refuses a load asking for another, so a reading
+# cannot change its own budget halfway through; and the Mind receipt carries the cap the PROXY
+# enforced rather than a number the reader re-derived. Unset is 8, so the existing profiles are
+# unchanged in effect and reading 3 stays reproducible.
+rw('run/profile.sh', [
+    ('  set -a; . "$fix/profiles/$name.profile"; set +a',
+     '  set -a; . "$fix/profiles/$name.profile"; set +a\n  # THE CAP IS ONE NUMBER. It was five independent literals — the proxy\'s 429, the Hermes leg, the\n  # Mind driver, the Mind leg\'s receipt check and the manifest\'s prose — which can drift apart with\n  # nothing noticing. It now enters the run state beside profile, upstream and model, so every\n  # consumer reads the same resolved value and a state written at one cap refuses a load at another.\n  # Unset means 8, so the existing profiles are unchanged in effect.\n  CB2_CAP=${CB2_CAP:-8}\n  case "$CB2_CAP" in \'\'|*[!0-9]*) echo "profile: CB2_CAP must be a positive integer"; return 1;; esac\n  [ "$CB2_CAP" -ge 1 ] || { echo "profile: CB2_CAP must be at least 1"; return 1; }'),
+    ('print(d[\'profile\'], d[\'upstream\'], d[\'model\'], d[\'upstream_ip\'], d[\'resolved_at\'], \'|\'.join(d[\'upstream_ips\']))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }\n    read -r sp su sm sip sat sips <<< "$got"\n    [ "$sp" = "$name" ] && [ "$su" = "$CB2_UPSTREAM" ] && [ "$sm" = "$CB2_MODEL" ] || { echo "profile: run state $state belongs to profile \'$sp\' ($su, $sm), not \'$name\' — use another out dir"; return 1; }',
+     'print(d[\'profile\'], d[\'upstream\'], d[\'model\'], d[\'upstream_ip\'], d[\'resolved_at\'], \'|\'.join(d[\'upstream_ips\']), d.get(\'cap\', 8))" 2>/dev/null) || { echo "profile: run state unreadable: $state"; return 1; }\n    read -r sp su sm sip sat sips scap <<< "$got"\n    [ "$sp" = "$name" ] && [ "$su" = "$CB2_UPSTREAM" ] && [ "$sm" = "$CB2_MODEL" ] || { echo "profile: run state $state belongs to profile \'$sp\' ($su, $sm), not \'$name\' — use another out dir"; return 1; }\n    [ "$scap" = "$CB2_CAP" ] || { echo "profile: run state $state was written at cap $scap, not $CB2_CAP — a reading may not change its budget mid-run; use another out dir"; return 1; }'),
+    ("json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL'}",
+     "json.dump({'profile': '$name', 'upstream': '$CB2_UPSTREAM', 'upstream_ips': '$CB2_UPSTREAM_IPS'.split(), 'upstream_ip': '$CB2_UPSTREAM_IP', 'resolved_at': '$CB2_RESOLVED_AT', 'model': '$CB2_MODEL', 'cap': int('$CB2_CAP')}"),
+    ('CB2_MODEL CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV',
+     'CB2_MODEL CB2_CAP CB2_KEY_FILE CB2_MIND_LANE CB2_MIND_PROVIDER CB2_MIND_KEY_ENV'),
+])
+rw('run/proxy.sh', [
+    ('-e CB2_CAP=8 ',
+     '-e CB2_CAP="${CB2_CAP:-8}" '),
+])
+rw('run/hermes_leg.sh', [
+    ('T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=8',
+     'T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=${CB2_CAP:-8}   # resolved by the run state, not a literal'),
+])
+rw('run/mind_driver.py', [
+    ('T = sys.argv[1]; COUNT_DIR = sys.argv[2]',
+     "# argv[3] is the run state's cap. It is an ARGUMENT rather than a default in this file because a\n# literal here is a fifth place the number can drift; a missing argument means the caller is old\n# and 8 is what every caller meant before the cap became configurable.\nT = sys.argv[1]; COUNT_DIR = sys.argv[2]"),
+    ('BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800; CAP = 8',
+     'BASE = "http://127.0.0.1:8091"; STATE = pathlib.Path("/state"); WALL = 1800\nCAP = int(sys.argv[3]) if len(sys.argv) > 3 else 8'),
+])
+rw('run/mind_leg.sh', [
+    ('docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count',
+     'docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count "$CB2_CAP"'),
+    ('    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= 8 and ref >= 0 and ref == 0 and tls',
+     '    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= cap and ref >= 0 and ref == 0 and tls'),
+    ('src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate = sys.argv[1:]',
+     'src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s = sys.argv[1:]\n# The cap the PROXY enforced, carried through rather than re-derived by this reader: two places\n# deciding what the budget was is how a receipt comes to disagree with the run it describes.\ncap = int(cap_s)'),
+    ('"$LEAK" "$CHECKS" "$BRAIN_GATE" <<\'EOF\'',
+     '"$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" <<\'EOF\''),
+    ('          "model": model, "model_ok": ck.get("model_ok") == "true",',
+     '          "cap": cap, "model": model, "model_ok": ck.get("model_ok") == "true",'),
+])
+new("profiles/nim-cap24.profile", '# cb2n profile "nim-cap24" (E.CB2-N reading 4): identical to "nim" except for CB2_CAP. The cap of\n# 8 was equal to Hermes\'s configured agent.max_turns 8, so eight turns cost at least eight\n# requests and any retry was a guaranteed violation — a budget that made one competitor\'s own\n# turn limit unsatisfiable. 24 is three times that limit: the cap stops runaway spend and no\n# longer binds normal operation. "nim" is left byte-identical so reading 3 stays reproducible.\n# Original header follows.\n# cb2n profile "nim" (E.CB2-N): NVIDIA NIM upstream, its IPv4 addresses resolved on the box ONCE\n# per run into the immutable run state (allowlisted exclusively, recorded in every receipt); the\n# key file (uid 10002, mode 0400) mounted read-only into the PROXY container only and injected as\n# the Authorization header on every forward; both work containers hold placeholder keys. One\n# model for both systems. The Mind runs with YM_PRIMARY_BRAIN=nim:<model> and all six roles equal\n# to it, behind YM_PROVIDER_BASE_URL_NIM (the proxy).\nCB2_UPSTREAM=integrate.api.nvidia.com\nCB2_UPSTREAM_IP=\nCB2_UPSTREAM_IPS=\nCB2_UPSTREAM_RESOLVE=1\nCB2_MODEL=openai/gpt-oss-120b\nCB2_KEY_FILE=/root/cb2/secrets/nim.key\nCB2_MIND_LANE=roles\nCB2_MIND_PROVIDER=nim\nCB2_MIND_KEY_ENV=NVIDIA_API_KEY\nCB2_CAP=24\n')
+
+new("selftest/cap_cases.sh", '#!/bin/bash\n# The request cap is ONE number carried by the run state. These cases prove the three things that\n# make that true, using a synthetic profile in a temporary fixtures tree so nothing touches a real\n# profile, a real key file or a real output root. Exit non-zero on any disagreement.\n#\n# They exist because the cap used to be five independent literals. A number duplicated in five\n# places is not a parameter, it is five parameters that happen to agree today.\nset -u\nHERE="$(cd "$(dirname "$0")" && pwd)"; BAD=0\nT=$(mktemp -d /tmp/cb2-cap-self-XXXX); trap \'rm -rf "$T"\' EXIT\nmkdir -p "$T/fixtures/profiles"\ncat > "$T/fixtures/profiles/synthetic.profile" <<\'PROF\'\nCB2_UPSTREAM=cap.test.invalid\nCB2_UPSTREAM_IP=203.0.113.7\nCB2_UPSTREAM_IPS=203.0.113.7\nCB2_UPSTREAM_RESOLVE=0\nCB2_MODEL=cap/test-model\nCB2_MIND_LANE=roles\nCB2_MIND_PROVIDER=nim\nCB2_MIND_KEY_ENV=NVIDIA_API_KEY\nPROF\n. "$HERE/../run/profile.sh"\n\nsay() { if [ "$2" = "$3" ]; then echo "$1: agree [$2]"; else echo "$1: DISAGREE got=[$2] want=[$3]"; BAD=1; fi; }\n\n# 1. Unset means 8 — the existing profiles are unchanged in effect.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s1.json"; unset CB2_CAP\n  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_CAP" || echo LOADFAIL ) > "$T/o1"\nsay "cap_defaults_to_8" "$(cat "$T/o1")" "8"\n\n# 2. A profile that names a cap gets that cap, and it lands in the run state.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=24\n  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo "$CB2_CAP" || echo LOADFAIL ) > "$T/o2"\nsay "cap_24_is_honoured" "$(cat "$T/o2")" "24"\nsay "cap_is_in_the_run_state" \\\n    "$(python3 -c "import json;print(json.load(open(\'$T/s2.json\')).get(\'cap\'))" 2>/dev/null)" "24"\n\n# 3. A run state written at one cap REFUSES a load asking for another. A reading may not change\n#    its own budget halfway through — that is the difference between a budget and a negotiation.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=8\n  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o3"\nsay "a_reading_cannot_change_its_own_budget" "$(cat "$T/o3")" "REFUSED"\n\n# 4. ...and the same cap reloads cleanly, so the refusal is about the cap and not about reloading.\n( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s2.json" CB2_CAP=24\n  cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o4"\nsay "the_same_cap_reloads" "$(cat "$T/o4")" "LOADED"\n\n# 5. A cap that is not a positive integer is refused rather than coerced to something.\nfor bad in 0 -1 abc 3.5 ""; do\n  ( export CB2_PROFILE=synthetic CB2_RUN_STATE="$T/s5-$RANDOM.json" CB2_CAP="$bad"\n    cb2_profile_load "$T/fixtures" >/dev/null 2>&1 && echo LOADED || echo REFUSED ) > "$T/o5"\n  # An EMPTY CB2_CAP is the unset case and correctly becomes 8; the rest must be refused.\n  want=REFUSED; [ -z "$bad" ] && want=LOADED\n  say "cap_rejects_${bad:-empty}" "$(cat "$T/o5")" "$want"\ndone\n\n# 6. No literal 8 is left deciding the budget in any consumer.\nF="$HERE/.."\nfor f in run/hermes_leg.sh run/mind_driver.py run/proxy.sh; do\n  n=$(grep -cE \'CAP *= *8|CB2_CAP=8|cap *= *8\' "$F/$f" 2>/dev/null || true)\n  say "no_hard_coded_cap_in_$(basename "$f")" "$n" "0"\ndone\nexit $BAD\n')
+rw("selftest/selftest.sh", [
+    ('# The receipt decision, driven through every classification without a graded leg.',
+     '# The request cap: one number, carried by the run state, refusing to change mid-reading.\nif bash "$FIX/selftest/cap_cases.sh"; then echo "cap_cases: agree"; else echo "cap_cases: DISAGREE"; BAD=1; fi\n# The receipt decision, driven through every classification without a graded leg.'),
+])
+
 # ── this file itself, recorded in the tree ────────────────────────────────────────────────────
 os.makedirs(R + "scratch", exist_ok=True)
 shutil.copyfile(os.path.abspath(__file__), R + "scratch/cb2n_patch.py")

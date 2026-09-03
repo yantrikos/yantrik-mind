@@ -5,7 +5,7 @@
 # mounts, 1800 s wall. Cleanup guaranteed by a trap. Receipt: counts only; raw stdout kept in a
 # separate file. Fails closed on a missing session id or log.
 set -u
-T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=8
+T=$1; OUT=${2:-/root/cb2n/out}; WALL=1800; CAP=${CB2_CAP:-8}   # resolved by the run state, not a literal
 FIX="$(cd "$(dirname "$0")/.." && pwd)"; export CB2_OUT="$OUT"; . "$FIX/run/profile.sh"; cb2_profile_load "$FIX" || exit 1
 cb2_rerun_prepare hermes "$T" "$OUT" || exit 2
 W="$OUT/artifacts/hermes_$T"; H="$OUT/homes/hermes_$T"; R="$OUT/receipts"; CD="$OUT/proxy/hermes_$T"; RAW="$OUT/raw"

@@ -76,7 +76,7 @@ if [ "$CB2_MIND_LANE" = roles ]; then
     printf '{"system":"mind","task":"%s","status":"brain-gate-failed","brain_gate":%s,"routed_kind":null,"disqualified":true,"void":false}\n' "$T" "$BRAIN_GATE" | tee "$R/mind_$T.json"; exit 5
   fi
 fi
-timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count > "$OUT/raw/mind_${T}_driver.txt" 2>&1
+timeout -k 5 $((WALL + 60)) docker exec "$NAME" python3 /fixtures/run/mind_driver.py "$T" /count "$CB2_CAP" > "$OUT/raw/mind_${T}_driver.txt" 2>&1
 RC=$?
 docker logs "$NAME" > "$OUT/raw/mind_${T}_stdout.txt" 2>&1
 ENVLEAK=$(cb2_env_leak_hits "$NAME")
@@ -86,9 +86,12 @@ CHECKS=$(python3 "$FIX/run/receipt_checks.py" "$CD/requests.json" "$CB2_MODEL")
 # declared output: the driver leaves RESULT.md and the added files under /state/artifact
 cp -r "$ST/artifact/." "$A/" 2>/dev/null
 HASH=$(timeout -k 5 60 python3 "$FIX/tools/tree_hash.py" "$A"); IMG=$(docker image inspect cb2-mind --format '{{.Id}}')
-python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" <<'EOF'
+python3 - "$ST/receipt.json" "$R/mind_$T.json" "$BIN_SHA" "$PROV" "$IMG" "$HASH" "$RC" "$T" "$CD/requests.json" "$CB2_PROFILE" "$CB2_UPSTREAM" "$CB2_UPSTREAM_IPS" "$CB2_RESOLVED_AT" "$CB2_RUN_STATE" "$CB2_RUN_STATE_SHA" "$CB2_MODEL" "$LEAK" "$CHECKS" "$BRAIN_GATE" "$CB2_CAP" <<'EOF'
 import json, sys
-src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate = sys.argv[1:]
+src, dst, bin_sha, prov, img, tree, rc, task, prx, profile, upstream, ips, resolved_at, run_state, run_state_sha, model, leak, checks, brain_gate, cap_s = sys.argv[1:]
+# The cap the PROXY enforced, carried through rather than re-derived by this reader: two places
+# deciding what the budget was is how a receipt comes to disagree with the run it describes.
+cap = int(cap_s)
 ck = dict(kv.split("=", 1) for kv in checks.split())
 try:
     d = json.load(open(src))
@@ -103,7 +106,7 @@ try:
     acc = p["model_requests"]; ref = p["refused_over_cap"]
     # `1 <= acc`, not `acc >= 0`: Hermes's receipt check requires at least one model request and
     # the Mind's accepted zero, so a leg that never reached the model passed on one side only.
-    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= 8 and ref >= 0 and ref == 0 and tls
+    receipt_ok = type(acc) is int and type(ref) is int and type(p["upstream_errors"]) is int and 1 <= acc <= cap and ref >= 0 and ref == 0 and tls
 except Exception:
     tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0
@@ -121,7 +124,7 @@ void = valid and (ck.get("http_errors") != "0" or ck.get("transport_errors") != 
 dq_ind = bool(d.get("dq_independent")) or (not capture_ok) or syml > 0 or special > 0 or int(leak) != 0 or (not valid)
 dq_dep = bool(d.get("dq_dependent")) or (not receipt_ok) or int(rc) != 0 or ck.get("model_ok") != "true"
 d.update({"profile": profile, "upstream": upstream, "upstream_ips": ips, "resolved_at": resolved_at, "run_state": run_state, "run_state_sha256": run_state_sha,
-          "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
+          "cap": cap, "model": model, "model_ok": ck.get("model_ok") == "true", "receipt_valid": valid, "key_leak_hits": int(leak), "brain_gate": json.loads(brain_gate),
           "upstream_http_errors": int(ck.get("http_errors", -1)), "upstream_transport_errors": int(ck.get("transport_errors", -1)),
           "upstream_client_errors": int(ck.get("client_errors", -1)), "client_disconnects": int(ck.get("disconnects", -1)),
           "usage_prompt_tokens": int(ck.get("usage_p", 0)), "usage_completion_tokens": int(ck.get("usage_c", 0)),

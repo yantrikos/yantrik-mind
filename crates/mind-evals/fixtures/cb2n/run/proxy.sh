@@ -14,7 +14,7 @@ case "$CMD" in
     CD=$3; IP=$4; mkdir -p "$CD" || fail "count dir"; chown 10002:10002 "$CD" || fail "count dir owner"
     docker rm -f "$NAME" >/dev/null 2>&1
     docker run -d --name "$NAME" --network cb2egress --dns 127.0.0.1 --add-host "$CB2_UPSTREAM:$CB2_UPSTREAM_IP" --read-only --tmpfs /tmp:size=64m \
-      --memory 512m --cpus 1 --pids-limit 64 -v "$CD:/count" "${KEYMOUNT[@]}" -e CB2_CAP=8 -e CB2_COUNT_FILE=/count/requests.json \
+      --memory 512m --cpus 1 --pids-limit 64 -v "$CD:/count" "${KEYMOUNT[@]}" -e CB2_CAP="${CB2_CAP:-8}" -e CB2_COUNT_FILE=/count/requests.json \
       -e CB2_UPSTREAM="$CB2_UPSTREAM" -e CB2_UPSTREAM_IP="$CB2_UPSTREAM_IP" -e CB2_UPSTREAM_IPS="$CB2_UPSTREAM_IPS" -e CB2_RESOLVED_AT="$CB2_RESOLVED_AT" -e CB2_PROFILE="$CB2_PROFILE" -e CB2_MODEL="$CB2_MODEL" cb2n-proxy >/dev/null || fail "container did not start"
     docker network connect --ip "$IP" cb2net "$NAME" || fail "could not take $IP on cb2net"
     GOT=$(docker inspect "$NAME" --format '{{(index .NetworkSettings.Networks "cb2net").IPAddress}}'); [ "$GOT" = "$IP" ] || fail "address mismatch ($GOT)"

@@ -28,9 +28,16 @@ def main():
         want = sys.argv[2]
         http_err, trans = d["upstream_http_errors"], d["upstream_errors"]
         client, disc = d["upstream_client_errors"], d["client_disconnects"]
+        # `.get(..., 0)` and NOT `d[...]`: every receipt written before this counter existed --
+        # readings 3 to 6 -- has no such key, and a re-check of a finished reading must not start
+        # failing because the harness grew a field. Absent means zero, which is exactly true for
+        # them. It is typed here so "strictly typed receipt integers" stays honest; it is
+        # deliberately NOT added to the printed line, which hermes_leg.sh parses POSITIONALLY --
+        # an extra token there would spill into the last variable and silently corrupt usage_n.
+        ptimeouts = d.get("proxy_request_timeouts", 0)
         acc, ref = d["model_requests"], d["refused_over_cap"]
         models, usage = d["response_models"], d["usage"]
-        valid = (all(nn(x) for x in (http_err, trans, client, disc, acc, ref))
+        valid = (all(nn(x) for x in (http_err, trans, client, disc, acc, ref, ptimeouts))
                  and isinstance(models, dict)
                  and all(isinstance(k, str) and type(v) is int and v > 0 for k, v in models.items())
                  and isinstance(usage, dict)

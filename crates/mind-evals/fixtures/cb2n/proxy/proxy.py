@@ -8,16 +8,22 @@ CB2_KEY_PATH (optional: a file whose content replaces the Authorization header o
 the work containers then never hold the real key), CB2_PROFILE / CB2_MODEL / CB2_UPSTREAM_IPS /
 CB2_RESOLVED_AT (recorded). Error classes on model requests: upstream_http_errors = 429 or 5xx
 (infrastructure → void), upstream_client_errors = other 4xx (the caller's request; informational),
-upstream_errors = transport/TLS failures including a failed upstream body read; a client that
+upstream_errors = transport/TLS failures including a failed upstream body read, and this proxy's
+own request timeout (CB2_WALL) -- which is ALSO counted in proxy_request_timeouts, because our
+ceiling firing is not the upstream failing and a receipt must be able to say which; a client that
 disconnects mid-stream is client_disconnects, never an upstream error. The receipt tallies the
 `model` id of every SUCCESSFUL model response and provider-reported usage counts; bodies are
 never stored."""
-import http.client, json, os, ssl, threading, time
+import http.client, json, os, socket, ssl, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = os.environ.get("CB2_UPSTREAM", "aig.mycluster.cyou")
 UPSTREAM_IP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")
 CAP = int(os.environ.get("CB2_CAP", "8"))
+# E.CB2-W: the per-request ceiling is the RUN STATE'S WALL, not a literal 600. A single model call
+# that outlives the whole leg is worthless, and a fixed 600 became the binding constraint the moment
+# a profile asked for 3600: the pilot saw one call run 499 s, which is inside 600 by 101 seconds.
+WALL = int(os.environ.get("CB2_WALL", "1800"))
 # EVERY POST consumes the cap except the one metadata POST observed in the Hermes probe
 # (Ollama-style /api/show, a model-info lookup); an unlisted inference path can therefore never
 # bypass the hard cap. Every path is still tallied under by_path.
@@ -26,7 +32,7 @@ COUNT_FILE = os.environ.get("CB2_COUNT_FILE", "/count/requests.json")
 KEY_PATH = os.environ.get("CB2_KEY_PATH", "")
 KEY = open(KEY_PATH, encoding="utf-8").read().strip() if KEY_PATH else ""
 lock = threading.Lock()
-state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "upstream_client_errors": 0, "client_disconnects": 0,
+state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upstream_errors": 0, "upstream_http_errors": 0, "upstream_client_errors": 0, "proxy_request_timeouts": 0, "client_disconnects": 0,
          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {},
          "profile": os.environ.get("CB2_PROFILE", ""), "model_expected": os.environ.get("CB2_MODEL", ""), "upstream": UPSTREAM, "upstream_ip": UPSTREAM_IP,
          "upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),
@@ -69,7 +75,7 @@ class H(BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else None
         ctx = ssl.create_default_context()
         # by HOSTNAME (SNI and certificate match); the container resolves it through its hosts entry
-        conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=600, context=ctx)
+        conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=WALL, context=ctx)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
         headers["Host"] = UPSTREAM
         if KEY:
@@ -80,8 +86,16 @@ class H(BaseHTTPRequestHandler):
         try:
             conn.request(self.command, self.path, body=body, headers=headers)
             resp = conn.getresponse()
-        except Exception:
+        except Exception as exc:
+            # OUR CEILING IS NOT THEIR FAILURE. A socket timeout here is this proxy giving up; a
+            # reset or TLS fault is the upstream failing. Both used to land in upstream_errors, so
+            # a receipt could not tell "NVIDIA dropped it" from "we stopped waiting" -- and with a
+            # model whose calls reach 499 s that difference decides whether a void is the
+            # provider's or the harness's. Voidness is deliberately UNCHANGED: the timeout is still
+            # counted in upstream_errors, so no verdict moves. The new counter only attributes it.
             with lock:
+                if isinstance(exc, (TimeoutError, socket.timeout)):
+                    state["proxy_request_timeouts"] += 1
                 state["upstream_errors"] += 1
                 persist()
             self.send_response(502)

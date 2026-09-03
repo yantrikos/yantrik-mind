@@ -310,3 +310,164 @@ fn nothing_calls_this_yet() {
         );
     }
 }
+
+// ── the delimited stream ─────────────────────────────────────────────────────────────────────
+mod stream {
+    use super::*;
+    use crate::fileset::{parse_file_stream, FILE_MARKER};
+
+    fn stream(parts: &[(&str, &str)], trailing_newline: bool) -> String {
+        let mut out = String::new();
+        for (path, body) in parts {
+            out.push_str(&format!("{FILE_MARKER} {path}\n{body}"));
+        }
+        if trailing_newline && !out.ends_with('\u{a}') {
+            out.push('\u{a}');
+        }
+        out
+    }
+
+    #[test]
+    fn a_well_formed_stream_yields_every_file_with_its_bytes() {
+        let text = stream(
+            &[
+                ("index.html", "<!doctype html>\n<h1>hi</h1>\n"),
+                ("run.sh", "#!/bin/bash\npython3 server.py\n"),
+                ("data/leads.json", "[]\n"),
+            ],
+            true,
+        );
+        let got = parse_file_stream(&text);
+        assert!(got.truncated.is_empty(), "{:?}", got.truncated);
+        assert_eq!(got.preamble, "");
+        let paths: Vec<&str> = got.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["index.html", "run.sh", "data/leads.json"]);
+        assert_eq!(got.entries[0].content, "<!doctype html>\n<h1>hi</h1>\n");
+        assert_eq!(got.entries[2].content, "[]\n");
+    }
+
+    #[test]
+    fn a_files_contents_can_never_break_the_format() {
+        // The reason this is not JSON: a file may contain quotes, backslashes, braces and newlines,
+        // and the only thing that ends a file here is the NEXT marker at the start of a line.
+        let nasty = "{\"a\": \"b\\\\c\"}\nnot a marker: === FILE: fake.txt\n";
+        let text = stream(&[("weird.json", nasty), ("after.txt", "ok\n")], true);
+        let got = parse_file_stream(&text);
+        assert_eq!(
+            got.entries.len(),
+            2,
+            "content that merely MENTIONS the marker must not split a file: {got:?}"
+        );
+        assert_eq!(got.entries[0].path, "weird.json");
+        assert_eq!(got.entries[0].content, nasty);
+        assert_eq!(got.entries[1].path, "after.txt");
+    }
+
+    #[test]
+    fn the_formats_one_sharp_edge_recorded_rather_than_hidden() {
+        // A marker at the START of a line inside a file DOES split it. That is the price of a
+        // format with no escaping, it is the only input that can corrupt a set, and it is written
+        // down here so nobody discovers it from a broken deliverable. The build prompt tells the
+        // model not to begin a line with the marker inside a file's contents.
+        let text = format!(
+            "{FILE_MARKER} doc.md
+how to use the format:
+{FILE_MARKER} example.txt
+body
+"
+        );
+        let got = parse_file_stream(&text);
+        assert_eq!(
+            got.entries.len(),
+            2,
+            "the sharp edge is real: the file was split"
+        );
+        assert_eq!(got.entries[0].content, "how to use the format:
+");
+    }
+
+    #[test]
+    fn a_stream_cut_off_mid_file_loses_that_file_and_keeps_the_rest() {
+        // The expected failure: a generation runs out of budget partway through the last file.
+        let text = format!(
+            "{FILE_MARKER} index.html\n<!doctype html>\n{FILE_MARKER} run.sh\n#!/bin/bash\necho start"
+        );
+        let got = parse_file_stream(&text);
+        assert_eq!(got.truncated, vec!["run.sh".to_string()]);
+        let paths: Vec<&str> = got.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["index.html"],
+            "the complete files before the cut must survive"
+        );
+    }
+
+    #[test]
+    fn a_preamble_is_kept_as_evidence_rather_than_dropped() {
+        let text = format!("Sure! Here are the files:\n\n{FILE_MARKER} a.txt\nbody\n");
+        let got = parse_file_stream(&text);
+        assert_eq!(got.entries.len(), 1);
+        assert_eq!(got.entries[0].content, "body\n");
+        assert!(
+            got.preamble.contains("Sure!"),
+            "the model ignoring the format is worth being able to see: {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_with_no_marker_at_all_yields_nothing_and_says_why() {
+        let got = parse_file_stream("I could not do that.\n");
+        assert!(got.entries.is_empty());
+        assert!(got.truncated.is_empty());
+        assert_eq!(got.preamble, "I could not do that.\n");
+    }
+
+    #[test]
+    fn a_backticked_or_padded_path_is_read_as_the_path() {
+        // Models fence things. The marker's tail is a path, not a code span.
+        let text = format!("{FILE_MARKER}   `src/main.py`  \nprint(1)\n");
+        let got = parse_file_stream(&text);
+        assert_eq!(got.entries.len(), 1);
+        assert_eq!(got.entries[0].path, "src/main.py");
+    }
+
+    #[test]
+    fn the_parser_never_decides_whether_a_path_is_safe() {
+        // Separation of duties: parsing recovers what was said, `plan_file_set` decides what may be
+        // written. A parser that quietly dropped unsafe paths would make a hostile set look like a
+        // smaller honest one.
+        let text = format!("{FILE_MARKER} ../escape.txt\nx\n");
+        let got = parse_file_stream(&text);
+        assert_eq!(got.entries.len(), 1);
+        assert_eq!(got.entries[0].path, "../escape.txt");
+        assert!(matches!(
+            plan_file_set(&got.entries),
+            Err(FileSetRefusal::UnsafePath { .. })
+        ));
+    }
+
+    #[test]
+    fn a_truncated_stream_is_written_whole_or_not_at_all() {
+        // The end-to-end property from kill criterion 1: parse, then plan, then write. A set whose
+        // recovered entries are all valid writes; one containing a bad path writes nothing.
+        let s = Scratch::new("stream");
+        let good = format!("{FILE_MARKER} index.html\n<h1>hi</h1>\n{FILE_MARKER} run.sh\necho ok\n");
+        let parsed = parse_file_stream(&good);
+        write_file_set(s.path(), &parsed.entries).expect("a valid recovered set writes");
+        assert_eq!(
+            s.listing(),
+            vec!["index.html".to_string(), "run.sh".to_string()]
+        );
+
+        let s2 = Scratch::new("stream-bad");
+        let bad = format!("{FILE_MARKER} index.html\n<h1>hi</h1>\n{FILE_MARKER} ../x.txt\nno\n");
+        let parsed = parse_file_stream(&bad);
+        assert!(write_file_set(s2.path(), &parsed.entries).is_err());
+        assert!(
+            s2.listing().is_empty(),
+            "a set containing one bad path wrote something: {:?}",
+            s2.listing()
+        );
+    }
+}
+

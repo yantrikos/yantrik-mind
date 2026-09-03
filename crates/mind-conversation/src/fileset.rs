@@ -219,3 +219,87 @@ pub fn write_file_set(root: &Path, entries: &[FileEntry]) -> anyhow::Result<Vec<
     }
     Ok(written)
 }
+
+/// The marker that opens each file in a build stream.
+pub const FILE_MARKER: &str = "=== FILE:";
+
+/// What a parse recovered, and what it had to drop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedSet {
+    pub entries: Vec<FileEntry>,
+    /// Paths dropped because the stream ended inside them, in order. A generation that ran out of
+    /// budget mid-file is the expected failure here, not an exotic one.
+    pub truncated: Vec<String>,
+    /// Text before the first marker — a preamble the model was told not to write. Kept as evidence
+    /// rather than discarded silently, because "it ignored the format" is worth being able to see.
+    pub preamble: String,
+}
+
+/// Parse a delimited build stream: a line `=== FILE: <path>`, then that file's bytes, until the next
+/// marker or the end.
+///
+/// DELIBERATELY NOT JSON. `extract_html_arg` exists in this codebase because one `publish_page` call
+/// that overflowed its token budget produced unparseable JSON, and a set of files is many times
+/// larger. This format needs no escaping, so a file's contents cannot break it, and a stream cut off
+/// mid-file loses exactly that file instead of the whole deliverable.
+///
+/// A file is TRUNCATED when the stream ends inside it AND the terminator was never seen. The
+/// terminator is the marker line for the next file, so the last file in a stream is only trusted
+/// when the stream ends with a newline — a stream that stops mid-token is not a finished file.
+pub fn parse_file_stream(text: &str) -> ParsedSet {
+    let mut entries: Vec<FileEntry> = Vec::new();
+    let mut truncated: Vec<String> = Vec::new();
+    let mut preamble = String::new();
+    let mut current: Option<(String, String)> = None;
+    let mut saw_marker = false;
+    let lines: Vec<&str> = text.split_inclusive(char::from(10)).collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(FILE_MARKER) {
+            // A new marker ends the previous file, which is therefore complete.
+            if let Some((path, body)) = current.take() {
+                entries.push(FileEntry {
+                    path,
+                    content: body,
+                });
+            }
+            saw_marker = true;
+            let path = rest.trim().trim_matches('`').trim().to_string();
+            current = Some((path, String::new()));
+            continue;
+        }
+        match current.as_mut() {
+            Some((_, body)) => {
+                let last = i + 1 == lines.len();
+                // The final line of the whole stream, with no trailing newline, is where a
+                // generation that ran out of budget stops. Everything before it is still real.
+                if last && !line.ends_with(char::from(10)) {
+                    body.push_str(line);
+                    let (path, body) = current.take().expect("current is Some");
+                    truncated.push(path.clone());
+                    let _ = body;
+                    return ParsedSet {
+                        entries,
+                        truncated,
+                        preamble,
+                    };
+                }
+                body.push_str(line);
+            }
+            None if !saw_marker => preamble.push_str(line),
+            None => {}
+        }
+    }
+    if let Some((path, body)) = current.take() {
+        entries.push(FileEntry {
+            path,
+            content: body,
+        });
+    }
+    ParsedSet {
+        entries,
+        truncated,
+        preamble,
+    }
+}
+

@@ -667,6 +667,71 @@ mod review {
         );
     }
 
+    /// E.CB2-B — EVERY large generation budget is either clamped or an EXPLAINED exception.
+    ///
+    /// `build_recipe` and the venture forge both author a deliverable in one generation and are
+    /// clamped. Other budgets are just as large and are deliberately NOT clamped, because
+    /// truncating them fails WORSE than the 504 clamping would prevent — so they are listed with
+    /// their reasons, and a new one cannot appear silently.
+    ///
+    /// The registry shape (guarded / exempt-with-a-reason) rather than a remembered file list: a
+    /// budget added tomorrow either clamps or lands in front of a reviewer.
+    #[test]
+    fn every_large_generation_budget_is_clamped_or_an_explained_exception() {
+        // What a 302 s deadline affords at the measured 15 tok/s floor. At or above this, a
+        // generation cannot complete against a provider that cuts there.
+        const AFFORDABLE: usize = 3_171;
+
+        // (file, literal, why it is NOT clamped). Each would fail worse truncated than refused.
+        // Keyed by VALUE, not by the literal's spelling: `8000` and `8_000` are the same budget
+        // and an exemption that matched only one of them would silently stop covering the site the
+        // day someone reformatted it. Caught by this guard failing on exactly that mismatch.
+        const EXEMPT: &[(&str, usize, &str)] = &[
+            ("delegate.rs", 15_000,
+             "the delegated-build CRITIC shares its budget with its own reasoning; measured, a               critique over a 12KB excerpt came back EMPTY at 2000, and an empty critique reads as               approval. A judge that cannot afford to explain itself defaults to shipping, which is               strictly worse than a refused request."),
+            ("lib.rs", 8_000,
+             "tool-call DISPATCH: a publish_page call inlines a whole HTML page into the tool               arguments, so a small budget yields truncated, unparseable JSON rather than a               shorter answer -- the failure the comment there records having already happened."),
+        ];
+
+        let sources: &[(&str, &str)] = &[
+            ("delegate.rs", include_str!("delegate.rs")),
+            ("code.rs", include_str!("code.rs")),
+            // lib.rs is scanned too, despite its size: leaving it out would hide the dispatch
+            // budget, which is exactly the "a list is only as complete as its author remembered"
+            // failure this registry exists to avoid.
+            ("lib.rs", include_str!("lib.rs")),
+        ];
+        let mut unexplained: Vec<String> = Vec::new();
+        for (name, src) in sources {
+            for (n, line) in src.lines().enumerate() {
+                let Some(rest) = line.split("max_tokens: ").nth(1) else { continue };
+                let lit: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '_').collect();
+                if lit.is_empty() {
+                    continue; // already `authoring_budget(..)`
+                }
+                let value: usize = lit.replace('_', "").parse().unwrap_or(0);
+                if value < AFFORDABLE || EXEMPT.iter().any(|(f, v, _)| f == name && *v == value) {
+                    continue;
+                }
+                unexplained.push(format!("{name}:{}: max_tokens: {lit}", n + 1));
+            }
+        }
+        assert!(
+            unexplained.is_empty(),
+            "a generation budget at or above what a 302s deadline affords ({AFFORDABLE}) is              neither clamped by mind_inference::authoring_budget nor listed as an explained              exception:
+  {}",
+            unexplained.join("
+  ")
+        );
+
+        // The registry must not quietly empty out: deleting every exemption would make the check
+        // above pass vacuously, so require each to still carry a real reason.
+        assert!(!EXEMPT.is_empty(), "the exemption registry was emptied");
+        for (f, l, why) in EXEMPT {
+            assert!(why.len() > 60, "exemption {f}/{l} has no real reason");
+        }
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

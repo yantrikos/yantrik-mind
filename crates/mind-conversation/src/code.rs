@@ -1273,7 +1273,11 @@ impl super::ConversationEngine {
                      Nothing else — no prose, no markdown fences."
                 );
                 let cfg = GenerationConfig {
-                    max_tokens: 7500,
+                    // Same defect as build_recipe's authoring step, in the venture lane: this asks
+                    // for up to three COMPLETE files in one generation. At the measured 15 tok/s
+                    // floor, 7,500 tokens is ~500 s, and a provider that cuts at 302 s takes it
+                    // every time. Clamped, so it is unchanged wherever no deadline is declared.
+                    max_tokens: mind_inference::authoring_budget(7500),
                     ..GenerationConfig::default()
                 };
                 match self

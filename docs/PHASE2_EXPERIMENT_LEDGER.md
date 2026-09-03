@@ -5526,3 +5526,20 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | **The export hole, fourth occurrence — closed at class level** | A deleted `export` has now survived a mutation four times in one day: `CB2_WALL`, the recipe's `stop_reason` hand-off, the provider deadline, and it would have survived again here. The cause is always the same and always invisible: the loader sources the profile under `set -a`, so anything a profile **file** declares is exported as a side effect, and a case that declares its value in the profile proves nothing about the export line. Only a **loader-assigned** value depends on it. Two instance-shaped cases (W8, D7) were written and the hole reappeared with a new variable, so this closes the class. |
 | Two ways the class guard was wrong before it was right | (1) It first watched **every** exported name and flagged `CB2_KEY_FILE`, which real profiles supply and the synthetic one does not — a false alarm, and a guard that cries wolf gets deleted. Narrowed to loader-assigned names. (2) It then derived its watch list **from the export line itself**, so removing a name un-watched it: the deleted export was caught only by accident, through the "watches at least four" assertion. **A guard that reads the line under test cannot catch a removal from it.** The watch list now comes from what the loader *assigns*. |
 | Standing | cb2n suite **180 checks, 0 disagreements**; re-derives byte-exactly. |
+
+## E.CB2-B follow-up 2 — every large budget is now clamped or an EXPLAINED exception
+| Site | Budget | Disposition |
+| --- | --- | --- |
+| `build_recipe` × 4 | 16,000 | **clamped** (shipped earlier) |
+| `code.rs` forge-build | 7,500 | **clamped** — same defect in the venture lane: three complete files in one generation, ~500 s at the measured floor |
+| `delegate.rs` critic × 3 | 15,000 | **EXEMPT, with the reason** |
+| `lib.rs` dispatch | 8,000 | **EXEMPT, with the reason** |
+| `mind-recipes` planner | 8,000 | outside the scanned files; headroom for a JSON plan, not a deliverable |
+
+| Field | Value |
+| --- | --- |
+| The finding that stopped a blanket fix | Only **one** of the six oversized budgets was the same defect. The critic's own comment is a direct warning against clamping it: *"a critique over a 12KB excerpt came back EMPTY at 2000… a judge that cannot afford to explain itself defaults to approving."* Truncating a judge into silent approval is **strictly worse** than the 504 it would prevent. Same for dispatch, where the budget carries a whole HTML page inside tool arguments and a small one yields unparseable JSON. |
+| So they are visible instead of "fixed" | A registry: clamp, or list the site with a reason a reviewer can weigh. A budget added tomorrow either clamps or lands in front of someone. |
+| The guard failed twice on its way to being right, both times usefully | It flagged `lib.rs:12028` because the literal is `8000` and my exemption said `8_000` — so exemptions are now keyed by **value**, since an exemption matching one spelling stops covering the site the day someone reformats it. And I had first left `lib.rs` out of the scanned files entirely, which would have hidden the dispatch budget — the exact "a list is only as complete as its author remembered" failure this registry exists to prevent. |
+| **A mistake of mine worth recording** | I undid a mutation with `git checkout HEAD -- fileset_tests.rs` while that file held **uncommitted** work, and destroyed the registry guard I had just written. I had been backing up `code.rs` and `delegate.rs` with `cp` for exactly this reason and then reached for git on a third file out of habit. Rule: **mutate against a committed baseline, or restore from a copy — never `git checkout` a file carrying uncommitted work.** |
+| Standing | Workspace green; the registry is the completeness wall for generation budgets. |

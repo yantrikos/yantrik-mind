@@ -205,4 +205,36 @@ say "no_budget_or_timeout_is_a_bare_literal_anywhere" "$(printf '%s' "$hits" | g
 [ -n "$hits" ] && printf '    %s
 ' "$hits"
 
+# W11. A COMMENT INSIDE A LINE CONTINUATION SILENTLY TRUNCATES THE COMMAND, and `bash -n` does not
+#      care: what is left is still valid syntax, just a different command. Adding a note above the
+#      `-e YM_CTL_PORT=` line of `docker run ... \` cut the invocation in half; `bash -n` passed
+#      both scripts, the smoke then failed with `"docker run" requires at least 1 argument`. Syntax
+#      checking is not command checking, so check the shape directly.
+bad=0
+for f in "$HERE"/../run/*.sh "$HERE"/../net/*.sh "$HERE"/*.sh; do
+  [ -f "$f" ] || continue
+  n=$(awk 'prev ~ /\\$/ && $0 ~ /^[ 	]*#/ { print FILENAME ":" NR } { prev=$0 }' "$f")
+  [ -n "$n" ] && { bad=$((bad+1)); echo "    $n"; }
+done
+say "no_comment_sits_inside_a_line_continuation" "$bad" "0"
+
+# W12. And the console lane keeps off other surfaces' defaults. CTL was pinned to 8078, which is
+#      YM_FRAME_PORT's default, so every Mind leg since reading 3 booted with a COLLISION line.
+#      Inert -- the driver drives 8091 -- but a false alarm in the one log a reviewer reads as
+#      evidence. The product's own five defaults do not collide; the harness had moved CTL onto
+#      FRAME. Assert the harness pins nothing onto a default that is not its own.
+clash=0
+for f in "$HERE/../run/mind_leg.sh" "$HERE/../run/smoke_mind.sh"; do
+  for pin in $(grep -o 'YM_[A-Z_]*PORT=[0-9]*' "$f" | sort -u); do
+    var=${pin%%=*}; val=${pin##*=}
+    # the product's defaults, from mind-core telegram.rs
+    case "$val" in
+      8077) other=YM_CTL_PORT;; 8078) other=YM_FRAME_PORT;; 8079) other=YM_CHAT_PORT;;
+      8088) other=YM_WEB_PORT;; 8090) other=YM_WEBUI_PORT;; *) other="";;
+    esac
+    [ -n "$other" ] && [ "$other" != "$var" ] && { clash=$((clash+1)); echo "    $(basename "$f"): $var=$val is $other's default"; }
+  done
+done
+say "no_pinned_port_lands_on_another_surfaces_default" "$clash" "0"
+
 exit $BAD

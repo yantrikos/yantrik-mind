@@ -32,9 +32,16 @@ echo "mind smoke binary: $BSHA (recorded at $SHAFILE)"
 trap 'docker rm -f cb2-mind-smoke >/dev/null 2>&1; bash "$FIX/run/proxy.sh" down cb2proxy-mind-smoke >/dev/null 2>&1; rm -rf "$OUT"' EXIT
 mkdir -p "$OUT/state/public" "$OUT/count"; chown -R 10003:10003 "$OUT/state"
 bash "$FIX/run/proxy.sh" up cb2proxy-mind-smoke "$OUT/count" 172.30.0.7 >/dev/null || { echo "proxy not ready"; exit 1; }
+# PORTS: the console lane is pinned off the product's defaults (WEB 8088 -> 8099, WEBUI 8090 ->
+# 8091) so a stray host-side listener can never be what a leg talks to. CTL now sits at its OWN
+# default 8077. It was 8078, which is YM_FRAME_PORT's default, so every Mind leg since reading 3
+# booted with "[ports] COLLISION on 8078 ... One will bind and the REST WILL NOT". Nothing here
+# talks to 8078 -- the driver drives 8091 -- so the collision was inert and the readings stand. It
+# was a false alarm sitting in every boot log, which is its own cost when the boot log is evidence.
+# The product's five defaults do not collide; the harness had moved CTL on top of FRAME.
 docker run -d --name cb2-mind-smoke --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \
   -v "$BIN":/mind-core:ro -v "$OUT/state:/state" -v "$OUT/count:/count:ro" \
-  -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8078 \
+  -e YM_DB=/state/mind.db -e YM_WEB_DIR=/state/public -e YM_WEB_PORT=8099 -e YM_WEB_URL=http://127.0.0.1:8099 -e YM_WEBUI_PORT=8091 -e YM_CTL_PORT=8077 \
   -e YM_OPERATOR=cb2 -e YM_TZ=Asia/Kolkata "${LANE[@]}" -e YM_INFER_PERMITS=2 \
   -e YM_DMN=off -e YM_PROACTIVE=off -e YM_PATTERNS=off -e YM_HOME_WATCH=off cb2-mind /mind-core >/dev/null || { echo "container did not start"; exit 1; }
 sleep 12

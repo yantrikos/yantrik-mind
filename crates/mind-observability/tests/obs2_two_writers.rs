@@ -150,43 +150,47 @@ fn a_single_writer_is_unchanged() {
 
 /// Not about locking: about the operator-facing STRINGS this crate emits.
 ///
-/// Three separate messages shipped today carrying a run of spaces mid-sentence — E.CFG2's config
-/// notice, E.L2B-R's attention report, and E.OBS2's own refusal. Each time I fixed the one string
-/// and added a guard next to it, and each time I wrote the next one the same way. Guarding
-/// individual strings was treating the symptom; the habit is the defect, so the guard belongs
-/// where any of them would trip it.
+/// FOUR separate messages shipped today carrying a run of spaces mid-sentence -- E.CFG2's config
+/// notice, E.L2B-R's attention report, E.OBS2's own refusal, and E.G2-R's world report. Each time I
+/// fixed the one string and added a guard beside it, and each time the next string I wrote had it
+/// again. The habit is the defect, so the guard belongs where any of them would trip it.
 ///
-/// An aligned label column (`scores     : …`) is deliberate and allowed — the run is followed by a
-/// colon. Anything else is prose that will be read by a person.
+/// DELIBERATELY DUMB. The first version scanned line by line and missed the very construct that
+/// causes the defect -- a literal opened on one line and continued on the next has a single quote
+/// on each line -- and reported green over a defect visible to grep. The second tried to lex Rust
+/// string literals in a test and desynchronised on quote characters, flagging a dozen innocent
+/// format strings. A guard that cannot be trusted is worse than none, because it is believed and
+/// then disabled. So this one does no parsing at all: a run of three or more spaces, on a
+/// non-comment line, directly after a letter, digit, comma or full stop. Every real defect today
+/// had a run of many spaces after a word; nothing legitimate in this crate does.
 #[test]
 fn no_operator_string_in_this_crate_carries_a_run_of_spaces() {
     const SRC: &str = include_str!("../src/lib.rs");
-    let mut bad = Vec::new();
+    let mut bad: Vec<String> = Vec::new();
     for (n, line) in SRC.lines().enumerate() {
         let t = line.trim_start();
-        // Comments are prose for developers and wrap freely; only string literals are shipped.
-        if t.starts_with("//") || !line.contains('"') {
+        if t.starts_with("//") || t.starts_with("*") {
             continue;
         }
-        let Some(start) = line.find('"') else { continue };
-        let Some(end) = line.rfind('"') else { continue };
-        if end <= start {
-            continue;
-        }
-        let inner = &line[start + 1..end];
-        let bytes = inner.as_bytes();
-        for i in 2..bytes.len().saturating_sub(1) {
-            if bytes[i] == b' ' && bytes[i - 1] == b' ' && bytes[i - 2] != b' ' {
-                // Walk to the end of the run; an alignment column ends at a colon.
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 1usize;
+        while i + 2 < chars.len() {
+            if chars[i] == ' ' && chars[i + 1] == ' ' && chars[i + 2] == ' ' {
+                // An aligned label column ("scores     : ...") is deliberate: the run ends at a
+                // colon. Prose does not.
                 let mut j = i;
-                while j < bytes.len() && bytes[j] == b' ' {
+                while j < chars.len() && chars[j] == ' ' {
                     j += 1;
                 }
-                if bytes.get(j) != Some(&b':') {
-                    bad.push(format!("line {}: {}", n + 1, line.trim()));
+                let before = chars[i - 1];
+                if chars.get(j) != Some(&':')
+                    && (before.is_alphanumeric() || before == ',' || before == '.')
+                {
+                    bad.push(format!("line {}: {}", n + 1, t.trim_end()));
                     break;
                 }
             }
+            i += 1;
         }
     }
     assert!(
@@ -198,4 +202,3 @@ fn no_operator_string_in_this_crate_carries_a_run_of_spaces() {
 ")
     );
 }
-

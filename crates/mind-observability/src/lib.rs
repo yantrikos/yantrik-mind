@@ -6605,10 +6605,11 @@ pub fn render_world_shadow_at(events: &[DecisionEvent], now_ms: u64) -> String {
 ");
     if reached == 0 {
         let before = verdicts.get("before-gate").copied().unwrap_or(0);
-        out.push_str(&format!(
-            "AGREEMENT: UNCOMPUTABLE. {before} evaluation(s) exited before the receptivity gate, so              the legacy verdict this shadow exists to be compared against was never produced. This              is not zero disagreement; it is no measurement. A box with prepared packets is needed.
-"
-        ));
+        out.push_str(&if before == 0 {
+            "AGREEMENT: UNCOMPUTABLE. No knock evaluation ran in this window, so there is no legacy verdict to compare the model against. This is not agreement and not disagreement; it is no measurement.".to_string()
+        } else {
+            format!("AGREEMENT: UNCOMPUTABLE. All {before} evaluation(s) exited before the receptivity gate, so the legacy verdict this shadow exists to be compared against was never produced. This is not zero disagreement; it is no measurement. A box with prepared packets is needed.")
+        });
     } else {
         out.push_str(&format!(
             "{reached} evaluation(s) reached the gate and carry a legacy verdict to compare against.

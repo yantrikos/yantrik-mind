@@ -812,6 +812,25 @@ mod g2r_reader_tests {
         assert!(out.contains("1 evaluation(s) reached the gate"), "{out}");
     }
 
+    /// A window with shadow rows but NO evaluations at all must not say "0 evaluations exited
+    /// before the gate" — that phrasing implies evaluations happened and none passed, which is a
+    /// different and more damning claim than "nothing ran". The staging deploy printed exactly that
+    /// sentence over zero evaluations, and a mutation showed this branch had no test at all.
+    #[test]
+    fn no_evaluations_is_worded_differently_from_all_evaluations_exiting_early() {
+        let evs = vec![shadow("headless-cadence", "unknown", 10, "s1")];
+        let out = render_world_shadow_at(&evs, 20);
+        assert!(out.contains("UNCOMPUTABLE"), "{out}");
+        assert!(
+            out.contains("No knock evaluation ran"),
+            "with nothing to compare it must say nothing ran: {out}"
+        );
+        assert!(
+            !out.contains("0 evaluation(s) exited"),
+            "a count of zero must never be phrased as evaluations that exited early: {out}"
+        );
+    }
+
     /// Silence is silence, not an empty table.
     #[test]
     fn no_rows_says_so() {

@@ -5502,3 +5502,17 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What is NOT claimed | That voids are now impossible. n=2 after against n=2 before, and a model slower than the assumed 15 tok/s floor could still overrun. The gate was preregistered at two consecutive legs and is met; that is the claim, and no more. |
 | Also fixed in passing | The redeploy now preserves `docker/` wholesale, so the Hermes archive survived this time — verified by hash before the suite ran. |
 | Follow-up owed before any GRADED reading | `CB2_PROVIDER_DEADLINE_S` lives in the profile but **not** in the immutable run state. The cap and the wall both had to move there so a reading cannot change its own parameters mid-run; this one is the same kind of parameter and should join them. Recorded now so it is not discovered later. |
+
+## E.CB2-B — a T1 comparison on gpt-oss-20b, and why it is NOT a reading
+| System | T1 score | wall | model requests |
+| --- | --- | --- | --- |
+| Mind, gate1 | **11/11** | 226 s | 3 |
+| Mind, gate2 | **11/11** | 145 s | 3 |
+| Hermes | **4/11** | 92 s | 4 |
+
+| Field | Value |
+| --- | --- |
+| What Hermes missed | `run_sh_present`, both form-submit checks, and **all four dashboard checks**. It produced `index.html` and `server.py` and stopped. Its 92 s was fast **because it did less** — so reading 6's cost framing inverts here: cheaper, and incomplete. |
+| Why this is not a win | **One task of three** (reading 6 was 27 points across T1/T2/T3 × both systems). **Pilot legs, which the E.CB2-D preregistration excludes from any comparison.** And **n=1 for Hermes**, which reading 6 recorded as volatile on exactly this task — 6/11, 11/11, disqualified twice, and once hung to the wall. Treating a single 4/11 as Hermes's level would be the same error made against deepseek this morning: a rate generalised from one sample on one path. |
+| What IS established | The Mind can be **graded** on this model again, which it could not be twelve hours ago, and its score did **not regress** while that was fixed. The blocker is removed; the comparison is not made. |
+| What answering the question actually requires | Both systems, all three tasks, interleaved per the manifest on `nim-oss20` — six legs. That is a **graded reading**: sealed protocol, blind A/B, Codex verification, not my say-so. Reading 6's own caution stands — "do NOT claim a win from 26-25; that is one check in one reading and both systems are variable." |

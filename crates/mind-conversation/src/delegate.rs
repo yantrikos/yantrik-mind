@@ -277,8 +277,9 @@ pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
     best.map(|(_, k)| k)
 }
 
-/// E.FILES2: the BUILD chain — one model call that emits a whole project as a delimited stream,
-/// then a write that is all-or-nothing.
+/// E.FILES2 + E.FILES3: the BUILD chain — a model call that emits a whole project as a delimited
+/// stream, an all-or-nothing write, one review round, and a second all-or-nothing write that may
+/// only improve on the first.
 ///
 /// No research step. A page is a design problem and benefits from references; a task tracker with a
 /// contract in the brief is a specification problem, and a search would spend a model call on
@@ -334,6 +335,58 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                 args: serde_json::json!({ "project": project, "stream": "{{files}}" }),
                 store_as: "project_url".into(),
                 on_error: ErrorAction::Fail,
+            },
+            // E.FILES3 — THE REVIEW ROUND, and it comes AFTER the first write on purpose.
+            //
+            // Reading 6's only Mind failure was `pytest_passes` on T3: the model wrote a correct
+            // tracker and an incorrect test suite for it, in one pass, never seeing them fail.
+            // Every check that exercised the TOOL passed.
+            //
+            // The obvious answer — run the tests — was tested and abandoned. An unprivileged
+            // `unshare -rn` gives a network namespace on the host but is refused inside the
+            // benchmark container ("Operation not permitted"), and the only way to get it there is
+            // to grant a capability or relax seccomp. Containment is what makes the measurement
+            // worth anything, and generated code in that container can reach the run proxy, so
+            // executing it unsandboxed could burn capped model requests. Running untrusted output
+            // is its own slice with its own security review.
+            //
+            // So this REVIEWS instead of running, and its limits are stated where they are made: a
+            // model checking its own work is weaker than executing it, and this may simply not
+            // catch what a failing test would.
+            RecipeStep::Think {
+                prompt: format!(
+                    "You produced these files for the brief below. Check them against each other \
+                     and against the brief, then output the COMPLETE set again.\n\n\
+                     THE BRIEF: {task}\n\n\
+                     WHAT YOU PRODUCED:\n{{{{files}}}}\n\n\
+                     Check, in this order:\n\
+                     - Do the TESTS match the program they test? Every name they import, every \
+                     function they call, every string and exit code they expect must be what the \
+                     program actually does. A test that would fail against your own program is the \
+                     single most common defect here.\n\
+                     - Does every requirement the brief STATES have something answering it — the \
+                     exact filenames, the exact output strings, the exact data shapes?\n\
+                     - Does anything reference a file that is not in the set?\n\n\
+                     Then output the whole set in the same format, with the same markers:\n\
+                     === FILE: <relative/path>\n\
+                     <the complete contents>\n\n\
+                     Output ONLY files. If you find nothing to change, output the set UNCHANGED — \
+                     do not shorten it, do not summarise it, and do not drop a file you are not \
+                     rewriting. A file missing from your output is a file that keeps its old \
+                     contents, so omitting one is never how you delete it."
+                ),
+                store_as: "reviewed".into(),
+                on_error: ErrorAction::Skip,
+                max_tokens: Some(16_000usize),
+                think: Some(false),
+            },
+            // Written with Skip, so a review that comes back unparseable or unsafe leaves the FIRST
+            // set standing. The first write is the guarantee; this one is the improvement.
+            RecipeStep::Tool {
+                tool_name: "write_files".into(),
+                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}" }),
+                store_as: "reviewed_url".into(),
+                on_error: ErrorAction::Skip,
             },
             RecipeStep::Notify {
                 message: format!(

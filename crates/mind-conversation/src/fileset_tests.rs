@@ -545,3 +545,108 @@ mod wiring {
     }
 }
 
+// ── E.FILES3: the review round, and the line it must not cross ───────────────────────────────
+mod review {
+    use crate::delegate::build_recipe;
+    use mind_recipes::{ErrorAction, RecipeStep};
+
+    fn steps() -> Vec<RecipeStep> {
+        build_recipe("t", "proj", "build a task tracker with tests", None).steps
+    }
+
+    #[test]
+    fn the_review_comes_after_a_write_so_a_bad_review_cannot_lose_the_draft() {
+        let s = steps();
+        let write_ix: Vec<usize> = s
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| matches!(st, RecipeStep::Tool { tool_name, .. } if tool_name == "write_files"))
+            .map(|(i, _)| i)
+            .collect();
+        let think_ix: Vec<usize> = s
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| matches!(st, RecipeStep::Think { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(write_ix.len(), 2, "one write to guarantee, one to improve");
+        assert_eq!(think_ix.len(), 2, "authoring, then review — and no more");
+        assert!(
+            write_ix[0] < think_ix[1],
+            "the review must come AFTER the first write: reviewing first means an unparseable              review loses the whole draft"
+        );
+        assert!(think_ix[1] < write_ix[1]);
+    }
+
+    #[test]
+    fn the_second_write_may_only_improve_and_never_destroy() {
+        let s = steps();
+        let writes: Vec<&RecipeStep> = s
+            .iter()
+            .filter(|st| matches!(st, RecipeStep::Tool { tool_name, .. } if tool_name == "write_files"))
+            .collect();
+        // The FIRST write is the guarantee and must fail the chain if it cannot happen.
+        match writes[0] {
+            RecipeStep::Tool { on_error, .. } => {
+                assert!(matches!(on_error, ErrorAction::Fail), "the first write is the deliverable")
+            }
+            _ => unreachable!(),
+        }
+        // The SECOND is the improvement: if the review is unparseable, unsafe or empty, the tool
+        // errors and the chain must CONTINUE with the first set intact.
+        match writes[1] {
+            RecipeStep::Tool { on_error, .. } => assert!(
+                matches!(on_error, ErrorAction::Skip),
+                "a failed review must leave the first set standing, not fail the build"
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn at_most_one_review_and_it_costs_at_most_one_extra_call() {
+        let s = steps();
+        let thinks = s.iter().filter(|st| matches!(st, RecipeStep::Think { .. })).count();
+        assert_eq!(
+            thinks, 2,
+            "an open repair loop is how a cost ceiling stops existing; the ceiling is two calls"
+        );
+    }
+
+    /// KILL CRITERION 1, and the reason it exists rather than being assumed: the execution design
+    /// was abandoned because `unshare -rn` is refused inside the benchmark container and generated
+    /// code there can reach the run proxy. This asserts the build lane never runs what it wrote.
+    #[test]
+    fn the_build_lane_executes_nothing_it_generated() {
+        const DELEGATE: &str = include_str!("delegate.rs");
+        let start = DELEGATE
+            .find("pub fn build_recipe")
+            .expect("the build recipe exists");
+        let end = DELEGATE[start..]
+            .find("
+}
+")
+            .map(|e| start + e)
+            .unwrap_or(DELEGATE.len());
+        let body = &DELEGATE[start..end];
+        for forbidden in [
+            "Command::new",
+            "std::process",
+            "spawn_blocking",
+            "tokio::process",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the build recipe reached for {forbidden:?} — running generated output is a                  separate slice with its own security review, and the sandbox for it was tested                  and refused inside the benchmark container"
+            );
+        }
+        const FILESET: &str = include_str!("fileset.rs");
+        for forbidden in ["Command::new", "std::process", "tokio::process"] {
+            assert!(
+                !FILESET.contains(forbidden),
+                "the file-set module reached for {forbidden:?}"
+            );
+        }
+    }
+}
+

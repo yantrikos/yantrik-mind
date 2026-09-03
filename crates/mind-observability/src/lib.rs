@@ -406,6 +406,25 @@ impl DecisionLog {
         }
         let state = path_state(&p);
         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        // E.OBS2: is this process the file's writer? Established once and held for the process's
+        // life. A second `mind-core` on the same box now REFUSES to write instead of interleaving
+        // the hash chain and permanently disabling every integrity-checked report on that box.
+        //
+        // The refusal is loud once and then silent: a second instance would otherwise print on
+        // every loop tick, and a message repeated hundreds of times a minute is not read either.
+        if st.claim.is_none() {
+            let claim = take_claim(&p);
+            if claim.is_err() {
+                eprintln!(
+                    "[flight-recorder] REFUSING TO WRITE {}: another process holds this decision                      log. Two writers interleave the hash chain and permanently break every                      verified report on this box. This instance will record nothing; cognition is                      unaffected. If this is a second mind-core started by hand, stop it.",
+                    p.display()
+                );
+            }
+            st.claim = Some(claim);
+        }
+        if matches!(st.claim, Some(Err(()))) {
+            return;
+        }
         let prev = match st.head.clone() {
             Some(h) => h,
             None => chain_head(&p).unwrap_or_else(|| "genesis".to_string()),
@@ -635,6 +654,18 @@ impl RecordOutcome {
 struct PathState {
     /// The chain value of the last line known to be on disk. `None` = ask the file.
     head: Option<String>,
+    /// E.OBS2: this process's exclusive claim on the file, held open for the process's life.
+    ///
+    /// The chain is a hash of (previous chain, event bytes), so it assumes ONE WRITER PER FILE and
+    /// nothing used to enforce that. The lock above this is a Mutex: it serialises THREADS and is
+    /// blind to a second process. On 2026-09-03 a second `mind-core` started by hand on staging
+    /// appended to the live service's log, interleaved the chain at line 22087, and permanently
+    /// disabled every integrity-checked report on that box — silently, until someone opened one.
+    /// Irreversible by construction: no later write can repair the prefix.
+    ///
+    /// `None` = not yet attempted. `Some(Ok)` = held. `Some(Err)` = another process holds it, and
+    /// this one must not write.
+    claim: Option<Result<std::fs::File, ()>>,
 }
 
 static PATH_STATE: std::sync::Mutex<
@@ -658,6 +689,47 @@ fn lock_key(path: &Path) -> PathBuf {
             .map(|p| p.join(name))
             .unwrap_or(absolute),
         _ => absolute,
+    }
+}
+
+/// E.OBS2: take this process's exclusive claim on a log file, once, for the process's life.
+///
+/// An `flock` and not a pid file on purpose. The kernel releases an flock when the holding process
+/// dies for ANY reason — including a kill -9 — so a crashed writer cannot leave a stale claim that
+/// bricks its successor. A pid file would need a liveness check, and that check is itself racy;
+/// this is the one design where the operating system already has the answer.
+///
+/// The lock is taken on a SIDECAR `<log>.lock`, never on the log itself: the log is opened and
+/// closed on every append, and on some platforms closing any descriptor for a file drops that
+/// process's locks on it. A dedicated file is held open and never touched otherwise.
+///
+/// Failure to LOCK is refusal to write. Failure to CREATE the lock file is not: a read-only or
+/// missing directory is an environment problem, and turning it into silent blindness would be a
+/// worse outcome than the corruption this prevents, which needs a second writer to occur at all.
+fn take_claim(path: &Path) -> Result<std::fs::File, ()> {
+    use fs4::FileExt;
+    let lock_path = path.with_extension(match path.extension() {
+        Some(e) => format!("{}.lock", e.to_string_lossy()),
+        None => "lock".to_string(),
+    });
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(_) => return Err(()),
+    };
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        // WouldBlock means another process holds it — the case the whole mechanism exists for.
+        // Any other error is also a refusal: an exclusive claim we could not establish is not a
+        // claim, and guessing in the writer's favour is how the chain got corrupted.
+        Err(_) => Err(()),
     }
 }
 

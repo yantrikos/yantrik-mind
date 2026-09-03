@@ -10157,14 +10157,26 @@ mod lane_experiment {
     /// MEAN, so it is retried and then verified.
     #[cfg(test)]
     fn must_delete(path: &std::path::Path) {
-        for _ in 0..50 {
-            if std::fs::remove_file(path).is_ok() && !path.exists() {
-                return;
+        // The budget was 50 x 20ms = one second, which holds when this suite runs alone and does
+        // NOT hold under `cargo test --workspace`, where seventeen test binaries compete for the
+        // disk: the handle outlives the second and a green change gets a red suite for a reason
+        // that has nothing to do with it. Back off up to ~10s instead — a passing run still costs
+        // one attempt, so the ceiling is paid only by the case that would otherwise fail.
+        let mut last = String::from("no attempt was made");
+        for attempt in 0..80u32 {
+            match std::fs::remove_file(path) {
+                Ok(()) if !path.exists() => return,
+                // Windows accepts the delete and defers it while any handle is open; the path
+                // keeps resolving until the last one closes. That is a WAIT, not a failure.
+                Ok(()) => last = "delete accepted but the path still resolves (deferred)".into(),
+                Err(e) => last = e.to_string(),
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(
+                20 + attempt.min(10) * 12,
+            )));
         }
         panic!(
-            "could not delete {} — the test's premise never held",
+            "could not delete {} — the test's premise never held; last attempt said: {last}",
             path.display()
         );
     }

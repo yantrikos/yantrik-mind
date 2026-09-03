@@ -1104,9 +1104,23 @@ mod tests {
         // anyone asked. `withheld` is therefore 0: there was nothing left for the eval gate to
         // withhold. That is the STRONGER outcome, and worth asserting as such rather than
         // restoring the weaker one that assumed the secret got as far as this corpus.
+        // THE PROBE MUST BE UNFORGEABLE BY THE LEDGER'S OWN BOOKKEEPING. `4471` is four decimal
+        // digits, and every line carries a 64-char chain hash (hex, so digits qualify) and a
+        // nanosecond timestamp. Measured over real DecisionLog files, a six-record log contains
+        // ~59 distinct 4-digit strings, so a bare `4471` matches by accident about once in 170
+        // runs — which is the entire "redaction flake" that went unexplained for a day. The
+        // recorder was never at fault: `contains_secret` is pure and has no env gate, so it cannot
+        // redact intermittently. A separated or full-length card cannot occur in hex or in a
+        // timestamp, so these probes keep the "anywhere in the file" strength without the dice.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for probe in ["4471-9302", "4471930211228890", "9302-1122-8890"] {
+            assert!(!raw.contains(probe), "the RECORDER must not hold it: {probe}");
+        }
+        // And the redaction must have HAPPENED, not merely left no trace: an absence test alone
+        // passes just as well when the recorder wrote nothing at all.
         assert!(
-            !std::fs::read_to_string(&path).unwrap().contains("4471"),
-            "the RECORDER must not hold it"
+            raw.contains(REDACTED_GOAL),
+            "the goal must be present AS a redaction, not simply missing"
         );
         assert!(
             !corpus

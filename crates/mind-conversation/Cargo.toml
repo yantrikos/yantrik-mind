@@ -25,4 +25,4 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 mind-memory = { workspace = true, features = ["fixtures"] }
-
+sha2 = "0.10"

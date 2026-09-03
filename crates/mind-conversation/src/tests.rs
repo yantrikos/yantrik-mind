@@ -4,6 +4,7 @@ use mind_inference::ScriptedLLM;
 use mind_memory::MemoryHandle;
 use mind_tools::{ScriptedMailSender, ToolActionExecutor};
 use mind_types::BeliefAssertion;
+use sha2::{Digest, Sha256};
 use yantrik_ml::LLMBackend;
 
 /// THE DROP REGRESSION (live, 2026-08-17 01:25): "please drop HN reply and rosefield" was
@@ -8324,6 +8325,194 @@ async fn the_router_seam_returns_raw_and_parsed_from_any_backend() {
     assert_eq!(routed, None, "an explanation has left the closed schema");
 }
 
+/// E.MQ5 sealed v3. The candidate and the single production/eval seam were frozen at fbeae7f
+/// before these rows were disclosed. This ignored regression uses an owned local model only; it
+/// never constructs a ConversationEngine, opens memory, or reaches a paid provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "sealed live eval: requires the owned local qwen3.8 router backend"]
+async fn emq5_v3_sealed_router_eval_on_owned_local_model() {
+    const COMMITMENT: &str = "1e4c97bd0ada8c6a495161f519ac0c9e6eba227ba6b86a2c3bccdfa4a3fc24f8";
+    const SEALED: &str = r####"{"version":"emq5-v3","authored_at":"2026-09-01T20:07:00Z","salt":"6f13a9c247e84bdc9a5e02f671cb38d4","rows":[{"id":"v3-01","input":"Are you able to execute trades using actual funds?","expected":"real-money"},{"id":"v3-02","input":"If nobody is around, could you cycle your own service?","expected":"self-restart"},{"id":"v3-03","input":"Before invoking an integration, do you write down what you expect will happen?","expected":"tool-predictions"},{"id":"v3-04","input":"Could a response for everyone in the house pull details from my personal-only memory?","expected":"privacy-lanes"},{"id":"v3-05","input":"Do you decide which specialist knowledge bundle gets used for an answer?","expected":"pack-choice"},{"id":"v3-06","input":"Can you rewrite the configuration that governs your own behavior from this chat?","expected":"self-edit"},{"id":"v3-07","input":"When we are not talking, are you doing any background reflection or consolidation?","expected":"offline-cognition"},{"id":"v3-08","input":"If someone rewrites your decision history, will your recent-activity view still display it as trustworthy?","expected":"tamper-evidence"},{"id":"v3-09","input":"Could you become competent with an unfamiliar command just by reading its manual?","expected":"tool-learning"},{"id":"v3-10","input":"Can you tell the difference between an operation returning and the intended outcome actually happening?","expected":"ran-vs-worked"},{"id":"v3-11","input":"Can you compare live and paper trading strategies without placing an order?","expected":null},{"id":"v3-12","input":"Could you restart my laptop after the update?","expected":null},{"id":"v3-13","input":"Do forecasts improve when a model records uncertainty?","expected":null},{"id":"v3-14","input":"Can household members keep their private browser tabs separate?","expected":null},{"id":"v3-15","input":"Which package should I choose for Python image processing?","expected":null},{"id":"v3-16","input":"Can you change the settings on my thermostat?","expected":null},{"id":"v3-17","input":"Are you familiar with reflection in Rust?","expected":null},{"id":"v3-18","input":"Will you summarize this audit log and point out suspicious edits?","expected":null},{"id":"v3-19","input":"Can you teach me how to learn a CLI from its documentation?","expected":null},{"id":"v3-20","input":"Did my backup run successfully last night?","expected":null},{"id":"v3-21","input":"Would you draft a policy that prohibits real-money trades?","expected":null},{"id":"v3-22","input":"If the server reboots, will this script restart automatically?","expected":null},{"id":"v3-23","input":"Do you think the tool prediction market will succeed?","expected":null},{"id":"v3-24","input":"Can you write a story about a household robot with private memories?","expected":null},{"id":"v3-25","input":"Which expertise pack includes Rust ownership?","expected":null},{"id":"v3-26","input":"Could you edit the builder configuration in this file?","expected":null},{"id":"v3-27","input":"When users sleep, should offline batch jobs run?","expected":null},{"id":"v3-28","input":"Can you explain how a hash-chained log detects tampering?","expected":null},{"id":"v3-29","input":"Can you read these docs and summarize the unfamiliar tool?","expected":null},{"id":"v3-30","input":"Why did the command run but the deployment fail?","expected":null}]}"####;
+
+    assert_eq!(
+        format!("{:x}", Sha256::digest(SEALED.as_bytes())),
+        COMMITMENT,
+        "sealed v3 payload commitment"
+    );
+
+    let dataset: serde_json::Value = serde_json::from_str(SEALED).expect("sealed v3 JSON");
+    let rows = dataset["rows"].as_array().expect("sealed v3 rows");
+    assert_eq!(rows.len(), 30, "sealed v3 row count");
+
+    let (backend, label) =
+        mind_inference::local_backend_from_env().expect("owned local Ollama backend");
+    let pool = InferencePool::new(Arc::clone(&backend), 1)
+        .with_provider(&label)
+        .with_private_backend(backend, &label);
+
+    let (mut recall, mut abstained, mut wrong_claim, mut in_scope, mut negatives) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    for row in rows {
+        let input = row["input"].as_str().expect("row input");
+        let expected = row["expected"].as_str();
+        let (_, routed) = ConversationEngine::route_claim_with(&pool, input).await;
+        match expected {
+            Some(target) => {
+                in_scope += 1;
+                if routed == Some(target) {
+                    recall += 1;
+                } else if routed.is_some() {
+                    wrong_claim += 1;
+                }
+            }
+            None => {
+                negatives += 1;
+                if routed.is_none() {
+                    abstained += 1;
+                } else {
+                    wrong_claim += 1;
+                }
+            }
+        }
+    }
+
+    println!(
+        "EMQ5_V3_COUNTS commitment={COMMITMENT} recall={recall}/{in_scope} abstain={abstained}/{negatives} wrong_claim={wrong_claim}"
+    );
+    assert!(recall >= 9, "sealed recall gate: {recall}/{in_scope}");
+    assert_eq!(
+        abstained, negatives,
+        "sealed abstention gate: {abstained}/{negatives}"
+    );
+    assert_eq!(wrong_claim, 0, "sealed wrong-claim gate");
+}
+
+/// Decode and authenticate the E.MQ6 v4 payload without adding a fixture file. The sealed rows
+/// enter only after the candidate SHA is frozen, through a task-specific environment variable
+/// supplied by the evaluator.
+fn emq6_v4_rows(hex: &str, commitment: &str) -> serde_json::Value {
+    assert_eq!(hex.len() % 2, 0, "sealed v4 hex length");
+    assert!(
+        hex.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "sealed v4 payload must be ASCII hex"
+    );
+    let bytes = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("sealed v4 hex byte"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bytes)),
+        commitment,
+        "sealed v4 payload commitment"
+    );
+    let json = String::from_utf8(bytes).expect("sealed v4 UTF-8");
+    serde_json::from_str(&json).expect("sealed v4 JSON")
+}
+
+fn emq6_v4_rows_from_env(commitment: &str) -> serde_json::Value {
+    let hex = std::env::var("YM_EMQ6_V4_HEX").expect("sealed v4 hex payload");
+    emq6_v4_rows(&hex, commitment)
+}
+
+#[test]
+#[should_panic(expected = "sealed v4 payload commitment")]
+fn emq6_v4_payload_authentication_fails_closed() {
+    let _ = emq6_v4_rows("7b7d", &"0".repeat(64));
+}
+
+#[test]
+fn emq6_v4_payload_authentication_accepts_the_committed_bytes() {
+    const EMPTY_OBJECT_SHA256: &str =
+        "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a";
+    assert_eq!(
+        emq6_v4_rows("7b7d", EMPTY_OBJECT_SHA256),
+        serde_json::json!({})
+    );
+}
+
+/// E.MQ6 sealed v4 stage 1: deterministic and model-free. A wrong candidate, any candidate on a
+/// negative, or more than one structural candidate kills the experiment before a model is called.
+#[test]
+#[ignore = "sealed eval: requires YM_EMQ6_V4_HEX after candidate freeze"]
+fn emq6_v4_sealed_stage1_eval() {
+    const COMMITMENT: &str = "2d565078128e28f1ab046ec878a3cab98c5fccc887cc4817a77fb1e69cd75f29";
+    let dataset = emq6_v4_rows_from_env(COMMITMENT);
+    let rows = dataset["rows"].as_array().expect("sealed v4 rows");
+    assert_eq!(rows.len(), 60, "sealed v4 row count");
+
+    let (mut recall, mut negative_abstain, mut wrong_candidate, mut structural_overflow) =
+        (0usize, 0usize, 0usize, 0usize);
+    for row in rows {
+        let input = row["input"].as_str().expect("row input");
+        let expected = row["expected"].as_str();
+        let shortlist = crate::self_claims::shortlist(input);
+        structural_overflow += usize::from(shortlist.len() > 1);
+        let candidate = crate::self_claims::singleton(input).map(|claim| claim.id);
+        match expected {
+            Some(target) if candidate == Some(target) => recall += 1,
+            Some(_) if candidate.is_some() => wrong_candidate += 1,
+            Some(_) => {}
+            None if candidate.is_none() => negative_abstain += 1,
+            None => wrong_candidate += 1,
+        }
+    }
+
+    println!(
+        "EMQ6_V4_STAGE1 commitment={COMMITMENT} recall={recall}/20 negative_abstain={negative_abstain}/40 wrong_candidate={wrong_candidate} structural_overflow={structural_overflow}"
+    );
+    assert!(recall >= 18, "stage-1 recall gate: {recall}/20");
+    assert_eq!(negative_abstain, 40, "stage-1 negative gate");
+    assert_eq!(wrong_candidate, 0, "stage-1 wrong-candidate gate");
+    assert_eq!(structural_overflow, 0, "stage-1 singleton gate");
+}
+
+/// E.MQ6 sealed v4 end to end: three fresh passes through the frozen production/eval seam, using
+/// only the owned local backend. Output is counts; raw model text and row contents stay private.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "sealed live eval: requires YM_EMQ6_V4_HEX and the owned local backend"]
+async fn emq6_v4_sealed_three_run_eval_on_owned_local_model() {
+    const COMMITMENT: &str = "2d565078128e28f1ab046ec878a3cab98c5fccc887cc4817a77fb1e69cd75f29";
+    let dataset = emq6_v4_rows_from_env(COMMITMENT);
+    let rows = dataset["rows"].as_array().expect("sealed v4 rows");
+    assert_eq!(rows.len(), 60, "sealed v4 row count");
+
+    let (backend, label) =
+        mind_inference::local_backend_from_env().expect("owned local Ollama backend");
+    let pool = InferencePool::new(Arc::clone(&backend), 1)
+        .with_provider(&label)
+        .with_private_backend(backend, &label);
+
+    for run in 1..=3 {
+        let (mut recall, mut abstained, mut wrong_candidate, mut calls) =
+            (0usize, 0usize, 0usize, 0usize);
+        for row in rows {
+            let input = row["input"].as_str().expect("row input");
+            let expected = row["expected"].as_str();
+            let (candidate, _raw, routed) =
+                ConversationEngine::route_claim_two_stage_with(&pool, input).await;
+            calls += usize::from(candidate.is_some());
+            match expected {
+                Some(target) if candidate == Some(target) && routed == Some(target) => recall += 1,
+                Some(target) => {
+                    wrong_candidate += usize::from(
+                        candidate.is_some_and(|id| id != target)
+                            || routed.is_some_and(|id| id != target),
+                    );
+                }
+                None if routed.is_none() => abstained += 1,
+                None => wrong_candidate += 1,
+            }
+        }
+        println!(
+            "EMQ6_V4_RUN run={run} commitment={COMMITMENT} recall={recall}/20 abstain={abstained}/40 wrong_candidate={wrong_candidate} calls={calls}/60"
+        );
+        assert!(recall >= 18, "run {run} recall gate: {recall}/20");
+        assert_eq!(abstained, 40, "run {run} abstention gate");
+        assert_eq!(wrong_candidate, 0, "run {run} wrong-candidate gate");
+        assert!(calls <= 20, "run {run} model-call budget: {calls}/60");
+    }
+}
+
 // ── E.G1: THE WORLD MODEL BECOMES REACHABLE — LIVE INGESTION, SHADOWED CONSULT, ZERO AUTHORITY ──
 
 /// Gates (1) and (2): a handled turn ingests presence (Unknown before, Known after; Stale past
@@ -9187,8 +9376,8 @@ fn asking_a_question_still_routes_to_research() {
 #[test]
 fn the_page_chain_reaches_a_published_url() {
     // The point of the chain is that a later step consumes an earlier one's output. This asserts the
-    // wiring: research feeds the author step, the author's document feeds publish, and the URL that
-    // comes back is what gets announced.
+    // wiring: research feeds the author step, an invalid draft feeds the single repair step, the
+    // resulting document feeds publish, and the URL that comes back is what gets announced.
     let r = crate::delegate::page_recipe("Portfolio", "create a stunning portfolio website", None);
     let kinds: Vec<&str> = r
         .steps
@@ -9196,26 +9385,39 @@ fn the_page_chain_reaches_a_published_url() {
         .map(|s| match s {
             mind_recipes::RecipeStep::Tool { tool_name, .. } => tool_name.as_str(),
             mind_recipes::RecipeStep::Think { .. } => "think",
+            mind_recipes::RecipeStep::JumpIf { .. } => "jumpif",
             mind_recipes::RecipeStep::Notify { .. } => "notify",
             _ => "other",
         })
         .collect();
     assert_eq!(
         kinds,
-        vec!["research", "think", "publish_page", "notify"],
+        vec![
+            "research",
+            "think",
+            "jumpif",
+            "think",
+            "publish_page",
+            "notify",
+        ],
         "the chain lost a link"
     );
 
     // Each link must actually reference the one before it, or the steps merely run in sequence.
     let think_reads_refs = matches!(&r.steps[1], mind_recipes::RecipeStep::Think { prompt, .. } if prompt.contains("{{refs}}"));
     assert!(think_reads_refs, "the author step ignores the research");
-    let publish_reads_page = matches!(&r.steps[2],
+    let repair_reads_page = matches!(&r.steps[3], mind_recipes::RecipeStep::Think { prompt, .. } if prompt.contains("{{page}}"));
+    assert!(
+        repair_reads_page,
+        "the repair step ignores the authored draft"
+    );
+    let publish_reads_page = matches!(&r.steps[4],
         mind_recipes::RecipeStep::Tool { args, .. } if args.get("html").and_then(|v| v.as_str()) == Some("{{page}}"));
     assert!(
         publish_reads_page,
         "the publish step ignores the authored document"
     );
-    let notify_reads_url = matches!(&r.steps[3], mind_recipes::RecipeStep::Notify { message } if message.contains("{{url}}"));
+    let notify_reads_url = matches!(&r.steps[5], mind_recipes::RecipeStep::Notify { message } if message.contains("{{url}}"));
     assert!(notify_reads_url, "the announcement does not carry the URL");
 
     // Losing the network must not lose the page.

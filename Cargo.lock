@@ -2044,6 +2044,7 @@ dependencies = [
  "mind-world",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "yantrik-ml",
 ]

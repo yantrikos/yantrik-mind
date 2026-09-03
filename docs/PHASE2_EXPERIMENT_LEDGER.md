@@ -4402,3 +4402,16 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The test that asserted the wrong thing | It required the last file to be dropped, and passed. It now requires both files present AND the observation reported, and reintroducing the delete fails it by name. |
 | My preregistered prediction, finally settled | I predicted truncation at the token cap. Three legs later: the cap was never reached, the model never truncated, and the only truncation in this story was mine. |
 | What is now genuinely unknown, again | How T3 scores with its test file intact. Nothing has been graded yet. |
+
+## E.CB2-N READING 6 — the four graded legs so far, and two corrections I owe
+| Field | Value |
+| --- | --- |
+| Mind T1 | **11/11.** Every check, including all four dashboard checks. `routed_kind: build`, `captured_from: cb2-t1-d21e20`, four files (`index.html`, `server.py` 4468 bytes, `run.sh`, `data/leads.json`), 2 model requests, 2398 completion tokens, 34.8 s. In reading 5 the same brief scored 2/11. |
+| Hermes T1 | **11/11.** rc 0, 323 s, 16 model requests, 15 in its own log, not disqualified. |
+| Mind T2 | **6/6.** `routed_kind: build`, nine files (`index.html`, `style.css`, four project pages, three writing posts), 2 requests, 3223 completion tokens, 73 s. In reading 5, 2/6. |
+| Hermes T2 | **6/6**, on the single declared rerun. The first attempt was VOID — rc 0, valid log, 13 accepted, 0 refused, and TWO upstream 429/5xx. Infrastructure, not the agent. The first receipt and its proxy counts are preserved under `voided/` with the declaration written down beside them. |
+| CORRECTION 1 — I claimed a win that was not one | I reported Mind T1's 11/11 as "the first time we've beaten Hermes on anything", comparing it against Hermes's 6/11 from READING 5. In this reading Hermes scored 11/11 on T1. It is a tie. I carried a number across readings for a system whose bimodality on this exact task I had documented myself. |
+| CORRECTION 2 — a standing claim that stopped being true | I wrote that "the routing model call has never once changed a kind", said I had verified it across every recorded leg, and used it to argue the call was dead weight. T2's brief contains "website", "site" and "page", so the classifier says `page` and the floor was `page` — and the leg ran as `build`. The router refined it, in this very reading. The claim was true of every leg I had seen and I stated it as a property rather than an observation. |
+| CORRECTION 3 — right number, wrong mechanism | I predicted T2 would reach 6/6 via the page lane and the filename fix. It reached 6/6 via the BUILD lane, which writes a real `index.html` into a project directory and makes the filename question moot for that brief. |
+| What the four legs establish | On the two briefs measured so far, the Mind is at parity with Hermes on quality — 11/11 and 6/6 against 11/11 and 6/6 — at 2 model requests per task against 13 to 16, and 35 to 73 seconds against 323. This morning the same two briefs scored 2/11 and 2/6. |
+| What was actually wrong, restated now that it is measured | Nothing in the model. The gap was one file instead of many, a router rebadging code as a page, and a filename. Same model, same containment, same meter. |

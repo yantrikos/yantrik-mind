@@ -986,7 +986,7 @@ impl super::ConversationEngine {
                 continue;
             }
             let line = format!(
-                "{} names {}:{}, which its provider does not serve (catalogue of {}). That route                  will fail every time it is used until the model is changed.",
+                "{} names {}:{}, which its provider does not serve (catalogue of {}). That route will fail every time it is used until the model is changed.",
                 check.var,
                 check.provider,
                 check.model,

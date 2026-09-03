@@ -14621,6 +14621,13 @@ async fn cfg2_a_route_its_provider_does_not_serve_is_recorded_and_announced() {
         text.contains("YM_ROLE_RESEARCH") && text.contains("z-ai/glm-5.2"),
         "the notice names the variable and the dead model: {text}"
     );
+    // The line an operator READS. A run of stray whitespace shipped to staging on the first
+    // witness -- harmless to a parser, and exactly the sort of sloppiness that makes a human stop
+    // reading the channel this feature depends on entirely.
+    assert!(
+        !text.contains("  "),
+        "the operator-facing line carries no run of whitespace: {text:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

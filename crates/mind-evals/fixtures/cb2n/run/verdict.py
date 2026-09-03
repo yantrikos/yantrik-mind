@@ -219,3 +219,47 @@ def model_liveness(status, body_text):
     if code == 400 and ("model" in text.lower() and ("not found" in text.lower() or "end of life" in text.lower() or "no longer" in text.lower())):
         return "gone", f"HTTP {code}: {detail}"
     return "inconclusive", f"HTTP {code}: {detail}" if detail else f"HTTP {code}"
+
+
+def explain_gone(model, listed, status=None):
+    """A `gone` verdict conflates two very different failures. Say which one it is.
+
+    E.MODEL1 refuses to start a reading on a model the provider no longer serves, and it decides
+    that from a 404. But a mistyped model id answers 404 too, with the same body, and the refusal
+    then tells an operator "the model is GONE" and sends them looking for a retirement
+    announcement that does not exist.
+
+    That is not hypothetical: probing `deepseek-ai/deepseek-v4-flash-0813` returned a flat
+    `404 page not found` and the classifier said gone. The model was never retired -- the id was
+    wrong, carrying pro's date suffix. The provider's list held `deepseek-ai/deepseek-v4-flash-0731`
+    the whole time. One extra request on the FAILURE path only, and the message names the id the
+    operator meant.
+
+    `listed` is the provider's model ids, or None when the list could not be read -- which is its
+    own answer and must not be reported as either.
+    """
+    # 410 GONE is the provider SAYING it retired the model, and NVIDIA sends the date in the body.
+    # 404 is the ambiguous one -- a retired model and a mistyped id answer it identically. Framing
+    # a stated retirement as "check the id" is the same defect in the other direction, and it
+    # appeared the moment this was tested against the real endpoint rather than against a list.
+    stated = status == 410
+    lead = ("the provider STATES this model is retired" if stated
+            else f"'{model}' is not among the provider's %d models")
+    if listed is None:
+        return ("the provider states a retirement; its model list could not be read" if stated
+                else "the provider's model list could not be read, so retired-vs-mistyped is unresolved")
+    listed = list(listed)
+    if model in listed and not stated:
+        return (f"the provider still LISTS '{model}' among {len(listed)} models, so the refusal is "
+                "not a retirement -- treat it as the endpoint failing for this id")
+    import difflib
+    near = difflib.get_close_matches(model, listed, n=3, cutoff=0.6)
+    if stated:
+        # A retirement needs a SUCCESSOR, not a spell check.
+        return (f"the provider states '{model}' is retired; of its {len(listed)} current models the "
+                f"nearest are: {', '.join(near) if near else 'none resembling it'}")
+    if near:
+        return (f"'{model}' is not among the provider's {len(listed)} models; the closest it does "
+                f"list are: {', '.join(near)} -- check the id before concluding a retirement")
+    return f"'{model}' is not among the provider's {len(listed)} models, and nothing is close to it"
+

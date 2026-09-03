@@ -87,7 +87,25 @@ print(v, r.replace(chr(10), ' ')[:200])
       CB2_MODEL_PROBE_MS=$((t1 - t0))
       if [ "$verdict" = gone ]; then
         echo "profile: the model '$CB2_MODEL' is GONE — $reason"
-        echo "profile: refusing to start a reading on a model that no longer exists"
+        # ONE extra request, on the FAILURE path only. A 404 cannot tell a retired model from a
+        # mistyped id -- both answer it, with the same body -- and reporting the wrong one sends an
+        # operator hunting a retirement announcement that does not exist. Probing
+        # `deepseek-v4-flash-0813` did exactly that: the id carried pro's date suffix, and the
+        # provider had listed `deepseek-v4-flash-0731` the whole time.
+        local listfile=/tmp/cb2_models.$$
+        curl -s --max-time 30 -o "$listfile" -H "Authorization: Bearer $(cat "$CB2_KEY_FILE")"           "https://$CB2_UPSTREAM/v1/models" >/dev/null 2>&1 || : > "$listfile"
+        echo "profile: $(CB2_LIST="$listfile" python3 -c "
+import json, os, sys
+sys.path.insert(0, '$fix/run')
+from verdict import explain_gone
+try:
+    ids = [m['id'] for m in json.load(open(os.environ['CB2_LIST']))['data']]
+except Exception:
+    ids = None
+print(explain_gone('$CB2_MODEL', ids, $code))
+" 2>/dev/null || echo "the provider's model list could not be read, so retired-vs-mistyped is unresolved")"
+        rm -f "$listfile"
+        echo "profile: refusing to start a reading on a model that does not answer"
         return 1
       fi
       # A timeout, a 429 or an auth failure is NOT death. Refusing here would turn a bad minute

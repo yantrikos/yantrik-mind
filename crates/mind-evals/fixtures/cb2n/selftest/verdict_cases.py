@@ -7,7 +7,7 @@ suite whose only cases are failures cannot notice a rule that rejects everything
 import json, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "run"))
 from verdict import (classify, host_independent, receipt_shape_ok, reported_project,
-                     call_latencies, model_liveness)
+                     call_latencies, model_liveness, explain_gone)
 
 # EVERY CASE RUNS AT BOTH CAPS. The rule used to import a module-level `CAP = 8`, so it was only
 # ever exercised at eight while the `nim-cap24` reading enforces twenty-four — a self-test that
@@ -245,5 +245,59 @@ if "end of life" not in _r or "410" not in _r:
     print(f"liveness/reason_quotes_provider: DISAGREE got={_r!r}")
 else:
     print("liveness/reason_quotes_provider: agree")
+
+# E.MODEL1b -- WHICH KIND OF GONE. A 404 answers for a retired model and for a mistyped id alike,
+# and the refusal used to report both as "no longer exists". That happened for real: probing
+# `deepseek-ai/deepseek-v4-flash-0813` returned a flat 404 and was read as a retirement; the id
+# carried pro's date suffix, and the provider had listed `-0731` throughout. These cases pin the
+# four answers, including the one that must NOT be guessed.
+_LISTED = ["deepseek-ai/deepseek-v4-flash-0731", "deepseek-ai/deepseek-v4-pro-0813",
+           "meta/llama-3.1-8b-instruct"]
+GONE_CASES = [
+    ("mistyped_id_names_the_near_miss", "deepseek-ai/deepseek-v4-flash-0813", _LISTED,
+     ["not among", "deepseek-v4-flash-0731", "before concluding a retirement"]),
+    ("unlisted_404_says_nothing_is_close", "openai/gpt-oss-120b", _LISTED,
+     ["not among", "nothing is close"]),
+    ("still_listed_is_not_a_retirement", "meta/llama-3.1-8b-instruct", _LISTED,
+     ["still LISTS", "not a retirement"]),
+    # An unreadable list is its own answer. Reporting it as either a retirement or a typo would be
+    # inventing evidence, which is the failure this whole classifier exists to avoid.
+    ("unreadable_list_is_unresolved", "anything/at-all", None,
+     ["could not be read", "unresolved"]),
+]
+for name, model, listed, wants in GONE_CASES:
+    got = explain_gone(model, listed)
+    ok = all(w in got for w in wants)
+    if not ok:
+        bad = 1
+    print(f"gone/{name}: {'agree' if ok else 'DISAGREE'}" + ("" if ok else f" got={got!r}"))
+
+# The near-miss must be a REAL near miss, not the first thing in the list.
+# A 410 is the provider SAYING it retired the model -- NVIDIA sends the end-of-life date in the
+# body. Telling that operator to "check the id" is the same defect pointing the other way, and it
+# only showed up when this ran against the real endpoint instead of a list. A retirement needs a
+# SUCCESSOR, not a spell check.
+STATED = [
+    ("stated_retirement_is_not_a_spell_check", "openai/gpt-oss-120b", _LISTED + ["openai/gpt-oss-20b"], 410,
+     ["states", "retired"], ["check the id"]),
+    ("stated_retirement_offers_the_nearest_current", "openai/gpt-oss-120b", _LISTED + ["openai/gpt-oss-20b"], 410,
+     ["gpt-oss-20b"], []),
+    ("an_ambiguous_404_still_suggests_the_id", "deepseek-ai/deepseek-v4-flash-0813", _LISTED, 404,
+     ["check the id"], ["states"]),
+    ("stated_retirement_with_no_list_says_so", "openai/gpt-oss-120b", None, 410,
+     ["states a retirement", "could not be read"], ["mistyped"]),
+]
+for name, model, listed, status, wants, forbids in STATED:
+    got = explain_gone(model, listed, status)
+    ok = all(w in got for w in wants) and not any(f in got for f in forbids)
+    if not ok:
+        bad = 1
+    print(f"gone/{name}: {'agree' if ok else 'DISAGREE'}" + ("" if ok else f" got={got!r}"))
+
+if "flash-0731" not in explain_gone("deepseek-ai/deepseek-v4-flash-0813", _LISTED):
+    bad = 1
+    print("gone/near_miss_is_actually_near: DISAGREE")
+else:
+    print("gone/near_miss_is_actually_near: agree")
 
 sys.exit(bad)

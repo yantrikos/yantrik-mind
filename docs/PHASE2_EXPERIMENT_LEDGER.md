@@ -5100,3 +5100,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Kill criterion 4 — the interesting rows survive | MET, and it is the one that would have looked reasonable while being wrong. Wakes carrying an unseen loop sort ahead of the rest, newest first within each group. The mutation that keeps the FIRST wakes by cycle order — the obvious implementation — drops precisely the rows the report exists to surface, and fails. |
 | **Kill criterion 5, which I got wrong when I wrote it** | I preregistered *"small inputs render exactly as before"*. That is now false and was never achievable: moving the summary above the detail changes the output for EVERY input, including small ones. What is actually true is what I should have written — **the CONTENT for small inputs is unchanged and all four original tests pass untouched.** Recording the imprecision rather than quietly reinterpreting my own criterion to match what I built. |
 | Mutations | Three, all die: cap removed, cap keeps the first wakes, truncation silent. Workspace 1763/1763. |
+
+## E.L2B-R2 WITNESSED — 2,240 lines to 61, and the number underneath it
+| Field | Value |
+| --- | --- |
+| Before / after, same box, same data | **2,240 lines / 74 KB → 61 lines / 2,583 bytes.** A 29× reduction, and the conclusion is now the first thing printed. |
+| What the report says now, in its first five lines | *"404 wake(s); 67 carried a due loop the shadow never considered. Gates the shadow missed: ask 9, dmn 65, knock 5."* Then twelve wakes in detail, those with an unseen loop first, and a line saying 392 were omitted but still counted. |
+| The number that was buried | **`dmn` is due and unconsidered in 65 of 404 wakes — 16%.** That is the largest single coverage hole in the attention shadow, it has been true all day, and it was on line 2,235 of a 2,240-line report. The fix did not discover it; the fix made it the first thing anyone reads. |
+| The shape of this defect, for the record | Found by running my own code at realistic volume, which no test of mine did. Four tests, three dead mutations, a full suite, a deploy and a witness had all passed at two and three wakes. **Scale is a dimension my testing does not cover**, and it is now the eighth defect today that survived every filter I own. |

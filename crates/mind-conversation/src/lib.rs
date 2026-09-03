@@ -4137,7 +4137,14 @@ fn now_str() -> String {
 /// Write an HTML page to the served dir and return its shareable URL. Shared by the publish_page tool
 /// AND the defensive auto-publish (so a raw-HTML reply becomes a link, never a wall of HTML in chat).
 
-fn publish_html(name_hint: &str, html: &str) -> Option<String> {
+/// The FILE STEM `publish_html` will write, given a name hint. Split out so the naming decision can
+/// be tested without a filesystem — and because the decision, not the write, is where E.PAGE1's
+/// defect lived.
+fn published_stem(name_hint: &str) -> String {
+    let name_hint = match name_hint.rsplit_once('.') {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case("html") && !stem.is_empty() => stem,
+        _ => name_hint,
+    };
     let safe: String = name_hint
         .chars()
         .map(|c| {
@@ -4154,11 +4161,19 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
         .chars()
         .take(40)
         .collect();
-    let safe = if safe.trim_matches('-').is_empty() {
+    if safe.trim_matches('-').is_empty() {
         "page".to_string()
     } else {
         safe
-    };
+    }
+}
+
+fn publish_html(name_hint: &str, html: &str) -> Option<String> {
+    // The naming decision is `published_stem`, called rather than repeated. It was inlined here and
+    // duplicated into that function so a test could reach it, which is two copies of one rule and
+    // exactly how a tested rule and a shipped rule come to disagree — the defect this whole slice
+    // is about was one function ignoring what another had decided.
+    let safe = published_stem(name_hint);
     let dir =
         std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
     std::fs::create_dir_all(&dir).ok()?;

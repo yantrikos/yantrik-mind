@@ -175,3 +175,44 @@ mod page1_recipe_tests {
     }
 }
 
+#[cfg(test)]
+mod page1_naming_tests {
+    use crate::published_stem;
+
+    /// THE TEST THAT WAS MISSING. E.PAGE1 shipped without it and was a no-op: `required_filename`
+    /// was right, the recipe carried it, and `publish_html` then replaced every character outside
+    /// `[A-Za-z0-9-_]` with a dash — so `index.html` became the stem `index-html` and the file
+    /// landed at `index-html.html`. Two tests passed and the outcome they existed for did not
+    /// happen. It was found by reading the writer while planning a different slice.
+    #[test]
+    fn a_required_filename_becomes_that_exact_file() {
+        assert_eq!(published_stem("index.html"), "index");
+        assert_eq!(published_stem("about-us.html"), "about-us");
+        assert_eq!(published_stem("notes_2026.html"), "notes_2026");
+        // Case in the extension does not matter; case in the stem is lowered as it always was.
+        assert_eq!(published_stem("Index.HTML"), "index");
+    }
+
+    #[test]
+    fn a_page_title_is_still_slugified_exactly_as_before() {
+        // The rule that stops a page being named after the user's raw request is untouched.
+        assert_eq!(
+            published_stem("Arjun Mehta — Software Engineer"),
+            "arjun-mehta---software-engineer"
+        );
+        assert_eq!(published_stem("Top 10 Combos!"), "top-10-combos");
+        assert_eq!(published_stem(""), "page");
+        assert_eq!(published_stem("!!!"), "page");
+    }
+
+    #[test]
+    fn a_dotted_name_that_is_not_a_page_keeps_its_old_treatment() {
+        // Only a `.html` tail is a filename. Anything else is a title with a dot in it, and
+        // stripping its tail would rename a page for no reason.
+        assert_eq!(published_stem("v1.2 release notes"), "v1-2-release-notes");
+        assert_eq!(published_stem("report.pdf"), "report-pdf");
+        // A bare extension has no stem to keep.
+        assert_eq!(published_stem(".html"), "html");
+    }
+}
+

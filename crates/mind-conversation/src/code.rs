@@ -866,7 +866,10 @@ impl super::ConversationEngine {
                 // `forge_due` cannot bound them because `updated_ms` is refreshed on every tick
                 // including the failures -- so a stuck venture looks freshly updated forever and
                 // only an owner typing `forge kill` stops it.
-                "stage_tries": 0_i64, "max_stage_tries": 3_i64,
+                // `stage_tries_for` names the stage the count BELONGS to: the strong-builder
+                // path returns early and skips the bookkeeping below, so a count must never be
+                // trusted once the venture has moved on. A stale one is ignored, not applied.
+                "stage_tries": 0_i64, "stage_tries_for": "brainstorm", "max_stage_tries": 3_i64,
                 "log": [], "updated_ms": 0_i64,
             });
             self.forge_save(&all).await;
@@ -1565,12 +1568,26 @@ impl super::ConversationEngine {
         // non-terminal test in three places, and a new stage name would silently stay due.
         let ended_on = all[&id]["stage"].as_str().unwrap_or("").to_string();
         if ended_on == stage_at_entry {
-            let tries = all[&id].get("stage_tries").and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+            // A count only counts for the stage it was recorded against. One path (the strong
+            // builder) advances the venture and returns before this block, so `test` can inherit
+            // `build`'s two failed attempts and die on its first hiccup. Keying the count to a
+            // stage makes that self-correcting for EVERY such path, present or future.
+            let counted_for = all[&id]
+                .get("stage_tries_for")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let prior = if counted_for == ended_on {
+                all[&id].get("stage_tries").and_then(|x| x.as_i64()).unwrap_or(0)
+            } else {
+                0
+            };
+            let tries = prior + 1;
             let max_tries = all[&id]
                 .get("max_stage_tries")
                 .and_then(|x| x.as_i64())
                 .unwrap_or(3);
             all[&id]["stage_tries"] = serde_json::json!(tries);
+            all[&id]["stage_tries_for"] = serde_json::json!(ended_on.clone());
             if tries >= max_tries {
                 all[&id]["stage"] = serde_json::json!("killed");
                 report = format!(
@@ -1579,6 +1596,7 @@ impl super::ConversationEngine {
             }
         } else {
             all[&id]["stage_tries"] = serde_json::json!(0_i64);
+            all[&id]["stage_tries_for"] = serde_json::json!(ended_on.clone());
         }
         all[&id]["updated_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
         if let Some(l) = all[&id]["log"].as_array_mut() {

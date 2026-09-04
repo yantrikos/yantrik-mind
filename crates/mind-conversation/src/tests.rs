@@ -14806,3 +14806,47 @@ async fn forge_progress_resets_the_give_up_count() {
          build stage would kill a venture that is making progress: {report}"
     );
 }
+
+/// E.LOOP-F — A COUNT FROM ANOTHER STAGE MUST NOT KILL A VENTURE THAT IS MAKING PROGRESS.
+///
+/// The strong-builder path advances build→test and RETURNS EARLY, skipping the tick's bookkeeping
+/// entirely. So a venture that failed to build twice and then succeeded arrives at `test` still
+/// carrying two failed attempts, and dies on its first hiccup at a stage it has barely attempted.
+/// The count therefore names the stage it belongs to, and a count recorded against a stage the
+/// venture has since left is ignored rather than applied — which holds for every early-returning
+/// path, including ones added later.
+#[tokio::test]
+async fn forge_does_not_apply_one_stages_failures_to_another() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("still no json")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    // Two failed BUILD attempts, then the strong builder carried it to `spec`'s neighbourhood
+    // without clearing them. One failure here must not be the third strike.
+    let _ = mem
+        .profile_set(
+            "forge_ventures",
+            &serde_json::json!({"v1": {
+                "id": "v1", "idea": "a thing", "stage": "spec", "iter": 0, "max_iter": 2,
+                "stage_tries": 2_i64, "stage_tries_for": "build", "max_stage_tries": 3_i64,
+                "log": [], "updated_ms": 0_i64,
+            }})
+            .to_string(),
+        )
+        .await;
+
+    let report = conv.forge_tick_for(true, None).await.unwrap_or_default();
+    let all = conv.forge_load().await;
+    assert_eq!(
+        all["v1"]["stage"].as_str().unwrap_or(""),
+        "spec",
+        "a venture on its FIRST failure at this stage was killed by another stage's count: {report}"
+    );
+    assert_eq!(
+        all["v1"]["stage_tries"].as_i64().unwrap_or(-1),
+        1,
+        "the count must restart when it belonged to a stage the venture has left: {report}"
+    );
+}

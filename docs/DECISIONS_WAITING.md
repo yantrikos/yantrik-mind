@@ -142,3 +142,27 @@ needs scope tracking.
 
 Everything else on the T1 lane is done. Nothing here is waiting on more engineering.
 
+---
+
+## 8. Pair a device to staging's cockpit? (added 2026-09-04 — this one is small)
+
+Phase G is measurable the moment this is done, and not before. The chain is fully mapped:
+
+| link | state |
+| --- | --- |
+| a packet exists for knock to consider | ✅ done — `calendar add` → future node → `nightshift` → one packet standing by |
+| an idle stretch | ✅ |
+| **presence** | ❌ |
+
+`idle_ok = present && !quiet_now && idle_stretch`, and `present` is
+`telegram_reachable() || console_present()`. Staging is headless, so presence can only come from
+`console_present()` — which needs a **machine view**, one of the cockpit's nine allowlisted
+read-only GETs. Those are operator-authenticated and return **401** without a paired device.
+
+I did not work around the 401. It is a real authentication boundary, and defeating one to make a
+measurement convenient is the kind of shortcut that is invisible in a result and expensive later.
+
+What it buys: the world-model shadow has recorded 9,865 knock evaluations that all exited before
+the gate, so `AGREEMENT` has been `UNCOMPUTABLE` since E.G1 shipped. With presence, the next
+evaluation reaches the receptivity gate and the shadow finally produces the number it exists for.
+

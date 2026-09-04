@@ -7265,3 +7265,25 @@ su -s /bin/sh yantrikmind -c "timeout -s KILL 10 unshare --user --map-root-user 
 ```
 
 So the check is live for the process that actually runs it. **"It works as root" is not "it works as the service"** — a different question with a different answer available, and the second one is the one that matters.
+
+### E.SYNTAX1 — driven live on the deployed binary; silence earned
+`ym delegate syncheck: …` on staging, 180 s, 3 files, **no findings block**. Verified the silence was earned rather than assumed: `server.py` parses, carries `__main__` and `serve_forever`, `run.sh` starts it, and running it gave `GET /` 200 and `GET /dashboard` 200.
+
+Together with the wiring test — which fires, and whose mutant fails — the check is now shown to do both halves: **speak when there is a defect, and stay quiet when there is not**, on the binary that is actually deployed.
+
+### E.REPAIR1 — PREREG: does the review round ACT on a finding?
+**This is the question every check has been waiting on**, and `DECISIONS_WAITING` lists it under "not blocked, just not done": *"the finding demonstrably reaches the review round; whether the review ACTS on it well needs a reading."* It does not need a reading. It needs one model call, and it can be run locally for nothing.
+
+Five checks now put defects in front of the review step. **Not one of them has been shown to produce a repair.** Every "shipped" claim today rests on delivery, not on outcome — and delivery was the easy half.
+
+**Design.** Take the real artifact that shipped broken (`oss20_app_jsinpython.py`, a JavaScript template literal on line 89), build `build_recipe`'s ACTUAL review prompt around it — same wording, same ordering, with the finding in the `WHAT THE WRITE STEP OBSERVED` block exactly as `write_files` emits it — and send it to the model. Then ask one question of the answer: **does the file it returns parse?**
+
+**n=5, and the reason is on the record.** E.THINK4: a single draw of the same configuration varied 2.7x, and I reported single draws as findings twice today. One repair attempt would say nothing.
+
+**KILL CRITERIA, declared before the first call.**
+1. Report the count that repaired out of five, never a single run.
+2. "Repaired" means the returned file **parses** — checked with `ast.parse`, not by reading it.
+3. A control arm with the finding block **removed** — same brief, same file, no defect named. If the model repairs equally well without being told, the findings are decoration and the honest conclusion is that five checks buy nothing at this step.
+4. If the model returns no file at all, that counts as a failure to repair, not as an inconclusive run.
+
+**Prediction, recorded in advance:** the told arm repairs more often than the control. If the control matches it, I will say so plainly — that outcome would undercut a day of work, and it is exactly why the control is in the design rather than added afterwards.

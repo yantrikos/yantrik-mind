@@ -5624,3 +5624,12 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Four mutants, all now caught | Both unfence calls removed; the closing-fence requirement dropped; the opening-fence requirement dropped; a one-line fence treated as a wrapper. Each verified to change the file before its verdict was read. |
 | A shell trap that made three "SURVIVED" verdicts meaningless | `sed -i "$m"` with backticks inside **double quotes** performs command substitution, so the pattern was mangled and the file never changed. The rule I already had — *verify the mutant changed the file* — is the only reason this was caught; the mutation harness now hashes the file before and after. |
 | Standing | Workspace **1779/1779**. |
+
+## E.CB2-B2 end-to-end — PREREGISTERED: a leg must TRUNCATE and RECOVER
+| Field | Value |
+| --- | --- |
+| What is still unproven | No leg has yet truncated **and** recovered. The completion pass has been seen to run and produce the right file; the fence fix has never been exercised on a real cut generation. |
+| The gate | Run T1 at the **real 302 s deadline** — no tuned parameter — until a truncation is observed, up to **six legs**. The fix is validated only if a leg that **truncates** also scores **≥ 9/11**. |
+| The failure modes I am NOT allowed to paper over | If a leg truncates and still scores low, that is the **next defect** and I report it rather than tuning anything. If six legs produce no truncation, the fix stays **unvalidated** and I say so — clean legs may not stand in for it, which is the mistake that produced reading 7. |
+| Why ≥ 9/11 and not 11/11 | A recovered artifact need not be perfect to prove the recovery chain works; 9/11 is reading 6's T3 bar and comfortably above the 2/11 a failed recovery produces. Setting it at 11/11 would let ordinary model variance read as a broken fix. |
+| Prediction | A truncating leg recovers to ≥ 9/11. If it does not, my expectation is a **fourth** stacked defect rather than the fence fix being wrong — the first three were each hidden by the one before. |

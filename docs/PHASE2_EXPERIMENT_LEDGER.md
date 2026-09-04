@@ -5698,3 +5698,14 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What I will run | 8 T1 legs with the budget-aware prompt, same profile, same binary lineage. |
 | **Stated before the result** | 8 legs is a small sample. A drop from 3/8 to 0/8 is **suggestive, not conclusive** (Fisher p ≈ 0.08), and I will report it as such rather than as proof. What would be conclusive is the truncation rate over a longer run, which the next readings supply for free. |
 | Kill criterion | If truncations do not fall, the prompt is not doing the work and the answer is the **plan step** — an explicit file list checked against the budget — not a louder instruction. If scores fall, it ships nothing. |
+
+## E.CB2-P — the budget note stopped the truncations and revealed what was underneath
+| Field | Value |
+| --- | --- |
+| Truncation | **0 in the first 4 legs**, against a 3-in-8 baseline, and every leg decomposed the way the note asked — `run.sh` + `server.py` + `templates/` + `data/`. The blind-decomposition problem is answered. |
+| But the scores did not follow | Legs 1–2 scored 11/11; legs 3 and 4 scored **7/11 and 2/11 with NO truncation**. Fixing one failure mode exposed the next, which is the honest shape of this kind of work. |
+| **Leg 4, diagnosed by RUNNING it** | The artifact is complete, well-formed and parses. It dies at import: `from http.server import BaseHTTPRequestHandler, TCPServer` → **`TCPServer` is in `socketserver`**. `site_up` fails, `ERR_CONNECTION_REFUSED`, 2/11. **The model review step read this file and approved it.** One execution finds it in under a second. |
+| Leg 3 for contrast | Starts cleanly and serves; fails four checks for unrelated reasons. So the two low scores have **different causes**, and only one descends from the truncation family. |
+| What this settles | ARCH8 listed "verify by executing" third. It is **first**. Truncation is now largely handled, and what remains are **runtime** failures a model reviewer cannot see by reading — the review step's own comment already said so: *"a model checking its own work is weaker than executing it."* This is that sentence, measured, on leg 4 of a live run. |
+| The caution that does not go away | Executing generated code is a security decision. It was tried inside the benchmark container and abandoned for good reasons, and nothing here changes that. The question is whether a **box that already trusts the mind** should run its own build before announcing it — which is a different question, and one nobody has asked. |
+| Honest accounting of the change | The budget note is a **partial** win: it removes truncation without improving the score distribution, because the next failure was waiting underneath. I will not claim it as a score improvement. |

@@ -6698,3 +6698,34 @@ a/run.sh → b/run.sh
 **What this does NOT claim.** It does not claim T1 would then score 11/11 — the finding reaches a model that still has to act on it, and a model checking its own work is weaker than executing it. It claims the Mind currently ships a dead entry point with nothing in the loop able to notice, and that this is the failure r7 actually recorded.
 
 **Not in scope.** Granting the Mind execution. `Sandbox::available()` PROBES rather than assumes (it runs `echo ok` through the sandbox), and correctly returns false in the benchmark container, which refuses unprivileged userns. Hermes needs no sandbox because the container IS its boundary; the Mind carries its own because it has to be safe on a real machine. Closing that gap means an operator declaring "this process is already inside a disposable boundary", which disables a safety property and is Pranab's call, not mine.
+
+### E.FENCE1 — PREREG: a markdown fence must not be written into the deliverable
+**Preregistered before code. Also corrects an over-broad claim I made an hour ago.**
+
+**The correction first.** In E.ENTRY1 I wrote that a syntax check "was probed and KILLED — it would have caught nothing." That was measured on **reading 7's ten artifacts only**, and I generalised it to the loop. Widening to the whole corpus, **3 of 23 judged artifacts do not parse**, each for a different reason:
+
+| artifact | SyntaxError | what actually happened |
+| --- | --- | --- |
+| `out-ds-pilot/mind_T1/server.py` | unterminated triple-quoted string (line 236 of 397) | cut mid-HTML-template — a truncation |
+| `out-ds-pilot3/mind_T1/server.py` | expected an indented block after class definition | ends with `if __name__ == "__main__":` **four times** — a degenerate repetition loop |
+| `out-v3/mind_T1/main.py` | invalid syntax, **line 1** | the file begins ` ```python ` and ends ` ``` ` |
+
+The E.ENTRY1 claim stands for r7 and is wrong as a general statement. Corrected here rather than left standing, because a false negative recorded as a settled result is how a real defect stays unfixed.
+
+**This slice takes only the third**, because it is the one that is not a model-reasoning problem. The model wrapped its file in a markdown fence and the writer stored the wrapper verbatim. `python3 main.py` then dies on line 1 and **the entire deliverable is lost** — not degraded, lost.
+
+**It is already solved one lane over.** `publish_page` calls `extract_document`, whose comment reads: *"A model asked for 'only the HTML' still wraps it in a ```html fence about half the time. Refusing that would fail the chain on a formatting habit, so unwrap it here — the alternative is a prompt that has to win every time."* The build lane's `write_files` has no equivalent. Same producer, same habit, one lane hardened and the other not.
+
+**The rule, deliberately narrow.** Strip only when the first non-empty line is a bare fence open (` ``` ` optionally followed by one language word, nothing else) AND the last non-empty line is exactly ` ``` `. Never for `.md`/`.markdown`, where a leading fence is legitimate content. Anything else is left untouched.
+
+**KILL CRITERIA, declared before running.**
+1. It must strip **exactly one** file in the corpus.
+2. That file must **parse** afterwards, having failed before.
+3. Every file it leaves alone must be **byte-identical** — asserted, not eyeballed.
+4. The write path must still refuse everything it refuses today; stripping a wrapper must not become a way to smuggle a path or a payload past `plan_file_set`.
+
+**Validation already performed against those criteria** (`scratch/probe_fence.py` over 229 files of the real corpus): **stripped 1, untouched 228 byte-identical (asserted in the probe), and the stripped file went `SyntaxError: invalid syntax` → `parses`.**
+
+**Reported as well as stripped.** The page lane strips silently, which is right for a whole document. Here the review round is downstream and a file that arrived wrapped is evidence the producer misread the format instruction — worth one line in the findings, not a silent repair.
+
+**What this does NOT claim.** One occurrence in 229 files. This is a rare failure with a total blast radius, not a common one; the case for fixing it is the cost when it fires, not its frequency. It also does nothing for the other two unparseable artifacts — a truncation and a repetition loop — which are separate and are not in this slice.

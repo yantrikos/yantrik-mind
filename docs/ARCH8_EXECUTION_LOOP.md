@@ -84,3 +84,49 @@ Planning is not the differentiator. The observe-and-correct cycle is.
    before it is an engineering one. It must not be answered inside the benchmark container.
 4. **A condition that can ask a real question** of a step's output, so recoveries stop being
    hand-rolled per lane.
+
+## 6. Bounding a loop — the rule, and the three ways we got it wrong
+
+Every loop in this system that can fail must be able to STOP. The forge and foresight both had
+loops that could not, and both were found the same way: a comment promising a retry, sitting next
+to code that counted nothing. When you write "will retry next tick", you are making a claim about
+termination, and the claim needs a number behind it.
+
+**The class.** *The guard's firing condition is destroyed by the very failure it exists to catch.*
+Four instances so far:
+- `forge_due` bounds on `now - updated_ms > 900_000`, but `updated_ms` is refreshed after the
+  match on every tick INCLUDING the failures — a stuck venture always looks freshly updated.
+- `resolve_predictions` retried while `status == "open"` and the deadline was past, which is
+  exactly what a failed judge preserves.
+- E.CB2-B's recovery path was unreachable in precisely the case that needed it.
+- E.CB2-B's gate never exercised the failure the change introduced.
+
+**Three checks, in order, when you add a bound:**
+
+1. **Is the bound's own input mutated by the failure path?** If the failure refreshes the clock or
+   preserves the predicate, the bound can never fire. Read the failure path, not the success path.
+2. **Is the RESET reachable on every path that makes progress?** This is the one that nearly
+   shipped a worse bug than it fixed. The forge's strong builder advances build→test and `return`s
+   early, skipping the tick's bookkeeping — so a venture that failed twice and then succeeded
+   would have carried two failures into the next stage and died there. **A bound whose reset is
+   unreachable kills the work that is going well**, which is strictly worse than not bounding at
+   all. Fix it by keying the counter to what it counts (the stage), never by patching the one call
+   site you happened to find; the next early return reintroduces it.
+3. **Does anything TELL?** A retry with a diagnostic is a design decision; a retry with neither a
+   counter nor a report is a stall waiting to happen. This is what separated the two real findings
+   from the two negatives — `consolidate_with_min` can stall forever, but `memory-baseline` names
+   that exact condition, so it is a considered fail-closed and not an oversight.
+
+**How to stop.** Follow the precedent already in the file rather than inventing a second idiom:
+`max_iter` bounds the forge's iterate loop and exits honestly — *"shipped AS-IS at 6/10 after
+exhausting 2 iterations — honest ceiling, artifacts kept for review."* Say which stage gave up and
+after how many attempts. And pick a terminal state the rest of the code already understands: the
+forge's non-terminal test is `st != "shipped" && st != "killed"` in three places, so a new stage
+name would have kept the venture due forever — the bug the bound was added to fix.
+
+**A terminal state is not a verdict.** Foresight closes an ungradeable prediction as `unjudged`,
+which is deliberately never scored as a hit or a miss: no calibration evidence may be written from
+a judgment that never happened. Before adding the state, every reader of that field was checked —
+each either tests `== "open"` (so the new state correctly drops out) or matches `hit`/`miss`
+explicitly (so it is ignored). Adding a state to a field other code branches on is a schema change;
+treat it as one.

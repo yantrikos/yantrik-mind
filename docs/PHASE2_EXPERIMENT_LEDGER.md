@@ -6352,3 +6352,26 @@ Both prompts are built from p3's real stream and differ only in that block (7,37
 **What this does and does not establish.** It shows that when the finding is put in front of the model, it identifies the defect and picks the correct repair — the link works at the level of reasoning. It does **not** show the finding was *necessary*, because the control never ran a fair test. The preregistered outcome "both repair → the check adds nothing" remains **untested**, and that is precisely the outcome that would devalue two days of detector work, so leaving it untested would be the convenient mistake.
 
 **Not claiming a win from this.** The treatment arm is suggestive and I would have liked to report it as the verification; it is one confounded sample with a truncated output. The next attempt has to avoid the agent loop — the honest options are a `ym delegate` run whose authoring genuinely produces the defect, or exercising the recipe's `Think` step directly rather than through chat.
+
+## E.WIN6 — a duplicate path destroys the whole build (PREREGISTERED, observed live)
+First real `ym delegate` run of the T1 brief on the fixed lane:
+
+```
+[255216] Build a lead-generation landing · build · ❌ failed
+  🛠️ I couldn't finish the build: tool 'write_files' failed: run.sh appears twice; one path, one file
+```
+
+`plan_file_set` refuses the **entire set** when any path repeats. The model emitted `run.sh` twice — a trivial, extremely recoverable mistake — and the build produced **nothing at all**. In a graded leg that is a near-zero, and the artifact that would have scored is discarded whole.
+
+**Not caused by my changes**: the failure is at the first write, before the completion or review steps exist. It is a pre-existing brittleness that only showed itself because I finally ran the lane instead of reasoning about it.
+
+**Why last-wins is right here, and is not me softening a guard.** The lane already means "later replaces earlier": the review step's own instruction is *"Any file you DO output must be complete, because it replaces the old one wholesale."* That is the protocol between steps; a duplicate inside one stream is the same statement made twice, and the second is the model's latest intent. Weighed against the measured alternative — losing the whole artifact — keeping the last definition is plainly better.
+
+**And it must not be silent.** The duplicate becomes a reported finding on the write message, which now reaches the review (E.WIN4). So if the wrong version won, the reviewer is told the path was duplicated and can correct it. That is the difference between recovering and papering over.
+
+| Kill criteria | |
+| --- | --- |
+| No longer fatal | A set with a duplicated path writes, keeping the LAST definition. |
+| Visible, never silent | The write message names the duplicated path so the review can act on it. |
+| No other refusal weakens | Traversal, absolute paths, file count, size and depth limits all still refuse. This is the one refusal that changes, and only for duplicates. |
+| Inert otherwise | A set with no duplicates produces a byte-identical message. |

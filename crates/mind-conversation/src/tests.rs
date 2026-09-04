@@ -15222,3 +15222,142 @@ async fn the_learning_curve_names_verdicts_that_cannot_score() {
         "once anything scores, this is the ordinary learning curve and must be untouched: {scored}"
     );
 }
+
+/// E.WIN2 VALIDATION on real artifacts, driven from files outside the repo.
+///
+/// Ignored by default: it reads seven real T1 build streams pulled from the staging box, which are
+/// not committed. Run with the directory set to prove the check on real output rather than on
+/// fixtures I wrote — the previous version of this idea died exactly because real artifacts
+/// contradicted it.
+#[test]
+#[ignore]
+fn placeholder_mismatch_flags_the_real_seven_of_eleven_leg_and_nothing_else() {
+    let dir = std::env::var("YM_LEG_STREAMS").expect("set YM_LEG_STREAMS to the streams dir");
+    let expect_flagged = ["p3"];
+    let expect_clean = ["p1", "p2", "p5", "p6", "p7"];
+    for leg in expect_flagged.iter().chain(expect_clean.iter()) {
+        let path = format!("{dir}/{leg}.stream");
+        let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let found = crate::required_literals::placeholder_mismatches(&src);
+        if expect_flagged.contains(leg) {
+            assert!(
+                !found.is_empty(),
+                "{leg} lost four checks to a placeholder mismatch and must be flagged"
+            );
+            assert!(
+                found.iter().any(|f| f.contains("DYNAMIC_SCRIPT")),
+                "{leg}'s finding must name the key that never matched: {found:?}"
+            );
+        } else {
+            assert!(
+                found.is_empty(),
+                "{leg} scored 11/11 — flagging it is the false accusation that gets a checker \
+                 turned off: {found:?}"
+            );
+        }
+    }
+}
+
+/// E.WIN2 — the committed case, using the two real artifacts verbatim.
+///
+/// p3 scored 7/11 and p1 scored 11/11 on the same task. The only difference that matters is below:
+/// p1's template carries `{{DASHBOARD_JSON}}` and its code replaces that exact string; p3's code
+/// substitutes `{{DYNAMIC_SCRIPT}}` into a template that says `<!-- DYNAMIC_SCRIPT -->`. Nothing
+/// matches, the script tag is dropped, and four checks that all hang off `script#cb2-dashboard`
+/// fail at runtime.
+#[test]
+fn a_substituted_placeholder_no_template_carries_is_reported() {
+    // p3, verbatim.
+    let broken = "=== FILE: server.py\n\
+        script_tag = f'<script id=\"cb2-dashboard\" type=\"application/json\">{script_json}</script>'\n\
+        content = render_template('dashboard.html', {'DYNAMIC_SCRIPT': script_tag})\n\
+        === FILE: templates/dashboard.html\n\
+        <!-- DYNAMIC_SCRIPT -->\n";
+    let found = crate::required_literals::placeholder_mismatches(broken);
+    assert_eq!(found.len(), 1, "expected exactly the DYNAMIC_SCRIPT finding: {found:?}");
+    assert!(
+        found[0].contains("DYNAMIC_SCRIPT") && found[0].contains("silently dropped"),
+        "the finding must name the key and say what it costs: {}",
+        found[0]
+    );
+
+    // p1, verbatim — the same task done correctly.
+    let ok = "=== FILE: server.py\n\
+        page = page.replace('{{DASHBOARD_JSON}}', dashboard_json_str)\n\
+        === FILE: templates/dashboard.html\n\
+        <script id=\"cb2-dashboard\" type=\"application/json\">{{DASHBOARD_JSON}}</script>\n";
+    assert!(
+        crate::required_literals::placeholder_mismatches(ok).is_empty(),
+        "an 11/11 artifact must never be accused"
+    );
+
+    // THE FALSE POSITIVE REAL ARTIFACTS CAUGHT: `POST` is quoted in the server and appears again in
+    // the form's method, across two files, on a leg that scored 11/11.
+    let post = "=== FILE: server.py\nif self.command == 'POST':\n\
+        === FILE: templates/index.html\n<form method=\"POST\" action=\"/submit\">\n";
+    assert!(
+        crate::required_literals::placeholder_mismatches(post).is_empty(),
+        "an HTTP verb is not a placeholder; flagging it is what gets a checker turned off"
+    );
+
+    // A constant used twice inside ONE file is just a constant.
+    let one_file = "=== FILE: server.py\nX = 'MAX_RETRIES'\nprint('MAX_RETRIES', MAX_RETRIES)\n";
+    assert!(crate::required_literals::placeholder_mismatches(one_file).is_empty());
+}
+
+/// E.WIN2 — the two guards mutation found untested.
+///
+/// The main case could not reach either: its single-file example short-circuits on
+/// `files.len() < 2`, and its correct example quotes the key WITH braces so it never becomes a key
+/// at all. Both mutants survived until these existed.
+#[test]
+fn the_placeholder_check_guards_that_mutation_found_untested() {
+    // (a) A constant confined to ONE file while the build has several.
+    let confined = "=== FILE: server.py\nX = 'MAX_RETRIES'\nprint(MAX_RETRIES)\n\
+                    === FILE: templates/index.html\n<p>hello</p>\n";
+    assert!(
+        crate::required_literals::placeholder_mismatches(confined).is_empty(),
+        "a constant living in one file of many is not a template placeholder"
+    );
+
+    // (b) A key quoted BARE, and templated correctly elsewhere — the "already done right" escape.
+    let bare_but_correct = "=== FILE: server.py\nctx = {'DASHBOARD_JSON': payload}\n\
+                            === FILE: templates/dashboard.html\n<script>{{DASHBOARD_JSON}}</script>\n";
+    assert!(
+        crate::required_literals::placeholder_mismatches(bare_but_correct).is_empty(),
+        "the template form exists, so there is nothing wrong to report"
+    );
+
+    // ...and the same key with the template form absent IS the defect, so (b) is not vacuous.
+    let bare_and_wrong = "=== FILE: server.py\nctx = {'DASHBOARD_JSON': payload}\n\
+                          === FILE: templates/dashboard.html\n<!-- DASHBOARD_JSON -->\n";
+    assert_eq!(
+        crate::required_literals::placeholder_mismatches(bare_and_wrong).len(),
+        1,
+        "the same key without a template form is exactly the p3 defect"
+    );
+}
+
+/// E.WIN2 WIRING — the mismatch must reach the review round through the real write tool.
+///
+/// Every case above would still pass with the check never called from anywhere. Mutation caught
+/// that too: my wiring mutant had been pointed at the import-check test, which does not touch this
+/// path, so it "survived" for the wrong reason.
+#[tokio::test]
+async fn placeholder_mismatches_reach_the_review_round() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+    let broken = "=== FILE: server.py\ncontent = render('d.html', {'DYNAMIC_SCRIPT': tag})\n\
+                  === FILE: templates/d.html\n<!-- DYNAMIC_SCRIPT -->\n";
+    let msg = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "phmis", "stream": broken}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        msg.contains("DYNAMIC_SCRIPT"),
+        "the review round must be told the substitution will not match: {msg}"
+    );
+}

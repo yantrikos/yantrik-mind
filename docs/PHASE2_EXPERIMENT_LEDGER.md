@@ -6272,3 +6272,19 @@ I preregistered "verify that identifiers the request names literally appear in t
 | Silent on the real passes | Must **not** flag p1, p5, p2, p6, p7 — all 11/11, all using placeholders correctly. |
 | Validated on artifacts, not fixtures | The premise this replaces died precisely because I checked real output before shipping. |
 | Inert by default | Byte-identical message when nothing mismatches. |
+
+### E.WIN2 — RESULT: shipped, validated on real artifacts, four mutants killed
+`placeholder_mismatches` reports a substitution key the build uses that no file renders as `{{KEY}}`. It rides the write tool's existing message into the review round — no new step, no model call, byte-identical when code and templates agree.
+
+| Kill criterion | Outcome |
+| --- | --- |
+| Catches the real case | **p3 flagged**, naming `DYNAMIC_SCRIPT` |
+| Silent on real passes | **p1, p2, p5, p6, p7 clean** — all 11/11 |
+| Validated on artifacts, not fixtures | Seven real T1 build streams pulled from the box and run through the shipped function |
+| Inert by default | Byte-identical message when nothing mismatches |
+
+**Real artifacts caught a false positive before it shipped.** The first version flagged `POST` on p5, an 11/11 leg: an HTTP verb, quoted in the server and again as a form method, in two different files. My rule said "UPPER_SNAKE" but the code never required the underscore. That single character is now load-bearing and says so in a comment.
+
+**Mutation found three gaps in my own tests, and one of my own mistakes.** The two-files guard and the already-templated escape both survived, because the main case could not reach either — its single-file example short-circuits on `files.len() < 2`, and its correct example quotes the key *with* braces so it never becomes a key. Both now have cases that reach them, plus a non-vacuous twin proving the correct case is not passing for free. The wiring mutant "survived" for a different reason entirely: **I had pointed it at the import-check test**, which does not touch this path — the same harness error as E.LOOP-J's survivor, twice in one session. Retargeted, all four die.
+
+**Expected effect, stated so it can be scored:** p3 7/11 → 11/11 *if the review acts on the finding*, which is unverified end-to-end. With E.LOOP-I2 on p4, the 8-leg set would go 11,11,7,2,11,11,11,8 → 11,11,11,11,11,11,11,8. **p8 stays 8/11** — its element renders and its numbers are wrong, which needs execution.

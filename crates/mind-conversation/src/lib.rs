@@ -44,6 +44,7 @@ mod briefing;
 mod calendar;
 mod capabilities;
 mod pyimports;
+mod required_literals;
 mod cloud_photos;
 pub mod cognitive;
 mod crypto_trader;
@@ -14711,7 +14712,13 @@ impl RecipeHost for MindRecipeHost {
                         // Deliberately inert: with no findings — which is every leg measured so
                         // far but one — not a byte of this message changes, so legs without an
                         // import defect behave exactly as before and readings stay comparable.
-                        let findings = crate::pyimports::stdlib_import_findings(stream);
+                        let mut findings = crate::pyimports::stdlib_import_findings(stream);
+                        // E.WIN2: a placeholder the code substitutes that no template contains.
+                        // A real leg scored 7/11 because its code replaced `{{DYNAMIC_SCRIPT}}`
+                        // while its template said `<!-- DYNAMIC_SCRIPT -->`; the script tag was
+                        // silently dropped and four checks hung off it. Empty when code and
+                        // templates agree, which keeps this message byte-identical.
+                        findings.extend(crate::required_literals::placeholder_mismatches(stream));
                         if !findings.is_empty() {
                             msg.push_str(&format!(
                                 "

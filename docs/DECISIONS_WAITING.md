@@ -237,3 +237,46 @@ link, and it very nearly vetoed the profile Pranab chose for reading 8.
 The same shape as the day's other errors — asserting a property of something I had not run. Filed
 here rather than only in the ledger because this entry is what someone would read before deciding
 where a reading can be taken.
+
+---
+
+## Update, evening 2026-09-04 — "repair unverified" now has a number, and one new decision
+
+**Every "repair unverified" in the T1 table above is now measured.** E.REPAIR1 (n=20 per arm, control
+included, prediction recorded first): the review round repairs a named defect **45%** of the time
+when told and **15%** when not — replicated at 50% the next run. So the detectors triple the odds
+of a repair, and **the review step is the weak link, not detection**. E.REPAIR2 then falsified the
+obvious fix: asking for the smallest edit scored **0/20** (the model reproduced the file, bug
+included). E.REPAIR3 shipped a bounded, conditional second round; E.REPAIR4 is measuring what it
+buys. None of this needed a reading — it needed forty local calls and a control arm.
+
+**Item 1 (execution)** gains one more measured fact: the exact `Sandbox::run` invocation returns
+`ok` **as the service user** under the live systemd unit (`PrivateUsers=no`,
+`RestrictNamespaces=no`, `NoNewPrivileges=no`). The five mechanical checks — including the sandboxed
+`ast.parse` — are live in production, not just as root.
+
+**Item 5 (`rustpython-parser`)** — the syntax case is **closed without it**. E.SYNTAX1 reuses the
+forge's own sandboxed `ast.parse` (parses, never executes); 687 python files judged, 3 fired, each
+re-confirmed unparseable, and one of them was reading 6's lost point. Whatever else the crate was
+wanted for, it is no longer wanted for this.
+
+### 8. Six failing tests in `yantrik-ml`'s `capability.rs` — tests or code? *(for Pranab / Codex)*
+Giving `crates/yantrik-ml` its own `[workspace]` table (`937084b` in yantrik-companion) made its
+unit suite runnable for the first time: **24 tests, 18 pass, 6 fail**, all assertion drift. Five
+of the six sit in `capability.rs`, the module holding `ModelCapabilityProfile` — precisely where
+the per-model thinking level and call timeout are meant to go.
+
+| test | expects | code says |
+| --- | --- | --- |
+| `profile_summary` | summary contains `9.0B` | it does not |
+| `profile_from_model_name` | `tiny.uses_mcq()` true | false |
+| `tool_family_routing` | `World` | `Schedule` |
+| `tool_family_best_for_query` | `System` | `Files` |
+| `yantrik_trained_profile` | tier `Small` | `Medium` |
+| `generation_config_default` (candle) | `max_tokens` 512 | 2048 |
+
+**Not fixed, on purpose.** Whether the tests encode intent that regressed, or the code moved
+deliberately and the tests went stale, is a product question — and deciding it silently is what
+produced a dark suite in the first place. What I would do if told: fix toward the tests unless a
+commit message says otherwise, because a test is a recorded intention and a drifted constant is not.
+**Blocking:** extending `ModelCapabilityProfile` cleanly.

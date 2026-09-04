@@ -6508,3 +6508,19 @@ The wall is not scope, it is **dataflow**: the question is which variable the da
 So E.WIN3 stays blocked on DECISIONS_WAITING item 5, and my correction to myself was wrong while the original call was right.
 
 **Recorded because the cost of these probes was small and the cost of a future session repeating them is not.** Both rules are the obvious ones to reach for; both look right until run against real artifacts; and a checker built on either would have flagged a passing leg or missed the defective one. Two negatives, an hour, no code shipped — which is the correct outcome when the signal is not there.
+
+### E.F4 — the surviving residual checked too: LATENT, not a defect (0 for 4 avoided)
+E.F4's three defect claims all dissolved, and the entry recorded one thing as still real: `mind_horizon_checkpoints` embeds a `status` that goes stale — a goal reading `active` there while the lifecycle has it failed then expired. Given a 0-for-3 record in this subsystem, I checked reachability before touching it.
+
+| question | answer |
+| --- | --- |
+| Is the stale value a checkpoint field? | **No.** `GoalCheckpoint` is `goal_id`, `created_at_ms`, `state_json`, `state_sha256` — no status. The stale value is inside `state_json`, the goal's own serialized state. |
+| Does the status reader use it? | **No.** `list_horizons` joins `j.status` from `mind_horizon_jobs`, the live table. |
+| When is `state_json` read? | Only on `HorizonRun::resume`. |
+| Can a terminal goal be resumed? | **No** — the requeue path guards on `previous_status != Some("pending")`, and the authority is `mind_horizon_jobs`. |
+
+So it is a snapshot that nothing reads as state, exactly as the earlier entry suspected but did not verify. **Latent, not a defect**, and claiming it would have made my record in this subsystem 0 for 4.
+
+The residual is a naming hazard rather than a bug: a field called `status` inside a durable blob, which will read as current to the next person who opens it. Worth a comment if anyone is in there; not worth a change on its own, and certainly not worth one from me given the record above.
+
+**Also connects two blocked lanes.** E.D1 closed with *"a box with contested attention: real packets, real presence… Two separate Phase measurements are now blocked on one piece of infrastructure."* That is the same presence I diagnosed for knock in E.G3. **Phase D, Phase G and the knock gate are all blocked on the same missing thing** — a device paired to a cockpit, or a real channel. `DECISIONS_WAITING` item 8 unblocks three measurements, not one, which is worth knowing when it is weighed.

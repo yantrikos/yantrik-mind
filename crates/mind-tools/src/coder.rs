@@ -600,6 +600,24 @@ pub fn last_assistant_text(workdir: &str) -> Option<String> {
     last
 }
 
+/// Was this failure the PROVIDER refusing, rather than the model doing a bad job? Classified from
+/// the CLI's own last words (E.CODERDEAD1). Only these shapes may mark the lane dead across jobs;
+/// a model that wrote nothing is a bad build, not a dead lane, and returns `None`.
+pub fn provider_refusal(last_words: &str) -> Option<&'static str> {
+    let t = last_words.to_ascii_lowercase();
+    if t.contains("403") || t.contains("access to model denied") || t.contains("accessdenied") {
+        Some("credential denied (403)")
+    } else if t.contains("429") || t.contains("usage limit") || t.contains("rate limit") {
+        Some("quota exhausted (429)")
+    } else if t.contains("connection refused") || t.contains("econnrefused") {
+        Some("endpoint unreachable (connection refused)")
+    } else if t.contains("401") || t.contains("failed to authenticate") {
+        Some("authentication failed (401)")
+    } else {
+        None
+    }
+}
+
 /// Render a coder result for the chat.
 pub fn render_coder(r: &CoderResult) -> String {
     let mut s = String::new();
@@ -675,6 +693,17 @@ mod tests {
             last_assistant_text(root.to_str().unwrap()).as_deref(),
             Some("Done. Three files produced:")
         );
+    }
+
+    /// The four texts real runs produced on 2026-09-04, verbatim, and one honest failure.
+    #[test]
+    fn provider_refusals_are_recognised_from_the_clis_own_words_and_bad_builds_are_not() {
+        assert_eq!(provider_refusal("Failed to authenticate. API Error: 403 Access to model denied. Please make sure you are eligible for using the model."), Some("credential denied (403)"));
+        assert_eq!(provider_refusal("API Error: Request rejected (429) · Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more"), Some("quota exhausted (429)"));
+        assert_eq!(provider_refusal("API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)"), Some("endpoint unreachable (connection refused)"));
+        assert_eq!(provider_refusal("401 Unauthorized: invalid authentication credentials"), Some("authentication failed (401)"));
+        assert_eq!(provider_refusal("Done. Three files produced:"), None);
+        assert_eq!(provider_refusal(""), None);
     }
 
     #[test]

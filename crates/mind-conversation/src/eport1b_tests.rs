@@ -669,3 +669,20 @@ fn every_spawn_in_the_delegation_path_carries_its_opportunity() {
         "expected six carrying spawns in delegate.rs (five wrapped plus bounded_route's inline carry, plus E.FILES2's build arm); found {carried:?} — if a spawn was added or removed, decide about it here"
     );
 }
+
+/// E.CODERDEAD1: a coder whose provider refused is absent from the kinds until a restart, so
+/// `code` falls to `build` by the existing substitution instead of paying for another refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_coder_lane_is_absent_from_the_kinds_and_says_why() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CountingBackend { calls: calls.clone() }) as Arc<dyn LLMBackend>;
+    let pool = InferencePool::new(backend, 2);
+    let coder = Arc::new(mind_tools::coder::Coder::new("t", "m", "https://example.invalid", "/tmp"));
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS").with_coder(coder);
+    assert!(conv.available_kinds_for_test().contains(&"code"), "premise: the coder is available");
+    conv.set_coder_dead_for_test("credential denied (403)");
+    assert!(!conv.available_kinds_for_test().contains(&"code"), "a dead lane is absent");
+    let why = conv.coder_dead_reason().expect("the reason survives");
+    assert!(why.contains("dead since") && why.contains("UTC") && why.contains("credential denied (403)"), "{why}");
+}

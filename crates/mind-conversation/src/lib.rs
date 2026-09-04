@@ -5099,6 +5099,28 @@ fn fmt_shares(v: f64) -> String {
     }
 }
 
+/// E.CODERDEAD1: what killed the coder lane, and when.
+#[derive(Debug, Clone)]
+pub(crate) struct CoderDeath {
+    pub since: std::time::SystemTime,
+    pub reason: String,
+}
+
+impl CoderDeath {
+    pub(crate) fn sentence(&self) -> String {
+        let at = chrono::DateTime::<chrono::Utc>::from(self.since).format("%H:%M UTC");
+        format!("the coder lane is dead since {at} — {}", self.reason)
+    }
+}
+
+pub(crate) fn mark_coder_dead(slot: &Arc<std::sync::Mutex<Option<CoderDeath>>>, reason: &str) {
+    if let Ok(mut g) = slot.lock() {
+        if g.is_none() {
+            *g = Some(CoderDeath { since: std::time::SystemTime::now(), reason: reason.to_string() });
+        }
+    }
+}
+
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
@@ -5199,6 +5221,9 @@ pub struct ConversationEngine {
     /// Agentic coder — when set, "code: X" / "write a script to X" dispatches Claude Code (on MiniMax)
     /// in an isolated scratch dir with a secret-stripped env.
     coder: Option<Arc<Coder>>,
+    /// E.CODERDEAD1: the coder's last provider-level refusal, remembered across jobs so a dead
+    /// credential is paid for once, not per delegation. Cleared by a restart — the fix needs one.
+    coder_dead: Arc<std::sync::Mutex<Option<CoderDeath>>>,
     /// Remote worker pool — when set, the mind can fan work out to the transferred LXCs over SSH.
     workers: Option<Arc<WorkerPool>>,
     /// Device-trust store (ARCH-2) — backs the `device pair/list/revoke` console verbs. The control
@@ -5337,6 +5362,7 @@ impl ConversationEngine {
             researcher: None,
             sandbox: None,
             coder: None,
+            coder_dead: Arc::new(std::sync::Mutex::new(None)),
             workers: None,
             devices: None,
             egress: None,
@@ -5692,6 +5718,19 @@ impl ConversationEngine {
     pub fn with_route_budget(mut self, budget: std::time::Duration) -> Self {
         self.route_budget = budget;
         self
+    }
+
+    /// The sentence that explains a dead coder lane, or `None` while it is alive.
+    pub(crate) fn coder_dead_reason(&self) -> Option<String> {
+        self.coder_dead
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(CoderDeath::sentence))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_coder_dead_for_test(&self, reason: &str) {
+        mark_coder_dead(&self.coder_dead, reason);
     }
 
     pub fn with_coder(mut self, coder: Arc<Coder>) -> Self {
@@ -14236,6 +14275,16 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // fall back to the local isolated coder. Either way it's a generator — running stays sandboxed.
         if self.coder.is_some() || self.workers.is_some() {
             if let Some(task) = Self::parse_coder_request(user_text) {
+                // E.CODERDEAD1: a lane that refused with a provider error is not tried again
+                // until a restart — the fourth 403 costs the same as the first and tells nothing.
+                if self.workers.is_none() {
+                    if let Some(dead) = self.coder_dead_reason() {
+                        let reply = format!("{dead}. Fix the provider or credential and restart the mind.");
+                        let _ = self.memory.append_message("user", user_text).await;
+                        let _ = self.memory.append_message("assistant", &reply).await;
+                        return Ok(reply);
+                    }
+                }
                 let reply = if let Some(workers) = &self.workers {
                     match workers.run_coder(&task, "MiniMax-M2", 260).await {
                         Ok(out) => out,

@@ -1570,7 +1570,8 @@ impl super::ConversationEngine {
         if self.recipes.is_some() {
             v.push("page");
         }
-        if self.coder.is_some() {
+        // E.CODERDEAD1: a coder whose provider refused is absent until a restart.
+        if self.coder.is_some() && self.coder_dead_reason().is_none() {
             v.push("code");
         }
         if self.researcher.is_some() {
@@ -1959,7 +1960,7 @@ impl super::ConversationEngine {
         // version of this change bounded the wait but still wrote the row afterwards — the comment
         // claimed one thing and the code did another, which review caught.
         let runnable_kind = |k: &str| match k {
-            "code" => self.coder.is_some(),
+            "code" => self.coder.is_some() && self.coder_dead_reason().is_none(),
             "page" | "build" => self.recipes.is_some(),
             _ => self.researcher.is_some(),
         };
@@ -2182,6 +2183,7 @@ impl super::ConversationEngine {
             // was delegated". Every round narrates into scratch, so the channel thread shows the
             // loop working — and the critique trail survives for the promotion gate to keep.
             let c = self.coder.clone().unwrap();
+            let dead_slot = self.coder_dead.clone();
             let house = self.inference.clone();
             let named_critic = critic_from_env(&house);
             // 50, not 3. The cap is a RUNAWAY BACKSTOP, not the quality bar: the loop's real exits
@@ -2547,6 +2549,12 @@ impl super::ConversationEngine {
                 ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
                 let shipped = reviewed && verdict_ships(&verdict) && !inconclusive;
                 let status = code_job_status(r.ok, r.files.len());
+                if status == "failed" {
+                    if let Some(why) = mind_tools::coder::provider_refusal(&r.summary) {
+                        scratch_note(&mem, &id2, &format!("coder lane marked dead: {why}")).await;
+                        crate::mark_coder_dead(&dead_slot, why);
+                    }
+                }
                 let status_line = if status == "failed" {
                     "FAILED — the coder produced nothing; its last words are below"
                 } else if shipped {
@@ -2615,7 +2623,14 @@ impl super::ConversationEngine {
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
         }
-        format!("🧰 Delegated [{id}] \"{name}\" ({kind}). It's on the board — `ym jobs` — and the result lands in chat.")
+        let dead_note = if classified == "code" && kind != "code" {
+            self.coder_dead_reason()
+                .map(|r| format!(" {r}; building on the mind's own path instead."))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        format!("🧰 Delegated [{id}] \"{name}\" ({kind}).{dead_note} It's on the board — `ym jobs` — and the result lands in chat.")
     }
 
     /// `ym jobs [json | checkpoints/resume/rollback <id> | keep/drop/delete <id>]` — the board,

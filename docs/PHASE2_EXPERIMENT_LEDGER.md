@@ -6069,3 +6069,18 @@ The rate stage was scoring the **false RED** the old binary's checker had writte
 This matters beyond the forge. Three entries earlier today record defects as *reachable but with no observed instance*, and I wrote a memory about the difference between proving a failure **can** happen and showing that it **did**. This one is on the other side of that line: a real venture, on a real box, killed by a checker that could not see the thing it was judging. Nothing in the log says "the checker failed" — it says the artifact crashed. **A broken check does not report itself as broken; it reports its subject as broken**, which is what makes this family expensive to find by reading and cheap to find by driving.
 
 The fix is deployed at `36e4be2`; a fresh venture is being driven to the test stage to show a PASS where this one could only ever produce a FAIL.
+
+### E.FORGE1 — RESULT: PROVEN on the box, the only place it could be proven
+| Step | Evidence |
+| --- | --- |
+| Found | Driving staging. `v496495` built `unit_oracle.py`; the test stage reported RED with a traceback from its own checker — `src = open("/var/li...` raising **inside** the sandbox. |
+| Diagnosed | The check ran `ast.parse(open("<host path>"))` inside a sandbox that `mind-core` builds as `Sandbox::new().hiding(state_dir)`, and the forge writes artifacts under that very directory. Invisible by design; the check could never pass for **any** file, ever. |
+| Cost, observed not theorised | `v496495` was **killed by its own kill criterion** — *"the artifact fails to execute (crash)"* — for a file that was never executed and never read. The criterion was correct; the evidence it was given was manufactured by a broken checker. |
+| Fixed | `Sandbox::run_python_with(code, name, input)` — the header always promised *"code + inputs live in a throwaway scratch dir passed as FILES"* but exposed no way to pass an input, so the caller reached for a host path. The artifact now goes in as `target.py`. |
+| Deployed | `36e4be2`. Verified in the running binary itself: the new `open('target.py')` form present, the old `import ast, sys` host-path form **gone**. |
+| **Proven** | A fresh venture, `v497868`, driven from `forge start` through to the test stage on the fixed binary: **`⚒️ v497868 tested: GREEN — PASS: deadline_sentinel.py parses`** — the outcome that was structurally impossible an hour earlier. |
+
+**Why this one could not have been found by reading.** Nothing in the log said "the checker failed". It said *the artifact crashed*. A broken check does not report itself as broken — it reports its subject as broken, and every downstream stage then reasons correctly from a false premise: the rating was honest, the kill criterion was well designed, and a venture died anyway. The only way to see it was to run the thing and read what came back.
+
+### E.LOOP-G — the healthy path, verified live at the same time
+`foresee the price of tin in 2030` then `resolve all` on the fixed binary: **graded on the first attempt**, `status=unclear`, with a real judge reason (*"no specific LME Tin closing price for 2030"*), and `resolve_fails` never set because nothing failed. Two things confirmed on a live mind: the change did not break normal resolution, and `unclear` — the judge answering "I cannot tell" — stays properly distinct from `unjudged`, which means the judge never answered at all. The failure path itself is still only proven by unit tests watched to fail; forcing three real judge failures is not something to manufacture on a live box.

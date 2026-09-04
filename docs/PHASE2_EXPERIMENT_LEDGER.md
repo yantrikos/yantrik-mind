@@ -7562,3 +7562,12 @@ Codex is out of usage (Pranab, this evening), so item 8 of `DECISIONS_WAITING` i
 
 ### E.DARK1 — SHIPPED (`b3d6e5d` in yantrik-companion): 40/40, six failures fixed on evidence
 Closes `DECISIONS_WAITING` item 8 without Codex. Fixed toward the **tests**: `summary()` arg order (a local divergence — `{:.1}B` had been receiving `self.family`), the `< 4.0` tier boundary, the native-tools override erasing Tiny/Small MCQ (local divergence; now Medium/Large only, with a guard test), the `matches / keywords.len()` scorer that let the shorter table win ties by construction (now a raw count, pinned by a test whose mutant fails with `0.1538 vs 2.0`), Schedule's bare time words, System's missing `deploy`/`run the`. Fixed toward the **code**, with evidence: `max_tokens` 2048 (2048 upstream too) and two assertions expecting `StructuredJSON` for a Medium Qwen, where `NativeFunctionCall` is deliberate and is how the live agent loop calls tools. Both dependents build.
+
+### E.REPAIR6 — PREREG: do the cause-naming finding and the second round COMPOUND?
+I wrote in E.REPAIR5 that they "should compound": the cause finding converts a systematic failure into stochastic slips, and E.REPAIR4 showed a second round repairs slips. That is a claim, and claims get measured.
+
+**Design.** E.REPAIR4's two-round harness with the round-1 finding replaced by the **cause** text (as `syntax.rs` now emits it) and the round-2 re-check likewise cause-aware when `${` is still present. Same artifact, n=20, `ast.parse` verdict.
+
+**PREDICTION, recorded first:** round 1 ≈ 70% (E.REPAIR5's number); round 2 lifts the cumulative to **~85%**, because the residual failures after a cause-naming round are mostly slips. **If round 2 adds ≤ 1**, the compounding claim is false and the second round's value on this class is nil even with a better finding — recorded either way.
+
+**Kill criteria.** Report round-1, round-2-only and cumulative out of 20; log failure classes with the `${ still present` marker so "same misconception" vs "slip" is visible; no product change follows from this — it only tests a claim already in the ledger.

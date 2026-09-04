@@ -5925,3 +5925,20 @@ Carries E.LOOP-F (the forge's bounded give-up), E.LOOP-G (foresight closing an u
 | Health, not just "active" | 0 restarts, 0 panics/errors in the journal, clean startup lines, and all three surfaces answering (web `200`; the `404`s on `/` for `:8088` and `:8077` are "no route at /", not a dead process). A crash loop also reports `active` for a moment, which is why the restart count is the check that matters. |
 
 Production remains untouched and still waits on Pranab's word, as does reading 8.
+
+### E.LOOP-K — sweeping ARCH8 check #2 across the tree: NEGATIVE, and that is worth knowing
+Check #2 ("is the RESET reachable on every path that makes progress") is the one that nearly shipped a worse bug than it fixed, so it was worth asking whether the same shape exists elsewhere. Two mechanical sweeps:
+
+**First pass — functions whose end-of-body bookkeeping an early return can skip.** 86 candidates, useless: the heuristic cannot tell a state machine's tick from a command router, and `cli_dispatch_inner` alone has 50 early returns that are just dispatch. Recorded because a scan that returns 86 hits has told you nothing, and reading 86 functions to discover that is how a day disappears.
+
+**Second pass — the sharper and more damaging shape:** a function that mutates loaded state in place, then hits an early `return` before any save, so the write the caller believes happened never reaches the store. Not "a bound cannot fire" but "the state you just changed is gone". Five candidates, and **all five are false positives**:
+
+| Candidate | Why it is fine |
+| --- | --- |
+| `bill_autopay` (finance) | A `hit` flag: the early return is the no-bill-matched path, where nothing was mutated. Saves on the path that did mutate. |
+| `family_set` (people) | A `touched` flag; the early return is the unknown-field arm, before any write. |
+| `forget_person_date` (people) | `removed` is `Some` only when the mutation happened; the early return is the `None` branch. |
+| `jobs_report_cmd` (delegate) | Mutates a local report object that is returned, not persisted state at all. |
+| `cli_dispatch_inner` (lib) | Dispatch, not a state machine. |
+
+**The conclusion is about the codebase, not the scan.** Every mutate-then-save path found is flag-guarded, consistently, by a different author-moment each time. The forge's skipped reset was not an instance of a sloppy habit — it was a single early `return` added to a fast path (the strong builder) that predated the bookkeeping it now skips. That is a much narrower thing to watch for: **not "does this function have early returns", but "was this bookkeeping added AFTER the early returns that now bypass it"**. Which is a question about history, and the next sweep of this class should ask git rather than the source.

@@ -4156,6 +4156,70 @@ fn now_str() -> String {
 /// The FILE STEM `publish_html` will write, given a name hint. Split out so the naming decision can
 /// be tested without a filesystem — and because the decision, not the write, is where E.PAGE1's
 /// defect lived.
+/// The base URL a published page or project is announced under. E.URL1: this used to default to
+/// `http://192.168.4.90:8088` — production's address, compiled in — so staging handed out links to
+/// the wrong box until its env carried its own. `YM_WEB_URL` wins; otherwise this box's LAN
+/// address on `YM_WEB_PORT` (default 8088); otherwise the loopback, which is at least true here.
+pub(crate) fn web_base_url() -> String {
+    let port = std::env::var("YM_WEB_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(8088);
+    base_from(std::env::var("YM_WEB_URL").ok().as_deref(), port, lan_ip())
+}
+
+/// Pure core of `web_base_url`, so the precedence is testable without env races.
+pub(crate) fn base_from(env_url: Option<&str>, port: u16, ip: Option<std::net::IpAddr>) -> String {
+    if let Some(u) = env_url.map(str::trim).filter(|u| !u.is_empty()) {
+        return u.trim_end_matches('/').to_string();
+    }
+    match ip {
+        Some(ip) => format!("http://{ip}:{port}"),
+        None => format!("http://127.0.0.1:{port}"),
+    }
+}
+
+/// This box's address on its default route. A UDP socket "connected" to an unroutable peer sends
+/// nothing; the kernel still picks the source address it would use, which is the one a phone on
+/// the LAN can reach. `None` when there is no route at all (containment, no network).
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("10.255.255.255:1").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    if ip.is_unspecified() || ip.is_loopback() {
+        None
+    } else {
+        Some(ip)
+    }
+}
+
+#[cfg(test)]
+mod web_base_url_tests {
+    use super::base_from;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn the_env_wins_and_loses_its_trailing_slash() {
+        let ip = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 4, 95)));
+        assert_eq!(base_from(Some("http://192.168.4.95:8088/"), 8088, ip), "http://192.168.4.95:8088");
+        assert_eq!(base_from(Some("  https://mind.example  "), 1, None), "https://mind.example");
+    }
+
+    #[test]
+    fn without_env_the_link_names_this_box_never_a_compiled_in_one() {
+        let ip = Some(IpAddr::V4(Ipv4Addr::new(192, 168, 4, 95)));
+        let got = base_from(None, 8088, ip);
+        assert_eq!(got, "http://192.168.4.95:8088");
+        assert!(!got.contains("192.168.4.90"), "production's address must not be a default: {got}");
+        assert_eq!(base_from(Some(""), 9000, ip), "http://192.168.4.95:9000", "empty env is unset");
+    }
+
+    #[test]
+    fn with_no_route_the_link_is_the_loopback_which_is_at_least_true_here() {
+        assert_eq!(base_from(None, 8088, None), "http://127.0.0.1:8088");
+    }
+}
+
 fn published_stem(name_hint: &str) -> String {
     let name_hint = match name_hint.rsplit_once('.') {
         Some((stem, ext)) if ext.eq_ignore_ascii_case("html") && !stem.is_empty() => stem,
@@ -4194,8 +4258,7 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
         std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::write(format!("{dir}/{safe}.html"), html).ok()?;
-    let base =
-        std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
+    let base = web_base_url();
     Some(format!("{base}/{safe}.html"))
 }
 
@@ -4307,8 +4370,7 @@ pub(crate) fn publish_file_set(
     let root = std::path::Path::new(&dir).join(&slug);
     std::fs::create_dir_all(&root).map_err(|e| format!("could not make the project directory: {e}"))?;
     let written = crate::fileset::write_file_set(&root, &planned).map_err(|e| e.to_string())?;
-    let base =
-        std::env::var("YM_WEB_URL").unwrap_or_else(|_| "http://192.168.4.90:8088".to_string());
+    let base = web_base_url();
     // A dropped file is reported in the same slot the observation used to occupy, so a caller that
     // says "may be incomplete" now says "was cut and not written" — the difference between a note
     // and a fact.

@@ -6099,3 +6099,21 @@ Continuing the approach that found E.FORGE1. Read-only surfaces driven through `
 **And a mistake of my own, worth recording because of how nearly it became a finding.** My first sweep ran bare `attention`, which routes to **chat**, and the mind replied *"A security or data-integrity issue in the memory profile needs immediate attention before proceeding."* I was one step from filing a security incident. The real surface is `ym why attention`, and it reports something entirely different. A second call returned nothing at all, which is what exposed it as model prose rather than a report. **Model output that reads like an instrument reading is the most dangerous kind of evidence in this system**, and I have now been caught by it twice today — once as leg 4's review approving a fatal import, once as a hallucinated security alert.
 
 **What the sweep says about the world shadow.** E.G1 shipped it as "live ingestion, one shadowed consult, zero authority". On a headless canary it consults constantly and can never be graded, because the thing it shadows never runs. That is not a defect to fix in the shadow — it is a statement that **this instrument cannot be evaluated where it is currently deployed**, and someone should decide whether to drive knock packets deliberately or accept that the measurement waits for a box with real traffic.
+
+## E.G3 — Phase G reachability: the world shadow is CORRECT and cannot be graded here
+Picked up because the staging sweep found `ym why world` reporting **AGREEMENT: UNCOMPUTABLE**. The question was whether the shadow is broken. It is not, and the investigation is worth recording so nobody "fixes" a working instrument.
+
+**Why the knock sample cannot be graded.** Agreement is only defined for `knock-receptivity`, recorded at a real decision moment. Every one of 9,865 evaluations exited at `packets.is_empty()` → `no_packets`, long before the receptivity gate, so the legacy verdict to compare against was never produced. 9,865 joined to a shadow row, **0 orphaned** — the plumbing is sound; the precondition simply never occurs. A packet is prepared, proof-carrying work (`told` from an explicit user statement, `observed` from the calendar), and a headless canary with no user produces neither.
+
+**Why the cadence sample reads 99.1% unknown, and why that is right.** `world_ingest_presence` writes one observation **per handled turn**. A headless box with no channel has no turns, so `state_at("user","presence")` is legitimately `Unknown`. The lone `known` is consistent with my own `/cli` message earlier in this session, which routed to chat and would have counted as a handled turn. **A world model reporting "I don't know whether the user is present" on a box with no user is answering correctly.**
+
+**The report already refuses the three ways this could mislead** — it never pools the two samples (one measures agreement with a decision, the other only that ingestion→gate→verdict is alive), it puts the disposition breakdown beside the known/unknown split so "known 1%" cannot be read as model failure, and it reports UNCOMPUTABLE rather than zero, because *"a zero standing where uncomputable belongs looks like a healthy result"*.
+
+| Conclusion | |
+| --- | --- |
+| Is there a defect? | **No.** Instrument, plumbing and report are all correct. |
+| Can Phase G be measured on .95? | **No, and not by any code change.** It needs a box where a real user is present and real packets exist. |
+| What would make it measurable | Attach a channel to staging so turns and packets occur naturally, or accept that this measurement waits for production traffic. **Manufacturing packets would produce an agreement number computed on synthetic input** — the same flaw as inventing test cases for a parser, which cost me a broken scorer earlier today. |
+| Decision | Pranab's: give staging real traffic, or let Phase G wait. Filed in `DECISIONS_WAITING.md`. |
+
+The negative is the deliverable here. Without it, the next session sees "AGREEMENT: UNCOMPUTABLE" and 99% unknown and starts repairing something that is working exactly as designed.

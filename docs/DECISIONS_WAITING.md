@@ -112,3 +112,33 @@ its first action (crash-proof, changes the verdict schema), or `MANIFEST.json` d
   had been failing every python file it ever built (E.FORGE1). E.LOOP-F and E.LOOP-G still have no
   observed instance — but that is now a statement about what the mind has been asked to do on that
   box, not about what the box can show.
+
+---
+
+## What the T1 push is now blocked on (added 2026-09-04, after the "win every round" session)
+
+Reading 7 lost 24–17 and **the entire gap is T1** — the Mind wins T2 6/6 vs 4/6 and ties T3. T1's
+losses were decomposed on 32 real artifacts re-checked in the checker image. Four defects were
+found and closed; what remains is not work, it is two decisions.
+
+| defect | state |
+| --- | --- |
+| a duplicated path destroyed the whole build | **closed and verified** — the failure itself was the test |
+| findings reached a step with no mandate to fix them | **closed and verified** — review prompt asserted |
+| unresolvable import (leg p4, 2/11) | fixed and mutation-checked; **repair unverified** |
+| placeholder mismatch (leg p3, 7/11) | fixed and mutation-checked; **repair unverified** |
+| startup snapshot (leg p8, 8/11) | diagnosed precisely; **cannot be detected without a parser** |
+
+**Item 3 (reading 8)** is the only way to verify the repair link for the two detectors. Staging
+cannot do it: its primary brain is `ollama-local:qwen3.8:27b`, not the benchmark's `gpt-oss-20b`,
+and that model narrates instead of emitting `=== FILE:` markers. I will not repoint staging's brain
+to make my own test pass.
+
+**Item 5 (`rustpython-parser`)** now gates **two** pieces of T1 value, not one: the syntax check
+E.LOOP-I2 gives up (leg v3's class), and the startup-snapshot detector for p8. I probed the
+regex-only version of the latter and it found nothing on the defective leg — p8's load sits at
+module scope but nested inside `if`/`with`, indented exactly like a function body. Separating those
+needs scope tracking.
+
+Everything else on the T1 lane is done. Nothing here is waiting on more engineering.
+

@@ -185,6 +185,58 @@ mod tests {
         ));
     }
 
+    /// Kill criteria 1 and 2, and they can only run where the sandbox works.
+    ///
+    /// This dev machine has no unprivileged user namespaces, so the check is inert here and this
+    /// test would pass vacuously -- which is why it asserts `judged > 0` first. Point
+    /// `YM_SYNTAX_CORPUS` at a tree of benchmark artifacts ON A LINUX BOX and run it there.
+    #[tokio::test]
+    async fn fires_on_exactly_the_unparseable_files_in_a_real_corpus() {
+        let Ok(root) = std::env::var("YM_SYNTAX_CORPUS") else {
+            return;
+        };
+        let mut judged = 0usize;
+        let mut fired: Vec<String> = Vec::new();
+        let mut walk = vec![std::path::PathBuf::from(&root)];
+        while let Some(dir) = walk.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk.push(p);
+                    continue;
+                }
+                if p.extension().and_then(|x| x.to_str()) != Some("py") {
+                    continue;
+                }
+                let Ok(c) = std::fs::read_to_string(&p) else { continue };
+                let stream = format!("=== FILE: t.py
+{c}
+");
+                judged += 1;
+                if !unparseable_python(&stream).await.is_empty() {
+                    fired.push(p.display().to_string());
+                }
+            }
+        }
+        assert!(judged > 5, "corpus too small or unreadable: {judged} python files");
+        // The reference is python's own `ast.parse` over the same tree, run separately.
+        // Every fire must be a file python also rejects -- printed so a mismatch is legible.
+        eprintln!("judged={judged} fired={}: {fired:#?}", fired.len());
+        for f in &fired {
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg("import ast,sys; ast.parse(open(sys.argv[1],encoding='utf-8',errors='replace').read())")
+                .arg(f)
+                .output()
+                .expect("python3 must be present where the sandbox works");
+            assert!(
+                !out.status.success(),
+                "accused a file python accepts -- a FALSE ACCUSATION, the one failure this check                  must never make: {f}"
+            );
+        }
+    }
+
     /// Kill criterion 6: a build with no python costs nothing -- not even a sandbox spawn.
     /// Asserted through the public entry point, which returns before constructing one.
     #[tokio::test]

@@ -7074,3 +7074,26 @@ There is no single mapping. A per-(provider, model) descriptor is not a nicety �
 1. **Declared provider/transport instead of a URL substring.** Alone it converts a timeout into a comfortable pass on the lane we actually run, and it is the smallest change of the three.
 2. **`Think` as a level** carrying `Off|Low|Medium|High` to the wire the transport already understands.
 3. **Per-(provider, model) descriptor** for which levels are honoured, what each costs, and the default per workload — with the Anthropic gap (`build_anthropic_body` carries no thinking field) closed as part of it.
+
+### E.THINK2 — RETRACTED. The causal chain was traced through a constructor the local lane never calls
+**The four-link chain in E.THINK2 is false, and it was the centrepiece of what I reported.** I claimed the Mind fails to recognise its own ollama gateway, falls back to `/v1`, discards `config.think`, and sends the worst possible `reasoning_effort` — and that this caused reading 8's 312 s timeout.
+
+**It does not.** The URL sniffing I found lives in `ApiLLM::new`. The local lane uses a different constructor entirely:
+
+```rust
+yantrik_ml::GenericOpenAIBackend::for_provider("ollama", &url, Some(key), model)
+    .with_thinking(think)
+```
+
+Verified in the companion crate: `for_provider("ollama")` → `ProviderPresets::ollama()` with `is_ollama: true` → **native `/api/chat`**; `with_thinking(false)` → `disable_thinking: true` → **sends `think: false`**; and a per-call `config.think` overrides the preset.
+
+**Worse: the exact hazard I "discovered" is named in the comment directly above that call**, and the declared provider exists because of it — *"Provider type `ollama` (NOT `openai`): our endpoint is an Ollama server — self-hosted OR fronted by a TLS gateway that doesn't carry the `:11434` auto-detect port."* Someone found this, fixed it by declaring the provider, and wrote down why. I read a different file, found the old hazard's shape, and reported it as live.
+
+**What this changes.**
+- **The 312 s was genuine generation**, not a misrouted transport. The lane was on native with thinking off; the full T1 prompt is simply much larger than my 1.5 k-char probe, and 27B is slow enough that it crosses 300 s.
+- **"Fix the detection" is NOT most of the win.** It fixes nothing on the lane we run. `ApiLLM::new`'s substring test remains a latent issue for the one call site that uses it (`mind-inference:3555`), which is a smaller, separate thing.
+- The real levers revert to: **raise or level the 300 s ceiling**, or **use a faster model** — gpt-oss:20b did the full T1 through the real Mind in **179.7 s**.
+
+**What still stands, because it was measured rather than inferred:** E.THINK1 and E.THINK3 are untouched. Graded levels do exist on the wire and we send a bool; `think:"high"` destroys gpt-oss and is harmless on qwen; `reasoning_effort:"none"` is harmful on both; thinking costs output as well as time. The per-(provider, model) descriptor is still justified — **by the level measurements, not by the retracted chain.**
+
+**The error, named.** I found a defect's *shape* in one constructor and asserted it applied to a lane whose construction I had not read — the same root as every other error today, and the most expensive version of it, because a four-link chain with real code references reads as thorough. Thoroughness about the wrong code path is not thoroughness. The check that would have caught it is the one I already added after E.FENCE1 and did not apply here: **is this already handled?**

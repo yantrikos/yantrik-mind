@@ -5688,3 +5688,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Why groups, not per file | Strict per-file authoring costs 1 + N calls: for T1 that is 5 against today's 2, spending the exact cost advantage reading 6 measured (2 requests against Hermes's 3–16). Grouping to fill a budget gives the same fits-by-construction guarantee at ≈ 1 + ceil(total ÷ budget) ≈ 3. |
 | Gate — and it must exercise what this change INTRODUCES | Today's recurring lesson. A plan-then-author design fails in a **new** way: **the plan is wrong** — an underestimated file still overruns, or the planner lists files the author then ignores. So the gate is not "legs pass": it must include a leg where a planned file **exceeds** its estimate, and show that the outcome is a *reported* failure or a split, never a silently truncated deliverable. |
 | Kill criterion | If plan-then-author cannot beat the current arrangement on **both** score and call count across the measured T1 variance, it does not ship — the completion pass already recovers truncation at 2 calls on clean builds. |
+
+## E.CB2-P step 1 — the author is TOLD its measured budget (preregistered measurement)
+| Field | Value |
+| --- | --- |
+| The change | The authoring prompt now states the affordable token count and what to do with it: *"several complete files beat one large one — split a big program by responsibility rather than writing one file you cannot finish."* No extra model call. |
+| Measured, never asked | The number is the run state's provider deadline × the observed throughput floor. With **no** declared limit, **no number is stated** — inventing one would be exactly the self-report this design refuses, and a mutant that asserts a budget regardless is caught. |
+| Baseline, from legs already run at the 302 s deadline | **3 token-limit truncations in 8 T1 legs** (clean: gate1, gate2, v1, v2, e2e1; cut: reading 7, v3, e2e2). |
+| What I will run | 8 T1 legs with the budget-aware prompt, same profile, same binary lineage. |
+| **Stated before the result** | 8 legs is a small sample. A drop from 3/8 to 0/8 is **suggestive, not conclusive** (Fisher p ≈ 0.08), and I will report it as such rather than as proof. What would be conclusive is the truncation rate over a longer run, which the next readings supply for free. |
+| Kill criterion | If truncations do not fall, the prompt is not doing the work and the answer is the **plan step** — an explicit file list checked against the budget — not a louder instruction. If scores fall, it ships nothing. |

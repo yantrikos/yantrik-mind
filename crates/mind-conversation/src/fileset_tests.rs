@@ -980,6 +980,60 @@ print('this file was cut off mid";
         assert!(target < s.len(), "the jump target is past the end of the recipe");
     }
 
+    /// E.CB2-P — the author is TOLD its budget, and only when one is actually known.
+    ///
+    /// Every T1 outcome measured was decided by decomposition: multi-file layouts scored 11/11,
+    /// monolithic ones were cut and scored 2/11. The model chose blind — "one big file" and "four
+    /// small files" looked equally affordable because it was never told what it had.
+    ///
+    /// The number must be MEASURED, never asked for. A model's account of its own limits is
+    /// remembered, not measured, which is why `myself` is a measurement tool rather than a recall.
+    /// And with no declared provider limit there is no number to state, so the prompt must not
+    /// invent one.
+    #[test]
+    fn the_author_is_told_its_budget_only_when_one_is_measured() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("YM_PROVIDER_DEADLINE_S").ok();
+
+        let author_prompt = || -> String {
+            steps()
+                .iter()
+                .find_map(|st| match st {
+                    RecipeStep::Think { prompt, .. } => Some(prompt.clone()),
+                    _ => None,
+                })
+                .expect("the build recipe has no authoring step")
+        };
+
+        // With NIM's measured deadline declared, the author is told the affordable number.
+        std::env::set_var("YM_PROVIDER_DEADLINE_S", "302");
+        let told = author_prompt();
+        let budget = mind_inference::authoring_budget(16_000);
+        assert!(
+            told.contains(&budget.to_string()),
+            "the author is not told the budget it must fit ({budget})"
+        );
+        assert!(
+            told.contains("Several complete files beat one large one"),
+            "the author is told a number but not what to DO with it"
+        );
+
+        // With no declared limit there is no measured number, so none is stated. Inventing one
+        // would be exactly the self-report this design refuses.
+        std::env::remove_var("YM_PROVIDER_DEADLINE_S");
+        let untold = author_prompt();
+        assert!(
+            !untold.contains("YOUR BUDGET FOR THIS RESPONSE"),
+            "a budget was asserted with nothing measured behind it"
+        );
+
+        match prev {
+            Some(x) => std::env::set_var("YM_PROVIDER_DEADLINE_S", x),
+            None => std::env::remove_var("YM_PROVIDER_DEADLINE_S"),
+        }
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

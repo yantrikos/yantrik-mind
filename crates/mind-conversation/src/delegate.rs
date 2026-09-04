@@ -286,6 +286,24 @@ pub fn parse_route(reply: &str, available: &[&str]) -> Option<&'static str> {
 /// inspiration nobody asked for. If a build turns out to need references, that is a measured change
 /// with its own row, not a habit copied from the page lane.
 pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&str>) -> Recipe {
+    // E.CB2-P — THE AUTHOR IS TOLD ITS BUDGET. Every T1 outcome measured on 2026-09-03/04 was
+    // decided by DECOMPOSITION: multi-file layouts scored 11/11, single monolithic files were cut
+    // and scored 2/11. The model chose that blind — it was never told how much it had, so "write
+    // the whole thing in one file" and "write four files" looked equally affordable.
+    //
+    // The number is MEASURED, never asked for: the provider's declared deadline from the run state
+    // times the observed throughput floor. A model's account of its own limits is remembered, not
+    // measured — the same reason `myself` is a measurement tool rather than a recall.
+    let budget = mind_inference::authoring_budget(16_000);
+    let budget_note = if mind_inference::provider_deadline_seconds().is_some() {
+        format!(
+            "
+
+YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, not              a suggestion: everything past it is LOST, and a file cut in half is worth nothing. So              SIZE THE FILE SET TO FIT. Several complete files beat one large one — split a big              program by responsibility (entry point, server, templates, data) rather than writing              one file you cannot finish. If the whole set cannot fit, write FEWER files completely              and say which are missing."
+        )
+    } else {
+        String::new()
+    };
     let rules = pack_rules
         .map(|r| format!("HOUSE RULES from a mounted knowledge pack — follow them:\n{r}\n\n"))
         .unwrap_or_default();
@@ -319,7 +337,7 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                      images. Use only the language's standard library unless the brief says \
                      otherwise.\n\
                      - If the brief asks for something runnable, include exactly what it asks for \
-                     (a run script, an entry point) and make it work with no build step."
+                     (a run script, an entry point) and make it work with no build step.{budget_note}"
                 ),
                 store_as: "files".into(),
                 on_error: ErrorAction::Fail,

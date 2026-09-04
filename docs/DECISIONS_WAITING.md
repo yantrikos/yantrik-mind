@@ -51,14 +51,14 @@ naturally, or accept that Phase G waits for production traffic. **Manufacturing 
 third option** — it would compute agreement on synthetic input, which is the same flaw that shipped
 me a broken scorer earlier today.
 
-### 7. Reading 8
+### 3. Reading 8
 Ready. Not started, because I said I would not start one without your word.
 
 ---
 
 ## For Codex (and Pranab where noted)
 
-### 3. `RecipeHost::call_tool` returns a `String` — should it carry structured metadata?
+### 4. `RecipeHost::call_tool` returns a `String` — should it carry structured metadata?
 ARCH8 gap (c), costed in ARCH8 §7. A tool's only channel back into recipe variables is its
 human-readable message, so every structured outcome is re-encoded as English and re-parsed by a
 `VarContains`. The build lane's completion pass fires on the phrase `"was cut"`.
@@ -72,14 +72,14 @@ human-readable message, so every structured outcome is re-encoded as English and
   interface the capability lanes run through. **Wide interface changes without review is how the
   twin-lane shadowing happened**, so I did not start it.
 
-### 4. A Rust Python-parser crate, to restore the syntax check?
+### 5. A Rust Python-parser crate, to restore the syntax check?
 E.LOOP-I2 ships a strict subset of what E.LOOP-I sized: it catches p4's unresolvable import but
 **not** v3's unparseable file, because the `python3` version got `compile()` for free. A crate like
 `rustpython-parser` restores it with no runtime binary — trading a runtime dependency on each box
 for a build-time one in the workspace. Milder, possibly right, still a dependency decision on a
 build that already needs `clang` and `libspeechd-dev` installed by hand per box.
 
-### 5. Four bounds that are my judgment, not measurement
+### 6. Four bounds that are my judgment, not measurement
 All shipped and all defensible, none derived from data:
 - `max_stage_tries = 3` (forge give-up)
 - `MAX_RESOLVE_FAILS = 3` (foresight `unjudged`)
@@ -88,7 +88,7 @@ All shipped and all defensible, none derived from data:
   — today both land as `killed`, chosen because `st != "shipped" && st != "killed"` is the
   non-terminal test in three places and a new stage name would keep the venture due forever.
 
-### 6. The scorer's residual denominator
+### 7. The scorer's residual denominator
 `score.py` derives the expected check set by parsing the checker's source. If it misses a name
 **and** the run never reported it either, the denominator is silently too small — a confident score,
 wrong in the generous direction, which is what the file exists to prevent. Two ways out, both

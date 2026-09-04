@@ -6390,3 +6390,19 @@ A repeated path now keeps its **last** definition and the repeat is reported on 
 Two mutants killed: the FIRST definition winning instead of the last, and the repeat never being reported. **Two existing tests failed and were updated rather than deleted** — they encoded the old contract, which I changed deliberately and preregistered; the empty/traversal/directory-clash cases they also cover are untouched.
 
 **What this run bought.** The leg produced no artifact and no score, and was still the most valuable thing I ran today: it found a defect that costs an entire build, and that no amount of reading the file-set code would have surfaced, because the code is *correct* — "one path, one file" is a reasonable rule that happens to be catastrophic against a model that occasionally says a thing twice. Suite 1808/1808.
+
+### E.WIN5/6 — the limit of what staging can verify for the build lane
+Two `ym delegate` runs of the T1 brief on the fixed lane, two different failures, and the second one settles the question:
+
+| run | outcome |
+| --- | --- |
+| 255216 | `write_files` failed: `run.sh appears twice` → **fixed** (E.WIN6) |
+| 3694d2 | `write_files` failed: *"the build produced no files — it wrote prose instead: I'll start by exploring the worki…"* |
+
+The second is not a lane defect. The authoring model narrated instead of emitting `=== FILE:` markers, and **staging's primary brain is `ollama-local:qwen3.8:27b-q4_K_M`** — not the benchmark's `openai/gpt-oss-20b`. I had been treating a delegate run on staging as equivalent to a graded leg. It is not: same lane, different model, and this model does not follow the authoring format.
+
+**So the last unproven link cannot be closed here.** Whether the review *repairs* a mechanical finding needs an authoring step that produces files, and on staging it does not. The options were: point staging's primary brain at the benchmark model (a service config change whose only purpose is to make my test work — and which makes staging stop being staging), or stop and say so. **Stopping.**
+
+**What that means for the four T1 defects.** All four are fixed, tested and mutation-checked; two of them (E.LOOP-I2, E.WIN2) produce findings whose *repair* by the review remains unverified end-to-end. The honest next evidence is a graded reading, which is Pranab's call.
+
+**And the assumption worth naming**, because it is the same shape as three other errors today: I assumed staging exercises the same lane as the benchmark because it runs the same binary. It runs the same binary against a different brain. "Same code" is not "same system", and the difference only appeared because I ran it twice and read the failures instead of the first one.

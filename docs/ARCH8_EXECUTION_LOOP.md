@@ -130,3 +130,33 @@ a judgment that never happened. Before adding the state, every reader of that fi
 each either tests `== "open"` (so the new state correctly drops out) or matches `hit`/`miss`
 explicitly (so it is ignored). Adding a state to a field other code branches on is a schema change;
 treat it as one.
+
+## 7. Gap (c), costed: why the completion pass still matches prose
+
+E.LOOP-L made the truncation signal a shared constant so the publisher and the recipe cannot
+drift. That removes the fragility but not the underlying shape, and it is worth being precise
+about why, because the constant looks like a fix and is really a patch.
+
+**The signal exists structurally and is thrown away.** `publish_file_set` knows exactly which files
+were cut and refused — it returns them. The recipe needs precisely that fact. But `RecipeStep::Tool`
+stores only `Value::String(out)`: the host's `call_tool` returns a `String`, so a tool's only
+channel back into the recipe's variables is its human-readable message. Every structured outcome a
+tool knows must therefore be re-encoded as English and re-parsed by a `VarContains`. That is why
+the guard reads prose — not an oversight at the call site, a limit of the interface.
+
+`mind-recipes` already knows this hurts: `VarIsPublishableDocument` exists because
+`VarContains { "</html>" }` is satisfied by prose that merely MENTIONS `</html>`. That variant is a
+point fix for one such question. The completion pass is a second. Each new "did this step achieve
+its purpose?" gets its own bespoke answer.
+
+**The real fix, and its price.** Let a tool return a result plus structured metadata, and store it
+as side variables (`{store_as}__cut_files`, `{store_as}__stop_reason` — the `Think` arm already
+does exactly this for stop reasons). Conditions then test facts instead of sentences, and gap (c)
+closes generally rather than one variant at a time.
+
+The price is the `RecipeHost::call_tool` signature, which every tool in the system implements. That
+is a wide, mechanical change — the kind that is safe with review and unwise without it, and it
+would touch the same interface the capability lanes and the twin-lane shadowing fix run through.
+**Not started unilaterally.** Recorded here so the choice is visible and costed rather than
+rediscovered: the constant holds the line today, and the interface change is what actually closes
+the gap.

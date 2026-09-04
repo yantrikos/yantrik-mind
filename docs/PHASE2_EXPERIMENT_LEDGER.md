@@ -7227,3 +7227,25 @@ n=5 per cell, native `/api/chat`, same authoring prompt, `num_predict` 4000. Des
 5. Watched to FAIL, with the mutation confirmed present in the file before its run.
 
 **Not claimed:** that this fixes reading 8. It makes the fix *reachable from config* instead of requiring a rebuild; whether 300 s should become some other number is the measurement question the proposal leaves open.
+
+### E.TIMEOUT1 — NOT SHIPPED. It lives in another repository and cannot meet its own kill criteria here
+I wrote the change, then reverted it. The reason is worth more than the twenty lines.
+
+**Where the constant actually lives.** `crates/yantrik-ml` is **not** part of yantrik-mind, and it is not a workspace member of yantrik-companion either. It is a vendored copy of a separate upstream — `github.com/yantrikos/yantrik-ml` — pulled in through:
+
+```toml
+yantrik-ml = { git = "https://github.com/yantrikos/yantrik-ml.git" }
+[patch."https://github.com/yantrikos/yantrik-ml.git"]
+yantrik-ml = { path = "crates/yantrik-ml" }
+```
+
+Three consequences, none of which I had checked before editing:
+1. The edit is to the **yantrik-companion** repository, not the one this session has standing authority over.
+2. `cargo test -p yantrik-ml` fails — *"not a member of the workspace"* — and running it standalone fails too, because the crate believes it is in a workspace that does not list it. **Its tests cannot be run at all in this setup.**
+3. Nothing in yantrik-mind's git would carry the change; it would be an uncommitted edit in a third tree, invisible to this repo's history and to any rebuild that re-fetches the git dependency.
+
+**So it fails my own prereg.** Kill criterion 5 was *"watched to FAIL, with the mutation confirmed present in the file before its run."* I cannot run the tests, so I cannot watch anything fail, so the slice does not ship. Written down rather than quietly relaxed, because relaxing a kill criterion once it becomes inconvenient is how a criterion stops meaning anything.
+
+**The work is not lost.** The design is in `PROPOSAL_think_levels.md` under the configuration surface, the change is ~20 lines at three sites, and the evidence for it is in E.THINK5. What it needs is a decision that is not mine: whether this session edits, tests and commits in `yantrik-companion`/`yantrik-ml` at all.
+
+**And the general lesson.** I checked *"does this capability already exist?"* — the criterion I added this morning — and it correctly returned no. I did not check **"is this file mine to change?"**, which is a different question and turns out to matter just as much. `grep` found the constant; nothing in the grep result said it belonged to another project. Adding that to the pre-flight: **before editing, establish which repository owns the file and whether its tests can run.**

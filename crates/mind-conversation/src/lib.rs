@@ -43,6 +43,7 @@ mod book;
 mod briefing;
 mod calendar;
 mod capabilities;
+mod entrypoint;
 mod pyimports;
 mod required_literals;
 mod cloud_photos;
@@ -95,6 +96,8 @@ pub use proactive::{DmnLogEntry, DMN_LOG_CAPACITY};
 mod chains_window_tests;
 #[cfg(test)]
 mod ecb2f_tests;
+#[cfg(test)]
+mod entrypoint_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
@@ -14668,9 +14671,28 @@ impl RecipeHost for MindRecipeHost {
                 // Only a genuinely EMPTY stream is excused. Prose without markers still errors, so
                 // "it ignored the format" stays visible — the same reason `ParsedSet` keeps the
                 // preamble as evidence rather than discarding it.
+                // E.ENTRY1/D2 — what an EARLIER write of this same build already reported.
+                //
+                // The completion pass overwrites `project_url` so the review round stops reading a
+                // stale message. Carrying the earlier message here is what stops that fix being
+                // lossy: findings raised on the files pass one wrote must still reach the review,
+                // which is the only step that can act on any of them.
+                //
+                // An unresolved `{{...}}` is ignored rather than shown. `resolve_vars` leaves a
+                // placeholder LITERAL when its variable was never set, and pasting that in front of
+                // a model is how a prompt starts describing the harness instead of the work.
+                let prior = _args
+                    .get("prior")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty() && !p.starts_with("{{"))
+                    .unwrap_or_default();
                 if stream.trim().is_empty()
                     && _args.get("allow_empty").and_then(|v| v.as_bool()) == Some(true)
                 {
+                    if !prior.is_empty() {
+                        return Ok(prior.to_string());
+                    }
                     return Ok("the review changed nothing — the first set stands".to_string());
                 }
                 match publish_file_set(project, stream, truncated) {
@@ -14725,15 +14747,36 @@ impl RecipeHost for MindRecipeHost {
                                 "`{d}` was written twice in one set; the LAST definition was kept —                                  check it is the one you meant"
                             ));
                         }
+                        // E.ENTRY1: the entry script names a program that does nothing when run.
+                        // Reading 7's T1 shipped a `server.py` that parsed, imported cleanly and
+                        // contained only definitions — `run.sh` started it, python defined a
+                        // handler class and exited, and the leg died on ERR_CONNECTION_REFUSED
+                        // with every other check green. Silent on all sixteen judged artifacts of
+                        // ~24 real runs and on that one it fires, so a healthy build's message is
+                        // unchanged.
+                        findings.extend(crate::entrypoint::dead_entry_points(stream));
                         if !findings.is_empty() {
+                            // The header used to say "IMPORTS THAT DO NOT RESOLVE", which was true
+                            // when imports were the only finding and became a lie as soon as
+                            // placeholder and duplicate-path findings joined them. A block that
+                            // misdescribes its own contents teaches the reader to discount it, and
+                            // the reader here is the review round that has to act.
                             msg.push_str(&format!(
                                 "
 
-IMPORTS THAT DO NOT RESOLVE — fix these, they are why the                                  program cannot start:
+DEFECTS FOUND MECHANICALLY IN WHAT YOU JUST WROTE — each of                                  these was checked, not guessed, and each one is enough on its own to stop the                                  program working. Fix every one:
 {}",
                                 findings.join("
 ")
                             ));
+                        }
+                        // Earlier passes first, so the message reads as the cumulative state of the
+                        // build rather than as whatever the last call happened to touch.
+                        if !prior.is_empty() {
+                            msg = format!("{prior}
+
+THEN, finishing the set:
+{msg}");
                         }
                         Ok(msg)
                     }

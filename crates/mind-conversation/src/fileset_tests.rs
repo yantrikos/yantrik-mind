@@ -1282,3 +1282,102 @@ print('cut off mid";
     }
 }
 
+
+/// E.ENTRY1/D2 — the review round must read the FRESHEST write message, not the first one.
+///
+/// This is the second time in one session a check was wired to a step that could not act on it:
+/// `pyimports` and `required_literals` were both reported to a completion pass whose mandate is
+/// only "write what is missing", and I stated twice — to Pranab and to a reviewer — that they
+/// "reach the review round" before reading the prompt and finding they did not.
+///
+/// The same defect sat in the dataflow. The completion write stored to `completion_url`, which
+/// NOTHING downstream reads; the review interpolates `{{project_url}}`, still holding pass one's
+/// message. Reading 7's T1 is what it cost: the review was told "server.py was cut and NOT
+/// written" while server.py sat in the deliverable at 2814 bytes, and `RESULT.md` reported that
+/// same falsehood to Pranab.
+///
+/// So this asserts the DATAFLOW, not the presence of a step: whatever variable the review reads
+/// must be the one the last write before it stores into. It was watched to FAIL against
+/// `completion_url` before the fix, which is the only reason it counts as evidence.
+#[test]
+fn the_review_round_reads_the_variable_the_completion_write_stores_into() {
+    use crate::delegate::build_recipe;
+    use mind_recipes::RecipeStep;
+
+    let steps = build_recipe("t", "proj", "build a lead form with a server", None).steps;
+
+    // The review is the Think step whose prompt asks for what the write step OBSERVED.
+    let review_prompt = steps
+        .iter()
+        .find_map(|s| match s {
+            RecipeStep::Think { prompt, .. } if prompt.contains("WHAT THE WRITE STEP OBSERVED") => {
+                Some(prompt.clone())
+            }
+            _ => None,
+        })
+        .expect("build_recipe must have a review step that reads the write step's observations");
+
+    // Every write_files step that runs BEFORE the review must land somewhere the review can see.
+    let review_at = steps
+        .iter()
+        .position(|s| matches!(s, RecipeStep::Think { prompt, .. } if prompt.contains("WHAT THE WRITE STEP OBSERVED")))
+        .expect("review step position");
+
+    let writes_before: Vec<String> = steps[..review_at]
+        .iter()
+        .filter_map(|s| match s {
+            RecipeStep::Tool {
+                tool_name,
+                store_as,
+                ..
+            } if tool_name == "write_files" => Some(store_as.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        writes_before.len() >= 2,
+        "expected the authoring write and the completion write before the review, got {writes_before:?}"
+    );
+
+    for var in &writes_before {
+        assert!(
+            review_prompt.contains(&format!("{{{{{var}}}}}")),
+            "the review round never reads `{var}`, so anything that write reports — including every \
+             mechanical defect found in the files it just wrote — is discarded. Writes before the \
+             review: {writes_before:?}"
+        );
+    }
+}
+
+/// The carry-forward that stops the D2 fix being lossy.
+///
+/// Overwriting `project_url` makes the review truthful; without `prior` it would also make it
+/// forget every finding raised on the files pass one wrote. Assert the completion write actually
+/// passes the earlier message, because "it compiled" has twice not meant "it carries a value".
+#[test]
+fn the_completion_write_carries_the_earlier_message_forward() {
+    use crate::delegate::build_recipe;
+    use mind_recipes::RecipeStep;
+
+    let steps = build_recipe("t", "proj", "build a lead form with a server", None).steps;
+    let completion_write = steps
+        .iter()
+        .filter_map(|s| match s {
+            RecipeStep::Tool {
+                tool_name, args, ..
+            } if tool_name == "write_files" => Some(args.clone()),
+            _ => None,
+        })
+        .find(|a| {
+            a.get("stream").and_then(|v| v.as_str()) == Some("{{completion}}")
+        })
+        .expect("build_recipe must have a completion write");
+
+    assert_eq!(
+        completion_write.get("prior").and_then(|v| v.as_str()),
+        Some("{{project_url}}"),
+        "the completion write must carry pass one's message forward, or overwriting project_url \
+         silently drops every finding raised on the files pass one wrote"
+    );
+}

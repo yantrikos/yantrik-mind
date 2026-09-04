@@ -418,8 +418,32 @@ YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, no
             // first set standing rather than fail a build that may already be fine.
             RecipeStep::Tool {
                 tool_name: "write_files".into(),
-                args: serde_json::json!({ "project": project, "stream": "{{completion}}", "stop_reason": "{{completion__stop_reason}}", "allow_empty": true }),
-                store_as: "completion_url".into(),
+                // `prior` carries the first write's message forward. Without it, overwriting
+                // `project_url` below would DROP every mechanical finding raised on the files pass
+                // one wrote — trading a stale message for a lossy one. The completion pass only
+                // ever runs when the JumpIf found the truncation marker in `project_url`, so the
+                // variable is always set here and the placeholder always resolves.
+                args: serde_json::json!({ "project": project, "stream": "{{completion}}", "stop_reason": "{{completion__stop_reason}}", "allow_empty": true, "prior": "{{project_url}}" }),
+                // E.ENTRY1/D2 — THIS OVERWRITES `project_url` ON PURPOSE, and the reason is a
+                // measured failure. It used to store to `completion_url`, which NOTHING downstream
+                // reads: the review step interpolates `{{project_url}}` and the Notify reports it,
+                // so both saw the FIRST write's message forever.
+                //
+                // Reading 7's T1 is what that costs. The first pass was cut, the completion pass
+                // wrote `server.py`, and the review round was still told "server.py was cut and NOT
+                // written" while the file sat there at 2814 bytes — the review reasoned correctly
+                // from a false premise, and `RESULT.md` reported a failure that had been half
+                // repaired. Any mechanical finding raised on THIS write landed in the same dead
+                // variable, which would have made E.ENTRY1 inert in precisely the case it exists
+                // for. That is the second time this session a detector was wired to something that
+                // could not act on it; the fix belongs with the detector.
+                //
+                // Safe in all three branches, which is why it is one word and not a new step:
+                //   - completion skipped by the JumpIf  -> never runs, first message stands;
+                //   - completion write succeeds         -> the fresher, truthful message wins;
+                //   - completion write errors (`Skip`)  -> the engine advances WITHOUT storing
+                //     (`ErrorResolution::Skip => i += 1`), so the good first message survives.
+                store_as: "project_url".into(),
                 on_error: ErrorAction::Skip,
             },
             // E.FILES3 — THE REVIEW ROUND, and it comes AFTER the first write on purpose.

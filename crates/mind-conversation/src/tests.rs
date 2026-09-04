@@ -15123,8 +15123,19 @@ async fn import_findings_reach_the_review_and_are_absent_when_clean() {
         )
         .await
         .expect("a well-formed set writes");
+    // E.ENTRY1 renamed this header. It said "IMPORTS THAT DO NOT RESOLVE", which was true while
+    // imports were the only finding and became false as soon as placeholder mismatches, duplicate
+    // paths and dead entry points were reported under it — a block that misdescribes its own
+    // contents teaches its reader to discount it, and its reader is the step that must act.
+    //
+    // Note what this test does NOT establish, because I once claimed it did: driving `write_files`
+    // shows the finding is in the MESSAGE, never that the message reaches the review step. That is
+    // a dataflow question, and it is asserted separately in
+    // `fileset_tests::the_review_round_reads_the_variable_the_completion_write_stores_into` —
+    // which failed until E.ENTRY1/D2, because the completion write's message went to a variable
+    // nothing read.
     assert!(
-        msg.contains("IMPORTS THAT DO NOT RESOLVE") && msg.contains("socketserver"),
+        msg.contains("DEFECTS FOUND MECHANICALLY") && msg.contains("socketserver"),
         "the review round must be handed the unresolvable import, naming where the symbol really \
          lives, or the repair is guessed: {msg}"
     );

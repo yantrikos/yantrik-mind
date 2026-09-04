@@ -6038,3 +6038,19 @@ Is that a defect? **Partly, and narrowly.** Not counting a cancellation is argua
 Recorded, not fixed. Fixing it means deciding what a cancelled tick *means* — a strike, a no-op, or its own state — and that is a judgment about the forge's contract with its operator rather than a bug with an obvious answer. It goes on the list with the other bounds that are my judgment rather than measurement.
 
 **The wider point is Pranab's.** Three of today's ledger entries said, in effect, "no observed instance". That was true and it was also a consequence of not driving the box that exists to be driven. One session of actually using it produced a real finding in the first ten minutes.
+
+## E.FORGE1 — the forge's test stage FAILS every python file it builds (PREREGISTERED, found live)
+Found by driving staging, not by reading. Venture `v496495` built `unit_oracle.py` and the test stage reported **RED**:
+
+```
+FAIL: unit_oracle.py — stderr: Traceback ... File "/tmp/ym_sbx_.../prog.py", line 2
+    src = open("/var/li...
+```
+
+| Field | Value |
+| --- | --- |
+| What is actually wrong | The check runs `ast.parse(open("<absolute path>").read())` **inside the sandbox**, and the sandbox exists to mask exactly that path: `mind-core` builds it as `Sandbox::new().hiding(state_dir)`, and the forge writes artifacts to `/var/lib/yantrik-mind/forge/<id>` — **inside the masked dir**. The file is invisible by design, `open()` raises, and the venture is marked RED. |
+| Why it is worse than a false negative | It is a false **RED**. The verdict is decided by the checker's own plumbing and reports the artifact as broken, so the iterate loop then spends model calls "fixing" a file that was never shown to be wrong, and the venture eventually ships AS-IS at a bad score. A check that cannot pass is the same defect family as a guard that cannot fire — its output is determined by something other than the thing it claims to measure. |
+| The fix | Use the sandbox the way its own header describes: *"code + inputs live in a throwaway scratch dir passed as FILES"*. The forge was passing a path instead of the input. Add a `run_python_with` that takes one extra input file, and have the check read `target.py` from the scratch dir rather than reaching into the host. |
+| Kill criteria | A syntactically valid file must PASS (today impossible for any file). A file with a real syntax error must still report SYNTAX. The check must not reference a host path at all. If the sandbox is unavailable the existing SKIP behaviour must be unchanged — never a silent pass. |
+| **How it will be verified** | Not locally: `Sandbox::available()` is false on Windows (no user namespaces), so no local test can execute it. The proof is on staging — re-drive the same venture's test stage and see PASS where it just said FAIL. That is precisely the kind of verification the box exists for, and precisely what I was not doing when I reported staging as "empty". |

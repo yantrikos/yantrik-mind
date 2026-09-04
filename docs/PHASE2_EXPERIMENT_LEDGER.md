@@ -6973,3 +6973,29 @@ ${Object.entries(data.per_day).map(([d,c])=>`${d}: ${c}`).join('\n')}
 So item 5 is **re-opened with real evidence**, and the evidence is stronger than what it had before: not a historical artifact from a pre-fix run, but a defect produced today, on the model Pranab has chosen, that four purpose-built checks all miss by construction.
 
 **Also worth recording**: `has_block_without_body` (added to `freshness.rs` for exactly the "cannot compile" case) does not catch this either. It was built to make the freshness check ABSTAIN on unparseable files, not to report them — the right scope for that check, and a reminder that a guard which silences is not a guard that warns.
+
+### E.THINK1 — thinking levels measured, and `reasoning_effort:"none"` is actively harmful
+Pranab: qwen3.8 is a thinking model, the mind needs low/high/max levels with timeouts to match. Measured before designing, on the real authoring prompt, `max_tokens` 4000, `/v1` on both endpoints.
+
+| model | effort | wall_s | content | reasoning | markers |
+| --- | --- | --- | --- | --- | --- |
+| qwen3.8:27b | *(none sent)* | 94.9 | 3851 | 1347 | 3 |
+| qwen3.8:27b | `none` | 188.1 | 8011 | **1512** | 3 |
+| qwen3.8:27b | `low` | 114.6 | 4554 | 1159 | 3 |
+| qwen3.8:27b | `medium` | 147.4 | 6471 | 1851 | 4 |
+| qwen3.8:27b | `high` | 190.1 | **0** | 15263 | **0** |
+| gpt-oss:20b | *(none sent)* | 38.2 | 2113 | 15413 | 2 |
+| gpt-oss:20b | `none` | 29.1 | **0** | 17683 | **0** |
+| gpt-oss:20b | `low` | **8.3** | 4308 | **273** | **4** |
+| gpt-oss:20b | `medium` | 29.1 | 142 | 16879 | 1 |
+| gpt-oss:20b | `high` | 28.7 | **0** | 17406 | **0** |
+
+**1. `reasoning_effort:"none"` DOES NOT SUPPRESS REASONING, AND WE SEND IT.** On qwen it produced *more* reasoning than sending no control at all (1512 vs 1347) and doubled the wall (188 s vs 95 s). On gpt-oss it produced **zero content** and 17,683 reasoning characters. The client's comment states *"`reasoning_effort:"none"` is what actually suppresses it there (verified on qwen3.6 via the TLS gateway: 10s→0.9s, clean content)"* — **true of qwen3.6, false of both models we run today**, and `QwenTemplate::disable_thinking()` is `true`, so this exact value goes out on every `/v1` qwen call. A verified measurement became a standing assumption and the model underneath it changed. That is E.MODEL1's shape exactly: **model retirement as a live failure mode**, here in the form of a tuning constant outliving the model it was tuned on.
+
+**2. `low` is the sweet spot and it is not close.** gpt-oss at `low`: **8.3 s**, 273 reasoning chars, and **the only one of the ten runs that emitted all four files**. Every other setting on that model spent its entire 4000-token budget reasoning and shipped 0–2 files.
+
+**3. `high` is catastrophic for authoring on both models** — zero content, budget wholly consumed. Whatever "max" becomes, it must never be the authoring default. This is the measured version of the argument `build_recipe`'s comment already makes from first principles.
+
+**Caveat, stated rather than buried:** these are `/v1` measurements. The Mind's local lane uses native `/api/chat`, where `config.think` IS honoured. So this table bounds the `/v1` path — which is the one that silently discards a per-call thinking request — and fixes the level design; the 179.7 s (gpt-oss) and 312 s (qwen) figures come from the native path via the real Mind.
+
+**What it does to the proposal.** `docs/PROPOSAL_think_levels.md` was written with its durations deliberately blank. They can now be filled from data, and one design decision is settled by measurement rather than taste: **`Off` must not map to `reasoning_effort:"none"`** — on these models that is the worst setting available. `Off` should send no control on `/v1` (or `low`, which is strictly better than `none` on both), and `think:false` on native.

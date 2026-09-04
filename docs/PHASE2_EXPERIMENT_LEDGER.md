@@ -6583,3 +6583,24 @@ Tested exactly that refinement — given the NAME of the dashboard handler, does
 **Honest limits**: n=7 with 2 abstentions; I identified handlers heuristically here, where a real manifest would state them (and would also resolve p3 and p7 by naming the dispatcher plus its route guard); and one true positive is one, not a rate. This is a reason to build the thing, not evidence that it works.
 
 **Third probe today, and the first to separate.** The other two — "module-scope read with none in a def" and "read reachable from any dashboard-mentioning function" — both failed against real artifacts and shipped nothing. That ratio is the argument for probing before building, not against it.
+
+### E.WIN3 — SOLVED as an algorithm: branch-level route analysis separates 7/7, and it needs no manifest
+The manifest probe separated but abstained on two legs whose dashboard is inline in `do_GET`. That pointed at the real fix: the route guard `if self.path == '/dashboard':` is **in the source**, so the mapping I thought a manifest had to supply is derivable. Analyse the guarded BRANCH, not the function.
+
+Result over the seven post-fix T1 artifacts, using stdlib `ast`:
+
+| leg | score | reads on request | verdict |
+| --- | --- | --- | --- |
+| p1, p2, p5, p6, p7 | 11/11 | true | ok |
+| p3 | 7/11 | true | ok — **correct**, its dashboard does read fresh; its defect was the placeholder mismatch (E.WIN2), a different bug |
+| **p8** | **8/11** | **false** | **flagged** |
+
+**7 of 7 resolved, zero abstentions, zero false positives, the one defective leg caught.**
+
+**CORRECTION to what I told Codex twenty minutes ago.** I messaged that E.WIN3 is no longer blocked on the parser crate. **Premature.** This probe runs on the box's `python3` and uses its `ast` module; the check has to run *inside the Mind*, which is Rust. So what changed is better than "unblocked" and needs saying precisely:
+
+- **The manifest is not needed** — that part stands, and it removes a whole model-authored artifact from the design.
+- **A Python parser in Rust still is** — the algorithm is `ast`-shaped and my two regex/indentation attempts both failed.
+- **But the decision is now a different one.** It was "add a dependency for a speculative check". It is now "a validated algorithm with 7/7 separation and zero false positives on real artifacts needs a parser to ship". That is a much easier call to make, either way.
+
+**Three corrections on this one defect, worth counting.** First: "needs dataflow analysis, blocked on a parser." Second: "not blocked, a manifest supplies the missing mapping." Third: "the mapping is derivable from the route guard; the manifest is unnecessary; the parser is." Each was wrong in a way the next probe exposed, and each was cheap because I probed instead of building. The pattern is not that I keep being wrong — it is that the first plausible explanation kept surviving until something ran.

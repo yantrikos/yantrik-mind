@@ -6406,3 +6406,21 @@ The second is not a lane defect. The authoring model narrated instead of emittin
 **What that means for the four T1 defects.** All four are fixed, tested and mutation-checked; two of them (E.LOOP-I2, E.WIN2) produce findings whose *repair* by the review remains unverified end-to-end. The honest next evidence is a graded reading, which is Pranab's call.
 
 **And the assumption worth naming**, because it is the same shape as three other errors today: I assumed staging exercises the same lane as the benchmark because it runs the same binary. It runs the same binary against a different brain. "Same code" is not "same system", and the difference only appeared because I ran it twice and read the failures instead of the first one.
+
+### E.WIN3 — probed before building, and the simple signal does NOT separate
+Before writing a startup-snapshot detector I ran the cheap version of it over the seven real T1 artifacts: count loads of the data file at module scope versus inside a function.
+
+```
+p1 module-scope=0 in-function=3     p5 module-scope=0 in-function=2
+p2 module-scope=0 in-function=2     p6 module-scope=0 in-function=2
+p3 module-scope=0 in-function=3     p7 module-scope=0 in-function=3
+p8 module-scope=0 in-function=1     <- the defective one
+```
+
+**It found nothing on the defective leg.** p8's load is at module scope but nested inside `if os.path.exists(LEADS_FILE):` / `with open(...) as f:`, so the `json.load` line is indented exactly like a function body. Column-0 matching cannot see it, and no amount of regex tuning distinguishes *module-level control flow* from *a function body* — that needs scope tracking, which needs a parser.
+
+The one number that does separate — p8 having a single in-function load where the passing legs have two or three — is a count, not a structure, and a checker built on it would be the kind of thing that flags a passing artifact the first time someone factors their code differently. Today has already produced two false positives caught only by real artifacts (`POST`, and the whole first premise of E.WIN2); shipping a third on a weaker signal is not a trade worth making.
+
+**So E.WIN3 is blocked on a decision already open**: `rustpython-parser` (DECISIONS_WAITING item 5), the same dependency that would restore the syntax check E.LOOP-I2 gives up. That is now two pieces of T1 value waiting on one decision, which is worth knowing when it gets weighed.
+
+The alternative remains execution, which the cb2n container cannot do — no user namespaces.

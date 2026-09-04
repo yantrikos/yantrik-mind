@@ -6288,3 +6288,19 @@ I preregistered "verify that identifiers the request names literally appear in t
 **Mutation found three gaps in my own tests, and one of my own mistakes.** The two-files guard and the already-templated escape both survived, because the main case could not reach either — its single-file example short-circuits on `files.len() < 2`, and its correct example quotes the key *with* braces so it never becomes a key. Both now have cases that reach them, plus a non-vacuous twin proving the correct case is not passing for free. The wiring mutant "survived" for a different reason entirely: **I had pointed it at the import-check test**, which does not touch this path — the same harness error as E.LOOP-J's survivor, twice in one session. Retargeted, all four die.
 
 **Expected effect, stated so it can be scored:** p3 7/11 → 11/11 *if the review acts on the finding*, which is unverified end-to-end. With E.LOOP-I2 on p4, the 8-leg set would go 11,11,7,2,11,11,11,8 → 11,11,11,11,11,11,11,8. **p8 stays 8/11** — its element renders and its numbers are wrong, which needs execution.
+
+### E.WIN3 — p8's 8/11 diagnosed: state read once at startup, served as if live (NOT built yet)
+The last T1 shortfall, diagnosed from its verdict and its source rather than guessed:
+
+| evidence | reading |
+| --- | --- |
+| `submit_appends_exactly_one_record` **passes**, `store_length_after: 21` | the write path is correct — leads really are appended |
+| `dashboard_total_exact` fails, `expected: 20` | the dashboard reported a total that was not the count at fetch time |
+| `dashboard_per_day_exact_14_bins` fails with **`keys: 14`** | the bin *count* is right; the *values* are wrong |
+| `server.py` lines 18–25 | `leads = json.load(f)` at **module scope**, and `serve_dashboard` serves from that variable |
+
+One defect explains all three failures: the file is read **once at import** and served as if live, so every number the dashboard reports is the startup snapshot. The brief's `total`, `per_day` and `recent` are all derived from that same stale list.
+
+**A general bug class worth a check** — "load at startup, mutate the file at runtime, keep serving the snapshot" is a classic, not a benchmark artefact. A plausible static signal: a data file read at module scope, written inside a handler, and never re-read inside one.
+
+**Deliberately not built now.** Two checks (E.LOOP-I2, E.WIN2) are shipped and **neither is verified end-to-end** — I have shown the finding reaches the review round, not that the review acts on it. Adding a third detector before verifying the first two is how a session accumulates plausible-looking work that nobody has watched succeed. The verification comes first; if the review does act, this is the next slice and its expected value is the 3 checks p8 lost.

@@ -354,6 +354,14 @@ pub fn lane_failure(detail: &str) -> (String, &'static str) {
             "the local lane is FLAKY (gateway error after retries)".to_string(),
             "the endpoint is up but its backend is failing intermittently — check the model host",
         )
+    } else if let Some(i) = d.find("timed out after ") {
+        // E.MSG2: the client that timed out stated its own wait and model — relay it, never
+        // append a second number from a model-less knob.
+        let sentence: String = detail[i..].chars().take_while(|c| *c != '\n').collect();
+        (
+            format!("the local lane TIMED OUT — {sentence}"),
+            "raise YM_LLM_TIMEOUT_MODELS for that model (or YM_LLM_TIMEOUT_S), lower the thinking level, or pick a faster model",
+        )
     } else if d.contains("timeout") || d.contains("timed out") {
         (
             format!(
@@ -4933,6 +4941,17 @@ mod lane_failure_tests {
         assert!(why.contains(" s "), "carries the seconds it waited: {why}");
         assert!(!why.contains("unreachable"), "{why}");
         assert!(hint.contains("YM_LLM_TIMEOUT_S"), "{hint}");
+    }
+
+    #[test]
+    fn a_client_that_stated_its_own_wait_is_relayed_not_second_guessed() {
+        // The exact shape yantrik-ml's describe_send_error produces (E.MSG2).
+        let d = "Ollama API request failed: timed out after 5 s waiting for qwen3.8:27b-q4_K_M (YM_LLM_TIMEOUT_MODELS / YM_LLM_TIMEOUT_S)";
+        let (why, hint) = lane_failure(d);
+        assert!(why.contains("TIMED OUT"), "{why}");
+        assert!(why.contains("after 5 s") && why.contains("qwen3.8:27b-q4_K_M"), "{why}");
+        assert!(!why.contains("300"), "must not add the model-less number: {why}");
+        assert!(hint.contains("YM_LLM_TIMEOUT_MODELS"), "{hint}");
     }
 
     #[test]

@@ -4217,6 +4217,17 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
 /// EXTRACTED so it can be tested. It spent the interval since E.PAGE1 living in an implementation
 /// that a capability shadowed (E.LOOP-T1), which meant the rule was correct, unreachable, and
 /// unverifiable all at once. A rule worth having is worth being able to check.
+/// The exact phrase a truncation message carries — and the exact substring the build recipe's
+/// `JumpIf` matches to decide whether the completion pass must run.
+///
+/// It is a constant because the coupling is otherwise invisible: a prose string written in this
+/// file, which a `Condition` in `delegate.rs` must keep matching, with nothing obliging anyone to
+/// keep the two in step. Rewording "was cut" to "was truncated" would silently stop the completion
+/// pass from ever firing and reintroduce the defect that cost reading 7 — a guard disabled by an
+/// edit that looks like copy-editing. `the_truncation_marker_ties_the_publisher_to_the_recipe`
+/// fails if the two ever drift.
+pub(crate) const TRUNCATION_MARKER: &str = "was cut";
+
 pub(crate) fn page_filename(required: Option<&str>, html: &str, name: Option<&str>) -> String {
     required
         .map(str::to_string)
@@ -14665,7 +14676,7 @@ impl RecipeHost for MindRecipeHost {
                     // point of having one.
                     Ok((url, written, unterminated)) if url.is_empty() && written.is_empty() => Ok(
                         format!(
-                            "nothing was written: the generation hit its token limit and {} was cut",
+                            "nothing was written: the generation hit its token limit and {} {TRUNCATION_MARKER}",
                             unterminated.join(", ")
                         ),
                     ),
@@ -14677,7 +14688,7 @@ impl RecipeHost for MindRecipeHost {
                                 // limit, so that file is partial and was NOT written. Saying which
                                 // file is missing is what lets a later pass finish the set.
                                 format!(
-                                    " — the generation hit its token limit, so {} was cut and NOT written",
+                                    " — the generation hit its token limit, so {} {TRUNCATION_MARKER} and NOT written",
                                     unterminated.join(", ")
                                 )
                             } else {

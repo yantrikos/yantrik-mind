@@ -372,7 +372,7 @@ YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, no
                 condition: Condition::Not {
                     inner: Box::new(Condition::VarContains {
                         var: "project_url".into(),
-                        substring: "was cut".into(),
+                        substring: crate::TRUNCATION_MARKER.into(),
                     }),
                 },
                 target_step: 5,

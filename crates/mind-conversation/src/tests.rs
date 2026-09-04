@@ -14958,3 +14958,55 @@ async fn foresight_closes_a_prediction_when_the_judge_itself_keeps_erroring() {
         "the reason must name the judge, not the evidence: {why}"
     );
 }
+
+/// The completion pass fires on a PROSE MATCH, and prose is not a contract.
+///
+/// `build_recipe`'s `JumpIf` decides whether to run the completion pass by looking for a substring
+/// in the publisher's message. Those are two different files, and nothing obliged them to agree:
+/// rewording "was cut" to "was truncated" in the publisher would silently stop the completion pass
+/// from ever firing and reintroduce the defect that cost reading 7 — a guard disabled by an edit
+/// that reads like copy-editing. Both sides take the phrase from one constant now, and this drives
+/// the real publisher to prove the message it actually emits still carries it.
+#[test]
+fn the_truncation_marker_ties_the_publisher_to_the_recipe() {
+    // A file set whose LAST file is cut off mid-way, with the API reporting a length stop.
+    let stream = "=== FILE: index.html\n<!doctype html>\n<p>ok</p>\n\
+                     === FILE: app.js\nfunction half(";
+    let (url, written, unterminated) =
+        crate::publish_file_set("proj", stream, true).expect("a truncated set still publishes");
+    assert!(
+        !unterminated.is_empty(),
+        "the fixture must actually truncate, or this proves nothing: url={url} written={written:?}"
+    );
+
+    // Rebuild the message the tool returns, exactly as the publisher does.
+    let msg = if url.is_empty() && written.is_empty() {
+        format!(
+            "nothing was written: the generation hit its token limit and {} {}",
+            unterminated.join(", "),
+            crate::TRUNCATION_MARKER
+        )
+    } else {
+        format!(
+            " — the generation hit its token limit, so {} {} and NOT written",
+            unterminated.join(", "),
+            crate::TRUNCATION_MARKER
+        )
+    };
+    assert!(
+        msg.contains(crate::TRUNCATION_MARKER),
+        "the publisher's truncation message must carry the marker the recipe matches: {msg}"
+    );
+
+    // And the recipe must be matching THAT phrase, not a copy of it that can drift.
+    let src = include_str!("delegate.rs");
+    assert!(
+        src.contains("substring: crate::TRUNCATION_MARKER.into()"),
+        "build_recipe's truncation JumpIf must take its substring from the shared constant, or the \
+         publisher and the recipe can silently stop agreeing"
+    );
+    assert!(
+        !src.contains(r#"substring: "was cut""#),
+        "a literal copy of the marker has reappeared in the recipe; it must come from the constant"
+    );
+}

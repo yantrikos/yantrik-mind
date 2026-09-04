@@ -5951,3 +5951,17 @@ That cluster is one commit: `a8271d3` "Integrate governed autonomy and durable o
 **The method cannot tell "returns before any state change" (right) from "returns after one" (wrong).** Only the mutation-order scan can, and that one came back clean across the whole tree. So the history angle adds nothing the earlier sweep had not already settled, and I am recording that rather than reading 31 functions to arrive at it slowly.
 
 **Closing this line.** Three sweeps — tail bookkeeping (86 candidates, useless), discarded mutations (5, all guarded), bookkeeping-newer-than-its-bypassing-return (31, dominated by validation guards). **One true positive in the codebase, and it was the one already found and fixed.** The forge's skipped reset was singular, not the visible corner of a habit. Worth the cost to know: the alternative was carrying a vague suspicion about every tick function in the system, and that suspicion is now retired with evidence instead of lingering.
+
+## E.LOOP-L — the completion pass fired on a prose match, and prose is not a contract
+ARCH8 gap (c) says conditions are a fixed enum of four, so "did this step achieve its purpose?" can only be asked in those shapes. The instance was in code I shipped **today**: `build_recipe`'s `JumpIf` decides whether to run the completion pass by testing whether the publisher's message contains the substring `"was cut"`.
+
+Those are two different files with nothing holding them together. Rewording the publisher's message to "was truncated" — an edit that reads like copy-editing, that no reviewer would question, and that no test would fail — would silently stop the completion pass from ever firing and **reintroduce the defect that cost reading 7**. It is the same class again: a guard disabled by a change nobody would recognise as touching a guard.
+
+| | |
+| --- | --- |
+| Fix | One `TRUNCATION_MARKER` constant. Both publisher messages build from it and the recipe's condition reads it, so the two cannot drift. |
+| Test | Drives the real `publish_file_set` with a genuinely truncated set (asserted to actually truncate, or it proves nothing), checks the emitted message carries the marker, and checks the recipe takes its substring from the constant rather than a copy. |
+| Mutation | The recipe reverting to a literal copy: **killed**. Changing the constant itself: **survived — and that is the design working**, since it moves producer and consumer together. Equivalent by construction, which is exactly what a shared constant is for. |
+| Scope, honestly | This removes one fragile coupling. It does **not** close ARCH8 gap (c) — the engine still cannot ask "did this step achieve its purpose?" in general, and the completion pass is still a hand-rolled instance of that question. What changed is that this particular instance can no longer be broken by an innocent edit. |
+
+The forge's own "one more was cut" message was deliberately left alone: nothing matches it, so it is prose and not an interface. Making it a constant too would imply a contract that does not exist.

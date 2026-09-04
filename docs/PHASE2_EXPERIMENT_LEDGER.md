@@ -6170,3 +6170,27 @@ Found in the staging sweep: `ym curve` said *"No predictions resolved yet — 0 
 | Why it matters more after E.LOOP-G | My own change added `unjudged` — also neither `hit` nor `miss`. A mind whose judge is failing every time would now report **exactly** the same "No predictions resolved yet — 0 still open", hiding the failure completely. I made a blind spot bigger while fixing something else, which is worth stating plainly. |
 | The fix | Count the unscoreable verdicts and say them. The curve's calibration maths does not change — `unclear` and `unjudged` still never enter a hit-rate — only what the operator is told when the hit-rate cannot be computed yet. |
 | Kill criteria | With only `unclear`/`unjudged` predictions the message must name them and must not claim nothing resolved. With genuinely nothing stored it must still read sensibly. **With any `hit`/`miss` present the existing curve output must be byte-identical** — this is a report used to read the thesis, and changing a working number to fix a message would be a bad trade. |
+
+### E.G3 — refining the idle-gate claim: I was half right, and tested it
+I wrote above that "an idle-gated loop cannot be observed by poking it" and that my driving was
+suppressing knock. I then backed off the box for **thirteen minutes** and checked. The result:
+knock opportunities still **7**, evaluations still **9,865** — no new one. So the claim as written
+is not established.
+
+The loop's own policy line says it exactly: `cap:one-per-day 7, idle:600s 7`, and the code comment
+says *"Its opportunity is ONE IDLE STRETCH (keyed by the activity that opened it)"*. So an
+opportunity is not "any 600 s of quiet" — it is **one per stretch, and a stretch has to be opened
+by activity**. Both of my mental models were wrong in opposite directions:
+
+| What I assumed | What the policy actually says |
+| --- | --- |
+| Poking suppresses it (first claim) | Half true: activity does reset the timer, but activity is also what OPENS the stretch. |
+| Therefore silence produces it (the test) | False. Thirteen minutes of silence produced nothing, because no new stretch had been opened since the one already consumed. |
+
+The correct recipe is **activity, then quiet**: a conversation turn opens a stretch, ~600 s later it
+matures into exactly one opportunity. Continuous driving and continuous silence both yield zero,
+which is a genuinely awkward thing to instrument and worth writing down rather than rediscovering.
+
+Recording the failed test rather than only the corrected explanation: the first version of this
+entry sounded confident and had not been checked, and the thirteen-minute window is what showed it.
+

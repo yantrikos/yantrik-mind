@@ -796,6 +796,74 @@ print('this file was cut off mid";
         assert!(crate::publish_file_set("prose2", prose, false).is_err());
     }
 
+    /// E.CB2-B2 — a wrapping markdown fence is unwrapped, and a Markdown file keeps its own.
+    ///
+    /// `publish_page` already carries this lesson: a model asked for "only the HTML" wraps it in
+    /// a fence about half the time, and "the alternative is a prompt that has to win every time".
+    /// The file-set lane never got it and the prompt lost — a completion pass emitted a correct
+    /// `main.py` wrapped in a python fence, the fence was written verbatim, the file did not
+    /// parse, and the site never came up: 2/11 on a leg whose content was actually right.
+    #[test]
+    fn a_wrapping_fence_is_stripped_but_a_markdown_file_keeps_its_own() {
+        let q = "```";
+        let stream = format!("=== FILE: main.py{n}{q}python{n}print(1){n}{q}{n}=== FILE: notes.md{n}Intro line.{n}{n}{q}bash{n}echo hi{n}{q}{n}{n}Closing line.{n}", n = "\n", q = q);
+        let parsed = crate::fileset::parse_file_stream(&stream);
+        let by = |path: &str| {
+            parsed.entries.iter().find(|e| e.path == path).map(|e| e.content.clone()).unwrap_or_default()
+        };
+        // The wrapper goes and the CODE survives intact.
+        assert_eq!(by("main.py").trim(), "print(1)", "the wrapping fence was not stripped");
+        // A Markdown file that merely CONTAINS a fenced block keeps it: it does not both begin
+        // and end with one, which is exactly why the rule is narrow.
+        let notes = by("notes.md");
+        assert!(notes.contains(q), "a markdown file lost its own fenced block: {notes:?}");
+        assert!(notes.trim_start().starts_with("Intro line."), "mangled at the front: {notes:?}");
+        assert!(notes.trim_end().ends_with("Closing line."), "mangled at the end: {notes:?}");
+
+        // THE ONLY FILE IN A STREAM IS THE FINAL ONE, and the final file is built on a different
+        // path from the rest. This case exists because patching only the loop left exactly the
+        // motivating scenario -- a completion pass emitting ONE file -- still fenced.
+        let solo = format!("=== FILE: solo.py{n}{q}python{n}print(3){n}{q}{n}", n = "\n", q = q);
+        let sp = crate::fileset::parse_file_stream(&solo);
+        assert_eq!(
+            sp.entries[0].content.trim(),
+            "print(3)",
+            "the ONLY file in a stream is the final one and was left fenced: {:?}",
+            sp.entries[0].content
+        );
+
+        // Content that ENDS with a fence but does not OPEN with one is not wrapped either.
+        let tail = format!("=== FILE: tail.md{n}See below.{n}{q}{n}", n = "\n", q = q);
+        let tp = crate::fileset::parse_file_stream(&tail);
+        assert!(
+            tp.entries[0].content.trim_start().starts_with("See below."),
+            "a trailing fence is not a wrapper: {:?}",
+            tp.entries[0].content
+        );
+
+        // A lone fence line is not a wrapper around anything, and must survive untouched.
+        let lone = format!("=== FILE: lone.md{n}{q}{n}", n = "\n", q = q);
+        let lp = crate::fileset::parse_file_stream(&lone);
+        assert!(
+            lp.entries[0].content.contains(q),
+            "a lone fence line was eaten: {:?}",
+            lp.entries[0].content
+        );
+
+        // BOTH ends must be fences for it to be a wrapper. Content that OPENS with one and never
+        // closes is not wrapped -- it is a file that happens to start that way, or one that was
+        // cut -- and stripping its first line would silently delete real content. Found by a
+        // surviving mutant that dropped the closing-fence requirement.
+        let half = format!("=== FILE: half.md{n}{q}python{n}print(2){n}", n = "\n", q = q);
+        let hp = crate::fileset::parse_file_stream(&half);
+        assert!(
+            hp.entries[0].content.trim_start().starts_with(q)
+                && hp.entries[0].content.contains("print(2)"),
+            "an unclosed opening fence is not a wrapper and must be left alone: {:?}",
+            hp.entries[0].content
+        );
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

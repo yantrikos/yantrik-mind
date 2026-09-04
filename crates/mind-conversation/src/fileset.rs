@@ -258,6 +258,36 @@ pub struct ParsedSet {
 /// consistent with a cut-off generation and with a model that ended without one. It is reported as
 /// `unterminated` and kept; only the API's `finish_reason` could settle it, and this function does
 /// not have it.
+/// Strip ONE wrapping markdown fence from a file's contents.
+///
+/// `publish_page` already carries this lesson and states it plainly: *"A model asked for 'only the
+/// HTML' still wraps it in a ```html fence about half the time. Refusing that would fail the chain
+/// on a formatting habit, so unwrap it here — the alternative is a prompt that has to win every
+/// time."* The file-set lane never got it, and the prompt lost: a completion pass emitted a
+/// perfectly good `main.py` wrapped in ```python, the fence was written verbatim, the file did not
+/// parse, and the site never came up — 2/11 on a leg whose content was actually correct.
+///
+/// Deliberately narrow. It strips only when the FIRST non-empty line opens a fence and the LAST
+/// non-empty line is a bare closing fence, so a Markdown file that legitimately CONTAINS fenced
+/// blocks keeps every one of them: such a file does not both begin and end with one.
+fn unfence(content: &str) -> &str {
+    let trimmed = content.trim_matches('\n');
+    let mut lines = trimmed.lines();
+    let (Some(first), Some(last)) = (lines.next(), trimmed.lines().next_back()) else {
+        return content;
+    };
+    if !first.trim_start().starts_with("```") || last.trim() != "```" {
+        return content;
+    }
+    // A fence that opens and closes on one line is not a wrapper.
+    if trimmed.lines().count() < 2 {
+        return content;
+    }
+    let start = trimmed.find('\n').map(|i| i + 1).unwrap_or(0);
+    let end = trimmed.rfind("```").unwrap_or(trimmed.len());
+    trimmed[start..end].trim_end_matches('\n')
+}
+
 pub fn parse_file_stream(text: &str) -> ParsedSet {
     let mut entries: Vec<FileEntry> = Vec::new();
     let mut unterminated: Vec<String> = Vec::new();
@@ -272,7 +302,7 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
             if let Some((path, body)) = current.take() {
                 entries.push(FileEntry {
                     path,
-                    content: body,
+                    content: unfence(&body).to_string(),
                 });
             }
             saw_marker = true;
@@ -296,9 +326,13 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
         }
     }
     if let Some((path, body)) = current.take() {
+        // THE FINAL FILE IS UNFENCED TOO. It is built here rather than in the loop above, and
+        // patching only the loop left the last file in a stream fenced — which is exactly the case
+        // that motivated the fix: a completion pass emitting ONE file makes that file the final
+        // one. Found by a mutant that survived because the assertion could not reach this path.
         entries.push(FileEntry {
             path,
-            content: body,
+            content: unfence(&body).to_string(),
         });
     }
     ParsedSet {

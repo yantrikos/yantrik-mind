@@ -6424,3 +6424,24 @@ The one number that does separate — p8 having a single in-function load where 
 **So E.WIN3 is blocked on a decision already open**: `rustpython-parser` (DECISIONS_WAITING item 5), the same dependency that would restore the syntax check E.LOOP-I2 gives up. That is now two pieces of T1 value waiting on one decision, which is worth knowing when it gets weighed.
 
 The alternative remains execution, which the cb2n container cannot do — no user namespaces.
+
+### E.G3 — CLOSED: the knock gate needs PRESENCE, and my own driving made it unreachable
+Third hypothesis, and this one holds all the way down. The two I tested and recorded as wrong were both looking at the wrong term:
+
+```rust
+let idle_ok = present && !quiet_now && idle_stretch;   // loops.rs:436
+```
+
+**`present` was always false**, and nothing about idleness or the daily cap mattered. `has_presence()` is `telegram_reachable() || console_present()`; staging is headless so there is no Telegram, and `console_present()` is `has_notice_queue() && console_view_recent()` — someone must actually be *looking*.
+
+**And my own method guaranteed it stayed false.** The design distinguishes two registrations: a **user turn** moves the idle clock, while a **machine view** — the cockpit's nine read-only GETs, allowlisted exactly in `is_machine_view` — moves the *view* stamp without touching idle. That is precisely so a watcher can be present and idle at once, which is the state knock requires. But the ctl `/cli` endpoint dispatches through `cli_dispatch`, the **user** path. So every command I sent all evening counted as a user turn: it reset the idle clock and never marked presence. **The two conditions were unsatisfiable simultaneously by the only tool I was using.**
+
+| what I claimed | what was true |
+| --- | --- |
+| "my driving suppresses it" | Half right for the wrong reason — driving did reset idle, but presence was the binding term and was never satisfied at all |
+| "activity then quiet will produce one" | No: `/cli` activity marks no presence, so quiet after it changes nothing |
+| (untested) "the daily cap is spent" | No: all 9,865 evaluations exited at `no_packets`, so no knock was ever delivered to spend it |
+
+**Where it now stands.** The chain is fully mapped and one link is missing: packet ✓ (E.G3's calendar → night shift → packet), idle ✓, **presence ✗**. Presence needs a machine view from the web cockpit, and `/api/loops`, `/api/skills`, `/api/orders` all return **401** — operator auth, a paired device. That is a real authentication boundary and not one to work around to make a measurement convenient.
+
+**So Phase G is blocked on pairing a device to staging's cockpit** — a small, concrete ask, and a far better state than "two hypotheses, both wrong". Filed as a decision.

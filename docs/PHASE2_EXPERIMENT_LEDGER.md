@@ -7320,3 +7320,22 @@ With production's `unfence` applied, n=5 per arm:
 **Also retired:** the one signal I salvaged from the void run — told returning a file 5/5 against control's 2/5 — is gone. In the corrected run **both arms returned a file 5/5**. That difference was an artefact of the broken extractor too, and I had already written it down as surviving. It did not survive.
 
 **A hypothesis worth testing rather than asserting:** the told prompt is materially longer, and it instructs the model to "rewrite that file", which may push it toward regenerating from scratch rather than editing — a bigger, riskier operation on a 105-line file. That is a guess. n=20 per arm is running to give the comparison a sample size that can carry a conclusion.
+
+### E.REPAIR1 — n=20 REVERSES n=5, and the prediction holds after all
+
+| arm | repaired | rate |
+| --- | --- | --- |
+| **told** — the defect named as `write_files` emits it | **9/20** | **45%** |
+| **control** — same prompt, no defect named | **3/20** | **15%** |
+
+**Naming the defect roughly TRIPLES the repair rate.** The preregistered prediction — *"the told arm repairs more often than the control"* — is confirmed at a sample size that can carry it. At n=5 the same comparison read 2/5 vs 4/5 and pointed the other way; the control's 4/5 was a lucky run against a true rate near 15%.
+
+**A rough sense of the strength, stated rather than dressed up:** a difference of 30 points with n=20 per arm sits near two standard errors (~p ≈ 0.03 two-tailed). Real, and not overwhelming. It should not be quoted as a precise effect size.
+
+**The mechanism is visible in the run log.** Several control runs returned **no file at all** in 0.5–2.6 s — the model looked, saw nothing it was told was wrong, and took the prompt's own instruction to *"output nothing at all"*. So the finding's first job is not to explain the bug; it is to **make the model act**. Without it the review often declines to touch anything.
+
+**And the honest limit: 45% is not good.** Even when handed the exact error, the exact line, and the likely cause, the repair fails more often than it succeeds. So the five checks are worth having — they triple the odds — and the review step is the weak link, not the detection. That is the opposite of where I have been spending the day's effort, and it is measured rather than argued.
+
+**What this cost me twice today.** n=5 misled me on thinking levels (E.THINK4, a cell varying 2.7x) and again here, in the direction of concluding my own work was worthless. Both times the fix was more samples, and both times the samples were cheap — 40 calls, eight minutes, no spend. **Cheap measurement is not a reason to skip repetition; it is the reason repetition is affordable.**
+
+**Next, and it follows from the mechanism rather than from taste:** the finding currently says *"Rewrite that file"*, which asks for a whole 105-line regeneration. The obvious variant asks for the smallest edit that fixes the named line. That is a testable A/B on the same harness — same artifact, same n — and it is the cheapest available lever on a 45% number.

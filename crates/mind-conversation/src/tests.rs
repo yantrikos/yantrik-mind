@@ -15549,3 +15549,52 @@ async fn stale_route_finding_reaches_the_write_message_and_is_absent_when_clean(
         "a handler that reads on request must carry no findings block: {ok}"
     );
 }
+
+/// E.SYNTAX1 WIRING — kill criterion 5: the finding must reach the step that can act on it.
+///
+/// Gated on `YM_SANDBOX_TESTS=1` because it needs a working sandbox, which a Windows dev box does
+/// not have. It is deliberately NOT written as "skip if the sandbox is unavailable": that shape
+/// passes vacuously wherever it matters least. Instead the first assertion proves the sandbox
+/// answered at all, so a broken environment fails loudly rather than quietly.
+#[tokio::test]
+async fn unparseable_python_reaches_the_write_message_and_is_absent_when_clean() {
+    if std::env::var("YM_SANDBOX_TESTS").ok().as_deref() != Some("1") {
+        return;
+    }
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+
+    // The shape that actually shipped: a JavaScript template literal inside a python file.
+    let broken = "=== FILE: app.py\nimport json\n\n\ndef render(d):\n    return f\"${Object.entries(d).map(([a,b])=>a).join(',')}\"\n";
+    let msg = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "synbroken", "stream": broken}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        msg.contains("not valid Python"),
+        "the sandbox must have answered AND the finding must be in the write message — if this \
+         fails with no finding at all, the sandbox is not working here and the test proved \
+         nothing: {msg}"
+    );
+    assert!(
+        msg.contains("DEFECTS FOUND MECHANICALLY") && msg.contains("app.py"),
+        "the review round must be handed the file name under the findings header: {msg}"
+    );
+
+    // A healthy python file: not a byte of the message changes.
+    let clean = "=== FILE: app.py\nimport json\n\n\ndef render(d):\n    return json.dumps(d)\n";
+    let ok = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "synclean", "stream": clean}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        !ok.contains("DEFECTS FOUND MECHANICALLY"),
+        "a parsing file must carry no findings block: {ok}"
+    );
+}

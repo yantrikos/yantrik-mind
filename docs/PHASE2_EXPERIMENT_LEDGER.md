@@ -7339,3 +7339,31 @@ With production's `unfence` applied, n=5 per arm:
 **What this cost me twice today.** n=5 misled me on thinking levels (E.THINK4, a cell varying 2.7x) and again here, in the direction of concluding my own work was worthless. Both times the fix was more samples, and both times the samples were cheap — 40 calls, eight minutes, no spend. **Cheap measurement is not a reason to skip repetition; it is the reason repetition is affordable.**
 
 **Next, and it follows from the mechanism rather than from taste:** the finding currently says *"Rewrite that file"*, which asks for a whole 105-line regeneration. The obvious variant asks for the smallest edit that fixes the named line. That is a testable A/B on the same harness — same artifact, same n — and it is the cheapest available lever on a 45% number.
+
+### E.VERIFY1 — PREREG: the review's own verification is discarded, and I found it by reflecting on my own loop
+Pranab: *"reflect on yourself on how you make things work end to end… you already have your code locally to inspect."* Doing that produced a concrete defect rather than a principle.
+
+**How I actually repair something**, from this session's own record: read the file, make a **surgical edit** (exact old string → new string, everything else untouched), **run it**, read the failure, edit again — and **verify after fixing**, which is why a mutation that does not visibly apply gets discarded rather than counted.
+
+**What the build lane does**, read from `delegate.rs`:
+
+```
+… review Think → write_files → store_as "reviewed_url" → Notify "built — {{project_url}}"
+```
+
+**Nothing reads `reviewed_url`.** So when the review rewrites a file, `write_files` runs all five mechanical checks over the repaired output — and **E.REPAIR1 measured that repair still failing 55% of the time** — and every one of those findings lands in a variable no step consumes. The verification is performed and thrown away.
+
+**Two harms, and the second is the one that reaches Pranab.**
+1. The checks that just cost a sandbox spawn each are wasted on the review's output.
+2. The Notify reports `{{project_url}}`, which after this morning's D2 fix holds the **pre-review** state. So the owner is told *"built — <url>"* about an artifact the system has just detected is still broken. **The mind knows and does not say.**
+
+This is D2 exactly — a write whose message goes somewhere nothing reads — surviving one step further down the same recipe. I fixed it at the completion pass this morning and did not look at the step after it.
+
+**KILL CRITERIA.**
+1. The review write's message must reach the Notify, so a still-broken artifact is reported as such.
+2. All three branches safe, as with D2: review skipped, review succeeded, review errored (`ErrorAction::Skip` advances **without** storing, so the earlier message survives).
+3. A clean build's Notify must be **byte-identical** to today's — no new noise on the healthy path.
+4. Watched to FAIL, with the mutation confirmed present first.
+5. It must carry the earlier message forward (`prior`), or fixing the staleness makes it lossy — the same trap as D2.
+
+**Deliberately NOT in this slice: a second repair round.** E.REPAIR1 says one round repairs 45%; a second could plausibly reach ~70%, but that is one more model call on every build and a bigger design decision. This slice makes the failure **visible**, which is the precondition for deciding whether to spend a call on it.

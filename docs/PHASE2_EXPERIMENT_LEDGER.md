@@ -6008,3 +6008,20 @@ The table was derived from the Mind's 35 T1/T3 files. Deriving a checker's knowl
 Those 651 files contain 24 distinct imports of the seven table modules, and exactly **three symbols the 35-file corpus never contained**: `ThreadingHTTPServer`, `urlencode`, `urlunparse`. All three were already in the table, because the table lists each module's complete export set rather than the subset observed. So across 651 real files the check flags **exactly one line — the known defect — with zero false positives.**
 
 All four new lines are now pinned in the test corpus, so a later trim of the table cannot quietly lose them. This is the validation the scorer taught me to do *before* claiming a checker works, rather than after a real artifact embarrasses it: the corpus a tool is built from and the corpus it is judged on must not be the same one.
+
+### E.LOOP-I2 — SCOPE CORRECTION: it is a strict subset of what E.LOOP-I sized
+E.LOOP-I's sizing says **2 flagged, 0 false positives** across 11 artifacts: p4 (the `TCPServer` import) and v3 (**an unparseable file**). I have been quoting that sizing while shipping something that catches only the first.
+
+The reason is structural, not an oversight to fix later: E.LOOP-I reached the stdlib through `python3`, which also gave it `compile()` — a real syntax check for free. `pyimports.rs` examines `from X import Y` lines as text. **It cannot detect a syntax error at all.** A file that does not parse produces no finding, silently, which is the safe direction but is one of the two measured defects lost.
+
+So the honest accounting of what shipped versus what was sized:
+
+| | E.LOOP-I (python3) | E.LOOP-I2 (shipped) |
+| --- | --- | --- |
+| Unresolvable stdlib import (p4) | caught | **caught** |
+| File does not parse (v3) | caught | **missed** |
+| Runtime dependency on the mind | `python3` | none |
+
+The mean-improvement figure I quoted (**9.0 → ~10.1**) was always p4 alone, so that number stands. What does not stand is any implication that this ships everything E.LOOP-I sized.
+
+**The option, flagged rather than taken.** A Python parser as a Rust crate (`rustpython-parser` and similar) would restore the syntax check with no runtime binary — trading a *runtime* dependency on the box for a *build-time* dependency in the workspace. That is a genuinely different and milder trade, and it may well be the right one. It is still a dependency decision on a system whose build already needs `clang` and `libspeechd-dev` installed by hand on each box, and the pattern this session has been to cost dependency decisions and leave them to Pranab and Codex rather than take them at the end of a long stretch of unreviewed work.

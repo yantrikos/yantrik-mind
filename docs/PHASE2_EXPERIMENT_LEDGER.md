@@ -7422,3 +7422,32 @@ Running it revealed **24 tests, 18 passing, SIX FAILING** — all assertion drif
 2. **The search found itself.** My first attempt at the un-wiring mutation hit the last match in the file — the assertion's own string literal inside the test module — and "failed" with `left: 0` for the wrong reason. Discarded and redone against a real site; the test now cuts the source at `#[cfg(test)]` first. Identical in shape to `pgrep -f` matching its own shell, which is already a memory.
 
 Regression: 38 lib tests, 32 pass, the same 6 pre-existing failures, none new. `yantrik-companion` and `yantrik-mind` both build.
+
+### E.REPAIR3 — PREREG: a bounded second repair round, taken only when findings remain
+**Does this already exist?** No. `build_recipe` has exactly one review round; `ModelCapabilityProfile.max_repair_attempts` exists per model but nothing in the recipe consults it. `grep` for a second review or a loop over findings returns nothing.
+
+**Why now, and why this.** E.REPAIR1/2 measured the review repairing **45–50%** of named defects (9/20, 10/20, two independent runs). So more than half of repairs still ship broken. E.VERIFY1 made that *visible* — the review write now stores to `project_url`, so the findings header is present in the variable when a repair failed. That is the precondition a conditional second round needs, and it did not exist until this afternoon.
+
+It is also the one thing my own loop does that the Mind's does not: **iterate**. Fix → verify → fix again. Not indefinitely — bounded.
+
+**Design, following the completion pass's own pattern exactly.** After the review write:
+```
+JumpIf  Not(VarContains{ project_url, FINDINGS_MARKER })  → the Notify
+Think   second review — same prompt, told the first repair did not clear the findings
+Tool    write_files → project_url, prior = {{project_url}}
+Notify
+```
+`FINDINGS_MARKER` is a **shared constant**, used by both the write step's header and the JumpIf, mirroring `TRUNCATION_MARKER` and its test — the two sides cannot drift.
+
+**Expected gain, stated before measuring:** a second pass at ~45% on the 55% that remain ≈ **~70% total**. Not verified here; this slice is the mechanism, and the rate is a later measurement on the same harness.
+
+**KILL CRITERIA.**
+1. **A clean build runs exactly the steps it runs today.** No findings → the JumpIf skips straight to the Notify. Asserted on the recipe structure, not assumed.
+2. The second round runs **only** when the findings header is present after the review write.
+3. **Bounded**: exactly one extra round, never a loop. No step may jump backward.
+4. Header and JumpIf take the marker from **one constant**; a literal copy in either place fails a test.
+5. The JumpIf's target is the Notify — asserted by index, because an off-by-one here silently skips the round or double-runs it.
+6. Watched to FAIL, mutation confirmed present first.
+7. Full workspace suite green.
+
+**Not claimed:** the 70%. The mechanism ships; the number is E.REPAIR4.

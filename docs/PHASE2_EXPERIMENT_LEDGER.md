@@ -5903,3 +5903,12 @@ The verdicts were right and my parser was wrong. `check_t3.py` declares six of i
 | After the fix | The same real verdict scores **`T3: 10/10`**, trustworthy, exit 0. |
 
 The lesson is not "test against real data" in the abstract. It is that synthetic cases share the author's misconception: mine invented their own check vocabulary (`a`, `b`, `c`), so no number of them could ever discover that a real checker declares names a second way. The real file was the only thing that knew.
+
+### E.CB2-S3 — the residual this leaves, named rather than fixed
+The T3 failure was caught because the parser missed names that the verdict **did** carry, so they showed up as foreign. The symmetric case is silent: if the parser misses a name AND the run never reported it either (the checker crashed before reaching it), the denominator is simply too small and nothing flags anything. The score would read confidently and be wrong in the generous direction — the very defect `score.py` was written to remove.
+
+This is the list-bounded guard problem again: **a completeness check is only as complete as its list**, and here the list is inferred from source by pattern. Two ways out, neither taken today because both are a design decision about where authority lives rather than a bug fix:
+- the checker DECLARES its full check set as its first action, before any work, so a crash cannot suppress it — authoritative and crash-proof, but changes the verdict schema; or
+- `MANIFEST.json` declares the expected names per task — consistent with the manifest already being the authority for the taxonomy, but introduces drift between manifest and checker.
+
+Recorded so the next person does not read `score.py`'s confident docstring and assume the denominator is proven. It is *derived*, and derivation has a failure mode.

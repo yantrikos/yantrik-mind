@@ -6139,3 +6139,24 @@ ym packets
 **Where it stands.** The precondition that blocked 9,865 consecutive evaluations is now satisfied for the first time. Agreement is still `UNCOMPUTABLE` because no knock evaluation has run since — the loop is gated by an idle gate and a daily cap (`considered: packets, receptivity, daily-cap`), so evaluations come in admitted windows rather than continuously. **Not yet a result**: the claim is that the blocker is removed, not that the measurement exists. It will show up as a `knock-receptivity` sample that does not exit at `no_packets`.
 
 The lesson is the same one this whole session keeps teaching: I reasoned my way to "this needs a decision from someone else" while the system's own help text was telling me which command to run.
+
+### E.G3 — the observer suppresses the phenomenon: knock is IDLE-GATED
+A knock evaluation only happens when the loop is admitted, and admission is
+`try_admit_background(now, idle_secs * 1000, BackgroundPass::Engagement)` — it requires a stretch
+with **no conversation activity**. My `/cli` driving includes chat turns (the bare `attention`
+command routed to chat and was handled as one), and every turn resets that timer.
+
+So the act of watching for a knock evaluation can be what prevents it. That explains the shape of
+what I saw: 9,865 evaluations spanning 14.9 h — a busy period that ended — and then **zero new ones
+across ninety seconds of me repeatedly querying the box**, while the `headless-cadence` sample, which
+ticks on a fixed schedule and is not idle-gated, advanced normally (117 → 119).
+
+Worth stating as a rule for this system, because it applies to every idle-gated loop, not just
+knock: **an idle-gated loop cannot be observed by poking it.** The only way to see one run is to
+stop touching the box and come back. Instrumentation that requires activity and phenomena that
+require quiet are mutually exclusive here, and a session that drives continuously will conclude the
+loop is dead when it is merely never admitted.
+
+This also retro-explains a number I reported earlier without understanding it: the loop ledger shows
+`knock: opportunities 7 · acted 7` in 24 h against 9,865 shadow consults. Seven admitted windows,
+each running many evaluations — not seven evaluations. I read that as a small number and moved on.

@@ -283,3 +283,6 @@ deliberately and the tests went stale, is a product question — and deciding it
 produced a dark suite in the first place. What I would do if told: fix toward the tests unless a
 commit message says otherwise, because a test is a recorded intention and a drifted constant is not.
 **Blocking:** extending `ModelCapabilityProfile` cleanly.
+
+## 9. The coder's QwenCloud token plan has lapsed — repurchase, or switch provider? (2026-09-04, E.CODER403)
+Every coder call returns `403 AccessDenied.Unpurchased` on `token-plan.ap-southeast-1.maas.aliyuncs.com` for every model tried; the same key ran 1,279 `qwen3.8-max` turns on 2026-08-16. Options: (a) renew the plan — nothing to change; (b) `YM_CODER_PROVIDER=minimax` (`MINIMAX_API_KEY` is present) — MiniMax-M2 spend; (c) `YM_CODER_PROVIDER=claude` (`CLAUDE_CODE_OAUTH_TOKEN` present) — Anthropic spend on your account. Until then the coder lane on staging is dead and, worse, reports jobs as ✅ done. **Spend is yours; the false "done" is mine and is filed as a defect regardless of which you pick.**

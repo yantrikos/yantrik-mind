@@ -5965,3 +5965,16 @@ Those are two different files with nothing holding them together. Rewording the 
 | Scope, honestly | This removes one fragile coupling. It does **not** close ARCH8 gap (c) — the engine still cannot ask "did this step achieve its purpose?" in general, and the completion pass is still a hand-rolled instance of that question. What changed is that this particular instance can no longer be broken by an innocent edit. |
 
 The forge's own "one more was cut" message was deliberately left alone: nothing matches it, so it is prose and not an interface. Making it a constant too would imply a contract that does not exist.
+
+### E.LOOP-F/G — CALIBRATION: reachable and tested, but NOT observed in the wild
+After deploying, I went looking for the damage on the live staging mind — a prediction stuck `open` past its deadline would be a foresight subject that had been silently blinded, and would turn a reasoned defect into a measured one. Queried read-only against `/var/lib/yantrik-mind/mind.db`:
+
+- **no `predictions` key at all** — foresight has never stored one on that box
+- **no `forge_ventures` key** — no venture has ever been forged there
+- 22 profile rows total; it is a headless canary with a narrow workload
+
+So there is **no observed instance of either failure**. Both defects are proven reachable by reading the code and by tests that were watched to fail, and neither has been seen to happen to anyone.
+
+That matters for how I have been describing them. E.LOOP-G's entry says a transient error *"silently and permanently blinded foresight on that subject"* — accurate as a statement about what the code does, and I have no evidence it ever did. The correct claim is the conditional one: **a single transient judge error WOULD have blinded foresight on that subject permanently, and nothing would have reported it.** The fix is still right — an unbounded retry that needs a human to notice is worth removing before it costs something rather than after — but "found and fixed a live outage" and "closed a reachable hole before it fired" are different claims, and only the second is supported.
+
+The same reading applies to E.LOOP-F. This is the third time today the honest scope has been narrower than the first telling (after the 40% 5xx from n=5, and the scorer's blast radius), and the pattern in all three is identical: a true mechanism, an unmeasured impact. Establishing the mechanism is the easy half and it is the half that feels like the finding.

@@ -6160,3 +6160,13 @@ loop is dead when it is merely never admitted.
 This also retro-explains a number I reported earlier without understanding it: the loop ledger shows
 `knock: opportunities 7 · acted 7` in 24 h against 9,865 shadow consults. Seven admitted windows,
 each running many evaluations — not seven evaluations. I read that as a small number and moved on.
+
+## E.FS1 — the learning curve reports "nothing happened" when foresight worked (PREREGISTERED)
+Found in the staging sweep: `ym curve` said *"No predictions resolved yet — 0 still open"* immediately after a prediction had been made, evidence gathered, a judge called, and an honest verdict recorded.
+
+| Field | Value |
+| --- | --- |
+| The mechanism | `calibration_view` builds `resolved` from `hit|miss` only, which is **correct** — an `unclear` verdict carries no calibration signal and must not enter a hit-rate. But when that list is empty it prints "No predictions resolved yet", and counts `open` as the only other category. A prediction that resolved `unclear` is in neither bucket, so the operator is told nothing was predicted **and** nothing is pending. |
+| Why it matters more after E.LOOP-G | My own change added `unjudged` — also neither `hit` nor `miss`. A mind whose judge is failing every time would now report **exactly** the same "No predictions resolved yet — 0 still open", hiding the failure completely. I made a blind spot bigger while fixing something else, which is worth stating plainly. |
+| The fix | Count the unscoreable verdicts and say them. The curve's calibration maths does not change — `unclear` and `unjudged` still never enter a hit-rate — only what the operator is told when the hit-rate cannot be computed yet. |
+| Kill criteria | With only `unclear`/`unjudged` predictions the message must name them and must not claim nothing resolved. With genuinely nothing stored it must still read sensibly. **With any `hit`/`miss` present the existing curve output must be byte-identical** — this is a report used to read the thesis, and changing a working number to fix a message would be a bad trade. |

@@ -15175,3 +15175,50 @@ fn the_forge_syntax_check_reads_its_input_from_the_sandbox_not_the_host() {
          that directory, so the check can only ever fail: {arm:.400}"
     );
 }
+
+/// E.FS1 — a verdict that carries no calibration signal is still a verdict.
+///
+/// `ym curve` reported "No predictions resolved yet — 0 still open" on staging immediately after a
+/// prediction had been made, evidence gathered, a judge called and an honest `unclear` recorded.
+/// The hit-rate maths was right (an `unclear` must never enter a hit-rate); the sentence told the
+/// operator that a working faculty had done nothing. E.LOOP-G's `unjudged` makes it worse: a mind
+/// whose judge keeps failing would print the identical line and hide the failure.
+#[tokio::test]
+async fn the_learning_curve_names_verdicts_that_cannot_score() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+
+    let pred = |id: i64, status: &str| {
+        serde_json::json!({
+            "id": id, "subject": format!("s{id}"), "domain": "d", "claim": "c",
+            "threshold": "t", "confidence": 0.7, "made_ms": 0_i64,
+            "resolve_by_ms": 1_i64, "status": status,
+        })
+    };
+
+    // A judged-but-undecidable verdict, and one the judge never answered at all.
+    conv.save_predictions(&[pred(1, "unclear"), pred(2, "unjudged"), pred(3, "open")])
+        .await;
+    let out = conv.calibration_view().await;
+    assert!(
+        out.contains("UNCLEAR") && out.contains("UNJUDGED"),
+        "both unscoreable verdicts must be named, or a failing judge is invisible here: {out}"
+    );
+    assert!(
+        !out.contains("No predictions resolved yet"),
+        "claiming nothing resolved over the top of two recorded verdicts is the defect: {out}"
+    );
+    assert!(out.contains("1 still open"), "the open count must survive: {out}");
+
+    // THE PROPERTY THAT MUST NOT MOVE: with real hits and misses, the curve is what it always was.
+    conv.save_predictions(&[pred(4, "hit"), pred(5, "miss")]).await;
+    let scored = conv.calibration_view().await;
+    assert!(
+        !scored.contains("No predictions have scored yet") && !scored.contains("UNCLEAR"),
+        "once anything scores, this is the ordinary learning curve and must be untouched: {scored}"
+    );
+}

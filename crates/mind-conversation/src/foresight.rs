@@ -1462,11 +1462,33 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             })
             .collect();
         if resolved.is_empty() {
-            let open = preds
-                .iter()
-                .filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == "open")
-                .count();
-            return format!("No predictions resolved yet — {open} still open. The learning curve starts once deadlines pass (or `ym resolve` to grade due ones now).");
+            let count_of = |want: &str| {
+                preds
+                    .iter()
+                    .filter(|p| p.get("status").and_then(|x| x.as_str()).unwrap_or("open") == want)
+                    .count()
+            };
+            let open = count_of("open");
+            // E.FS1: a verdict that carries no calibration signal is still a verdict, and saying
+            // "no predictions resolved" over the top of one is how a working faculty reads as an
+            // idle one. `unclear` means the judge answered and could not tell; `unjudged` means it
+            // never answered at all (E.LOOP-G) — a mind whose judge keeps failing would otherwise
+            // report this line unchanged and hide the failure completely.
+            let (unclear, unjudged) = (count_of("unclear"), count_of("unjudged"));
+            let mut note = String::new();
+            if unclear > 0 {
+                note.push_str(&format!(
+                    " {unclear} resolved UNCLEAR — judged, but the evidence did not decide it, so                      they carry no calibration signal."
+                ));
+            }
+            if unjudged > 0 {
+                note.push_str(&format!(
+                    " {unjudged} closed UNJUDGED — the judge could not be reached, which is a                      failure to measure rather than a result."
+                ));
+            }
+            return format!(
+                "No predictions have scored yet — {open} still open.{note} The learning curve                  starts once deadlines pass (or `ym resolve` to grade due ones now)."
+            );
         }
         use std::collections::BTreeMap;
         let mut by_domain: BTreeMap<String, Vec<bool>> = BTreeMap::new();

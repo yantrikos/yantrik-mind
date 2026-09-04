@@ -6795,3 +6795,29 @@ Nothing in between — **no healthy artifact has even two consecutive identical 
 Full workspace suite green.
 
 **Three checks now exist that all say the same thing in different languages** — E.LOOP-I2 (an import that cannot resolve), E.ENTRY1 (an entry point that runs nothing), E.REPEAT1 (a generation that looped) — and each was built only after a probe separated real artifacts. Together they cover three of the four ways r7-era artifacts died. The fourth, a truncation inside a triple-quoted template (`out-ds-pilot/mind_T1/server.py`), is **already covered**: that run's message said *"the stream ended without a newline, so server.py may be incomplete"* and named the right file. Checked before proposing anything, which is the E.FENCE1 lesson applied.
+
+### E.DRIVE-R8 — staging deploy driven, and it corrects what I told Pranab about execution
+Deployed `618713c` to staging (26 commits, backup + health check + rollback armed). Then **drove** it rather than reasoning about it.
+
+**Deploy is healthy.** Two ctl calls return HTTP 200 with real data.
+
+**A defect in my own driving, worth recording because it cost a model call loop.** My first health check POSTed `{"command":"loops_json"}` and timed out at 30 s. `/cli` takes the **raw body** — `conv.cli_dispatch(&body, …)` — so the mind received the JSON string as a user line and started an agent loop over it: `discover_tools`, `recall`, `recall`. `loops_json` *is* on the `is_machine_view` allowlist, which is exactly the point `PROPOSAL_ctl_registration_kind.md` makes: ctl dispatches through the USER path and the allowlist never applies there. **The proposal names two harms; this is a third and sharper one — an allowlisted machine verb sent to ctl is not merely misattributed, it is INTERPRETED, spending model calls and never answering.** My memory recorded "POST to :8077/cli with the console token" and never the payload shape; corrected.
+
+**The build lane works end to end on the new binary.** `ym delegate entrycheck: …` (a T1-shaped brief) produced `index.html`, `server.py`, `run.sh` in 90 s. The artifact **parses, has an `if __name__ == "__main__":` guard, and calls `serve_forever()`** — the entry point r7's T1 lacked. Run in a temp copy: `GET /` → 200, `POST /submit` → 200, and `data/leads.json` contained the submitted lead. The deliverable actually works.
+
+**Today's three checks were silent, and correctly so.** No `DEFECTS FOUND MECHANICALLY` block appeared, which is the inertness claim made in each module's header, now observed on a real build rather than asserted.
+
+### THE CORRECTION THAT MATTERS — the Mind's sandbox works fine outside the benchmark
+I told Pranab that closing the execution gap "means an operator declaring *this process is already inside a disposable boundary*, which disables a safety property, and is Pranab's decision." **That framing is wrong for everything except the benchmark.**
+
+Measured on staging, running the EXACT command `Sandbox::run` builds:
+
+```
+timeout -s KILL 10 unshare --user --map-root-user --fork --pid --mount-proc --net --uts --ipc \
+  /bin/sh -euc "cd <scratch>; exec prlimit --cpu=5 --as=... --nproc=64 --fsize=... --nofile=256 -- /bin/sh run.sh"
+→ ok, exit 0
+```
+
+`max_user_namespaces` is 2147483647 and `timeout`, `unshare` and `prlimit` are all present. **`Sandbox::available()` returns true here.** The Mind can already execute code safely on a real deployment; the capability exists, is designed, is bounded, and the build lane simply never calls it. Only the cb2 benchmark container refuses unprivileged userns — and there `available()` correctly returns false and callers correctly refuse.
+
+**So the decision is much smaller than I put to him.** Adding an execute-and-fix step to `build_recipe` needs **no new capability, no safety property disabled, and nothing from Pranab about containment**. It would work on staging and prod today and would correctly skip in the benchmark container. What it still needs is a security review of *running model-authored code inside the existing sandbox* — which `delegate.rs` already flags as "its own slice with its own security review" — but that is a review of USING a guard, not of removing one. Recorded as a correction because I put a bigger decision to Pranab than the evidence supported.

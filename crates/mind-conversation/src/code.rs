@@ -1404,8 +1404,14 @@ impl super::ConversationEngine {
                     }
                     if fname.ends_with(".py") {
                         if let Some(sb) = &self.sandbox {
-                            let check = format!("import ast, sys\nsrc = open({:?}).read()\ntry:\n    ast.parse(src)\n    print('OK')\nexcept SyntaxError as e:\n    print('SYNTAX:', e)", fp.to_string_lossy());
-                            match sb.run_python(&check).await {
+                            // E.FORGE1: read the artifact from the SCRATCH DIR, never from the host. This
+                            // used to `open()` an absolute path under the mind's state dir -- the one
+                            // directory the sandbox masks with a tmpfs on purpose -- so the check raised,
+                            // and every python file the forge ever built was reported FAIL for a reason
+                            // that had nothing to do with the file.
+                            let src = std::fs::read_to_string(&fp).unwrap_or_default();
+                            let check = "import ast\nsrc = open('target.py').read()\ntry:\n    ast.parse(src)\n    print('OK')\nexcept SyntaxError as e:\n    print('SYNTAX:', e)";
+                            match sb.run_python_with(check, "target.py", &src).await {
                                 Ok(r) if r.exit_code == 0 && !r.render().contains("SYNTAX") => {
                                     results.push(format!("PASS: {fname} parses"))
                                 }

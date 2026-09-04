@@ -15145,3 +15145,33 @@ async fn import_findings_reach_the_review_and_are_absent_when_clean() {
          earlier reading stops being comparable: {clean}"
     );
 }
+
+/// E.FORGE1 — the forge's syntax check must never reach for a host path.
+///
+/// It used to `open()` an absolute path under the mind's state dir from INSIDE the sandbox — the
+/// one directory the sandbox masks with a tmpfs on purpose — so the check raised and every python
+/// file the forge built was reported FAIL for a reason that had nothing to do with the file. Found
+/// on staging, because `Sandbox::available()` is false here and nothing local can execute it. This
+/// guard is what keeps it from coming back: the artifact goes IN as an input file.
+#[test]
+fn the_forge_syntax_check_reads_its_input_from_the_sandbox_not_the_host() {
+    let src = include_str!("code.rs");
+    let arm = src
+        .split("if fname.ends_with(\".py\")")
+        .nth(1)
+        .expect("the python branch of the forge test stage must still exist");
+    let arm = &arm[..arm.len().min(1400)];
+    assert!(
+        arm.contains("run_python_with(check, \"target.py\", &src)"),
+        "the artifact must be passed INTO the sandbox as an input file: {arm:.400}"
+    );
+    assert!(
+        arm.contains("open('target.py')"),
+        "the check must read the scratch-dir copy, not a host path: {arm:.400}"
+    );
+    assert!(
+        !arm.contains("fp.to_string_lossy()"),
+        "interpolating the host path back into the check reintroduces E.FORGE1 — the sandbox masks \
+         that directory, so the check can only ever fail: {arm:.400}"
+    );
+}

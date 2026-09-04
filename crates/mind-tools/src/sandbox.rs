@@ -133,6 +133,27 @@ impl Sandbox {
         .await
     }
 
+    /// Run `code` with ONE extra input file beside it in the scratch dir.
+    ///
+    /// The header above promises that "code + inputs live in a throwaway scratch dir passed as
+    /// FILES", but nothing exposed a way to pass an input, so callers reached for an absolute host
+    /// path instead — which the sandbox masks on purpose. The forge's syntax check did exactly
+    /// that and therefore FAILED every python file it built, blaming the artifact for its own
+    /// plumbing. Inputs go in beside the program now.
+    pub async fn run_python_with(
+        &self,
+        code: &str,
+        input_name: &'static str,
+        input: &str,
+    ) -> std::io::Result<ExecResult> {
+        self.run(
+            Limits::default(),
+            vec![("prog.py", code.to_string()), (input_name, input.to_string())],
+            "exec python3 -I -S -B prog.py",
+        )
+        .await
+    }
+
     pub async fn run_rust(&self, code: &str) -> std::io::Result<ExecResult> {
         // Compile (std-only, offline) then run. Compile errors go to stderr via the captured stream.
         self.run(

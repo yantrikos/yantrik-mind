@@ -6833,3 +6833,29 @@ timeout -s KILL 10 unshare --user --map-root-user --fork --pid --mount-proc --ne
 That third one is worth naming as a class: **deploying by a path other than the documented one leaves an automated actor pointed at stale state.** The deploy that succeeds is not the whole system; the thing that redeploys later is part of it.
 
 **Also, a false alarm I raised and caught in the same minute:** I read `520de02` on the box and announced someone had pushed after me. `520de02` is my own preceding ledger commit; the box's ref was stale. Recorded only because the reflex — attributing a surprising SHA to another actor before checking my own HEAD — is the same shape as the errors above.
+
+### E.COVER1 — a complete accounting of every low-scoring leg in the corpus
+**Stated before measuring:** if the checks I built fire on ≤1 low-scoring leg, coverage is thin and I say so. **They fire on 1 of 15. Coverage IS thin — and the reason turns out to be the interesting part.**
+
+Correlated all 35 scored verdicts against the artifacts. One methodological failure first: my initial pass reported **every** leg at 0/N, including ones known to be 11/11, because `checks` is `{name: {"pass": bool}}` and I tested the dict itself for truth. **That run was void and was discarded, not interpreted** — I assumed a data shape instead of reading it, the same root as three other errors today.
+
+Corrected, 15 of 35 legs score below 90%. Every one decomposes:
+
+| legs | score | cause | status |
+| --- | --- | --- | --- |
+| nim3, nim4, nim5 — **T1, T2 and T3** | 2/11, 2/6, 0/10 | **routed to the PAGE lane.** Each shipped one slugified `.html` and the page lane's "🌐 it's live". `site_up` and `relative_links_resolve` pass; `run_sh_present` and every functional check fail | fixed by `81b79cb` (09-02 22:53); those runs are 09-03 00:17–01:36, on an image that predated it |
+| b2-control, b2-treatment | 2/11 | `write_files failed: the build produced no files` — whole set refused. `routed_kind: "build"`, `wall_s` 20.4 against a normal 90–170 s | fixed by `6974db5` (09-04 01:53); those runs are 09-03 23:57 |
+| r7 mind_T1 | 2/5 | **dead entry point** — parses, imports resolve, no `__main__`, no `serve_forever` | fixed TODAY, E.ENTRY1 |
+| p4 | 2/5 | `ImportError: cannot import name 'TCPServer' from 'http.server'` — verified by running it | covered by `pyimports`; **`pyimports.rs`'s own header says it was built from this exact leg** |
+| p3 | 7/11 | placeholder mismatch (`{{DYNAMIC_SCRIPT}}` vs `<!-- DYNAMIC_SCRIPT -->`) | covered by `required_literals` (E.WIN2) |
+| p8 | 8/11 | dashboard serves a startup snapshot rather than reading on request | **E.WIN3 — algorithm validated 7/7, blocked on the `rustpython-parser` decision** |
+| v3 | 2/5 | file written inside a ```python fence | covered by `unfence` |
+| nim5 hermes_T1, r7 hermes_T2, nim6 hermes_T3 | 6/11, 4/6, 8/10 | the OPPONENT's failures | not ours |
+
+**The conclusion, and it reframes the work.** There is no large uncovered failure cluster. Every Mind failure in this corpus is fixed, covered, or blocked on **one** pending decision. The 2/11 cluster that looked like the biggest prize — five legs — is three page-lane misroutes and two whole-set refusals, both already closed hours before I looked.
+
+**So more detectors is the wrong next move.** The two things that would actually move a reading are:
+1. **E.WIN3 / p8's dashboard freshness** — the one live uncovered defect, gated on Codex's `rustpython-parser` call (which now also gates the E.ENTRY1 branch analysis and the forge syntax check; three things behind one decision).
+2. **Execution** — and per E.DRIVE-R8 the sandbox already works outside the benchmark container, so that is a security review of using an existing guard, not a capability request.
+
+**And my new kill criterion earned itself twice today.** E.FENCE1 was killed as a duplicate only after I had written the code; here, "does this already exist?" was asked FIRST and stopped me building a router fix for a cluster that was fixed two days ago. The corpus is full of artifacts from before fixes landed, and an old `out-*` directory is not evidence about today's code.

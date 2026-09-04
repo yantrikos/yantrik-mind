@@ -5725,3 +5725,11 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The remaining ceiling, named | Leg 4 — 2/11, complete and parseable, dead at import (`TCPServer` imported from `http.server`). Leg 3 — 7/11, starts and serves, fails four checks. Leg 8 — 8/11. **None of these is a truncation descendant, and none is visible to a model reading its own files.** |
 | Verdict on the change | **Keep it**: it costs nothing (no extra call), it demonstrably changes decomposition, the one truncation that occurred recovered fully, and it removes a failure mode whose recovery costs a model call. **But it is not a score improvement and is not recorded as one.** |
 | What this measurement actually bought | The clearest possible statement of where the next value is. With truncation handled, the distribution is capped by defects that only execution can find. That is now the top of the ARCH8 list on evidence, not on argument. |
+
+## E.CB2-P step 2 (plan-then-author) — KILLED by its own preregistered criterion
+| Field | Value |
+| --- | --- |
+| The criterion, written before the measurement | *"If plan-then-author cannot beat the current arrangement on **both** score and call count, it does not ship."* |
+| What the measurement showed | The **cheap** version achieved what the expensive one was for. All 8 legs decomposed by responsibility — `run.sh` + `server.py` + `templates/` + `data/` — from a prompt sentence costing **zero extra calls**. A plan step would spend a model call to produce a decomposition the author now produces for free. |
+| So it fails both halves | It cannot beat the current call count (it adds one), and it cannot beat the score, because the score is no longer limited by decomposition — it is limited by **runtime defects a plan cannot see**. Leg 4's plan was fine; its `import` was wrong. |
+| Recorded rather than quietly dropped | Pranab proposed plan-then-execute and the instinct was right — decomposition *was* the problem. The cheapest expression of that instinct solved it, so the expensive one is not owed. If a future task shows decomposition failing where a prompt cannot fix it, this becomes live again and the preregistration stands. |

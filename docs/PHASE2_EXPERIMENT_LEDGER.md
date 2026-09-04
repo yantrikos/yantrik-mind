@@ -6999,3 +6999,44 @@ Pranab: qwen3.8 is a thinking model, the mind needs low/high/max levels with tim
 **Caveat, stated rather than buried:** these are `/v1` measurements. The Mind's local lane uses native `/api/chat`, where `config.think` IS honoured. So this table bounds the `/v1` path — which is the one that silently discards a per-call thinking request — and fixes the level design; the 179.7 s (gpt-oss) and 312 s (qwen) figures come from the native path via the real Mind.
 
 **What it does to the proposal.** `docs/PROPOSAL_think_levels.md` was written with its durations deliberately blank. They can now be filled from data, and one design decision is settled by measurement rather than taste: **`Off` must not map to `reasoning_effort:"none"`** — on these models that is the worst setting available. `Off` should send no control on `/v1` (or `low`, which is strictly better than `none` on both), and `think:false` on native.
+
+### E.THINK2 — thinking differs by MODEL, by PROVIDER and by TRANSPORT, and all three are guessed
+Pranab asked whether thinking and its levels differ model-to-model and provider-to-provider, and whether custom support is needed. **Yes on three axes, and every one is currently handled by a heuristic.**
+
+**Axis 1 — MODEL.** Same provider, same transport, same parameter, opposite outcomes (E.THINK1):
+
+| `reasoning_effort:"none"` | content | reasoning | files |
+| --- | --- | --- | --- |
+| qwen3.8:27b | 8011 | 1512 | 3 |
+| gpt-oss:20b | **0** | 17683 | **0** |
+
+Their optima differ too: gpt-oss peaks at `low` (8.3 s, 4 files); qwen's best file count came at `medium`. **One value cannot be right for both.**
+
+**Axis 2 — PROVIDER.** Three wire formats exist in the wild and the code implements one and a half:
+- ollama native: `think: bool`
+- OpenAI-compatible: `reasoning_effort: none|low|medium|high`
+- Anthropic: `thinking: {type, budget_tokens}` — **`build_anthropic_body` carries no thinking field at all.** A reasoning request to an Anthropic backend is silently dropped today.
+
+**Axis 3 — TRANSPORT, within a single provider.** Native `/api/chat` honours a per-call `config.think`; the OpenAI-compat `/v1` path **ignores `think` entirely** and reads only `reasoning_effort`, and only when the family opts in. Our own comment records this.
+
+### THE CAUSAL CHAIN FOR READING 8's FAILURE, now complete
+`ApiLLM::new` decides the transport by **URL substring**:
+
+```rust
+let is_ollama = base_url.contains(":11434")
+    || base_url.contains("ollama.com")
+    || base_url.contains("cloud.ollama.com");
+```
+
+`https://aig.mycluster.cyou` matches none. So:
+1. The Mind **does not recognise its own ollama gateway as ollama** and falls back to `/v1`.
+2. On `/v1`, `config.think` is discarded, and because `QwenTemplate::disable_thinking()` is true it sends `reasoning_effort:"none"`.
+3. That value is **measured to be the worst available for qwen3.8** — 188.1 s against 94.9 s uncontrolled, with *more* reasoning, not less.
+4. With the full T1 prompt and grounding on top, the call reached 312 s and blew the hardcoded 300 s ceiling. Three legs disqualified.
+
+**And the configuration that triggers it is the one we recommend.** `mind-inference`'s own doc comment reads: *"Point the URL at the owned endpoint (a TLS gateway like `https://aig.mycluster.cyou` is preferred over a plaintext-LAN Ollama)."* **The documented best practice defeats the provider detection**, silently, with no error and no log line — the failure only appears as a slow call and a timeout, blamed on the model.
+
+Four small correct-looking decisions compose into a failure none of them contains: a substring test, a transport fallback, a family boolean, and a constant tuned on a retired model. That is ARCH8 §8's class — *a locally correct rule that is catastrophic in context* — with four rules instead of one.
+
+### What this means for the proposal
+`PROPOSAL_think_levels.md` is not enough as written: an enum plus a timeout table still assumes one mapping fits every backend. It needs a **capability descriptor per (provider, model)** answering four questions — how thinking is expressed, which levels that model actually honours, what each level costs (for the timeout), and which level each workload should use. Detection must be **declared, not sniffed**: a provider says what it is, and a URL heuristic is at best a fallback that logs when it fires.

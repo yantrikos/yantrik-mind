@@ -160,3 +160,39 @@ would touch the same interface the capability lanes and the twin-lane shadowing 
 **Not started unilaterally.** Recorded here so the choice is visible and costed rather than
 rediscovered: the constant holds the line today, and the interface change is what actually closes
 the gap.
+
+## 8. The second class: a locally correct rule that is catastrophic in context
+
+§6 is about guards that cannot fire. This is its opposite and it cost more: **rules that work
+exactly as written, and are ruinous where they are used.** Four instances landed on 2026-09-04, and
+not one of them reads as a bug in review — which is precisely the problem.
+
+| the rule | why it is right | what it did |
+| --- | --- | --- |
+| `plan_file_set`: "one path, one file" | a repeated path is ambiguous; refusing is honest | the model emitted `run.sh` twice and the **entire build was discarded** — no artifact, a near-zero in a graded leg |
+| the sandbox masks the mind's state dir | correct, and the whole point of a sandbox | the forge's syntax check `open()`ed a path in that directory from inside, so it **failed every python file it ever built**, and a venture was killed for "fails to execute" on a file never executed |
+| the completion pass writes only missing-or-cut files | sensible for what it was built for | it was the **only** step receiving mechanical defect findings, which it had no mandate to act on, making two shipped detectors inert |
+| `/cli` dispatches as a user turn | correct — a mis-routed mutation must never hide from the activity clock | every diagnostic became **Pranab's activity**, so the pattern loop wrote a belief about him from my debugging, and knock could never see presence |
+
+**The tell.** Each rule is a local invariant stated without its caller in view. Review asks *"is
+this code right?"* and each passes. The question that finds them is **"what happens when this runs
+HERE, against this producer, called by that?"** — a model that occasionally states a thing twice, a
+checker running inside the sandbox rather than beside it, a findings channel wired to whichever step
+happened to interpolate the variable.
+
+**Three habits that catch them, in the order they pay off:**
+
+1. **Run it.** All four were found by driving the system; three were invisible to reading. The
+   `ym delegate` leg that produced no artifact and no score was the single most valuable thing run
+   that day.
+2. **Read the failure, not the success path.** "One path, one file" is unremarkable until you watch
+   a build die on it. The forge's check looks correct until you see its traceback blaming the
+   artifact.
+3. **Ask what the rule assumes about its producer.** A refusal is safe against a careful author and
+   catastrophic against a probabilistic one. `plan_file_set` was written for a person.
+
+**And the corollary worth carrying past this codebase:** a broken check does not report itself as
+broken — **it reports its subject as broken**. The forge blamed the artifact; the rating stage
+scored that blame honestly; the kill criterion fired correctly; a venture died. Every stage after
+the defect reasoned faithfully from a false premise. When a verdict is bad, suspect the instrument
+before the thing measured, and especially when the verdict is confident.

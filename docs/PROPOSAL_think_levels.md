@@ -148,3 +148,43 @@ default; nothing is required for existing deployments to keep behaving exactly a
    ~1.6x and n=5 already missed a known outlier, so `YM_LLM_TIMEOUT_*` should ship with the
    **current 300 s** as its default — a pure refactor of a constant into a knob — and the number
    changed only when repeats on the real workload justify it.
+
+## The architecture Pranab described already exists — and it shrinks this proposal
+
+Pranab: *"llm should be the interface and then it should inherit and implemented by each different
+provider level. Same for models: base model and actual model."* Inspected rather than assumed:
+
+**The provider interface exists.** `LLMBackend` has **nine** implementations, and `provider/` holds
+genuine per-provider ones — `AnthropicBackend`, `GoogleGeminiBackend`, `GenericOpenAIBackend`, with
+a `ProviderRegistry`. The local lane already goes through `GenericOpenAIBackend::for_provider(…)`.
+
+The debt is that the **older** `llm/api.rs` still multiplexes with booleans — `is_ollama`,
+`is_anthropic`, branched at five sites — and it is that file which holds the URL-sniffing and the
+hardcoded 300 s. So the direction of travel is right and half-travelled; `ApiLLM` is the legacy path.
+
+**The model split exists too**, and this is the part that changes the proposal:
+
+- `ModelFamily::from_model_name()` — the **base model**, selecting the chat template.
+- `ModelCapabilityProfile::from_model_name()` — the **actual model**, already carrying
+  `tier`, `estimated_params_b`, `max_tools_per_prompt`, `tool_call_mode`, `slot_mode`,
+  `use_family_routing`, `max_agent_steps`, `multi_step_capable`, `max_effective_context`,
+  `ambient_context_budget` — **and `supports_repair_loop` / `max_repair_attempts`**.
+
+**So the "capability descriptor per (provider, model)" this proposal asked for is not a new
+structure. It is two missing fields on a structure that is already there**, already keyed by actual
+model name, and already used for exactly this kind of per-model behavioural tuning.
+
+| what the measurements say is per-model | where it lives today | where it belongs |
+| --- | --- | --- |
+| thinking level | `disable_thinking()` on the **family** template — too coarse: qwen3.8 and gpt-oss differ, and qwen3.6 → qwen3.8 changed under a constant tuned on the older one | `ModelCapabilityProfile` |
+| call timeout | a hardcoded 300 s constant at three sites | `ModelCapabilityProfile` |
+
+That is a materially smaller change than "add a descriptor", and it is better placed: a profile keyed
+on the **actual model name** is precisely what E.MODEL1 needs, because a value tuned on qwen3.6
+stops applying the moment the tag changes, instead of silently outliving it.
+
+**One more thing the profile already has that E.REPAIR1 speaks to.** `supports_repair_loop` and
+`max_repair_attempts` exist per model. E.REPAIR1 measured the build lane's review repairing 45% of
+the time when told, 15% when not. Whether to spend a second repair round is therefore already
+expressible per model rather than as a global recipe decision — the recipe simply does not consult
+it. Worth checking before any second-round design is drawn.

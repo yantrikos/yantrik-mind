@@ -6534,3 +6534,29 @@ My own rule is that harness changes need a preflight, and it exists because **fo
 **So reading 8 can start the moment it is authorised**, with the preflight already banked rather than discovered at the start of a graded sequence. That is the only part of reading 8 I can do without the word, and it is done.
 
 Recorded plainly because a green preflight is unremarkable and its absence is expensive — the whole reason the rule exists is that the cheap check was skipped four times and each skip cost a reading.
+
+## E.WIN7 — brainstorm with gpt-5.6-sol and deepseek-chat: the four T1 defects are ONE defect
+Pranab asked for a brainstorming session. Three rounds, both external models plus me, grounded in the real decomposition (32 re-checked artifacts, the three named causes, the no-execution constraint, the cost advantage, and the no-teaching-to-the-test rule).
+
+**The finding, which is better than what I brought in.** Both models converged on a root cause I had not seen: **the model asserts relationships between artifacts it never checks.** That collapses four failures I had been treating as unrelated into one class:
+
+| defect | the unchecked claim |
+| --- | --- |
+| p4 (2/11) | code claims an import the stdlib does not provide |
+| p3 (7/11) | code claims a placeholder the template does not carry |
+| p8 (8/11) | the dashboard claims freshness the control flow does not deliver |
+| reading 6's T3 loss | a test suite claims behaviour the program does not have |
+
+**And I committed the same defect this week, mid-fix.** I built two detectors, wired their findings into the completion step, and asserted they "reach the review round". They did not — the review interpolated a different variable. I claimed a relationship between two artifacts I had never checked, and repeated it to two people. That is not a coincidence worth glossing: the class is real enough to catch the person building detectors for it.
+
+**What I rejected, and why.** Both opening proposals froze the correctness-critical implementation — DeepSeek's went as far as a pre-verified `compute_stats` and a shell with `/dashboard` and `/submit` routes in it. That wins by deleting what the benchmark measures, and would produce a 27/27 that means nothing. GPT's counterfactual-reuse test states the line well: generic `group_by`/`window`/`sort` are legitimate the way `sorted()` is; `compute_t1_dashboard()` is not. DeepSeek's revision respected it, and I said so.
+
+**The objection that survived both refinements** was mine: the contest has three task shapes. A web-app runtime contract does nothing for T3, where the fatal artifact is a *test suite* — and shape-specific runtimes are task-shaped scaffolding by a slower route.
+
+**The best idea, and its limit.** DeepSeek's semantic manifest — the model authors everything, plus a declarative description of its own claims, mechanically checked against the source. Task-independent, preserves authorship. **But it cannot be the guarantee**, and GPT supplied the refutation in the same round: the manifest is a third model-authored artifact, so a coherent misreading passes. If it says "14 bins anchored on today" while the brief says "anchored on the newest lead", manifest and code agree perfectly and three checks still fail. **Agreement is not conformance.**
+
+Its real value is different and neither stated it outright: **it shrinks the surface that requires judgment.** The irreducible check — does this match the English brief — is today performed against 300 lines of Python by a reviewer that read a fatal import and approved it. Against a 20-line manifest it is a comparison models are far better at and a human can audit in a minute.
+
+**Honest conclusion, which is GPT's**: without execution, nothing proposed here guarantees "every round". The achievable target is a better distribution plus a smaller judgment surface, and I will not present the manifest to Pranab as a solution to a standard it cannot meet.
+
+**Actionable, and cheaply falsifiable**: build a manifest schema and checker, run it over the 32 real artifacts already on disk, and see whether it flags p3/p4/p8 while staying silent on the five 11/11 legs. That is the same validation that killed two of my own detectors this week — one with a false premise, one that flagged a passing leg. Better to learn its recall from real artifacts than to argue for it.

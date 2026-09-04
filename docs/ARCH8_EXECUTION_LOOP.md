@@ -196,3 +196,45 @@ broken — **it reports its subject as broken**. The forge blamed the artifact; 
 scored that blame honestly; the kill criterion fired correctly; a venture died. Every stage after
 the defect reasoned faithfully from a false premise. When a verdict is bad, suspect the instrument
 before the thing measured, and especially when the verdict is confident.
+
+## §9 — How other agents actually work, and the one number that separates them
+
+Pranab set this as a challenge: *find out how everyone is doing things and make sure the deliverable is reached, then optimise ours.* What follows separates what was **measured** from what is **impression**, because the most expensive error of the day was treating the second as the first.
+
+### What was measured
+
+**Hermes** (the benchmark opponent, read from the harness's own scripts and artifacts):
+- `hermes_leg.sh:36` grants `-t file,terminal,code_execution` with a writable `/work` mount and `max_turns: 24`.
+- It **iterates on its own artifact**: r7 T1 wrote `server.py` at 135 lines and then revised it (`@@ -17,46 +17,39 @@`) in the same leg. T2 revised `index.html`. T3 touched `tracker.py` and `test_tracker.py`.
+- It **executes**. Not from a log line — `out-r7/artifacts/hermes_T1/` contains `__pycache__/server.cpython-313.pyc` and `data/leads.json` (2 bytes, `[]`), uid 10001, created *after* `server.py` was written. CPython writes `__pycache__` only on import; `data/` exists only because the lead-storage code ran. Hermes started its server and posted a lead to it.
+
+**The Mind** (same run, same task):
+- Three model calls: author → *(completion, only if truncated)* → review. 170 s wall, 2 files.
+- Its review round reads its own output back and is asked to spot defects in it.
+- Its one channel of ground truth is the mechanical findings the write step attaches.
+
+**Myself, this session** — the most rigorous comparison available, because it is a full trace rather than a recollection. Three claims I made from inference were wrong (Hermes executes → from a `grep`; a syntax check would have caught T1 → probe killed it, 10/10 artifacts parse; the scorer defect corrupted past readings → my own ledger said otherwise). Three findings that held came from touching the artifact: `ls -la` on a directory, `tail` on a file, a mutant watched to fail.
+
+### The number that separates them
+
+Not tools, and not model quality. **How many times per loop the agent's belief is corrected by something that is not the model.**
+
+| agent | ground-truth touches per deliverable |
+| --- | --- |
+| Hermes | writes → **runs** → observes → revises (1–3 executions per leg) |
+| the Mind, before today | the write step's mechanical findings, once |
+| the Mind, after today | the same findings, plus a dead-entry-point check, and — for the first time — findings from the **completion** pass actually reaching the actor |
+| me, at my best today | a probe per hypothesis, a mutant per test |
+| me, at my worst today | zero, twice, and I published both |
+
+Reading 7's T1 is the cleanest illustration available of what "zero" costs. Every check the Mind owned was green. The file was present, parsed, and imported cleanly. It had no `serve_forever` and no `__main__`, so it defined a handler class and exited. **A model reviewing its own text approved it**; a single execution — or, as it turns out, one twenty-line function — would not have.
+
+### The optimisation, ranked by cost
+
+1. **Mechanical checks on the artifact.** No model call, no capability, no risk. Four now exist: unresolvable imports, placeholder mismatches, duplicate paths, dead entry points. Each was built only after a probe separated real artifacts. This is the cheapest ground truth there is and it is nowhere near exhausted.
+2. **Truthful dataflow, so a finding reaches something that can act on it.** Free, and it was broken twice: both detectors reported to a completion step with no mandate to fix, and the completion write stored to a variable nothing read. A finding that does not reach the actor is not a check.
+3. **Execution.** This is the real gap and it is **not** a coding task. `Sandbox::available()` PROBES rather than assumes and correctly returns false in the benchmark container, which refuses unprivileged user namespaces. Hermes needs no sandbox because the container *is* its boundary; the Mind carries its own because it must be safe on Pranab's actual machine. Closing the gap means an operator declaring "this process is already inside a disposable boundary" — which disables a safety property, and is Pranab's decision, not mine.
+
+### What is impression, and is labelled as such
+
+I have working knowledge of Claude Code, Codex and OpenClaw, but no traces of them in this repo and no way to run them here. The pattern I believe they share — a tool-use loop that observes a real result between attempts, rather than a fixed chain of prompts — is consistent with everything measured above, and I am not going to dress it up as evidence. The Hermes numbers are measured; that sentence is not.

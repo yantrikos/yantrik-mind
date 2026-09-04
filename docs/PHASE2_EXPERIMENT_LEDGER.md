@@ -5754,3 +5754,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Where it would go | Not a new step: feed the findings **into the existing review round** as concrete lines ("these imports do not resolve"), so the repair is aimed instead of guessed. The review already re-emits only what it changes. |
 | **The decision I am flagging rather than taking** | The check is Python-specific and needs `python3` on the box to introspect the stdlib. That is a **runtime dependency on the mind**, far milder than executing generated code but still a design choice, and it degrades to a skip where python3 is absent. I am not adding a dependency to the mind's runtime unilaterally at the end of a long session. |
 | Honest limit | This is a **subset**. It catches "the file cannot possibly run"; it cannot catch "the file runs and does the wrong thing", which is what p3 and p8 are. Execution remains the only answer to those, and that question stays with Pranab and Codex. |
+
+## E.LOOP-T1b — the dead duplicate removed, and the guard widened to catch duplicates not only shadows
+| Field | Value |
+| --- | --- |
+| What was left | `capabilities.rs` carried a `write_files` arm that **no `PluginSpec` declares**, so `handler_for_tool` never routes to it and it has never run. It nonetheless held a **second copy** of the writer's logic — the truncation verdict, `allow_empty`, the all-cut recovery — all of which I kept in step **by hand** earlier today without noticing it was dead. |
+| Why a dead copy is not harmless | It is the copy the next person fixes instead of the live one, and it becomes a **real shadow** the moment someone adds the tool to a spec. Its twin, `publish_page`, was live and three guards behind — same file, same shape, and only the routing differed. |
+| Fix | It defers, like `publish_page`. One guarded implementation, no second copy to drift. |
+| The guard was too narrow and now is not | It only flagged arms whose tool was **plugin-declared** — so it could not have seen this one, because the hazard exists *before* the routing does. It now flags any capability arm duplicating a built-in, declared or not; `declared` survives only to sharpen the message. |
+| Mutants | Both deferrals removed independently, each caught, and each mutation asserted to have actually removed the deferral it names. |
+| Standing | Workspace **1782/1782**. |

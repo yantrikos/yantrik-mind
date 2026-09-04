@@ -684,59 +684,18 @@ impl CapabilityHandler for DashboardsCapability {
             // somebody else's subscription — it runs on the mind's own inference path, which is
             // OpenAI-compatible, so it works with the providers we actually have and inside
             // containment, where the Anthropic-protocol coder cannot go at all.
-            "write_files" => {
-                let (project, stream) = (arg(args, "project"), arg(args, "stream"));
-                // Same rule as the recipe tool: ONLY the exact string "length" drops anything, so a
-                // caller that passes no stop reason behaves exactly as before.
-                let truncated = arg(args, "stop_reason") == "length";
-                if project.trim().is_empty() {
-                    return Some("(a build needs a project name)".to_string());
-                }
-                // A REVIEW THAT CHANGES NOTHING IS A SUCCESS, not an empty build. The review step
-                // now emits only the files it is changing, so the common good case is an empty
-                // stream, and reporting that as "the build produced no files" would make the
-                // healthiest outcome look like a failure.
-                //
-                // Only a genuinely EMPTY stream is excused. Prose without markers still errors, so
-                // "it ignored the format" stays visible — the same reason `ParsedSet` keeps the
-                // preamble as evidence rather than discarding it.
-                if stream.trim().is_empty() && arg(args, "allow_empty") == "true" {
-                    return Some("the review changed nothing — the first set stands".to_string());
-                }
-                match crate::publish_file_set(&project, &stream, truncated) {
-                    Ok((url, written, unterminated)) => {
-                        let mut msg = format!("{url} ({} files: {})", written.len(), written.join(", "));
-                        if !unterminated.is_empty() {
-                            msg.push_str(&if truncated {
-                                format!(
-                                    " — the generation hit its token limit, so {} was cut and NOT written",
-                                    unterminated.join(", ")
-                                )
-                            } else {
-                                format!(
-                                    " — NOTE: the stream ended without a newline, so {} may be incomplete",
-                                    unterminated.join(", ")
-                                )
-                            });
-                        }
-                        msg
-                    }
-                    Err(why) => format!("(couldn't write the project: {why})"),
-                }
-            }
-            // E.LOOP-T1 — DEFER, do not duplicate. `run_tool` consults this registry BEFORE the
-            // built-in dispatch and returns on a hit, so answering here SHADOWS the built-in
-            // `publish_page` — and that one carries three guards this arm never had: it unwraps a
-            // markdown fence ("the alternative is a prompt that has to win every time"), it refuses
-            // a document cut mid-generation rather than publishing "a live URL, an announcement
-            // that it is ready, and a page that is a hero followed by nothing", and it honours
-            // E.PAGE1's `required_filename`, which exists because a brief asking for `index.html`
-            // got a slug of its <title> instead.
+            // E.LOOP-T1b — DEAD AND DUPLICATED, which is how the shadowing bug was born.
             //
-            // Returning None hands the tool back to the one implementation that has them, rather
-            // than copying three guards into a second place to drift apart again. The plugin spec
-            // still owns the tool for enablement and for the model-facing description; only the
-            // BEHAVIOUR lives in one place.
+            // No `PluginSpec` declares `write_files`, so `handler_for_tool` never routes here and
+            // this arm has never run. It nonetheless carried a second copy of the writer's logic —
+            // the truncation verdict, `allow_empty`, the all-cut recovery — all of which had to be
+            // kept in step with the live implementation by hand today. A copy nobody executes is
+            // not harmless: it is the one the next person fixes instead of the real one, and its
+            // twin in `publish_page` was live and three guards behind.
+            //
+            // Deferring makes the single guarded implementation the only one, and the shadowing
+            // guard now covers this arm by construction.
+            "write_files" => return None,
             "publish_page" => return None,
             "make_dashboard" => {
                 // The robust dashboard path: the model gives small STRUCTURED data, Rust renders the

@@ -917,9 +917,15 @@ print('this file was cut off mid";
 
         let mut offenders: Vec<String> = Vec::new();
         for tool in &cap_tools {
-            if !declared(tool) || !builtin_tools.contains(tool) {
-                continue; // not routed to the capability, or the capability is the only implementation
+            // DELIBERATELY NOT gated on `declared`. An arm that duplicates a built-in but is not
+            // currently routed is not harmless: `write_files` was exactly that, and its second copy
+            // of the writer's logic had to be kept in step by hand — it is the copy the next person
+            // fixes instead of the live one. It also becomes a real shadow the moment someone adds
+            // the tool to a PluginSpec. `declared` is kept only to sharpen the message.
+            if !builtin_tools.contains(tool) {
+                continue; // the capability is the only implementation — nothing to diverge from
             }
+            let _routed_today = declared(tool);
             let defers = CAPS.contains(&format!("\"{tool}\" => return None"));
             if !defers && !ALLOWED.iter().any(|(t, _)| t == tool) {
                 offenders.push(tool.clone());
@@ -927,7 +933,7 @@ print('this file was cut off mid";
         }
         assert!(
             offenders.is_empty(),
-            "these capability arms shadow a built-in implementation that will therefore never              run; defer with `=> return None` or list them with a reason: {offenders:?}"
+            "these capability arms duplicate a built-in implementation — shadowing it where the              tool is plugin-declared, and drifting from it where it is not; defer with              `=> return None` or list them with a reason: {offenders:?}"
         );
 
         // The scan must be able to SEE something, or it passes vacuously forever.

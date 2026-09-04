@@ -6319,3 +6319,24 @@ So both detectors were, in practice, inert. They found real defects on real arti
 **Disclosure for the next reading**: this changes the review prompt for **every** build, not only ones with findings, because `{{project_url}}` always carries the URL and file list. That breaks the byte-identity I claimed for E.LOOP-I2 and E.WIN2 and must be declared up front, exactly as reading 7 declared its three product changes. Findings that reach nobody are worse than a disclosed prompt change.
 
 Suite 1807/1807 green.
+
+## E.WIN5 — does the review ACT on a mechanical finding? An A/B on the real defect (PREREGISTERED)
+Everything claimed for E.LOOP-I2 and E.WIN2 rests on one unverified link: a finding reaching the review is worth nothing unless the review **repairs** it. E.WIN4 fixed the wiring so the review is now shown the findings; this measures whether being shown them changes what it does.
+
+**Why not just run a build.** A live `ym delegate` only tests the repair link *if the model happens to emit a defect*, which was 1 leg in 8 in the measured set. Instead the real defective artifact is used directly: p3's actual file set, the actual T1 brief, and the actual review instructions.
+
+| Arm | Prompt |
+| --- | --- |
+| **treatment** | the review prompt as it now ships — brief + p3's files + `WHAT THE WRITE STEP OBSERVED … Fix every one of them:` + the real `DYNAMIC_SCRIPT` finding |
+| **control** | byte-identical **minus** the observed-defects block; the model sees the same broken files and the same instructions to check them against the brief |
+
+Both prompts are built from p3's real stream and differ only in that block (7,377 vs 6,936 bytes; `DYNAMIC_SCRIPT` appears 3× vs 2×, the extra being the finding itself).
+
+| Outcome | What I will conclude |
+| --- | --- |
+| treatment repairs, control does not | The finding does the work. This is the result the two detectors need to be worth anything. |
+| **both repair** | **The check adds nothing for this defect** — the model finds it unaided when told to check code against templates, and I will say the detector is not carrying its claimed value. |
+| neither repairs | The wiring is right and the review is not capable of acting on this class; the honest next step is execution, not more detectors. |
+| treatment repairs the wrong thing | Recorded as a failure. Emitting a plausible edit that does not fix the mismatch is the outcome that would look like success in a score and not be one. |
+
+"Repairs" is judged mechanically, not by eye: the output must contain a file whose code and template agree — either the template gains `{{DYNAMIC_SCRIPT}}`, or the code stops substituting a key no template carries. `placeholder_mismatches` is run over the result to decide, so the same function that found the defect scores the fix.

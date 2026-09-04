@@ -7490,3 +7490,19 @@ Notify
 **E.REPAIR3 stays.** It is bounded, conditional, and costs a clean build nothing; it measurably repairs the stochastic class and adds five points here. But its value was overstated in the prereg by a factor of five on the class we actually see most, and the honest line is: **the next lever is a smarter finding, not another round.**
 
 **Deploy note.** `be89c35` is on staging: second-round prompt confirmed in the fresh binary *before* the swap, health 200, autodeploy clone aligned.
+
+### E.REPAIR5 — PREREG: does a finding that names the CAUSE repair better than one that names the SYMPTOM?
+**Measurement first, product change second — the order E.REPAIR4 should have had.** Nothing in `syntax.rs` changes until this says it should.
+
+**Why this, from the evidence.** E.REPAIR4's log: in 10 of 13 never-repaired runs, the second round reproduced the **same** error class at a nearby line. The model holds a misconception — that `${…}` inside a Python f-string that builds JavaScript is valid — and a symptom-level finding (*"not valid Python — expression cannot contain assignment, line 89"*) does not disturb it; the model just rewrites and re-commits the belief. A finding can only be acted on if the model recognises what it names as the cause.
+
+**Arms, n=20 each, same artifact, same mechanical verdict (`ast.parse` on the returned file), same review prompt otherwise:**
+- `symptom` — today's wording, verbatim from `syntax.rs`.
+- `cause` — the same header, then: *"line 89 contains JavaScript template-literal syntax `${…}` inside a Python string. Python does not understand that; `{` begins an f-string expression and `$` is not valid there. Build the JavaScript without an f-string (a plain string, or `str.replace` for the values), or double every brace that belongs to the JavaScript."*
+
+**PREDICTION, recorded before the first call:** `cause` beats `symptom` by a margin n=20 can see — I expect roughly double. **If it does not** — if the model still re-commits the belief when told exactly what the belief is — then this class cannot be repaired by wording at all, the lever is execution feedback or a deterministic transform, and **the slice dies here without touching the product.** Either outcome is worth the forty calls.
+
+**KILL CRITERIA.**
+1. Report both arms out of 20, never one run.
+2. Same failure-class logging as E.REPAIR4, so if `cause` fails I can see *whether it is still the same misconception* or something new.
+3. No product change on a null result. A product change on a positive result is its own slice with its own prereg.

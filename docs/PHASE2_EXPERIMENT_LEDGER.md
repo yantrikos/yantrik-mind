@@ -7384,3 +7384,22 @@ E.REPAIR1 settled where the weakness is: detection triples the odds (45% told vs
 **Also logged per run:** the returned file's line count against the original's 105. If `minimal` works by returning something close to 105 lines while `rewrite` returns a different size, that is the mechanism visible directly rather than inferred.
 
 **This is the one change today's evidence supports at the weak link**, and it is a prompt string — no dependency, no capability, no other repository.
+
+### E.REPAIR2 — PREDICTION FALSIFIED, and hard. Do not change the wording.
+
+| arm | repaired |
+| --- | --- |
+| `rewrite` — today's wording, verbatim | **10/20** |
+| `minimal` — "make the SMALLEST change… leave every other line exactly as it is" | **0/20** |
+
+**I predicted `minimal` would win. It scored zero.** Recorded as promised: *"If `rewrite` wins or they tie, the clue was a coincidence and I will say so."* It did not merely win; the alternative never once produced a parsing file.
+
+**The mechanism is in the run log, not inferred.** `minimal` returned files of **134–137 lines against an original of 136**, with the syntax error still at **lines 87–90** — the defect's own region. Instructing the model to leave every other line alone makes it **reproduce the file, bug included**. It obeys the instruction and fails the task.
+
+**Why my clue was wrong.** I saw E.REPAIR1's failures at lines 75 and 118 and concluded that regeneration was introducing fresh breakage. Regeneration is what **works** here. The defect has no small edit: line 89 is a JavaScript template literal sitting inside Python, so fixing it properly means rewriting that whole expression and everything the f-string wraps. "Smallest change" is an instruction the model can satisfy without solving anything — and it did, twenty times.
+
+**The general lesson, which is worth more than the A/B.** The right repair instruction depends on the **defect class**. Foreign-language contamination needs the region rewritten; a genuine one-token typo might well prefer a minimal edit. A single global wording cannot be right for both, and today's — which asks for a rewrite — is the correct default for the class actually observed.
+
+**A replication worth noting.** `rewrite` scored 10/20 here against E.REPAIR1's told arm at 9/20 — two independent runs, 45% and 50%. **The 45% figure replicates**, which is more than could be said for anything I measured at n=5 today.
+
+**So the weak link stands and this lever did not move it.** The review round repairs about half the time when told, the checks triple the odds of it trying, and the wording is already the better of the two tested. The remaining candidates are a **second repair round** — already expressible per model via `max_repair_attempts`, which the recipe never consults — and giving the review something stronger than its own reading, which is the execution question.

@@ -5666,3 +5666,13 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Mutation | Restoring the shadowing arm is caught. |
 | What is now in force on the live page path | Fence unwrapping; refusal of a document cut mid-generation; and E.PAGE1's `required_filename` precedence. **All three were previously live in unreachable code.** |
 | Honest scope | This changes which implementation answers `publish_page`. It is a behaviour change on the agent path, gated by the workspace suite (1780/1780) and by the page-lane recipe tests, but **not yet exercised by a leg**. It should be visible in the next reading rather than asserted now. |
+
+## E.CB2-B3 — the completion pass is skipped when nothing was cut
+| Field | Value |
+| --- | --- |
+| Why | Most builds are not truncated. Spending a model call on every one trades reading 7's failure for a permanent tax on the Mind's cheapest column — 2 requests against Hermes's 3–16 is what reading 6 measured as its advantage. |
+| **A correction I owe** | I said the recipe engine had "only `Tool`/`Think`/`ThinkCited` — no loop", and used that to justify making the completion pass unconditional. It has **twelve** step kinds including `JumpIf`, and the **page lane already guards its repair the same way**, stating the argument I should have found: *"the extra call is spent only where the publish would have failed, which is the whole cost argument."* My variant scan had been truncated and I did not check it. |
+| The guard | `JumpIf { Not(VarContains { var: "project_url", substring: "was cut" }) } → the review step`. It keys on the **writer's own message**, which says "was cut and NOT written" exactly when a generation was truncated. A clean build now jumps straight to the review and is byte-identical to before this slice. |
+| Cost restored | Clean build: **2 model calls** (author + review), as before E.CB2-B2. Truncated build: 3. The recovery is paid for only where it is needed. |
+| Mutants, all caught | The guard removed entirely; the jump **overshooting** the review (which would silently drop the quality round); the condition inverted; the guard reading the wrong variable. |
+| **A refinement of my own mutation rule** | The removal mutant first reported SURVIVED — because my mutation added an attribute rather than deleting the step. It changed the file, so it passed the "did it apply" check, while **not being the mutation I had named**. Verifying the file changed is not enough: the change must be the one described, and the harness now asserts the construct is genuinely gone. |

@@ -336,6 +336,29 @@ pub fn build_recipe(name: &str, project: &str, task: &str, pack_rules: Option<&s
                 store_as: "project_url".into(),
                 on_error: ErrorAction::Fail,
             },
+            // E.CB2-B3 — AND IT IS SKIPPED WHEN NOTHING WAS CUT. The completion pass costs a model
+            // call, and most builds are not truncated; spending it every time would trade reading
+            // 7's failure for a permanent tax on the Mind's cheapest column, which reading 6
+            // measured as its advantage (2 requests against Hermes's 3-16).
+            //
+            // The page lane already does exactly this and states the argument: its repair is
+            // guarded so "the extra call is spent only where the publish would have failed, which
+            // is the whole cost argument". The condition here is the writer's own message, which
+            // says "was cut and NOT written" (or "nothing was written: … was cut") precisely when
+            // a generation was truncated — so a clean build jumps straight to the review and is
+            // byte-identical to before this slice.
+            //
+            // I had earlier claimed the engine had no conditional and made this pass unconditional
+            // on that basis. It has `JumpIf`, and twelve step kinds in total; the claim was wrong.
+            RecipeStep::JumpIf {
+                condition: Condition::Not {
+                    inner: Box::new(Condition::VarContains {
+                        var: "project_url".into(),
+                        substring: "was cut".into(),
+                    }),
+                },
+                target_step: 5,
+            },
             // E.CB2-B2 — THE COMPLETION PASS. Bounding the authoring budget to fit a provider's
             // deadline means a generation can now be CUT, and a cut file is correctly refused by
             // the writer rather than shipped in pieces. That turns "one oversized request that

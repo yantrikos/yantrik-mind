@@ -936,6 +936,50 @@ print('this file was cut off mid";
         assert!(declared("publish_page"), "the plugin-declaration scan stopped working");
     }
 
+    /// E.CB2-B3 — the completion pass is SKIPPED when nothing was cut, and its guard points at the
+    /// review rather than past it.
+    ///
+    /// Most builds are not truncated. Spending a model call on every one would trade reading 7's
+    /// failure for a permanent tax on the Mind's cheapest column — 2 requests against Hermes's
+    /// 3-16 is what reading 6 measured as its advantage. The page lane already guards its repair
+    /// for exactly this reason.
+    ///
+    /// A jump that overshot would silently skip the REVIEW as well, which is the kind of off-by-one
+    /// that costs a quality round and shows up as nothing at all.
+    #[test]
+    fn the_completion_pass_is_skipped_when_nothing_was_cut() {
+        let s = steps();
+        let jump_ix = s
+            .iter()
+            .position(|st| matches!(st, RecipeStep::JumpIf { .. }))
+            .expect("the completion pass is unguarded — every build pays for it");
+        let (cond, target) = match &s[jump_ix] {
+            RecipeStep::JumpIf { condition, target_step } => (condition, *target_step),
+            _ => unreachable!(),
+        };
+
+        // It must key on the FIRST WRITE'S OWN MESSAGE, which is what carries the fact.
+        let c = format!("{cond:?}");
+        assert!(c.contains("project_url"), "the guard reads the wrong variable: {c}");
+        assert!(c.contains("was cut"), "the guard does not key on truncation: {c}");
+        assert!(c.contains("Not"), "the guard must SKIP when nothing was cut, not when it was: {c}");
+
+        // The jump must land ON the review's Think, not past it.
+        let think_ix: Vec<usize> = s
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| matches!(st, RecipeStep::Think { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(think_ix.len(), 3, "author, completion, review");
+        assert!(jump_ix < think_ix[1], "the guard must precede the pass it skips");
+        assert_eq!(
+            target, think_ix[2],
+            "the jump must land on the REVIEW step; overshooting silently drops the quality round"
+        );
+        assert!(target < s.len(), "the jump target is past the end of the recipe");
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

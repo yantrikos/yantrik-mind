@@ -15045,6 +15045,14 @@ fn the_import_check_flags_the_real_defect_and_nothing_else() {
         // nothing about it — the list-bounded design absorbing an unknown module exactly as
         // intended, on a real line I had not seen when the table was written.
         "from io import StringIO",
+        // Widened from the Mind's 35 files to ALL 651 python artifacts on the box, which brought
+        // three symbols the smaller corpus never contained. All three were already in the table,
+        // so the check flags exactly ONE line in 651 real files — the known defect — with no
+        // false positives. Pinned here so a later trim of the table cannot quietly lose them.
+        "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer",
+        "from http.server import HTTPServer, BaseHTTPRequestHandler",
+        "from urllib.parse import urlencode, urlparse",
+        "from urllib.parse import urlparse, urlunparse",
     ];
     for line in GOOD {
         let found = crate::pyimports::stdlib_import_findings(line);

@@ -6001,3 +6001,10 @@ E.LOOP-I sized a no-execution runtime-defect check and then stopped at one thing
 | What it is worth, unchanged from E.LOOP-I's sizing | It catches the one leg in the measured set whose defect is structural. Repairing p4 alone moves the 8-leg mean from **9.0 → ~10.1**. It cannot touch p3, p8 or r7, whose defects are behavioural. |
 | Honest limit | A **subset**, and list-bounded: it catches "this file cannot possibly run", never "this file runs and does the wrong thing". Execution is still the only answer to those, and that question is still Pranab's and Codex's. Unverified end-to-end: no reading has been run, so the claim is that the finding now reaches the review round — not that the review acts on it well. |
 | Suite | 1801/1801 green. |
+
+### E.LOOP-I2 — validated against ALL 651 artifacts, not just the 35 it was built from
+The table was derived from the Mind's 35 T1/T3 files. Deriving a checker's knowledge from a sample and then testing it on that same sample proves nothing — so it was then run against **every python artifact on the box, 651 files**, including Hermes's, which are code from a competitor that ran.
+
+Those 651 files contain 24 distinct imports of the seven table modules, and exactly **three symbols the 35-file corpus never contained**: `ThreadingHTTPServer`, `urlencode`, `urlunparse`. All three were already in the table, because the table lists each module's complete export set rather than the subset observed. So across 651 real files the check flags **exactly one line — the known defect — with zero false positives.**
+
+All four new lines are now pinned in the test corpus, so a later trim of the table cannot quietly lose them. This is the validation the scorer taught me to do *before* claiming a checker works, rather than after a real artifact embarrasses it: the corpus a tool is built from and the corpus it is judged on must not be the same one.

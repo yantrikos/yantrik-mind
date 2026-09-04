@@ -6909,3 +6909,25 @@ Then drove a build whose brief explicitly demands a `/dashboard` "reading curren
 That is the strongest confirmation available short of a graded reading: a real model-authored artifact, judged fresh by the check, observed to be fresh.
 
 **Three wrong interfaces on the way there, all mine, none the artifact's.** I POSTed form-encoded to a handler that parses JSON; then JSON to `/submit`, which is a 404; the route is `/`. Each time I guessed at an interface instead of reading the six lines of `do_POST` that state it — and after the first failure I nearly recorded "the dashboard does not update" as a defect in the artifact. It would have been a fabricated finding about a program that works. **The same root as everything else today: acting from assumption when the answer was in a file I could have opened.** The habit that saved it was checking my own test before blaming the subject — which is only the inverse of the rule that a broken check reports its SUBJECT as broken.
+
+### E.CB2-R8 — PREREG: reading 8, local qwen lane, Pranab's word given
+**Authorized by Pranab 2026-09-04 ("lets do one more round"), profile chosen by him after I put three options.**
+
+**Setup, and every deviation from reading 7 stated up front.**
+- Profile `qwen` — the existing local-lane profile, **unchanged**. Upstream `aig.mycluster.cyou` (192.168.4.203), model `qwen3.8:27b-q4_K_M`, TLS verified. **Zero harness change**, zero spend.
+- Binary **pinned**: `/root/cb2n-r8/mind-core-0ba1d64`, a copy of today's deploy taken before the run so a later deploy cannot change what this reading measured. All four of today's checks verified present in the pinned copy by `strings`.
+- Fixtures `/root/cb2n/fixtures` (MANIFEST v4), runner `/root/cb2n-r7/run_all.sh` (honours `CB2_FIX`).
+
+**THREE THINGS THIS READING IS NOT, said before the numbers exist.**
+1. **Not a like-for-like against reading 7.** That was NIM `gpt-oss-20b` at cap 24 with a 302 s provider deadline. This is qwen 27B at **cap 8**, wall 1800, **deadline 0**. The deadline is what my authoring clamp reads, so **the truncation path that lost reading 7 cannot occur here** — E.ENTRY1 fires on its consequence, and that consequence is out of scope for this profile.
+2. **The cap is asymmetric in the Mind's favour and I am not touching it.** Cap 8 is the preregistered qwen setting. The Mind spends 2–3 requests a leg and is unaffected; Hermes has historically used 9–24 and **will hit the cap**. A cap raised or lowered to shape an outcome is exactly what the manifest's kill list exists for, so it stays at 8 — but no total from this reading may be quoted as a general standing.
+3. **It cannot settle the one open question either.** What is unverified is whether the review round **acts** on a finding. That needs a leg where a finding actually fires; on a healthy generation all four checks stay silent by design and the reading says nothing about repair.
+
+**A claim of mine, refuted before it could cost anything.** `DECISIONS_WAITING` records me asserting that qwen3.8:27b *"narrates instead of emitting `=== FILE:` markers"*, which would sink T1 for reasons unrelated to any fix. **Measured, with the real authoring prompt: 3 markers, 3 paths (`index.html`, `server.py`, `run.sh`), zero markdown fences, no preamble.** The note was wrong and is corrected. It was a note, never a measurement, and I nearly let it veto Pranab's chosen profile.
+
+**PREFLIGHT GREEN, and it earned itself twice today.** Containment proven, audit probe PASS, captest 8/1 at cap with TLS verified and the model correctly labelled, both smokes clean, 0/0 leftover attachments, pinned binary sha recorded by the harness itself. Earlier the same preflight caught (a) `nim-oss20.profile` missing from the tree `run_all.sh` defaults to, and (b) a profile I wrote for `gpt-oss-backup:20b` whose upstream **silently answered as `qwen3.8:27b`** — a run state that would have carried the wrong model name into a graded receipt. Both found before a single graded request. That is the whole argument for preflighting a harness change.
+
+**KILL CRITERIA for the reading itself** (the manifest's own list still governs: a brief edited per system, a label unsealed early, a check softened after a failure, a run on the live mind.db, an artifact edited).
+1. Any leg whose receipt is malformed, disqualified or VOID stops the sequence — one declared rerun only, by a human.
+2. Any leftover network attachment at the end invalidates it.
+3. If the Mind's binary sha in any receipt is not `0ba1d64…`, the reading measured something other than today's code and is void.

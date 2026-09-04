@@ -498,8 +498,30 @@ YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, no
             // set standing. The first write is the guarantee; this one is the improvement.
             RecipeStep::Tool {
                 tool_name: "write_files".into(),
-                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}", "stop_reason": "{{reviewed__stop_reason}}", "allow_empty": true }),
-                store_as: "reviewed_url".into(),
+                args: serde_json::json!({ "project": project, "stream": "{{reviewed}}", "stop_reason": "{{reviewed__stop_reason}}", "allow_empty": true, "prior": "{{project_url}}" }),
+                // E.VERIFY1 — THE REVIEW'S OWN VERIFICATION USED TO BE THROWN AWAY.
+                //
+                // This stored to `reviewed_url`, which NOTHING read: the Notify below reports
+                // `{{project_url}}`, and no later step consumes the review's message. So every
+                // mechanical check that ran over the REPAIRED files — imports, entry point,
+                // repetition, route freshness, and a sandboxed `ast.parse` — was performed and
+                // discarded.
+                //
+                // That is not a theoretical loss. E.REPAIR1 measured the review's repair still
+                // failing 55% of the time (9/20 succeed even when the defect is named). So in the
+                // majority of repairs the checks correctly detected that the artifact was STILL
+                // broken, and the owner was told "built — <url>" anyway. **The mind knew and did
+                // not say.**
+                //
+                // It is also D2 exactly, one step further down the same recipe. I fixed the
+                // completion write this morning and did not look at the step after it — which is
+                // its own lesson about fixing an instance rather than sweeping the class.
+                //
+                // `prior` carries the earlier message forward so making the report truthful does
+                // not make it lossy, and the three branches are safe for the same reason D2's are:
+                // a skipped review never runs, a successful one supersedes, and an errored one
+                // advances via `ErrorResolution::Skip` WITHOUT storing, leaving the good message.
+                store_as: "project_url".into(),
                 on_error: ErrorAction::Skip,
             },
             RecipeStep::Notify {

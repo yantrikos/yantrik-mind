@@ -1381,3 +1381,86 @@ fn the_completion_write_carries_the_earlier_message_forward() {
          silently drops every finding raised on the files pass one wrote"
     );
 }
+
+/// E.VERIFY1 — EVERY write's message must be read by something later. Class, not instance.
+///
+/// This defect has now appeared twice in one recipe. The completion write stored to
+/// `completion_url`, which nothing read; I fixed that this morning and did not look at the step
+/// after it, where the REVIEW write stored to `reviewed_url`, which nothing read either. So the
+/// mechanical checks ran over the repaired files — imports, entry point, repetition, freshness, and
+/// a sandboxed parse — and their verdict was discarded. E.REPAIR1 measured the repair still failing
+/// 55% of the time, so in most repairs the mind detected a still-broken artifact and reported
+/// "built" regardless.
+///
+/// Asserting the CLASS is the point. A test pinned to `reviewed_url` would have passed all morning
+/// while `completion_url` was broken, and vice versa. A write nobody reads is a check nobody runs.
+#[test]
+fn every_write_files_message_is_read_by_a_later_step() {
+    use crate::delegate::build_recipe;
+    use mind_recipes::RecipeStep;
+
+    let steps = build_recipe("t", "proj", "build a lead form with a server", None).steps;
+
+    // Where each write_files step puts its message.
+    let writes: Vec<(usize, String)> = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            RecipeStep::Tool {
+                tool_name,
+                store_as,
+                ..
+            } if tool_name == "write_files" => Some((i, store_as.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        writes.len() >= 3,
+        "expected the authoring, completion and review writes, got {writes:?}"
+    );
+
+    for (at, var) in &writes {
+        let needle = format!("{{{{{var}}}}}");
+        let read_later = steps.iter().skip(at + 1).any(|s| match s {
+            RecipeStep::Think { prompt, .. } => prompt.contains(&needle),
+            RecipeStep::Notify { message } => message.contains(&needle),
+            RecipeStep::Tool { args, .. } => serde_json::to_string(args)
+                .map(|t| t.contains(&needle))
+                .unwrap_or(false),
+            _ => false,
+        });
+        assert!(
+            read_later,
+            "the write at step {at} stores its message in `{var}`, which NO later step reads. \
+             Every mechanical defect that write found — including in files a repair just rewrote — \
+             is discarded, and the owner is told the build succeeded. Writes: {writes:?}"
+        );
+    }
+}
+
+/// The review write must carry the earlier message forward, or making the report truthful makes it
+/// lossy — the same trap D2 had.
+#[test]
+fn the_review_write_carries_the_earlier_message_forward() {
+    use crate::delegate::build_recipe;
+    use mind_recipes::RecipeStep;
+
+    let steps = build_recipe("t", "proj", "build a lead form with a server", None).steps;
+    let review_write = steps
+        .iter()
+        .filter_map(|s| match s {
+            RecipeStep::Tool {
+                tool_name, args, ..
+            } if tool_name == "write_files" => Some(args.clone()),
+            _ => None,
+        })
+        .find(|a| a.get("stream").and_then(|v| v.as_str()) == Some("{{reviewed}}"))
+        .expect("build_recipe must have a review write");
+
+    assert_eq!(
+        review_write.get("prior").and_then(|v| v.as_str()),
+        Some("{{project_url}}"),
+        "the review write must carry the earlier message forward, or a truthful final report \
+         silently drops every finding raised before the review"
+    );
+}

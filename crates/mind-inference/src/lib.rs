@@ -703,6 +703,12 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
+                // E.LOOP-J: what this generation actually managed, for the next one's budget.
+                note_generation_rate(
+                    &provider_for_lane,
+                    r.completion_tokens as u64,
+                    latency_ms,
+                );
                 r
             }
             Err(e) => {
@@ -892,6 +898,12 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
+                // E.LOOP-J: what this generation actually managed, for the next one's budget.
+                note_generation_rate(
+                    &provider_for_lane,
+                    r.completion_tokens as u64,
+                    latency_ms,
+                );
                 r
             }
             Err(e) => {
@@ -1342,6 +1354,93 @@ fn local_min_tokens() -> usize {
 /// half is cut, and being early costs a little headroom while being late costs the whole call.
 const ASSUMED_TOKENS_PER_SECOND: usize = 15;
 
+// ── E.LOOP-J: the OBSERVED generation rate ────────────────────────────────────────────────────
+//
+// The constant above is a guess frozen from three legs. Every served generation already knows the
+// truth — `LLMResponse` carries `completion_tokens` and the pool times the call — so the budget
+// can be sized from what this machine actually sees instead.
+//
+// Everything here is biased SLOW on purpose. Over-estimating the rate produces a budget too large
+// to finish inside the provider's deadline, and the generation is cut: that is precisely the
+// defect that cost reading 7, and it is silent at the point where it happens. Under-estimating
+// only produces a smaller file set. So the window's FLOOR is used, never its mean — the same rule
+// that turned 15.5 / 16.2 / 21.6 tok/s into 15 — and the tightest route is used rather than the
+// matching one, because the budget is a safety limit and not a per-route optimisation.
+
+/// Samples needed before an observation displaces the assumed constant. One fast call is noise.
+const MIN_RATE_SAMPLES: usize = 5;
+
+/// Generations smaller than this are not throughput measurements: at a few dozen tokens the round
+/// trip and queueing dominate, so the implied rate says more about the network than the model.
+const MIN_SAMPLE_TOKENS: u64 = 200;
+
+/// Most recent samples kept per route. Enough to smooth a slow minute; short enough that a
+/// provider that has genuinely slowed down is reflected quickly.
+const RATE_WINDOW: usize = 16;
+
+/// The band any observed rate is clamped into, so no single strange sample can size a budget.
+const MIN_OBSERVED_RATE: usize = 3;
+const MAX_OBSERVED_RATE: usize = 200;
+
+static OBSERVED_RATES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, std::collections::VecDeque<usize>>>,
+> = std::sync::OnceLock::new();
+
+fn observed_rates() -> &'static std::sync::Mutex<HashMap<String, std::collections::VecDeque<usize>>>
+{
+    OBSERVED_RATES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Record one served generation's observed rate.
+///
+/// A sample is ADMITTED only when the provider actually reported a count and the generation was
+/// big enough to measure. `completion_tokens` falls back to zero whenever a backend exposes no
+/// usage object, so "not reported" and "zero tokens" arrive identical — and against a floor-based
+/// estimate a single zero would read as infinitely slow and crush every later budget to the
+/// minimum. Refusing the sample is the whole guard; there is nothing downstream to catch it.
+pub fn note_generation_rate(route: &str, completion_tokens: u64, latency_ms: u64) {
+    if completion_tokens < MIN_SAMPLE_TOKENS || latency_ms == 0 {
+        return;
+    }
+    let rate = (completion_tokens * 1_000 / latency_ms) as usize;
+    if rate == 0 {
+        return;
+    }
+    if let Ok(mut m) = observed_rates().lock() {
+        let w = m.entry(route.to_string()).or_default();
+        w.push_back(rate.clamp(MIN_OBSERVED_RATE, MAX_OBSERVED_RATE));
+        while w.len() > RATE_WINDOW {
+            w.pop_front();
+        }
+    }
+}
+
+/// The slowest rate recently observed on any route, once enough samples exist to mean anything.
+///
+/// Deliberately not per-route: this sizes a safety limit, and the honest basis for a limit is the
+/// slowest thing actually seen, not the one that happens to match a label.
+pub fn observed_tokens_per_second() -> Option<usize> {
+    let m = observed_rates().lock().ok()?;
+    let mut best: Option<usize> = None;
+    for w in m.values() {
+        if w.len() < MIN_RATE_SAMPLES {
+            continue;
+        }
+        if let Some(floor) = w.iter().copied().min() {
+            best = Some(best.map_or(floor, |b: usize| b.min(floor)));
+        }
+    }
+    best
+}
+
+/// Test-only: forget every observation, so one case cannot size another's budget.
+#[doc(hidden)]
+pub fn reset_observed_rates_for_test() {
+    if let Ok(mut m) = observed_rates().lock() {
+        m.clear();
+    }
+}
+
 /// Fraction of the deadline a single generation may plan to occupy. The rest absorbs the model
 /// being slower than the floor, queueing, and the round trip.
 const DEADLINE_BUDGET_NUMERATOR: usize = 7;
@@ -1381,8 +1480,10 @@ pub fn authoring_budget(requested: usize) -> usize {
     match provider_deadline_seconds() {
         None => requested,
         Some(deadline) => {
-            let affordable = deadline * ASSUMED_TOKENS_PER_SECOND * DEADLINE_BUDGET_NUMERATOR
-                / DEADLINE_BUDGET_DENOMINATOR;
+            // What the machine has actually seen, when it has seen enough; otherwise the guess.
+            let rate = observed_tokens_per_second().unwrap_or(ASSUMED_TOKENS_PER_SECOND);
+            let affordable =
+                deadline * rate * DEADLINE_BUDGET_NUMERATOR / DEADLINE_BUDGET_DENOMINATOR;
             requested.min(affordable.max(MIN_AUTHORING_TOKENS))
         }
     }
@@ -4178,6 +4279,74 @@ mod tests {
         assert_eq!(backend.backend_name(), "anthropic");
     }
 
+
+    /// E.LOOP-J WIRING: a real served call through the pool must record its own rate.
+    ///
+    /// Every other case in this module calls `note_generation_rate` directly, so all of them would
+    /// still pass with the recording deleted from the pool's served path — the store would simply
+    /// never be fed in production and the budget would quietly stay on the guess forever. This is
+    /// the only case that fails if the two are not connected.
+    #[tokio::test]
+    async fn a_served_call_records_its_own_rate() {
+        struct Counting;
+        impl LLMBackend for Counting {
+            fn chat(
+                &self,
+                _: &[ChatMessage],
+                _: &GenerationConfig,
+                _: Option<&[serde_json::Value]>,
+            ) -> anyhow::Result<LLMResponse> {
+                // An in-process backend returns in under a millisecond, and `latency_ms` is then 0
+                // — which `note_generation_rate` correctly refuses, since a rate cannot be derived
+                // from a zero duration. The first version of this case failed for exactly that
+                // reason and looked like broken wiring. Real generations take seconds.
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                Ok(LLMResponse {
+                    thinking: String::new(),
+                    text: "generated".into(),
+                    prompt_tokens: 100,
+                    completion_tokens: 3_000,
+                    tool_calls: vec![],
+                    api_tool_calls: vec![],
+                    stop_reason: "stop".into(),
+                })
+            }
+            fn chat_streaming(
+                &self,
+                m: &[ChatMessage],
+                c: &GenerationConfig,
+                tl: Option<&[serde_json::Value]>,
+                _: &mut dyn FnMut(&str),
+            ) -> anyhow::Result<LLMResponse> {
+                self.chat(m, c, tl)
+            }
+            fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+                Ok(s.len() / 4)
+            }
+            fn backend_name(&self) -> &str {
+                "counting"
+            }
+        }
+
+        reset_observed_rates_for_test();
+        let pool = InferencePool::new(Arc::new(Counting) as Arc<dyn LLMBackend>, 1);
+        for _ in 0..MIN_RATE_SAMPLES {
+            let _ = pool
+                .chat(
+                    vec![ChatMessage::user("go")],
+                    GenerationConfig::default(),
+                )
+                .await;
+        }
+        let observed = observed_tokens_per_second();
+        reset_observed_rates_for_test();
+        assert!(
+            observed.is_some(),
+            "{} served calls reporting 3,000 completion tokens each recorded no rate — the pool's              served path is not feeding the store, so the budget can never leave the guess",
+            MIN_RATE_SAMPLES
+        );
+    }
+
     /// Configurable test backend: `None` => errors, `Some("")` => empty reply, `Some(x)` => Ok(x).
     struct TestBE {
         reply: Option<String>,
@@ -4470,6 +4639,11 @@ mod authoring_budget_tests {
 
     fn with_deadline<T>(v: Option<&str>, f: impl FnOnce() -> T) -> T {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // E.LOOP-J: the observed-rate store is process-global too, and the budget now reads it. A
+        // case that leaves samples behind would silently change the number a LATER case asserts,
+        // so the reset lives here rather than in each test's good intentions — the cases that
+        // assert the assumed constant are guaranteed to see it.
+        reset_observed_rates_for_test();
         let prev = std::env::var("YM_PROVIDER_DEADLINE_S").ok();
         match v {
             Some(x) => std::env::set_var("YM_PROVIDER_DEADLINE_S", x),
@@ -4528,6 +4702,125 @@ mod authoring_budget_tests {
     fn an_impossibly_short_deadline_does_not_produce_a_fragment() {
         with_deadline(Some("5"), || {
             assert_eq!(authoring_budget(16_000), MIN_AUTHORING_TOKENS);
+        });
+    }
+
+
+    // ── E.LOOP-J: the budget sized from what was actually observed ────────────────────────────
+    //
+    // Each case states the kill criterion it stands for. The three that guard AGAINST the
+    // observation are first: the whole point is that a bad sample must be unable to shrink a
+    // budget, because the resulting truncation is silent at the point it happens.
+
+    /// KILL CRITERION: a zero or absent token count must never become a sample.
+    ///
+    /// `completion_tokens` falls back to zero whenever a backend exposes no usage object, so "the
+    /// provider did not say" arrives indistinguishable from "it generated nothing". Against a
+    /// floor-based estimate a single zero reads as infinitely slow, and every later budget would
+    /// collapse to the minimum — a permanent, silent degradation from one unreported call.
+    #[test]
+    fn an_unreported_token_count_never_becomes_a_sample() {
+        with_deadline(Some("302"), || {
+            for _ in 0..20 {
+                note_generation_rate("nim", 0, 5_000);
+            }
+            assert_eq!(observed_tokens_per_second(), None);
+            assert_eq!(authoring_budget(16_000), 3_171, "the assumed constant, untouched");
+        });
+    }
+
+    /// KILL CRITERION: a generation too small to measure is not a measurement. At a few dozen
+    /// tokens the round trip dominates, so the implied rate describes the network.
+    #[test]
+    fn a_tiny_generation_is_not_a_throughput_measurement() {
+        with_deadline(Some("302"), || {
+            for _ in 0..20 {
+                note_generation_rate("nim", 40, 9_000);
+            }
+            assert_eq!(observed_tokens_per_second(), None);
+        });
+    }
+
+    /// KILL CRITERION: too few samples fall back to the assumed constant, unchanged. One fast call
+    /// is noise, and acting on it would raise the budget on the flimsiest possible evidence.
+    #[test]
+    fn too_few_samples_fall_back_to_the_assumed_constant() {
+        with_deadline(Some("302"), || {
+            for _ in 0..(MIN_RATE_SAMPLES - 1) {
+                note_generation_rate("nim", 3_000, 100_000); // 30 tok/s
+            }
+            assert_eq!(observed_tokens_per_second(), None);
+            assert_eq!(authoring_budget(16_000), 3_171);
+            // The very next sample crosses the threshold, so the fallback is about the COUNT and
+            // not about the samples being unusable.
+            note_generation_rate("nim", 3_000, 100_000);
+            assert_eq!(observed_tokens_per_second(), Some(30));
+        });
+    }
+
+    /// Enough samples replace the guess, and the budget moves with them.
+    #[test]
+    fn enough_samples_replace_the_guess() {
+        with_deadline(Some("302"), || {
+            for _ in 0..MIN_RATE_SAMPLES {
+                note_generation_rate("nim", 3_000, 100_000); // 30 tok/s
+            }
+            assert_eq!(observed_tokens_per_second(), Some(30));
+            assert_eq!(authoring_budget(16_000), 302 * 30 * 7 / 10);
+        });
+    }
+
+    /// KILL CRITERION: the estimate never exceeds the SLOWEST observation in the window.
+    ///
+    /// This is the rule that produced 15 from 15.5 / 16.2 / 21.6, and it is the difference between
+    /// a budget that fits the deadline on a bad minute and one that fits it on a good one.
+    #[test]
+    fn the_estimate_is_the_floor_and_not_the_mean() {
+        with_deadline(Some("302"), || {
+            for _ in 0..4 {
+                note_generation_rate("nim", 3_000, 100_000); // 30 tok/s
+            }
+            note_generation_rate("nim", 1_000, 100_000); // one slow one: 10 tok/s
+            assert_eq!(
+                observed_tokens_per_second(),
+                Some(10),
+                "the mean of these is 26; sizing a budget on it would not fit the slow case"
+            );
+        });
+    }
+
+    /// The tightest route wins, because this sizes a safety limit rather than optimising a route.
+    #[test]
+    fn the_slowest_route_sets_the_limit() {
+        with_deadline(Some("302"), || {
+            for _ in 0..MIN_RATE_SAMPLES {
+                note_generation_rate("fast", 6_000, 100_000); // 60 tok/s
+                note_generation_rate("slow", 1_200, 100_000); // 12 tok/s
+            }
+            assert_eq!(observed_tokens_per_second(), Some(12));
+        });
+    }
+
+    /// KILL CRITERION: a corrupt sample cannot escape the clamp.
+    #[test]
+    fn a_corrupt_sample_cannot_escape_the_clamp() {
+        with_deadline(Some("302"), || {
+            for _ in 0..MIN_RATE_SAMPLES {
+                note_generation_rate("nim", 1_000_000, 1); // a nonsensical 1,000,000 tok/s
+            }
+            assert_eq!(observed_tokens_per_second(), Some(MAX_OBSERVED_RATE));
+        });
+    }
+
+    /// And with no deadline declared, an observation changes nothing at all — the property that
+    /// made the original clamp safe to ship must survive making it adaptive.
+    #[test]
+    fn an_observation_still_changes_nothing_without_a_deadline() {
+        with_deadline(None, || {
+            for _ in 0..MIN_RATE_SAMPLES {
+                note_generation_rate("nim", 1_000, 100_000); // 10 tok/s, slower than the guess
+            }
+            assert_eq!(authoring_budget(16_000), 16_000);
         });
     }
 

@@ -316,9 +316,21 @@ pub struct ParsedSet {
 /// parse, and the site never came up — 2/11 on a leg whose content was actually correct.
 ///
 /// Deliberately narrow. It strips only when the FIRST non-empty line opens a fence and the LAST
-/// non-empty line is a bare closing fence, so a Markdown file that legitimately CONTAINS fenced
-/// blocks keeps every one of them: such a file does not both begin and end with one.
-fn unfence(content: &str) -> &str {
+/// non-empty line is a bare closing fence.
+///
+/// E.FENCE1 — THE MARKDOWN EXCLUSION, and it exists because the sentence that used to stand here
+/// was false. This comment previously argued that Markdown needed no special case, "so a Markdown
+/// file that legitimately CONTAINS fenced blocks keeps every one of them: such a file does not both
+/// begin and end with one". A README that opens with a fenced install command and closes with a
+/// fenced config block does exactly that, and it is an ordinary shape rather than a contrived one.
+/// On such a file the rule strips the OUTER pair, leaving the inner fences orphaned and the
+/// document mangled — a locally correct rule that is destructive in context, and the safety
+/// argument for it was a premise nobody had tested. Markdown is now excluded by name.
+fn unfence<'a>(path: &str, content: &'a str) -> &'a str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        return content;
+    }
     let trimmed = content.trim_matches('\n');
     let mut lines = trimmed.lines();
     let (Some(first), Some(last)) = (lines.next(), trimmed.lines().next_back()) else {
@@ -348,10 +360,8 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
         if let Some(rest) = trimmed.strip_prefix(FILE_MARKER) {
             // A new marker ends the previous file, which is therefore complete.
             if let Some((path, body)) = current.take() {
-                entries.push(FileEntry {
-                    path,
-                    content: unfence(&body).to_string(),
-                });
+                let content = unfence(&path, &body).to_string();
+                entries.push(FileEntry { path, content });
             }
             saw_marker = true;
             let path = rest.trim().trim_matches('`').trim().to_string();
@@ -378,10 +388,8 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
         // patching only the loop left the last file in a stream fenced — which is exactly the case
         // that motivated the fix: a completion pass emitting ONE file makes that file the final
         // one. Found by a mutant that survived because the assertion could not reach this path.
-        entries.push(FileEntry {
-            path,
-            content: unfence(&body).to_string(),
-        });
+        let content = unfence(&path, &body).to_string();
+        entries.push(FileEntry { path, content });
     }
     ParsedSet {
         entries,

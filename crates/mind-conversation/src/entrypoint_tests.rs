@@ -187,3 +187,60 @@ fn agrees_with_the_ast_probe_across_the_benchmark_corpus() {
         fired[0]
     );
 }
+
+// ── E.FENCE1 ──────────────────────────────────────────────────────────────────────────────────
+//
+// This started as a proposed new fence-stripper and was KILLED: `parse_file_stream` already calls
+// `unfence`, and the artifact I found (`out-v3/mind_T1/main.py`, which begins ```python and ends
+// ```) is the PRE-FIX evidence that motivated it, not an open defect. What survived is smaller and
+// real — `unfence` had no Markdown exclusion, and the comment justifying that was a false premise.
+
+const V3_FENCED_MAIN: &str = include_str!("../fixtures/entrypoint/v3_mind_T1_main_fenced.py");
+
+/// The existing fix, pinned to the real artifact that motivated it.
+///
+/// `out-v3/artifacts/mind_T1/main.py` was written with its ```python wrapper intact; python died on
+/// line 1 and the deliverable was a total loss. Nothing in the test suite held that artifact, so
+/// this pins the behaviour against the actual bytes rather than a paraphrase of them.
+#[test]
+fn the_parser_unfences_the_real_v3_artifact() {
+    let s = format!("=== FILE: main.py\n{V3_FENCED_MAIN}\n");
+    let parsed = crate::fileset::parse_file_stream(&s);
+    assert_eq!(parsed.entries.len(), 1);
+    assert!(
+        parsed.entries[0].content.starts_with("#!/usr/bin/env python3"),
+        "the shebang must be first after unfencing, got: {:?}",
+        &parsed.entries[0].content[..parsed.entries[0].content.len().min(40)]
+    );
+    assert!(
+        !parsed.entries[0].content.contains("```"),
+        "no fence may reach disk"
+    );
+}
+
+/// E.FENCE1 — a README that opens AND closes with a fenced block must survive intact.
+///
+/// The comment on `unfence` used to argue Markdown needed no special case, because "such a file
+/// does not both begin and end with one". An install command at the top and a config block at the
+/// bottom is an ordinary README, and on it the rule stripped the OUTER pair and left the inner
+/// fences orphaned. The safety argument was a premise nobody had tested; this is the test.
+#[test]
+fn a_readme_that_opens_and_closes_with_a_fence_is_not_mangled() {
+    let readme = "```bash\npip install thing\n```\n\nThen configure it:\n\n```json\n{\"key\": \"value\"}\n```";
+    let s = format!("=== FILE: README.md\n{readme}\n");
+    let parsed = crate::fileset::parse_file_stream(&s);
+    assert_eq!(parsed.entries.len(), 1);
+    let got = parsed.entries[0].content.trim_end();
+    assert_eq!(
+        got, readme,
+        "a Markdown file must reach disk byte-identical; unfencing it orphans its inner fences"
+    );
+    // The same bytes in a PROGRAM are still a wrapper, so the exclusion is by file type, not by
+    // giving up on the rule.
+    let prog = format!("=== FILE: main.py\n{readme}\n");
+    let p2 = crate::fileset::parse_file_stream(&prog);
+    assert!(
+        !p2.entries[0].content.starts_with("```bash"),
+        "a .py wrapped in a fence must still be unwrapped"
+    );
+}

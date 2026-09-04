@@ -6729,3 +6729,30 @@ The E.ENTRY1 claim stands for r7 and is wrong as a general statement. Corrected 
 **Reported as well as stripped.** The page lane strips silently, which is right for a whole document. Here the review round is downstream and a file that arrived wrapped is evidence the producer misread the format instruction — worth one line in the findings, not a silent repair.
 
 **What this does NOT claim.** One occurrence in 229 files. This is a rare failure with a total blast radius, not a common one; the case for fixing it is the cost when it fires, not its frequency. It also does nothing for the other two unparseable artifacts — a truncation and a repetition loop — which are separate and are not in this slice.
+
+### E.FENCE1 — KILLED as preregistered, and replaced by something a tenth the size
+**The prereg above is wrong in its central claim and stays in the ledger unedited.**
+
+I wrote: *"It is already solved one lane over… The build lane's `write_files` has no equivalent."* The second half is false. `parse_file_stream` calls **`unfence`**, and that function's own doc comment describes the exact artifact I had just "discovered":
+
+> *"a completion pass emitted a perfectly good `main.py` wrapped in ```python, the fence was written verbatim, the file did not parse, and the site never came up — 2/11 on a leg whose content was actually correct."*
+
+`out-v3/mind_T1/main.py` is the **pre-fix artifact that motivated the existing fix**, not an open defect. I found a historical failure in an old run directory and treated it as a live one — the inverse of E.WIN-class "true mechanism, unmeasured impact": here the mechanism was true, the impact was real, and it had already been fixed months of runs ago.
+
+**The test told me before I did.** `fenced_paths` returned `[]` on the real artifact, because it re-parses the stream and `parse_file_stream` has already unfenced it. My duplicate could never fire. I had written a function, a reporting path, a planner call site and six tests before the one failing assertion made me read the parser I was duplicating.
+
+**What I should have done, and the cost of not doing it.** Read the module I was extending before extending it. Total waste: one function, two wiring sites, six tests, reverted with `git checkout`. The prereg's kill criteria did not catch it because all four were about the RULE's behaviour and none asked whether the rule already existed. **Adding one: does this capability already exist in the module I am editing?**
+
+**WHAT SURVIVED, and it is real.** `unfence` had no Markdown exclusion, and the comment justifying that was a false premise stated as the safety argument:
+
+> *"so a Markdown file that legitimately CONTAINS fenced blocks keeps every one of them: such a file does not both begin and end with one."*
+
+A README that opens with a fenced install command and closes with a fenced config block does exactly that, and it is an ordinary shape rather than a contrived one. On such a file `unfence` strips the **outer pair**, orphaning the inner fences and mangling the document. Verified: the outer strip leaves `pip install thing`, a bare ```` ``` ````, the prose, and a dangling ```` ```json ```` block.
+
+This is the **"locally correct rule that is catastrophic in context"** class again (ARCH8 §8), with a twist worth naming: **the safety argument was a premise nobody had tested, written in the same comment that made the rule look considered.** A confident comment is not a test, and this one made the gap harder to see rather than easier.
+
+**Shipped:** `unfence` takes the path and returns Markdown untouched; the false sentence is replaced by what is actually true and why. Two tests, both on real or ordinary artifacts:
+- `the_parser_unfences_the_real_v3_artifact` — pins the EXISTING fix against the actual bytes that motivated it, which no test held.
+- `a_readme_that_opens_and_closes_with_a_fence_is_not_mangled` — the new guard. **Watched to fail** with the guard deleted by line address, after a first mutation attempt silently failed to apply and its "pass" was correctly discarded.
+
+Full workspace suite green.

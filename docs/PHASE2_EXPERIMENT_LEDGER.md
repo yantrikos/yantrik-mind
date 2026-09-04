@@ -7684,3 +7684,13 @@ First gate attempt read **0** for the E.BOARD1 literal: `strings` emits ASCII ru
 
 ### E.URL1 — BUILT: `web_base_url()` replaces both compiled `.90` defaults
 `base_from(env_url, port, ip)` under three tests; `lan_ip()` via the UDP-connect trick; loopback as the last resort. Mutant (old literal back) failed two tests by name. The two `.90` strings left in lib.rs are the doc comment and the test that forbids it. Full suite running before push; the staging witness is to **remove** `YM_WEB_URL` from `.95`'s env after deploy and see links say `192.168.4.95` anyway.
+
+### E.BOARD1 + E.CRITIC1 — WITNESSED on staging (`13f2d1c`), one run for both
+Three passes to get a coder to run at all on `.95`: no CLI (installed 2.1.261); then the router refined "write a small CLI … run.sh" from `code` to `build`; a task naming *existing* files stayed `code`. Arm A (`minimax`): the coder died at once — `429 · Token Plan usage limit reached` (option (b) of decision 9 is dead today too). Arm B (a `custom` coder on a dead port), stored board row, verbatim:
+> 🛠️ [wit3-dead] FAILED — the coder produced nothing; its last words are below:
+> ⚠ coder run did not complete cleanly
+> API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)
+> Outstanding review notes:
+> - The builder produced no artifact whatsoever — the summary is an API error, not a completed build; zero lines of code were written or edited. …
+
+`status: "failed"` in the row (was ✅ done on the production 403s). The last words are the CLI's transcript row, as designed. And the review notes exist: **the house pool judged** (`ollama-local`, the private member) where `YM_CRITIC_MODEL=ollama-cloud:…` had made every earlier build end "critic unavailable". The `jobs` board truncates results, which is why the first read looked empty — the row is the evidence, not the board line. Env restored under trap; CLI stays on staging.

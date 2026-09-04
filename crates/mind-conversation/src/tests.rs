@@ -15361,3 +15361,43 @@ async fn placeholder_mismatches_reach_the_review_round() {
         "the review round must be told the substitution will not match: {msg}"
     );
 }
+
+/// The review step must SEE what the write step observed, or every mechanical finding is inert.
+///
+/// I shipped two detectors — unresolvable imports (E.LOOP-I2) and placeholder mismatches (E.WIN2) —
+/// and told everyone their findings "reach the review round". They did not. They ride the write
+/// tool's message, which was interpolated only into the COMPLETION step, whose instructions are to
+/// write files that are missing or were cut. A completion pass will not repair an import error or a
+/// broken substitution; the reviewer that could was never shown them. Found by reading the actual
+/// prompt instead of trusting the sentence I had written about it three times.
+#[test]
+fn the_review_step_is_shown_what_the_write_step_observed() {
+    let recipe = crate::delegate::build_recipe("t", "proj", "the brief", None);
+    let review = recipe
+        .steps
+        .iter()
+        .find_map(|s| match s {
+            mind_recipes::RecipeStep::Think { prompt, store_as, .. } if store_as == "reviewed" => {
+                Some(prompt.clone())
+            }
+            _ => None,
+        })
+        .expect("the build recipe must still have a review step");
+
+    assert!(
+        review.contains("{{files}}"),
+        "the review must still see what was authored"
+    );
+    assert!(
+        review.contains("{{project_url}}"),
+        "the review must ALSO see the write step's message — that is where mechanically-found \
+         defects live, and without it every detector I ship is inert"
+    );
+    let observed = review
+        .find("WHAT THE WRITE STEP OBSERVED")
+        .expect("the findings must be introduced, not pasted in unlabelled");
+    assert!(
+        review[observed..].contains("Fix every one of them"),
+        "showing the defects is not enough; the review must be told to act on them"
+    );
+}

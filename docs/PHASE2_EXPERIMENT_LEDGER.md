@@ -6304,3 +6304,18 @@ One defect explains all three failures: the file is read **once at import** and 
 **A general bug class worth a check** — "load at startup, mutate the file at runtime, keep serving the snapshot" is a classic, not a benchmark artefact. A plausible static signal: a data file read at module scope, written inside a handler, and never re-read inside one.
 
 **Deliberately not built now.** Two checks (E.LOOP-I2, E.WIN2) are shipped and **neither is verified end-to-end** — I have shown the finding reaches the review round, not that the review acts on it. Adding a third detector before verifying the first two is how a session accumulates plausible-looking work that nobody has watched succeed. The verification comes first; if the review does act, this is the next slice and its expected value is the 3 checks p8 lost.
+
+## E.WIN4 — CORRECTION: both detectors were wired to a step that could not act on them
+I shipped two mechanical checks — unresolvable imports (E.LOOP-I2) and placeholder mismatches (E.WIN2) — and wrote, in the ledger and in two messages to Codex, that their findings *"reach the review round"*. **They did not.**
+
+The findings ride the write tool's message, and that message was interpolated into exactly one prompt: the **completion** step, whose instructions are *"Write ONLY the files that are missing or were cut… If nothing is missing, output nothing at all."* A completion pass will not repair an import that does not resolve or a substitution that never matches — it is not asked to, and it is told to stay silent when nothing is missing. Meanwhile the **review** step, the one that exists to check the artifact against the brief and rewrite what is wrong, interpolates only `{{files}}` — the raw authoring output. **It was never shown a single finding.**
+
+So both detectors were, in practice, inert. They found real defects on real artifacts and delivered them to a step that had no mandate to fix them.
+
+**How this got past me.** I verified the mechanism exactly as far as it was convenient: a test proves the finding reaches the write tool's message, and I then wrote "reaches the review round" as though those were the same claim. They are one interpolation apart, and I never read the review prompt. This is the third time today the failure has been *a confident sentence standing in for an observation* — and the first two (E.LOOP-F/G's "no observed instance", E.WIN2's premise) were caught by evidence, while this one survived to be repeated to two people.
+
+**Fixed**: the review step now interpolates `{{project_url}}` under a heading that says what those lines are — *"a DEFECT found mechanically… not an opinion, and not something to argue with. Fix every one of them"* — and a test asserts all three properties (the authored files are still shown, the write message is shown, and the review is told to act). The mutant that shows the defects but softens the instruction to "For your information" is killed.
+
+**Disclosure for the next reading**: this changes the review prompt for **every** build, not only ones with findings, because `{{project_url}}` always carries the URL and file list. That breaks the byte-identity I claimed for E.LOOP-I2 and E.WIN2 and must be declared up front, exactly as reading 7 declared its three product changes. Findings that reach nobody are worse than a disclosed prompt change.
+
+Suite 1807/1807 green.

@@ -445,6 +445,10 @@ YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, no
                      and against the brief, then output ONLY the files you are CHANGING.\n\n\
                      THE BRIEF: {task}\n\n\
                      WHAT YOU PRODUCED:\n{{{{files}}}}\n\n\
+                     WHAT THE WRITE STEP OBSERVED about those files. Anything listed here is a\
+                     DEFECT found mechanically -- by resolving imports, and by comparing your code\
+                     against your own templates -- not an opinion, and not something to argue with.\
+                     Fix every one of them:\n{{{{project_url}}}}\n\n\
                      Check, in this order:\n\
                      - Do the TESTS match the program they test? Every name they import, every \
                      function they call, every string and exit code they expect must be what the \

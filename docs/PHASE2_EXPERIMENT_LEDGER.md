@@ -6340,3 +6340,15 @@ Both prompts are built from p3's real stream and differ only in that block (7,37
 | treatment repairs the wrong thing | Recorded as a failure. Emitting a plausible edit that does not fix the mismatch is the outcome that would look like success in a score and not be one. |
 
 "Repairs" is judged mechanically, not by eye: the output must contain a file whose code and template agree — either the template gains `{{DYNAMIC_SCRIPT}}`, or the code stops substituting a key no template carries. `placeholder_mismatches` is run over the result to decide, so the same function that found the defect scores the fix.
+
+### E.WIN5 — RESULT: INCONCLUSIVE, with one confound in each arm
+| Arm | Outcome |
+| --- | --- |
+| **treatment** | The model **diagnosed it exactly**: *"templates/dashboard.html uses a `<!-- DYNAMIC_SCRIPT -->` comment, but the code substitutes the `{{DYNAMIC_SCRIPT}}` placeholder. So the JSON script tag is never inserted. I'll fix the template to use the placeholder the code actually replaces."* — then began emitting a corrected `templates/dashboard.html` containing `{{DYNAMIC_SCRIPT}}`. **But the response is 731 bytes and cut mid-file**, so the preregistered mechanical scoring (`placeholder_mismatches` over the result) cannot be completed. |
+| **control** | **Invalid.** It never engaged with the task at all, answering about a mailbox search instead. |
+
+**Both arms were contaminated by the harness, not by the model.** The `/cli` path routes through the conversational agent, which ran a mailbox tool and injected *"No mail accounts configured"* into the context — the treatment reasoned past it and the control did not. A chat turn is not a faithful stand-in for a recipe `Think` step, and I chose it for convenience.
+
+**What this does and does not establish.** It shows that when the finding is put in front of the model, it identifies the defect and picks the correct repair — the link works at the level of reasoning. It does **not** show the finding was *necessary*, because the control never ran a fair test. The preregistered outcome "both repair → the check adds nothing" remains **untested**, and that is precisely the outcome that would devalue two days of detector work, so leaving it untested would be the convenient mistake.
+
+**Not claiming a win from this.** The treatment arm is suggestive and I would have liked to report it as the verification; it is one confounded sample with a truncated output. The next attempt has to avoid the agent loop — the honest options are a `ym delegate` run whose authoring genuinely produces the defect, or exercising the recipe's `Think` step directly rather than through chat.

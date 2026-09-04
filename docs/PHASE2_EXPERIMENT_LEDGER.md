@@ -7287,3 +7287,16 @@ Five checks now put defects in front of the review step. **Not one of them has b
 4. If the model returns no file at all, that counts as a failure to repair, not as an inconclusive run.
 
 **Prediction, recorded in advance:** the told arm repairs more often than the control. If the control matches it, I will say so plainly — that outcome would undercut a day of work, and it is exactly why the control is in the design rather than added afterwards.
+
+### E.REPAIR1 — first run VOID: I measured my own extractor, not production
+Both arms scored 0/5 and I was one message from reporting *"five checks deliver findings the review round cannot act on"* — a claim that would have undercut the whole day's work.
+
+**It was my harness.** The model wraps its answer in a markdown fence, and my `re.split` extractor kept the fence verbatim, so `ast.parse` saw ```` ```python ```` on line 1. **Production does not do that**: `fileset::parse_file_stream` calls `unfence` on every file body — the very function whose Markdown gap I fixed this morning. Every returned file ended `…run()\n``` `.
+
+So the number measured **the difference between my extractor and the writer's**, and attributing it to the review round would have been a false statement about the product, in the direction of condemning it.
+
+**The class, again, and this is the third distinct costume today.** I built a harness that diverges from production and drew a conclusion about production. Earlier: a verdict parser that treated a dict as a bool and scored every leg 0/N; a `nim-oss20` profile whose upstream silently answered as a different model. Each time the harness was wrong and the subject looked broken. **A broken check reports its SUBJECT as broken** — my own memory says exactly this, and I have now hit it from three directions in one day.
+
+**What the void run still shows, because it does not depend on the extractor.** Told returned an `app.py` **5/5**; control returned one **2/5**. The finding changes behaviour: it makes the model attempt a rewrite every time. Whether the rewrite is CORRECT is what the corrected run answers.
+
+Re-running with a faithful port of `unfence` — strip only when the first non-empty line opens a fence and the last non-empty line is a bare closing fence — both arms, n=5.

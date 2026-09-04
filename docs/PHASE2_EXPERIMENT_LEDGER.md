@@ -6494,3 +6494,17 @@ Before blaming the loop that produced the bad belief about Pranab, I read its ba
 So the loop reasoned correctly over **polluted inputs**. The defect is entirely upstream — ctl recording my diagnostics as Pranab's activity — and the fix belongs there, not in the pattern loop's threshold.
 
 Worth checking rather than assuming, because the tempting response to a bad belief is to raise the bar on the thing that stated it. That would have made the mind slower to learn anything about its owner while leaving the actual contamination in place: a real cost paid for no benefit, defending against the wrong cause.
+
+### E.WIN3 — two cheap signals probed, neither separates; the parser conclusion stands
+I called my own "needs a parser" conclusion too pessimistic — Python's indentation *is* its scope structure, so a dedent-tracking scan should reach it without a dependency. I probed that twice against the seven real T1 artifacts. **Both failed, and the original conclusion stands.**
+
+| attempt | rule | result |
+| --- | --- | --- |
+| 1 | a read at module scope, and none inside any `def` | **No.** p8 has the most module-scope reads (2) but *does* read inside defs (3) — just not for the dashboard. And p2 has a module-scope read while scoring 11/11, so "any module read" over-flags a passing leg. |
+| 2 | is a read reachable from the function that serves `/dashboard` | **No.** All seven report "fresh", p8 included, because `do_GET` handles every route — a read anywhere in the submit path makes the dashboard look fresh. |
+
+The wall is not scope, it is **dataflow**: the question is which variable the dashboard's numbers were computed from, and answering that means following assignments, not indentation. Attempt 2's over-approximation is the give-away — reachability through a shared dispatcher is not the same as the value being recomputed.
+
+So E.WIN3 stays blocked on DECISIONS_WAITING item 5, and my correction to myself was wrong while the original call was right.
+
+**Recorded because the cost of these probes was small and the cost of a future session repeating them is not.** Both rules are the obvious ones to reach for; both look right until run against real artifacts; and a checker built on either would have flagged a passing leg or missed the defective one. Two negatives, an hour, no code shipped — which is the correct outcome when the signal is not there.

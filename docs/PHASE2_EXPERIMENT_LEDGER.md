@@ -7040,3 +7040,37 @@ Four small correct-looking decisions compose into a failure none of them contain
 
 ### What this means for the proposal
 `PROPOSAL_think_levels.md` is not enough as written: an enum plus a timeout table still assumes one mapping fits every backend. It needs a **capability descriptor per (provider, model)** answering four questions — how thinking is expressed, which levels that model actually honours, what each level costs (for the timeout), and which level each workload should use. Detection must be **declared, not sniffed**: a provider says what it is, and a URL heuristic is at best a fallback that logs when it fires.
+
+### E.THINK3 — the native path measured: levels already exist on the wire, and the detection fix is most of the win
+Native `/api/chat`, same authoring prompt, `num_predict` 4000.
+
+| model | `think` | wall_s | content | thinking | files |
+| --- | --- | --- | --- | --- | --- |
+| qwen3.8:27b | *(unset)* | 143.6 | 5235 | 1305 | 3 |
+| qwen3.8:27b | **false** | **85.6** | 6706 | **0** | 3 |
+| qwen3.8:27b | true | 190.9 | 4886 | 4496 | 3 |
+| qwen3.8:27b | `"low"` | 93.9 | 6387 | 776 | 3 |
+| qwen3.8:27b | `"high"` | 136.8 | 7047 | 1304 | 3 |
+| gpt-oss:20b | *(unset)* | 29.4 | 484 | 16512 | 1 |
+| gpt-oss:20b | **false** | 15.2 | 4022 | 4562 | **4** |
+| gpt-oss:20b | true | 23.9 | 4463 | 9247 | 4 |
+| gpt-oss:20b | `"low"` | **6.7** | 3455 | 195 | 3 |
+| gpt-oss:20b | `"high"` | 29.0 | **0** | 17188 | 0 |
+
+**1. The provider-detection fix is most of the win, and this is the number that says so.** On native with `think:false`, qwen does the authoring prompt in **85.6 s with zero thinking**, against **188.1 s** on the `/v1` path it is wrongly routed to — a 2.2× difference on the same model and prompt. The real T1 call measured 312 s over `/v1`; at that ratio it would land near 140 s, well under the 300 s ceiling. **That last figure is an inference from a ratio, not a measurement of the real call**, and is written as such.
+
+**2. Graded levels ALREADY EXIST on the wire and we do not use them.** `think: "low"` and `think: "high"` are accepted by ollama native and produce distinct thinking volumes on both models — qwen 776 vs 1304, gpt-oss 195 vs 17188. `GenerationConfig.think` is `Option<bool>`, so the mind can express two of at least four states the transport already supports. The capability Pranab asked for is not missing from the stack; it is missing from **our type**.
+
+**3. Levels are emphatically per-model, which settles the descriptor question by measurement.**
+- `think:false` fully suppresses on qwen (**0** thinking chars) and only partly on gpt-oss (**4562**). The same request, honoured differently.
+- `high` is harmless on qwen (136.8 s, 3 files) and **destroys** gpt-oss (0 content, 0 files).
+- The best setting differs: qwen wants `false` (fastest AND most content); gpt-oss wants `false` for completeness (4 files) but `"low"` for speed (6.7 s, 3 files).
+
+There is no single mapping. A per-(provider, model) descriptor is not a nicety — a shared default is **provably wrong for one of these two models whichever value is chosen**.
+
+**4. Thinking costs output, not just time.** qwen produced MORE content with thinking off (6706) than on (4886), in less than half the wall. On the authoring workload, reasoning is not buying quality; it is spending the budget the files need — which is exactly what `build_recipe`'s comment argues from first principles and now has numbers behind it.
+
+**Revised sequence**, cheapest and most decisive first:
+1. **Declared provider/transport instead of a URL substring.** Alone it converts a timeout into a comfortable pass on the lane we actually run, and it is the smallest change of the three.
+2. **`Think` as a level** carrying `Off|Low|Medium|High` to the wire the transport already understands.
+3. **Per-(provider, model) descriptor** for which levels are honoured, what each costs, and the default per workload — with the Anthropic gap (`build_anthropic_body` carries no thinking field) closed as part of it.

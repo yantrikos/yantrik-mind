@@ -7506,3 +7506,22 @@ Notify
 1. Report both arms out of 20, never one run.
 2. Same failure-class logging as E.REPAIR4, so if `cause` fails I can see *whether it is still the same misconception* or something new.
 3. No product change on a null result. A product change on a positive result is its own slice with its own prereg.
+
+### E.DARK1 — PREREG: the six dark `yantrik-ml` failures, triaged on evidence and fixed
+Codex is out of usage (Pranab, this evening), so item 8 of `DECISIONS_WAITING` is mine. The rule I set: *fix toward the tests unless evidence says the code moved deliberately.* Evidence gathered before touching anything: `git blame` (all six assertions and all the code arrived in **one** commit, the 03-26 monolith split — so nothing drifted *here*), then a clone of upstream `yantrikos/yantrik-ml` (HEAD `499b767`) to ask kill criterion zero: **is any of this already fixed there?** None is. Two are worse than unfixed — the vendored copy **introduced** them.
+
+| test | diagnosis | upstream | fix toward |
+| --- | --- | --- | --- |
+| `profile_summary` (`9.0B`) | **format args in the wrong order** — `{:.1}B` receives `self.family`, `family=` receives the float; every log line prints `medium(~QB) family=9` | correct (`tier, params`) — the vendored copy added `family={}` and misplaced the arg | **test** |
+| `yantrik_trained_profile` (4B → Small) | `x if x < 4.0 => Small` excludes exactly 4B | same bug upstream | **test** |
+| `profile_from_model_name` (`uses_mcq`) | a `supports_native_tools()` override forces NativeFunctionCall on **every** tier, erasing the Tiny/Small MCQ mode that exists because small models cannot hold many tools | **no such override upstream** — local addition | **test**, keeping the override for Medium/Large |
+| `tool_family_routing` (weather → World, got Schedule) | scoring is `matches / keywords.len()`, so **the family with the shorter list wins ties by construction** — adding a keyword makes a family *less* likely to win | same bug upstream | **test**, with a principled scorer: raw match count, tie → table order |
+| `tool_family_best_for_query` (deploy script → System, got Files) | System's table has no `deploy` / `run the`; only Files matches (`script`) | same gap upstream | **test**: add the missing words |
+| `test_generation_config_default` (512) | default is 2048 in the code | **2048 upstream too** | **code**: the test is stale on both sides |
+
+**KILL CRITERIA.**
+1. Each of the six tests passes after its fix, and **no other test in the crate changes state** — 38 lib tests with `--features api-llm`: 38 pass.
+2. The scorer change is watched to fail: reverting to the normalised score must fail `tool_family_routing` again.
+3. The override fix keeps NativeFunctionCall for a Medium/Large native-tools family — asserted, so "fixing" Tiny does not silently downgrade the capable tiers.
+4. `yantrik-companion` and `yantrik-mind` both still build.
+5. Kill criterion zero recorded: upstream checked, nothing already fixed.

@@ -6465,3 +6465,25 @@ But `ym patterns` produced this:
 One fix addresses both: let the ctl endpoint dispatch allowlisted read-only verbs as machine views, exactly as the web cockpit already does. The allowlist and the mechanism both exist — only the wiring is missing, which is the third time today the defect has been a correct mechanism connected to the wrong caller.
 
 **Not fixing it unilaterally**, and not deleting the belief either. Both touch how the mind decides what is true about its owner, and mutating a live belief store to tidy up my own footprint is a larger risk than the footprint. Recorded here and filed; the caution for anyone driving staging is that **your diagnostics become the user's history**.
+
+### E.DRIVE2 — CORRECTION to my own proposal: it is not one wiring change, it is two properties
+I wrote above that "one fix addresses both" harms — point ctl at `cli_dispatch_view`. Sharpening that before it sits in a decision list as though it were simple: **it conflates two properties that come apart precisely in the ctl case.**
+
+A machine view does two things for an allowlisted verb:
+1. it does **not** move the activity clock (the call is not the user doing something), and
+2. it **marks presence** (`last_view_ms`).
+
+For the web cockpit both are right together, because the cockpit's own doc says what presence means: *"someone can see a line NOW: a pinned chat, or an open cockpit. A queue nobody is looking at is not presence."* A cockpit GET means a person is watching.
+
+For ctl they diverge:
+
+| property | correct for ctl? |
+| --- | --- |
+| a diagnostic read is not user activity | **Yes** — this is exactly the belief-pollution fix |
+| a diagnostic read means someone is present | **No** — a script polling `loops_json` is not a person who can see a line |
+
+Wiring ctl straight to `cli_dispatch_view` would fix the belief store and simultaneously teach the mind that an unattended poller is an audience. The mind would then knock — speak unprompted — **to nobody**, which is worse than the pollution it fixes and precisely the failure `has_presence` was written to prevent.
+
+So the honest shape of the decision is: ctl needs a **third** registration kind — neither a user turn nor a presence-marking view — or the two properties need separating in `TurnExclusion`. That is a design change to how the mind decides whether anyone is listening, and it is not mine.
+
+Recording the correction because the version above reads as an easy win, and an easy-looking wiring change that quietly makes the mind talk to an empty room is exactly the kind of thing that gets waved through.

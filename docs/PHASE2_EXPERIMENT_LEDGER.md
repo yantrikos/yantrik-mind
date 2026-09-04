@@ -6560,3 +6560,26 @@ Its real value is different and neither stated it outright: **it shrinks the sur
 **Honest conclusion, which is GPT's**: without execution, nothing proposed here guarantees "every round". The achievable target is a better distribution plus a smaller judgment surface, and I will not present the manifest to Pranab as a solution to a standard it cannot meet.
 
 **Actionable, and cheaply falsifiable**: build a manifest schema and checker, run it over the 32 real artifacts already on disk, and see whether it flags p3/p4/p8 while staying silent on the five 11/11 legs. That is the same validation that killed two of my own detectors this week — one with a false premise, one that flagged a passing leg. Better to learn its recall from real artifacts than to argue for it.
+
+### E.WIN7 — the manifest's core claim, PROBED AND SEPARATED (third probe, first to work)
+E.WIN3 concluded the p8 stale-snapshot defect needed dataflow analysis, after two cheap probes failed. The brainstorm suggested why: my probes had to GUESS which function serves the dashboard, and `do_GET` handles every route, so a read on the submit path made every leg look fresh. A manifest supplies that mapping.
+
+Tested exactly that refinement — given the NAME of the dashboard handler, does a storage read reach it without passing through the dispatcher?
+
+| leg | score | handler | reads on request | verdict |
+| --- | --- | --- | --- | --- |
+| p1 | 11/11 | `serve_dashboard` | true | ok |
+| p2 | 11/11 | `dashboard_page` | true | ok |
+| p5 | 11/11 | `serve_dashboard` | true | ok |
+| p6 | 11/11 | `render_dashboard` | true | ok |
+| **p8** | **8/11** | `serve_dashboard` | **false** | **SNAPSHOT-SUSPECT** |
+| p3 | 7/11 | inline in `do_GET` | — | abstains |
+| p7 | 11/11 | inline in `do_GET` | — | abstains |
+
+**Zero false positives on the four passing legs, the defective leg caught, and the two it cannot resolve ABSTAIN rather than accuse** — the direction that keeps a checker from being turned off.
+
+**What this establishes, precisely.** Not that the manifest works end-to-end. It establishes that the freshness question is **decidable once the route→handler mapping is known, and undecidable when it must be guessed** — which is the specific thing a manifest contributes and the reason my earlier conclusion ("needs a parser") was aimed at the wrong difficulty. The obstacle was missing information, not missing analysis power.
+
+**Honest limits**: n=7 with 2 abstentions; I identified handlers heuristically here, where a real manifest would state them (and would also resolve p3 and p7 by naming the dispatcher plus its route guard); and one true positive is one, not a rate. This is a reason to build the thing, not evidence that it works.
+
+**Third probe today, and the first to separate.** The other two — "module-scope read with none in a def" and "read reachable from any dashboard-mentioning function" — both failed against real artifacts and shipped nothing. That ratio is the argument for probing before building, not against it.

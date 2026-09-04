@@ -14722,3 +14722,87 @@ mod ") {
         zeroed.join(" | ")
     );
 }
+
+/// E.LOOP-F — A FORGE STAGE THAT CANNOT PARSE ITS OUTPUT MUST GIVE UP, NOT RETRY FOREVER.
+///
+/// Four stages report "will retry next tick" and leave the stage unchanged. `forge_due` cannot
+/// bound them: `updated_ms` is refreshed after the match on EVERY tick, failures included, so a
+/// stuck venture always looks freshly updated and simply comes due again 15 minutes later. The
+/// guard's firing condition is destroyed by the very failure it would otherwise catch, and the
+/// only stop is an owner typing `forge kill`. This drives the real tick against a model that
+/// never emits parseable JSON and asserts the venture stops on its own, naming the stage.
+#[tokio::test]
+async fn forge_gives_up_on_a_stage_that_never_parses() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new("I could not produce a spec, sorry.")) as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    let _ = mem
+        .profile_set(
+            "forge_ventures",
+            &serde_json::json!({"v1": {
+                "id": "v1", "idea": "a thing", "stage": "spec", "iter": 0, "max_iter": 2,
+                "stage_tries": 0_i64, "max_stage_tries": 3_i64, "log": [], "updated_ms": 0_i64,
+            }})
+            .to_string(),
+        )
+        .await;
+
+    let mut reports = Vec::new();
+    for _ in 0..3 {
+        reports.push(conv.forge_tick_for(true, None).await.unwrap_or_default());
+    }
+    let all = conv.forge_load().await;
+    let stage = all["v1"]["stage"].as_str().unwrap_or("");
+    assert_eq!(
+        stage, "killed",
+        "a venture whose stage never parses retried {} times and is still `{stage}` — nothing \
+         bounds it but a human noticing: {reports:?}",
+        reports.len()
+    );
+    let last = reports.last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("gave up") && last.contains("spec"),
+        "giving up must SAY which stage gave up, the way max_iter's honest ceiling does: {last}"
+    );
+}
+
+/// E.LOOP-F — and a stage that ADVANCES must reset the count, so slow progress is never punished.
+/// A venture one attempt from the bound that then parses cleanly must come out of the tick with a
+/// fresh count, not one tick from death on its next stage.
+#[tokio::test]
+async fn forge_progress_resets_the_give_up_count() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = mind_inference::InferencePool::new(
+        Arc::new(ScriptedLLM::new(r#"{"name":"Kettle","kill":"no users in 30d"}"#))
+            as Arc<dyn LLMBackend>,
+        1,
+    );
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    let _ = mem
+        .profile_set(
+            "forge_ventures",
+            &serde_json::json!({"v1": {
+                "id": "v1", "idea": "a thing", "stage": "spec", "iter": 0, "max_iter": 2,
+                "stage_tries": 2_i64, "max_stage_tries": 3_i64, "log": [], "updated_ms": 0_i64,
+            }})
+            .to_string(),
+        )
+        .await;
+
+    let report = conv.forge_tick_for(true, None).await.unwrap_or_default();
+    let all = conv.forge_load().await;
+    assert_eq!(
+        all["v1"]["stage"].as_str().unwrap_or(""),
+        "build",
+        "a parseable spec must advance the venture: {report}"
+    );
+    assert_eq!(
+        all["v1"]["stage_tries"].as_i64().unwrap_or(-1),
+        0,
+        "advancing a stage must RESET the give-up count — carrying 2 failed attempts into the \
+         build stage would kill a venture that is making progress: {report}"
+    );
+}

@@ -861,6 +861,12 @@ impl super::ConversationEngine {
             let id = format!("v{}", chrono::Utc::now().timestamp() % 1_000_000);
             all[&id] = serde_json::json!({
                 "id": id, "idea": idea, "stage": "brainstorm", "iter": 0, "max_iter": 2,
+                // E.LOOP-F: how many ticks this venture has spent on the CURRENT stage without
+                // advancing. Four stages report "will retry next tick" and change nothing, and
+                // `forge_due` cannot bound them because `updated_ms` is refreshed on every tick
+                // including the failures -- so a stuck venture looks freshly updated forever and
+                // only an owner typing `forge kill` stops it.
+                "stage_tries": 0_i64, "max_stage_tries": 3_i64,
                 "log": [], "updated_ms": 0_i64,
             });
             self.forge_save(&all).await;
@@ -1042,7 +1048,8 @@ impl super::ConversationEngine {
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let report = match stage.as_str() {
+        let stage_at_entry = stage.clone();
+        let mut report = match stage.as_str() {
             "brainstorm" => {
                 // 3 independent persona takes + a synthesis — a real panel, not one voice.
                 let mut takes: Vec<String> = Vec::new();
@@ -1551,6 +1558,28 @@ impl super::ConversationEngine {
             }
             _ => return None,
         };
+        // E.LOOP-F — A STAGE THAT DOES NOT ADVANCE IS COUNTED, and a stage that does resets the
+        // count, so slow progress is never punished. The bound follows `max_iter`'s precedent in
+        // this same file: stop, and SAY which stage gave up, rather than retrying until a person
+        // notices. Terminal is `killed` because `st != "shipped" && st != "killed"` is the
+        // non-terminal test in three places, and a new stage name would silently stay due.
+        let ended_on = all[&id]["stage"].as_str().unwrap_or("").to_string();
+        if ended_on == stage_at_entry {
+            let tries = all[&id].get("stage_tries").and_then(|x| x.as_i64()).unwrap_or(0) + 1;
+            let max_tries = all[&id]
+                .get("max_stage_tries")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(3);
+            all[&id]["stage_tries"] = serde_json::json!(tries);
+            if tries >= max_tries {
+                all[&id]["stage"] = serde_json::json!("killed");
+                report = format!(
+                    "⚒️ `{id}` gave up at stage `{ended_on}` after {tries} attempts that made no                      progress — the artifacts are kept for review. `forge status` to see the log."
+                );
+            }
+        } else {
+            all[&id]["stage_tries"] = serde_json::json!(0_i64);
+        }
         all[&id]["updated_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
         if let Some(l) = all[&id]["log"].as_array_mut() {
             l.push(serde_json::json!(report.clone()));

@@ -7469,3 +7469,24 @@ Notify
 - `the_review_asks_for_a_delta_and_only_the_review_may_be_empty` takes the *last* Think as the review and requires `ONLY the files you are CHANGING` plus the keep-old-contents safety sentence. **The second round lacked both, and it should not have** — it has identical write semantics. Fixed in the prompt, not the test.
 
 **Not claimed:** the ~70%. That is E.REPAIR4 — deploy, then measure the second round on the same harness and the same artifact, n=20, with the first-round-only number as the control.
+
+### E.REPAIR4 — PREDICTION FALSIFIED. The second round buys ~5 points, not ~25, and the log says why
+
+| | count | rate |
+| --- | --- | --- |
+| repaired at round 1 (control, one round) | 6/20 | 30% |
+| repaired at round 2 only | **1** | — |
+| **cumulative after round 2** | **7/20** | **35%** |
+| never | 13 | 65% |
+
+**I predicted ~70% cumulative. It is 35%.** Recorded as promised. Round 1 alone came in at 30% this run — below the 45–50% of the two earlier runs, so the three together (9, 10, 6 of 20) put one round nearer **~42%**, with a wider spread than I had been quoting. The second round then repaired **1 of the 14** it was given.
+
+**The mechanism is in the per-run log, and it is not noise.** In 10 of the 13 `never` cases, round 2 fails with the **same error class at a nearby line** as round 1 — `expression cannot contain assignment` at 89→90, 87→84, 95→91, 87→91, 88→92, 89→115. The model regenerates the file and **reintroduces the same JavaScript-template-literal-inside-Python mistake every time.** It was told *"do not repeat the approach that left it standing"* and did exactly that, because it does not experience it as an approach — it experiences `${…}` inside an f-string that builds JS as correct Python. Python's own warnings show it trying: `SyntaxWarning: invalid escape sequence '\`'`, `'\$'` — escaping the characters, which is still wrong.
+
+**So this defect is SYSTEMATIC, not stochastic, and a re-roll cannot fix a systematic error.** The one round-2 success (run 12) was a round-1 failure of a *different* kind — `'[' was never closed` — a genuine slip, which a second draw repairs. Retry pays for slips. It does not pay for misconceptions.
+
+**What that says about the whole repair design.** The finding names the **symptom** (*"not valid Python — expression cannot contain assignment, line 89"*). The model cannot act on a symptom whose cause it does not recognise as a cause. What would move this class is naming the **cause** — *"line 89 contains JavaScript template-literal syntax `${…}`; a Python string cannot contain that unescaped; build the JS without an f-string or escape the braces"* — which the syntax check could emit when it sees `${` on the failing line. That is a **defect-class-specific finding**, the same conclusion E.REPAIR2 reached from the other direction: one wording cannot serve every class.
+
+**E.REPAIR3 stays.** It is bounded, conditional, and costs a clean build nothing; it measurably repairs the stochastic class and adds five points here. But its value was overstated in the prereg by a factor of five on the class we actually see most, and the honest line is: **the next lever is a smarter finding, not another round.**
+
+**Deploy note.** `be89c35` is on staging: second-round prompt confirmed in the fresh binary *before* the swap, health 200, autodeploy clone aligned.

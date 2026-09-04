@@ -39,7 +39,19 @@ would improve the **real** mind and would **not** move a graded leg. That is the
 implied when I filed it as the largest gap, and it is worth knowing before anyone spends a day on
 it.
 
-### 2. Reading 8
+### 2. Does staging get real traffic, or does Phase G wait?
+The world-model shadow (E.G1) cannot be graded on .95, and **no code change can fix that** — see
+E.G3. Agreement is only defined for the `knock-receptivity` sample, and all 9,865 evaluations exit
+at `no_packets` before the gate, because a packet is prepared proof-carrying work that a box with
+no user never produces. The companion sample reads 99.1% "unknown" for the same reason: presence is
+ingested once per handled **turn**, and a headless box has no turns. Both readings are correct.
+
+Two options, and only you can pick: attach a channel to staging so turns and packets occur
+naturally, or accept that Phase G waits for production traffic. **Manufacturing packets is not a
+third option** — it would compute agreement on synthetic input, which is the same flaw that shipped
+me a broken scorer earlier today.
+
+### 7. Reading 8
 Ready. Not started, because I said I would not start one without your word.
 
 ---

@@ -7211,3 +7211,19 @@ n=5 per cell, native `/api/chat`, same authoring prompt, `num_predict` 4000. Des
 **What this says about the 300 s ceiling.** On this probe qwen's worst observed authoring call is 195 s, and the real T1 prompt — larger, with grounding — measured **312 s**. So the probe underestimates the real workload by roughly 1.6x, and **300 s is marginal-to-insufficient for qwen-class authoring**. gpt-oss's worst probe draw is 30.4 s against a real T1 of 179.7 s (~6x), comfortably inside. A single global constant cannot serve both: it is generous for one model and short for the other, which is the measured case for `timeout_for(level)` being per-model as well as per-level.
 
 **Not claimed:** a timeout table. Five samples that already missed a known outlier are enough to say the current constant is wrong for qwen and fine for gpt-oss; they are not enough to write a number into code. Doing that would be the fifth "bound that is judgment, not measurement" on `DECISIONS_WAITING`.
+
+### E.TIMEOUT1 — PREREG: the hardcoded 300 s becomes a knob, with 300 s as its default
+**Kill criterion zero: does this already exist?** No. `grep` for env references near `timeout_global` returns **zero**, and the only timeout env vars in either repo (`YM_CODER_TIMEOUT_SECS`, `YM_PROVIDER_DEADLINE_S`) govern different things.
+
+**What and why.** `yantrik-companion/crates/yantrik-ml/src/llm/api.rs` sets `timeout_global(Some(Duration::from_secs(300)))` at **three** sites (lines 175, 181, 856). Measured today: 300 s is insufficient for qwen-class authoring (real T1 = 312 s; three legs of reading 8 disqualified) and generous for gpt-oss:20b (real T1 = 179.7 s). One constant cannot serve both, and today it cannot be changed without a rebuild of every box.
+
+**Deliberately the SMALLEST possible slice.** It does **not** add levels, per-model tables, or a new default. It turns one constant into `YM_LLM_TIMEOUT_S` whose default is **the same 300 s**, so with no env var set the behaviour is byte-identical. Per-level and per-model timeouts are the later slices this unblocks, and they need repeats on the real workload first — the proposal says so and this must not pre-empt it.
+
+**KILL CRITERIA.**
+1. With the variable **unset**, the resolved timeout is exactly **300 s** — the existing behaviour, asserted, not assumed.
+2. With it set to a valid integer, the resolved timeout is that value.
+3. Every invalid input — empty, non-numeric, negative, zero, absurdly large — falls back to **300 s**. A misconfigured box must never end up with a shorter timeout than today, because that converts a working lane into a failing one silently.
+4. **All three** sites use it. A knob wired to two of three is the "wired to something that cannot act on it" failure in a new costume, and a partial wiring would be invisible: the two patched paths would obey it and the third would not.
+5. Watched to FAIL, with the mutation confirmed present in the file before its run.
+
+**Not claimed:** that this fixes reading 8. It makes the fix *reachable from config* instead of requiring a rebuild; whether 300 s should become some other number is the measurement question the proposal leaves open.

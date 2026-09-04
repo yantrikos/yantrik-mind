@@ -6249,3 +6249,26 @@ My prediction was recorded before looking: *failures concentrate, most likely in
 | Conservative extraction | Only high-confidence literals (quoted attribute values, backticked tokens, explicit paths). Prose words must never become requirements. |
 | Inert by default | With nothing missing, the write tool's message must be **byte-identical**, exactly as E.LOOP-I2 is, so legs that comply behave as before. |
 | Expected effect, stated so it can be wrong | p3 7/11 → 11/11 if the review acts on the finding. Combined with E.LOOP-I2 on p4, the 8-leg set goes 11,11,7,2,11,11,11,8 → potentially 11,11,11,11,11,11,11,8. **p8 stays 8/11** — wrong computed values need execution, and I am not claiming that here. |
+
+### E.WIN2 — the premise was WRONG, and validating on real artifacts killed it before it shipped
+I preregistered "verify that identifiers the request names literally appear in the output", predicting it would recover p3's four dashboard checks. **It would not have.** Checked against the artifacts before writing the test: p3 **does** contain `cb2-dashboard`, exactly as p1 and p5 do, and both of those score 11/11. The literal is present in the source; the failure is at runtime. A static presence check would have flagged nothing on p3 and I would have shipped it claiming a fix it could not deliver.
+
+(I also nearly reached the opposite wrong conclusion first: my initial `cat .../mind_T1/*` read only top-level files and reported p1 — an 11/11 leg — as missing the element entirely. The templates live in a subdirectory. A measurement that says a passing artifact lacks a required element should be disbelieved before the artifact is.)
+
+**The real cause, found by reading both artifacts side by side:**
+
+| leg | template | code | outcome |
+| --- | --- | --- | --- |
+| p1 (11/11) | `<script id="cb2-dashboard" …>{{DASHBOARD_JSON}}</script>` | `page.replace('{{DASHBOARD_JSON}}', …)` | matches → element rendered |
+| p3 (**7/11**) | `<!-- DYNAMIC_SCRIPT -->` | `render_template('dashboard.html', {'DYNAMIC_SCRIPT': tag})`, and `render_template` builds the key as `{{KEY}}` | **no match** → the tag is never inserted → `script#cb2-dashboard` absent at runtime → 4 checks lost |
+
+**A placeholder mismatch between code and template.** The model wrote a substitution key one way and the template another way, and nothing in between noticed. This is a real bug class in any templating code, has nothing to do with this benchmark, and is worth exactly the four checks p3 lost.
+
+**Revised slice**: for every quoted `UPPER_SNAKE` identifier the code uses as a substitution key, if that identifier appears in a template but `{{IDENT}}` appears nowhere, say so. Conservative on purpose — requiring the identifier to appear in a template is what keeps an ordinary constant name from becoming an accusation.
+
+| Revised kill criteria | |
+| --- | --- |
+| Catches the real case | Must flag p3's `DYNAMIC_SCRIPT`. |
+| Silent on the real passes | Must **not** flag p1, p5, p2, p6, p7 — all 11/11, all using placeholders correctly. |
+| Validated on artifacts, not fixtures | The premise this replaces died precisely because I checked real output before shipping. |
+| Inert by default | Byte-identical message when nothing mismatches. |

@@ -6931,3 +6931,22 @@ That is the strongest confirmation available short of a graded reading: a real m
 1. Any leg whose receipt is malformed, disqualified or VOID stops the sequence — one declared rerun only, by a human.
 2. Any leftover network attachment at the end invalidates it.
 3. If the Mind's binary sha in any receipt is not `0ba1d64…`, the reading measured something other than today's code and is void.
+
+### E.CB2-R8 — VOID. No scores, and the reason is a hard limit in our own client
+All three Mind legs disqualified; Hermes was never invoked. **No verdicts, no totals, and nothing here may be quoted as a standing.**
+
+| leg | wall | outcome |
+| --- | --- | --- |
+| mind T1 | 321 s | `private inference unavailable — the local lane is unreachable`, `max_ms` **312533** |
+| mind T2 | 325 s | same, `max_ms` **315893** |
+| mind T3 | 16 s | different: both calls served, but the model **wrote prose**, not files |
+
+**Root cause for T1/T2, and it is ours, not the harness's.** `yantrik-companion/crates/yantrik-ml/src/llm/api.rs:175` sets `timeout_global(Some(Duration::from_secs(300)))` on the ollama client — **hardcoded, no env knob**. Both legs needed 312–316 s and were cut at 300. The Mind then did the right thing: `[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context)`. The fail-closed guard is correct and worked; the timeout under it is the defect.
+
+**This is a product limitation, not a benchmark artifact.** A local-first mind cannot complete an authoring-sized generation on a 27B local model, because its own client gives up at five minutes. That matters well beyond cb2.
+
+**A CORRECTION TO MYSELF, made two hours after the claim.** I wrote in `DECISIONS_WAITING` and in the R8 prereg that the note *"qwen3.8:27b narrates instead of emitting `=== FILE:` markers"* was **FALSE**, on the strength of one probe with a T1-shaped prompt that returned 3 clean markers. T3's leg says otherwise: *"the build produced no files — it wrote prose instead: I'll build this and verify it works before finalizing… `<tool_call><function=`"*. **The note was right for at least one task and I refuted it from a single prompt shape.** Same error as the day's others in a new costume: I generalised a measurement past what it measured, and this time I did it while explicitly congratulating myself for measuring instead of asserting.
+
+**A harness property worth recording.** `run_all.sh:49` does `continue 2` on a disqualified leg, which skips the PAIRED leg for that task. That is defensible for a paired comparison — grading one half of a broken pair buys nothing — but the consequence is that a Mind-side environment failure yields **zero** data about the opponent. Three Mind DQs therefore cost six legs of information, not three.
+
+**What the reading did buy**, since it bought no score: the 300 s ceiling is now known and located; the fail-closed privacy path is confirmed working under real load rather than in a test; the preflight caught two harness defects before any graded request; and the pinned-binary discipline held (`binary_sha256 0ba1d640…`, `binary_provenance c3e723f` in every receipt).

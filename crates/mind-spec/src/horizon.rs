@@ -83,6 +83,15 @@ pub struct HorizonRun {
 pub struct GoalCheckpoint {
     pub goal_id: String,
     pub created_at_ms: Millis,
+    /// A SNAPSHOT at `created_at_ms`, never current state.
+    ///
+    /// It carries the goal's own serialized fields, and those include a `status` that ages: a
+    /// checkpoint on staging reads `active` for a goal the lifecycle has since recorded as failed
+    /// and then expired. That is not a defect — the authority is `mind_horizon_jobs`, `list_horizons`
+    /// joins its `status` from there, and this blob is read only by `HorizonRun::resume`, which the
+    /// requeue path guards against terminal goals. But a field called `status` inside a durable blob
+    /// reads as current to whoever opens it next, which is exactly how a stale value becomes a
+    /// decision. Read state from the jobs table; read this only to resume.
     pub state_json: String,
     pub state_sha256: String,
 }

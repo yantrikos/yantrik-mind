@@ -1172,6 +1172,12 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     cur_summary
                 };
                 if reality.trim().is_empty() {
+                    note_unresolved(
+                        &mut preds[i],
+                        now,
+                        "no evidence could be gathered to judge it against",
+                    );
+                    changed = true;
                     continue;
                 }
                 let prompt = format!(
@@ -1209,7 +1215,19 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                             .to_string();
                         (verd, why)
                     }
-                    Err(_) => continue, // leave it open; try again next pass
+                    Err(_) => {
+                        // E.LOOP-G — "leave it open; try again next pass" could never stop. The
+                        // retry's precondition is `status == "open"` and a deadline in the past,
+                        // and a judge error preserves both exactly — so the prediction stayed
+                        // permanently due, spending a call every pass. Worse, `store_prediction`
+                        // refuses to stack a second open prediction on the same subject, and the
+                        // success path here is the ONLY place a status ever leaves "open": one
+                        // transient model error blinded foresight on that subject forever, with
+                        // nothing reporting it. Count the failures and close it honestly.
+                        note_unresolved(&mut preds[i], now, "the judge could not be reached");
+                        changed = true;
+                        continue;
+                    }
                 };
                 verdict
             };
@@ -2671,3 +2689,36 @@ mod shrink_judged_tests {
         assert!(p > 0.85, "40 hits should let the claim stand, got {p}");
     }
 }
+
+/// E.LOOP-G — EVERY path that ends a resolve pass without a verdict comes through here.
+///
+/// There were two of them — no evidence to judge against, and the judge itself erroring — each a
+/// bare `continue` with a reassuring comment ("leave it open; try again next pass"). Neither
+/// could ever stop: the retry's precondition is `status == "open"` with a deadline in the past,
+/// which is exactly what failing preserves. (The third `continue` in this loop, for lagging
+/// trip/event ledgers, is genuinely bounded — after a two-week grace it resolves to a machine
+/// `miss` — which is what a stall with an end looks like.) And because
+/// `store_prediction` refuses to stack a second open prediction on a subject, a prediction that
+/// can never close silently blinds foresight on that subject forever.
+///
+/// Closing as `unjudged` is deliberately NOT a verdict: it never becomes a hit or a miss, so no
+/// calibration evidence is written from a judgment that never happened. Not knowing is recorded
+/// as not knowing.
+fn note_unresolved(pred: &mut serde_json::Value, now: i64, why: &str) {
+    let fails = pred
+        .get("resolve_fails")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0)
+        + 1;
+    pred["resolve_fails"] = serde_json::json!(fails);
+    if fails >= MAX_RESOLVE_FAILS {
+        pred["status"] = serde_json::json!("unjudged");
+        pred["resolved_ms"] = serde_json::json!(now);
+        pred["why"] = serde_json::json!(format!(
+            "closed unjudged after {fails} attempts — {why}; neither a hit nor a miss"
+        ));
+    }
+}
+
+/// How many passes a prediction may fail to resolve before it is closed unjudged.
+const MAX_RESOLVE_FAILS: i64 = 3;

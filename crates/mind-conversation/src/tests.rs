@@ -14850,3 +14850,111 @@ async fn forge_does_not_apply_one_stages_failures_to_another() {
         "the count must restart when it belonged to a stage the venture has left: {report}"
     );
 }
+
+/// A judge that is simply down — the transient case `resolve_predictions` treated as "try again
+/// next pass" forever.
+struct DownJudge;
+impl LLMBackend for DownJudge {
+    fn chat(
+        &self,
+        _messages: &[yantrik_ml::ChatMessage],
+        _config: &yantrik_ml::GenerationConfig,
+        _tools: Option<&[serde_json::Value]>,
+    ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+        anyhow::bail!("judge upstream is down")
+    }
+    fn chat_streaming(
+        &self,
+        _messages: &[yantrik_ml::ChatMessage],
+        _config: &yantrik_ml::GenerationConfig,
+        _tools: Option<&[serde_json::Value]>,
+        _on_token: &mut dyn FnMut(&str),
+    ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+        anyhow::bail!("judge upstream is down")
+    }
+    fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+        Ok(text.split_whitespace().count())
+    }
+    fn backend_name(&self) -> &str {
+        "down-judge"
+    }
+}
+
+/// E.LOOP-G — A PREDICTION WHOSE JUDGE KEEPS FAILING MUST STOP, AND MUST STOP BLOCKING.
+///
+/// The retry's precondition is `status == "open"` and a deadline in the past, and a judge error
+/// preserved both exactly — so the prediction stayed permanently due. Because `store_prediction`
+/// refuses to stack a second open prediction on a subject, and the judge's success path is the
+/// only place a status ever leaves "open", one transient error blinded foresight on that subject
+/// forever. This drives the real resolve pass against a judge that is down.
+#[tokio::test]
+async fn foresight_closes_a_prediction_its_judge_can_never_grade() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool =
+        mind_inference::InferencePool::new(Arc::new(DownJudge) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    conv.save_predictions(&[serde_json::json!({
+        "id": 1, "subject": "rainfall", "domain": "weather",
+        "claim": "more than 10mm falls", "threshold": "10mm", "confidence": 0.7,
+        "made_ms": 0_i64, "resolve_by_ms": 1_i64, "status": "open",
+    })])
+    .await;
+
+    for _ in 0..3 {
+        let _ = conv.resolve_predictions(false).await;
+    }
+    let preds = conv.load_predictions().await;
+    let st = preds[0].get("status").and_then(|x| x.as_str()).unwrap_or("");
+    assert_eq!(
+        st, "unjudged",
+        "a prediction whose judge is down stayed `{st}` — permanently due, and permanently \
+         blocking any new prediction on its subject"
+    );
+    assert_ne!(st, "hit", "an ungraded prediction must never be scored as a hit");
+    assert_ne!(st, "miss", "an ungraded prediction must never be scored as a miss");
+    let why = preds[0].get("why").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        why.contains("no evidence could be gathered"),
+        "closing a prediction unjudged must SAY why it could not be judged: {why}"
+    );
+}
+
+/// E.LOOP-G — the SECOND unbounded path: evidence exists, so the judge is actually called, and the
+/// judge is the thing that fails. Both paths must feed the same bound; a prediction must not get
+/// three fresh attempts per failure mode.
+#[tokio::test]
+async fn foresight_closes_a_prediction_when_the_judge_itself_keeps_erroring() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool =
+        mind_inference::InferencePool::new(Arc::new(DownJudge) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS");
+    // A held understanding, so `reality` is non-empty and the pass reaches the judge call.
+    let _ = mem
+        .profile_set(
+            "understanding:rainfall",
+            &serde_json::json!({"summary": "14mm fell over the last day", "as_of": "today"})
+                .to_string(),
+        )
+        .await;
+    conv.save_predictions(&[serde_json::json!({
+        "id": 1, "subject": "rainfall", "domain": "weather",
+        "claim": "more than 10mm falls", "threshold": "10mm", "confidence": 0.7,
+        "made_ms": 0_i64, "resolve_by_ms": 1_i64, "status": "open",
+    })])
+    .await;
+
+    for _ in 0..3 {
+        let _ = conv.resolve_predictions(false).await;
+    }
+    let preds = conv.load_predictions().await;
+    let st = preds[0].get("status").and_then(|x| x.as_str()).unwrap_or("");
+    assert_eq!(
+        st, "unjudged",
+        "a prediction whose judge keeps erroring stayed `{st}` — retried forever, and blocking          every future prediction on its subject"
+    );
+    let why = preds[0].get("why").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        why.contains("judge could not be reached"),
+        "the reason must name the judge, not the evidence: {why}"
+    );
+}

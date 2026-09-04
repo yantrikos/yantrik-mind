@@ -5848,3 +5848,15 @@ Having found the class three times, I swept every "retried next tick / next pass
 Adding the files surfaced something else: `rederive.sh` **failed on the Windows checkout while passing on the Linux box**. Not drift — `profiles/nim.profile` and `nim-cap24.profile` came back exactly one byte per line larger (776→791, 1287→1309): git converted them to CRLF at checkout because `.gitattributes` covered `*.sh` and `deploy/*` but not `.profile`. The committed blobs were correct the whole time.
 
 That is a real weakness in the guarantee, not a Windows annoyance. The cb2/cb2n trees are proven by byte-exact re-derivation and by sha256 hashes pinned in this ledger; a proof that holds on one platform and fails on another is not a proof, and the failure mode is silent in the direction that matters (a tree could be checked out, edited, and hashed on a machine where the bytes differ from what any other machine sees). `crates/mind-evals/fixtures/** text eol=lf` now covers the whole fixture tree, and the two files were renormalized. Diagnosis note: MSYS `diff` strips trailing CR, so the first diff showed two files "differing" with visibly identical lines — `cmp` was what settled it.
+
+### E.CB2-S — CORRECTION: I overstated the blast radius in the commit that fixed it
+The commit message for `score.py` says *"Every reading so far was tallied by counting passes over the checks PRESENT in verdict.json."* **That is false, and my own ledger says so.** E.CB2-B's row (above) already recorded: *"The tally above excludes it, but the verdict as written is misleading to anyone reading it directly."* Every T1 fraction in this ledger is `/11` — a constant denominator across 11/11, 9/11, 8/11, 7/11 and 2/11 legs, including the leg whose checker actually crashed. I was scoring against the task's expected count all along.
+
+So the honest account is narrower than the one I shipped:
+
+| Claimed in the commit | Actually true |
+| --- | --- |
+| Reported readings were scored against a shrinking denominator | **No.** They were scored against 11. No published number moves. |
+| "The worse the failure, the better the fraction looked" | True of the **naive** tally, which is what a direct reader of `verdict.json` would compute — and what a future me would compute after forgetting the manual exclusion. Not true of what was reported. |
+
+What `score.py` is actually worth, stated without inflation: it converts a correct-but-manual habit into a function that is tested, mutation-checked, and run by the suite, and it closes two holes the habit did not cover (a check that never ran being invisible rather than failed, and the closed-name schema). That is a real improvement to a measurement process. It is not a rescue of corrupted numbers, and describing it as one would have been the same kind of error as the "40% 5xx from n=5" overclaim earlier in this session — a true mechanism, an unmeasured impact. The mechanism was found by reasoning about the code; the impact was assumed rather than checked against the record sitting in this same file.

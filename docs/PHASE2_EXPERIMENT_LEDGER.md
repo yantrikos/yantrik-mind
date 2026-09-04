@@ -7097,3 +7097,27 @@ Verified in the companion crate: `for_provider("ollama")` → `ProviderPresets::
 **What still stands, because it was measured rather than inferred:** E.THINK1 and E.THINK3 are untouched. Graded levels do exist on the wire and we send a bool; `think:"high"` destroys gpt-oss and is harmless on qwen; `reasoning_effort:"none"` is harmful on both; thinking costs output as well as time. The per-(provider, model) descriptor is still justified — **by the level measurements, not by the retracted chain.**
 
 **The error, named.** I found a defect's *shape* in one constructor and asserted it applied to a lane whose construction I had not read — the same root as every other error today, and the most expensive version of it, because a four-link chain with real code references reads as thorough. Thoroughness about the wrong code path is not thoroughness. The check that would have caught it is the one I already added after E.FENCE1 and did not apply here: **is this already handled?**
+
+### E.THINK4 — n=1, and the variance is bigger than the effects I reported
+Measuring the field combination production actually sends (`think:false` **plus** `reasoning_effort:"none"`, which `GenericOpenAIBackend` emits together) produced a result that matters more than the question:
+
+| model | arm | wall_s | content | thinking | files |
+| --- | --- | --- | --- | --- | --- |
+| qwen3.8:27b | `think` only | **227.5** | 12340 | 0 | 2 |
+| qwen3.8:27b | `think`+`effort` | 135.3 | 7628 | 0 | 4 |
+| gpt-oss:20b | `think` only | 19.3 | 4713 | 5648 | 4 |
+| gpt-oss:20b | `think`+`effort` | 27.1 | 4150 | **11701** | 3 |
+
+**`think:false` on qwen measured 85.6 s in E.THINK3 and 227.5 s here — the SAME configuration, 2.7× apart.** Every table in E.THINK1 and E.THINK3 is **one sample per cell**, and this says the noise floor on qwen exceeds most of the gaps I reasoned from.
+
+**What that retires.** The 2.2× native-vs-`/v1` figure (85.6 vs 188.1) I used to argue the transport mattered: **not established** — both numbers are single draws from a distribution this wide. Likewise qwen's level ordering (`low` 93.9 vs `high` 136.8) is inside the noise. I reported those as findings; they are hypotheses with n=1.
+
+**What survives, because it is qualitative or order-of-magnitude rather than a timing delta:**
+- `think:false` yields **0** thinking characters on qwen in **both** runs. The suppression works on native — that is reproducible and is the claim that actually mattered.
+- `reasoning_effort:"none"` **increases** thinking on gpt-oss, now seen twice independently: `/v1` 17683 vs `low` 273, and native 11701 vs 5648 without the field. Two observations, two transports, same direction.
+- `high` produced **zero content** on gpt-oss on `/v1`. A total failure is not a timing delta.
+- Thinking volumes differ by an order of magnitude across levels on both models, which is the per-model-descriptor argument and does not rest on wall time.
+
+**Consequence for the work Pranab asked for.** The whole point of the level design is `timeout_for(level)` — and **a timeout table cannot be built on n=1 when one cell varies 2.7×**. Doing it anyway would produce exactly the artefact `DECISIONS_WAITING` item 6 already lists four of: a bound that is judgment wearing a measurement's clothes. Before any duration is written into code, each cell needs repeats and a spread, not a point.
+
+**The error, named.** I ran one sample per configuration, saw differences, and reported them as measured findings — twice, in two ledger entries, to Pranab and to Codex. The discipline I applied all day to *code* (mutate it, watch it fail, assert exact counts) I did not apply to *measurement*: no repeats, no variance, no control. A single draw is not a measurement, and calling it one is the same class of error as asserting a property of code I had not run.

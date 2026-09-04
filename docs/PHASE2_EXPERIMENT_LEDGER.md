@@ -6604,3 +6604,36 @@ Result over the seven post-fix T1 artifacts, using stdlib `ast`:
 - **But the decision is now a different one.** It was "add a dependency for a speculative check". It is now "a validated algorithm with 7/7 separation and zero false positives on real artifacts needs a parser to ship". That is a much easier call to make, either way.
 
 **Three corrections on this one defect, worth counting.** First: "needs dataflow analysis, blocked on a parser." Second: "not blocked, a manifest supplies the missing mapping." Third: "the mapping is derivable from the route guard; the manifest is unnecessary; the parser is." Each was wrong in a way the next probe exposed, and each was cheap because I probed instead of building. The pattern is not that I keep being wrong — it is that the first plausible explanation kept surviving until something ran.
+
+## E.WIN8 — THE PREMISE WAS FALSE: Hermes executes its code during a graded leg, the Mind cannot
+Pranab challenged me to find out how the other agents actually work rather than reason about them. I went to the one I can read: Hermes is pinned at commit `3ce1cf2` with a sha256-verified archive, and its legs are on the box. This is measured from the harness's own invocation and the opponent's own stdout.
+
+**The invocation, `run/hermes_leg.sh:36`:**
+```
+cb2-hermes chat -Q -t file,terminal,code_execution -q "Work only inside the current directory (/work). $BRIEF"
+```
+
+**The Mind's, `run/mind_leg.sh:68-73`:**
+```
+docker run -d ... --read-only --tmpfs /tmp:size=256m ... cb2-mind /mind-core
+```
+
+| | Hermes | Mind |
+| --- | --- | --- |
+| invoked as | an agent with tools: `file`, `terminal`, **`code_execution`** | a daemon (`/mind-core`) |
+| filesystem | writable `-v $W:/work` | **`--read-only`** plus a tmpfs |
+| turns | `agent.max_turns: 24`; observed 13–24 | a fixed recipe, 2–4 model calls |
+
+**And it used the capability.** Reading 7's `hermes_T1_stdout.txt` contains `python3 server.py`. Hermes started its own server, in the graded leg, and could see whether it worked.
+
+**Reading 7's Mind T1 failure was `ERR_CONNECTION_REFUSED` — the server never started.** Hermes ran its server and saw it run. That is the 7-point gap, and it is not a model-quality gap.
+
+**I have been reasoning from a false premise all day, and I stated it explicitly.** The brainstorm context I wrote said: *"NO EXECUTION during grading… Hermes is bound by the same limit, so it's fair."* **It is not bound by it.** Both external models then optimised against a constraint that binds only us, which is my error and not theirs — I supplied the frame.
+
+**Two separable gaps, and the second is the one that is ours.**
+1. **Capability**: the Mind's execution goes through `mind-tools::Sandbox`, which needs user namespaces the container lacks, so `available()` is false and callers correctly refuse. Hermes needs no sandbox because the container *is* its isolation — same reasoning the Mind could use, and doesn't.
+2. **Design**: `build_recipe` has **no execute-and-iterate step at all**. Even with a working sandbox, the lane is author → write → complete → review → write. Nothing runs anything. That gap is architectural and would persist on a box where the sandbox works.
+
+**What I am NOT claiming**: that adding execution would fix T1. That needs a reading. What is now measured is that the decisive capability on the task we lose is present on one side and absent on the other, and that every static detector I built this week is compensation for it.
+
+**What this does to the decision list.** `DECISIONS_WAITING` item 1 was "may the mind run the code it writes?", which I withdrew as already-answered because a sandbox exists. That withdrawal was right about the sandbox and wrong about the consequence. The live question is narrower and sharper: **may the build lane run its artifact inside the benchmark container, where the container is the isolation boundary and the opponent already does exactly that?**

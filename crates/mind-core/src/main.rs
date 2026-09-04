@@ -218,6 +218,13 @@ async fn main() -> anyhow::Result<()> {
         println!("closed {orphans} delegation(s) that were interrupted by the last shutdown");
     }
 
+    // E.CRITIC1: a named critic the Private critic lane cannot serve is a misconfiguration that
+    // used to surface only as "critic unavailable" on every delegated build. Say it once, here,
+    // before anyone delegates anything.
+    if let Some(line) = mind_conversation::critic_misconfiguration() {
+        println!("{line}");
+    }
+
     // If a telegram token is configured, run the phone channel instead of the stdin REPL.
     if let Ok(tok) = std::env::var("YM_TELEGRAM_TOKEN") {
         if !tok.trim().is_empty() {

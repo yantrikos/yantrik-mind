@@ -7645,3 +7645,17 @@ Re-run on `.95` in flight, same design; `custom` on that binary really does yiel
 ### E.BOARD1 — PREREG: a coder run that produced nothing is `failed`, and its last words reach the board
 **Fact:** delegate.rs:2481 writes `ledger_update(.., "done", ..)` unconditionally for the code kind; `render_coder` prefixes "⚠ coder run did not complete cleanly" when `!ok`, but the board glyph is ✅ and `summary` was empty for the 403 runs (stdout JSON had no `result`, stderr empty) — the CLI's *transcript* held the only diagnostic: `Failed to authenticate. API Error: 403 Access to model denied`.
 **Change (mine):** (1) status `failed` when `!r.ok && r.files.is_empty()` (a timed-out run with files stays `done`, per the salvage doc). (2) When `summary` is empty and `!ok`, read the last assistant text from the run's own `.claude/projects/*/*.jsonl` and use it — the coder's last words, e.g. that 403. **Tests:** pure `code_job_status(ok, n_files)`; `last_assistant_text(workdir)` against a fixture built from the exact line shapes of the 403 transcript. Mutation on each.
+
+### E.TIMEOUT3 — DONE on staging: the knob is READ on the local lane
+| arm (`.95`, coder absent, same task) | process env | outcome |
+| --- | --- | --- |
+| KNOB5 | `YM_LLM_TIMEOUT_S=5` | `[privacy] private lane FAILED … Ollama API request failed: timeout: global` → board `❌ failed` |
+| CONTROL | knob absent | board `✅ done` — `app.py`, `run.sh`, `requirements.txt` written at 22:33, inside the first minute |
+Prediction held on both arms. E.TIMEOUT2 is now verified end to end: compiled in (strings gate), deployed (`.95`), and consulted at call time on `generic_openai.rs`'s site. Env restored under `trap` both times (knob 0, no provider line, backup removed).
+Two notes from the run: (1) the mind renders a *timeout* as "the local lane is unreachable" — say how long it waited; (2) **staging's project links carry `http://192.168.4.90:8088/…`** — production's address in a staging deliverable; a config leak to find (below).
+
+### E.BOARD1 + E.CRITIC1 — BUILT (tests + mutants), deploy to staging pending the full suite
+- `code_job_status(ok, n_files)`: `failed` when the coder exited unclean *and* left no file; the board row and notify open "FAILED — the coder produced nothing; its last words are below". Mutant (always `done`) failed by name.
+- `last_assistant_text(workdir)` in mind-tools reads the CLI's own `.claude/projects/*/*.jsonl`; used when `summary` is empty and the exit was unclean — the E.CODER403 403 now reaches the board. Fixture built from the transcript's exact row shapes; mutant (first row instead of last) failed by name.
+- `critic_choice(named, household_csv, private_csv)`: a named critic outside `YM_PRIVATE_PROVIDERS` is not used; the house pool judges and the label carries the reason. `critic_misconfiguration()` prints it once at startup (main.rs, before the channel branches). Scope stays `Private`; E.SEC15's audit untouched. Mutant (allowlist ignored) failed by name.
+- Witness planned on staging after deploy: startup line present in the journal; one `delegate` with `YM_CODER_PROVIDER=minimax` (key present on `.95`) ends `reviewed=true` by the house pool instead of "critic unavailable". Kill: if the house pool refuses under `Private` on `.95`, only the message ships and the row says so.

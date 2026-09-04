@@ -398,6 +398,13 @@ impl Coder {
         if summary.is_empty() {
             summary = String::from_utf8_lossy(&out.stderr).trim().to_string();
         }
+        // A run that died before its first tool call leaves stdout without a `.result` and stderr
+        // empty; the only diagnostic is the CLI's own transcript. E.CODER403's four runs said
+        // "403 Access to model denied" nowhere else, and the board showed "/  /". When the coder
+        // has no summary and did not exit cleanly, its last words are the summary.
+        if summary.is_empty() && !out.status.success() {
+            summary = last_assistant_text(&wd).unwrap_or_default();
+        }
         Ok(CoderResult {
             ok: out.status.success(),
             summary,
@@ -547,6 +554,52 @@ fn is_revoked_oauth_error(output: &str) -> bool {
         && (error.contains("revoked") || error.contains("invalid authentication credentials"))
 }
 
+/// The last assistant message in the run's own transcript — `.claude/projects/*/*.jsonl` under the
+/// workdir, one JSON object per line, `type: "assistant"` rows carrying `message.content` as either
+/// a string or an array of `{text}` parts. `None` when there is no transcript or no assistant turn.
+pub fn last_assistant_text(workdir: &str) -> Option<String> {
+    let projects = std::path::Path::new(workdir).join(".claude").join("projects");
+    let mut last: Option<String> = None;
+    for proj in std::fs::read_dir(&projects).ok()?.filter_map(|e| e.ok()) {
+        let files = std::fs::read_dir(proj.path())
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok());
+        for f in files {
+            if f.path().extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(f.path()) else {
+                continue;
+            };
+            for line in body.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                    continue;
+                }
+                let text = match v.get("message").and_then(|m| m.get("content")) {
+                    Some(serde_json::Value::String(s)) => s.trim().to_string(),
+                    Some(serde_json::Value::Array(parts)) => parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .trim()
+                        .to_string(),
+                    _ => String::new(),
+                };
+                if !text.is_empty() {
+                    last = Some(text);
+                }
+            }
+        }
+    }
+    last
+}
+
 /// Render a coder result for the chat.
 pub fn render_coder(r: &CoderResult) -> String {
     let mut s = String::new();
@@ -571,6 +624,67 @@ pub fn render_coder(r: &CoderResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact row shapes of the E.CODER403 transcript: a user row, an assistant row whose
+    /// content is an array of text parts and whose model is `<synthetic>`, a trailing marker row.
+    fn transcript(root: &std::path::Path, rows: &[String]) {
+        let dir = root
+            .join(".claude")
+            .join("projects")
+            .join("-opt-yantrik-mind-coder-run-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("19457dab.jsonl"), rows.join("\n")).unwrap();
+    }
+
+    const DENIED: &str = "Failed to authenticate. API Error: 403 Access to model denied. Please make sure you are eligible for using the model.";
+
+    #[test]
+    fn the_coders_last_words_are_read_from_its_own_transcript() {
+        let root = mind_types::scratch::dir("coder-last-words");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        transcript(
+            &root,
+            &[
+                r#"{"type":"queue-operation"}"#.to_string(),
+                r#"{"type":"user","message":{"role":"user","content":"Create a complete Python Flask app"}}"#.to_string(),
+                format!(r#"{{"type":"assistant","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"{DENIED}"}}]}}}}"#),
+                r#"{"type":"last-prompt"}"#.to_string(),
+            ],
+        );
+        assert_eq!(
+            last_assistant_text(root.to_str().unwrap()).as_deref(),
+            Some(DENIED)
+        );
+    }
+
+    #[test]
+    fn the_last_assistant_row_wins_and_string_content_counts() {
+        let root = mind_types::scratch::dir("coder-last-words-order");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        transcript(
+            &root,
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#.to_string(),
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write"}]}}"#.to_string(),
+                r#"{"type":"assistant","message":{"content":"Done. Three files produced:"}}"#.to_string(),
+            ],
+        );
+        assert_eq!(
+            last_assistant_text(root.to_str().unwrap()).as_deref(),
+            Some("Done. Three files produced:")
+        );
+    }
+
+    #[test]
+    fn no_transcript_means_no_words_not_a_panic() {
+        let root = mind_types::scratch::dir("coder-last-words-none");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(last_assistant_text(root.to_str().unwrap()), None);
+        assert_eq!(last_assistant_text("/definitely/not/a/dir"), None);
+    }
 
     /// The envelope the CLI actually returns under `--output-format json`, shaped exactly like the
     /// blobs `ym-record-spend` has been parsing on the box.

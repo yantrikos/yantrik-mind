@@ -68,6 +68,7 @@ mod code;
 pub mod config_panel;
 mod courier;
 pub mod delegate;
+pub use delegate::critic_misconfiguration;
 mod escrow;
 mod festivals;
 mod finance;

@@ -890,6 +890,78 @@ pub(crate) fn verdict_ships(v: &str) -> bool {
 /// reaches this code path).
 /// L4-0: the named critic is its own pool but the SAME spend ledger — it joins the house
 /// pool's family, so a critic call never escapes the meter.
+/// The board status for a finished code job. "done" used to be written unconditionally: E.CODER403
+/// found four ✅ rows whose coder had died on a 403 before its first edit. A run that produced no
+/// file and did not exit cleanly FAILED; a run that left files — including one the wall clock
+/// stopped — is a result to judge (see `CoderResult::timed_out`), and stays done.
+pub(crate) fn code_job_status(ok: bool, n_files: usize) -> &'static str {
+    if !ok && n_files == 0 {
+        "failed"
+    } else {
+        "done"
+    }
+}
+
+/// Which judge a delegated build gets. The critic call is `Private` on purpose (E.SEC15: a judge
+/// over an unbounded delegated payload defaults Private), so a named critic outside
+/// `YM_PRIVATE_PROVIDERS` can never serve it. E.CRITIC1 found both boxes configured exactly so —
+/// `YM_CRITIC_MODEL=ollama-cloud:…` against `YM_PRIVATE_PROVIDERS=ollama-local` — every build ending
+/// "critic unavailable", the reason in one journal line. Decide once, say why, and let the house
+/// pool (whose private member is the local model) judge instead. Pure, so it is testable.
+pub(crate) enum CriticChoice {
+    Named,
+    House { reason: String },
+}
+
+pub(crate) fn critic_choice(
+    named: Option<&str>,
+    household_csv: &str,
+    private_csv: &str,
+) -> CriticChoice {
+    match named {
+        None => CriticChoice::House {
+            reason: "no YM_CRITIC_MODEL".to_string(),
+        },
+        Some(spec)
+            if mind_inference::scope_allows(
+                mind_inference::PrivacyScope::Private,
+                spec,
+                household_csv,
+                private_csv,
+            ) =>
+        {
+            CriticChoice::Named
+        }
+        Some(spec) => CriticChoice::House {
+            reason: format!(
+                "named critic '{spec}' is not in YM_PRIVATE_PROVIDERS ({}) and the critic lane is Private — judged by the house pool instead",
+                if private_csv.trim().is_empty() {
+                    "unset"
+                } else {
+                    private_csv.trim()
+                }
+            ),
+        },
+    }
+}
+
+/// The operator-facing line for a critic the private lane cannot use, or `None` when the named
+/// critic (or none) can serve. Printed once at startup beside the backend line, so the defect is
+/// visible before anyone delegates anything.
+pub fn critic_misconfiguration() -> Option<String> {
+    let spec = std::env::var("YM_CRITIC_MODEL").ok()?.trim().to_string();
+    if spec.is_empty() {
+        return None;
+    }
+    let household = std::env::var("YM_HOUSEHOLD_PROVIDERS")
+        .unwrap_or_else(|_| mind_inference::DEFAULT_HOUSEHOLD.to_string());
+    let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+    match critic_choice(Some(&spec), &household, &private) {
+        CriticChoice::House { reason } => Some(format!("[critic] {reason}")),
+        CriticChoice::Named => None,
+    }
+}
+
 pub(crate) fn critic_from_env(family: &InferencePool) -> Option<(InferencePool, String)> {
     let spec = std::env::var("YM_CRITIC_MODEL").ok()?.trim().to_string();
     if spec.is_empty() {
@@ -2135,9 +2207,23 @@ impl super::ConversationEngine {
             tokio::spawn(in_opportunity(opportunity.clone(), async move {
                 // Who is judging is part of the record: a run reviewed by the local pool and one
                 // reviewed by a peer-strength model are not the same evidence.
-                let (critic, critic_label) = match &named_critic {
-                    Some((pool, spec)) => (pool, spec.clone()),
-                    None => (&house, format!("{} (household route)", house.provider())),
+                let household_csv = std::env::var("YM_HOUSEHOLD_PROVIDERS")
+                    .unwrap_or_else(|_| mind_inference::DEFAULT_HOUSEHOLD.to_string());
+                let private_csv = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+                let choice = critic_choice(
+                    named_critic.as_ref().map(|(_, s)| s.as_str()),
+                    &household_csv,
+                    &private_csv,
+                );
+                let (critic, critic_label) = match (&named_critic, choice) {
+                    (Some((pool, spec)), CriticChoice::Named) => (pool, spec.clone()),
+                    (_, CriticChoice::House { reason }) => (
+                        &house,
+                        format!("{} (household route; {reason})", house.provider()),
+                    ),
+                    (None, CriticChoice::Named) => {
+                        (&house, format!("{} (household route)", house.provider()))
+                    }
                 };
                 scratch_note(&mem, &id2, &format!("critic: {critic_label}")).await;
                 let mut wd: Option<String> = None;
@@ -2460,7 +2546,10 @@ impl super::ConversationEngine {
                 let r = last.expect("at least one round ran");
                 ledger_artifacts(&mem, &id2, &r.workdir, &r.files).await;
                 let shipped = reviewed && verdict_ships(&verdict) && !inconclusive;
-                let status_line = if shipped {
+                let status = code_job_status(r.ok, r.files.len());
+                let status_line = if status == "failed" {
+                    "FAILED — the coder produced nothing; its last words are below"
+                } else if shipped {
                     "done (passed review)"
                 } else if !reviewed {
                     "done (UNREVIEWED — the critic was unavailable; treat this as a draft)"
@@ -2478,7 +2567,7 @@ impl super::ConversationEngine {
                         format!("\n\nOutstanding review notes:\n{verdict}")
                     }
                 );
-                ledger_update(&mem, &id2, "done", Some(msg.clone())).await;
+                ledger_update(&mem, &id2, status, Some(msg.clone())).await;
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
@@ -3098,6 +3187,73 @@ mod tests {
         assert_eq!(n, "quant-check");
         assert!(t.starts_with("compare"));
         assert_eq!(k, "research");
+    }
+
+    #[test]
+    fn a_coder_run_that_produced_nothing_is_failed_and_one_with_files_is_done() {
+        assert_eq!(
+            code_job_status(false, 0),
+            "failed",
+            "the E.CODER403 rows: died on a 403, no files"
+        );
+        assert_eq!(
+            code_job_status(false, 2),
+            "done",
+            "wall-clock salvage with files stays a result"
+        );
+        assert_eq!(code_job_status(true, 0), "done");
+        assert_eq!(code_job_status(true, 3), "done");
+    }
+
+    impl CriticChoice {
+        fn is_house(&self) -> bool {
+            matches!(self, CriticChoice::House { .. })
+        }
+    }
+
+    #[test]
+    fn a_named_critic_outside_the_private_allowlist_is_replaced_by_the_house_pool_and_says_why() {
+        // Both boxes on 2026-09-04, verbatim.
+        match critic_choice(
+            Some("ollama-cloud:deepseek-v4-pro"),
+            mind_inference::DEFAULT_HOUSEHOLD,
+            "ollama-local",
+        ) {
+            CriticChoice::House { reason } => {
+                assert!(
+                    reason.contains("ollama-cloud:deepseek-v4-pro"),
+                    "names the critic: {reason}"
+                );
+                assert!(
+                    reason.contains("YM_PRIVATE_PROVIDERS"),
+                    "names the knob: {reason}"
+                );
+                assert!(reason.contains("house pool"), "says who judges instead: {reason}");
+            }
+            CriticChoice::Named => panic!("a cloud critic cannot serve the Private critic lane"),
+        }
+        assert!(
+            critic_choice(
+                Some("ollama-cloud:deepseek-v4-pro"),
+                mind_inference::DEFAULT_HOUSEHOLD,
+                ""
+            )
+            .is_house(),
+            "an unset private allowlist admits nothing"
+        );
+    }
+
+    #[test]
+    fn a_named_critic_inside_the_private_allowlist_is_used() {
+        assert!(matches!(
+            critic_choice(
+                Some("ollama-local:qwen3.8:27b"),
+                mind_inference::DEFAULT_HOUSEHOLD,
+                "ollama-local"
+            ),
+            CriticChoice::Named
+        ));
+        assert!(critic_choice(None, mind_inference::DEFAULT_HOUSEHOLD, "ollama-local").is_house());
     }
 
     #[test]

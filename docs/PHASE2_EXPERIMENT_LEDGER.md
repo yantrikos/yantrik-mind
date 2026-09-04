@@ -7300,3 +7300,23 @@ So the number measured **the difference between my extractor and the writer's**,
 **What the void run still shows, because it does not depend on the extractor.** Told returned an `app.py` **5/5**; control returned one **2/5**. The finding changes behaviour: it makes the model attempt a rewrite every time. Whether the rewrite is CORRECT is what the corrected run answers.
 
 Re-running with a faithful port of `unfence` — strip only when the first non-empty line opens a fence and the last non-empty line is a bare closing fence — both arms, n=5.
+
+### E.REPAIR1 — corrected run, and it goes AGAINST my recorded prediction
+With production's `unfence` applied, n=5 per arm:
+
+| arm | repaired (returned an `app.py` that parses) |
+| --- | --- |
+| **told** — the defect named, exactly as `write_files` emits it | **2/5** |
+| **control** — same prompt, finding block reduced to the file list | **4/5** |
+
+**The prereg said: *"the told arm repairs more often than the control… If the control matches it, I will say so plainly — that outcome would undercut a day of work."*** It did not merely match. It beat it. Recorded here in the direction that costs me, because the control existed precisely so this could not be quietly reinterpreted afterwards.
+
+**Two things I will NOT claim.**
+- **That naming the defect HURTS.** 2 vs 4 out of 5 is well inside the noise of a coin-flip process; five samples cannot distinguish a real effect from a run of luck, and E.THINK4 is a fresh reminder of what small-n does to me.
+- **That naming the defect HELPS.** Nothing here supports it. The point estimate is on the wrong side, and "the finding reaches the review round" — which I have asserted repeatedly today as though it settled something — is now shown to be a statement about **delivery only**.
+
+**What IS established, and it is genuinely positive:** the review round **can** repair. Both arms produced files that parse, so this is not a step that never works. That was not known before today; every previous claim about it rested on the finding arriving, never on an outcome.
+
+**Also retired:** the one signal I salvaged from the void run — told returning a file 5/5 against control's 2/5 — is gone. In the corrected run **both arms returned a file 5/5**. That difference was an artefact of the broken extractor too, and I had already written it down as surviving. It did not survive.
+
+**A hypothesis worth testing rather than asserting:** the told prompt is materially longer, and it instructs the model to "rewrite that file", which may push it toward regenerating from scratch rather than editing — a bigger, riskier operation on a 105-line file. That is a guess. n=20 per arm is running to give the comparison a sample size that can carry a conclusion.

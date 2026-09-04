@@ -7525,3 +7525,26 @@ Codex is out of usage (Pranab, this evening), so item 8 of `DECISIONS_WAITING` i
 3. The override fix keeps NativeFunctionCall for a Medium/Large native-tools family — asserted, so "fixing" Tiny does not silently downgrade the capable tiers.
 4. `yantrik-companion` and `yantrik-mind` both still build.
 5. Kill criterion zero recorded: upstream checked, nothing already fixed.
+
+### E.REPAIR5 — PREDICTION CONFIRMED: naming the cause repairs 70%, naming the symptom 40%
+
+| arm | repaired | failure classes |
+| --- | --- | --- |
+| `symptom` — today's wording | **8/20 (40%)** | 11 of 12 failures are the **same** misconception: `expression cannot contain assignment`, `${` still present |
+| `cause` — the misconception named, with two ways out | **14/20 (70%)** | 5 of 6 failures are **different** classes — unterminated string, unmatched paren; only 1 is the original |
+
+**The prediction (~2×) held, and the failure classes say why.** A symptom-level finding leaves the belief intact and the model re-commits it. A cause-level finding **breaks the belief** — Python's warnings show the model actually attempting the escape — and what remains is stochastic slips. Those are exactly the class E.REPAIR4 showed a second round *can* fix (its one success was a slip). So the cause finding and E.REPAIR3's second round should **compound**: the first converts systematic into stochastic, the second re-rolls the stochastic.
+
+**Also observed:** the symptom arm scored 40% here against 30% / 45% / 50% in earlier runs — one round on this artifact sits around 40% with a ±10-point spread, which is the number to quote from now on.
+
+### E.SYNTAX2 — PREREG: the syntax finding names the cause when it can see it
+**Positive result → own slice, own prereg**, per E.REPAIR5's own kill criterion 3. **Does it already exist?** No — `syntax.rs` emits Python's message and the line; nothing reads the failing line.
+
+**The change, bounded on purpose.** In `unparseable_python`, when the verdict is `Broken`, parse the line number Python reports, read that line of the source, and **only if it contains `${`** append the cause text measured in E.REPAIR5. Any other syntax error keeps today's wording exactly. No new detection, no new dependency, no sandbox change — the line is already in hand.
+
+**KILL CRITERIA.**
+1. On the real `oss20_app_jsinpython.py` fixture (line 89 contains `${`), the finding carries the cause text.
+2. On a syntax error whose failing line does **not** contain `${`, the finding is byte-identical to today's.
+3. A malformed or missing line number never panics and never invents a cause — silence on the cause, symptom text unchanged.
+4. Watched to FAIL, mutation confirmed present first.
+5. Full workspace suite green.

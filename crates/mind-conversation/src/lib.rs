@@ -44,6 +44,7 @@ mod briefing;
 mod calendar;
 mod capabilities;
 mod entrypoint;
+mod freshness;
 mod pyimports;
 mod repetition;
 mod required_literals;
@@ -101,6 +102,8 @@ mod ecb2f_tests;
 mod entrypoint_tests;
 #[cfg(test)]
 mod repetition_tests;
+#[cfg(test)]
+mod freshness_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
@@ -14763,6 +14766,12 @@ impl RecipeHost for MindRecipeHost {
                         // write step reported a DIFFERENT file as possibly incomplete. Silent on
                         // all 228 healthy artifacts of the corpus.
                         findings.extend(crate::repetition::degenerate_repetition(stream));
+                        // E.WIN3: the route renders live figures from data it never re-reads. The
+                        // 8/11 leg lost exactly the three dashboard checks to this, and every
+                        // other check was correctly silent — it parses, imports resolve, it binds
+                        // a port, it repeats nothing. Unlike its neighbours this fires on the
+                        // ABSENCE of a read, so everything it cannot read confidently stays quiet.
+                        findings.extend(crate::freshness::stale_route_findings(stream));
                         if !findings.is_empty() {
                             // The header used to say "IMPORTS THAT DO NOT RESOLVE", which was true
                             // when imports were the only finding and became a lie as soon as

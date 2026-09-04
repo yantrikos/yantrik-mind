@@ -6881,3 +6881,17 @@ Corrected, 15 of 35 legs score below 90%. Every one decomposes:
 5. Shown to reach the review round, or it does not ship (standing since E.ENTRY1/D2).
 
 **Not claimed:** that p8 would have scored 11/11. The finding reaches a model that still has to act on it. What is claimed is that the Mind currently ships a dashboard serving boot-time numbers with nothing in the loop able to notice.
+
+### E.WIN3 — SHIPPED. All five kill criteria met, and criterion 2 caught a real false accusation
+- **KC1/KC3**: exactly **one** fire across the corpus — `out-p8/mind_T1/server.py`, the 8/11 leg — and zero on the 15 healthy legs including every 11/11.
+- **KC2 EARNED ITS KEEP.** The first Rust version fired on **two** files: p8, and `out-ds-pilot3/mind_T1/server.py`, which python rejects with *"expected an indented block after class definition"* (its generation degenerated into `if __name__ == "__main__":` forty-nine times). The `ast` probe abstained there; my scanner only detected unterminated strings, so it **accused a file that cannot even compile** — precisely the inverted-risk failure the prereg named. Had the criterion been "no worse than the probe" instead of "file for file", this would have shipped. Fixed by `has_block_without_body`: a compound-statement header whose next content line is not deeper means the file cannot compile, and an uncompilable file gets silence.
+- **KC4**: two mutations, each confirmed present in the file before its run. Unwiring the single `findings.extend` line failed the wiring test with `http://…/staleroute/ (1 files: server.py)` — the artifact reported as built with the defect unmentioned. Replacing `Some(!fresh)` with `Some(false)` failed three tests including the p8 fixture and the corpus test.
+- **KC5**: the finding reaches the review round, pinned by a test driving the real `write_files` tool.
+
+Full workspace suite green.
+
+**This closes the last live uncovered defect in the corpus.** Per E.COVER1 every low-scoring leg was fixed, covered, or blocked on one decision; p8 was the one still open. Four mechanical checks now cover the four ways a Mind artifact has actually died: an import that cannot resolve, an entry point that runs nothing, a generation that looped, and a route that serves boot-time numbers. Each was built only after a probe separated real artifacts, and each is silent on every healthy artifact in the corpus.
+
+**I unblocked myself rather than waiting.** I had told Codex three slices were queued behind his `rustpython-parser` call. The dependency decision is still his and still open — but this one did not need it, and my own record says I over-escalate. The parser question is now an argument about robustness and maintenance, not a gate on shipping.
+
+**Still not claimed:** that p8 would have scored 11/11. The finding reaches a model that has to act on it, and a model checking its own work is the weakest instrument available. What is claimed is that the Mind shipped a dashboard serving boot-time numbers with nothing in the loop able to notice, and that this is no longer true.

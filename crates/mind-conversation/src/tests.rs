@@ -15510,3 +15510,42 @@ async fn degenerate_repetition_reaches_the_write_message_and_is_absent_when_clea
         "a healthy build must carry no findings block: {ok}"
     );
 }
+
+/// E.WIN3 WIRING — kill criterion 5: the finding must reach the step that can act on it.
+///
+/// Standing policy since E.ENTRY1/D2, where the completion write's whole message went to a
+/// variable nothing read. A check nobody receives is not a check.
+#[tokio::test]
+async fn stale_route_finding_reaches_the_write_message_and_is_absent_when_clean() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+
+    // A handler that renders the dashboard from a global captured at import.
+    let stale = "=== FILE: server.py\nimport json\n\nLEADS = []\n\n\nclass H:\n    def render(self):\n        return len(LEADS)\n\n    def do_GET(self):\n        if self.path == '/dashboard':\n            self.render()\n";
+    let msg = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "staleroute", "stream": stale}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        msg.contains("DEFECTS FOUND MECHANICALLY") && msg.contains("/dashboard"),
+        "the review round must be handed the stale route, or the dashboard ships showing \
+         boot-time numbers: {msg}"
+    );
+
+    // The same handler reading on request: not a byte of the message changes.
+    let fresh = "=== FILE: server.py\nimport json\n\n\nclass H:\n    def render(self):\n        with open('data/leads.json') as f:\n            return len(json.load(f))\n\n    def do_GET(self):\n        if self.path == '/dashboard':\n            self.render()\n";
+    let ok = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "freshroute", "stream": fresh}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        !ok.contains("DEFECTS FOUND MECHANICALLY"),
+        "a handler that reads on request must carry no findings block: {ok}"
+    );
+}

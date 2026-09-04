@@ -6445,3 +6445,23 @@ let idle_ok = present && !quiet_now && idle_stretch;   // loops.rs:436
 **Where it now stands.** The chain is fully mapped and one link is missing: packet ✓ (E.G3's calendar → night shift → packet), idle ✓, **presence ✗**. Presence needs a machine view from the web cockpit, and `/api/loops`, `/api/skills`, `/api/orders` all return **401** — operator auth, a paired device. That is a real authentication boundary and not one to work around to make a measurement convenient.
 
 **So Phase G is blocked on pairing a device to staging's cockpit** — a small, concrete ask, and a far better state than "two hypotheses, both wrong". Filed as a decision.
+
+### E.DRIVE2 — driving via `/cli` writes beliefs about Pranab from MY diagnostics
+Swept the remaining unexercised surfaces. `trips build`, `events build`, `book build` all report a missing photo source honestly; `dream` refuses with its bar stated (*"two verified citations across domains"*); `briefing` is correct and shows the packet I created. **No defects** — a clean negative for those surfaces.
+
+But `ym patterns` produced this:
+
+> *"Pranab's interest in `why roles verify` is likely driven by a need to understand the security or permission boundaries of the AI systems he is building…"*
+
+**Pranab never ran `why roles verify`. I did**, an hour earlier, as a diagnostic. The ctl `/cli` endpoint dispatches through `cli_dispatch` — the **user** path — so every command I send is recorded as the user's activity, and the pattern loop turned my debugging into a belief about him.
+
+**This is the same root as the knock finding, and the connection is the useful part.** The design already separates a **user turn** from a **machine view**: `is_machine_view` allowlists the cockpit's nine read-only GETs, which move the view stamp without touching the activity clock. The ctl endpoint does not use it. That single gap causes two distinct harms:
+
+| harm | mechanism |
+| --- | --- |
+| Phase G unmeasurable | `/cli` marks no presence, so `idle_ok` is never true and knock never runs |
+| the belief store is polluted | `/cli` marks user activity, so diagnostics become evidence about Pranab |
+
+One fix addresses both: let the ctl endpoint dispatch allowlisted read-only verbs as machine views, exactly as the web cockpit already does. The allowlist and the mechanism both exist — only the wiring is missing, which is the third time today the defect has been a correct mechanism connected to the wrong caller.
+
+**Not fixing it unilaterally**, and not deleting the belief either. Both touch how the mind decides what is true about its owner, and mutating a live belief store to tidy up my own footprint is a larger risk than the footprint. Recorded here and filed; the caution for anyone driving staging is that **your diagnostics become the user's history**.

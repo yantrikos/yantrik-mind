@@ -7367,3 +7367,20 @@ This is D2 exactly — a write whose message goes somewhere nothing reads — su
 5. It must carry the earlier message forward (`prior`), or fixing the staleness makes it lossy — the same trap as D2.
 
 **Deliberately NOT in this slice: a second repair round.** E.REPAIR1 says one round repairs 45%; a second could plausibly reach ~70%, but that is one more model call on every build and a bigger design decision. This slice makes the failure **visible**, which is the precondition for deciding whether to spend a call on it.
+
+### E.REPAIR2 — PREREG: does asking for the SMALLEST EDIT beat asking for a rewrite?
+E.REPAIR1 settled where the weakness is: detection triples the odds (45% told vs 15% control) and **the review step is the weak link, not the checks**. This tests the cheapest lever on that number — the wording of the finding, which is entirely ours.
+
+**The clue, and it is why this is worth a run rather than a guess.** In E.REPAIR1's told arm the failures were at **lines 75 and 118** — *not* line 89, the defect that was named. The model was not failing to fix the bug. It was regenerating a 105-line file and **introducing new breakage on the way**. Today's finding ends *"Rewrite that file"*, which asks for precisely that.
+
+**Arms, n=20 each, same artifact, same mechanical verdict (`ast.parse` on the returned file):**
+- `rewrite` — today's wording, verbatim from `syntax.rs`.
+- `minimal` — same defect, same specificity, but: *"Make the SMALLEST change that fixes line 89 and leave every other line exactly as it already is — the rest of the file is known to be correct, and rewriting it risks breaking something that works."*
+
+**PREDICTION, recorded before the first call:** `minimal` repairs more often than `rewrite`, because every regenerated line is a fresh chance to break something already correct. **If `rewrite` wins or they tie, the clue was a coincidence and I will say so** — the same commitment that made E.REPAIR1's reversal credible instead of convenient.
+
+**n=20, not 5.** Small samples misled me twice today, once into nearly reporting that a day's work was worthless. Forty calls is eight minutes on local hardware and costs nothing; cheap measurement is the reason repetition is affordable, not an excuse to skip it.
+
+**Also logged per run:** the returned file's line count against the original's 105. If `minimal` works by returning something close to 105 lines while `rewrite` returns a different size, that is the mechanism visible directly rather than inferred.
+
+**This is the one change today's evidence supports at the weak link**, and it is a prompt string — no dependency, no capability, no other repository.

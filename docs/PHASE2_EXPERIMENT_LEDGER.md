@@ -6213,3 +6213,15 @@ So "win every round" is a **T1 problem and nothing else**. Effort spent anywhere
 **Method, before any code.** I do not know which checks those legs fail — the study's verdicts were not kept, only its artifacts. But **32 real Mind T1 artifacts are on the box**, and `run/check.sh` re-checks an artifact inside the checker image with `--network none`: no model call, no NIM request, not a graded leg. Re-checking all 32 gives a per-check failure histogram over real output, which says exactly what to fix rather than what I would guess needs fixing.
 
 Preregistered before looking: **I expect the failures to concentrate in a small number of checks** — most likely the dashboard group (`dashboard_total_exact`, `dashboard_per_day_exact_14_bins`, `dashboard_recent_five_exact_order`), because those demand exact computed values rather than structure, and reading 6 recorded Hermes missing all four dashboard checks on its own T1. If instead the failures are spread evenly across unrelated checks, there is no single fix and the honest conclusion is that T1 quality is model-limited rather than harness-limited — I will say so.
+
+### E.G3 — PARKED: two hypotheses about the knock gate, both tested, both wrong
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| My driving suppresses it (activity resets the idle timer) | Left the box alone 13 minutes | **Wrong** — opportunities still 7, evaluations still 9,865 |
+| It needs activity THEN quiet (a turn opens a stretch that matures) | A real conversation turn, then 700 s of silence | **Wrong** — still 7 and 9,865 |
+
+The untested candidate is the one the policy line names first and I kept walking past: `cap:one-per-day`. If a knock was already delivered today, no further evaluation is admitted regardless of idleness, and both of my experiments were doomed before they started.
+
+**Parked deliberately rather than pursued.** Pranab has set the standard as winning every round, and the entire measured gap is T1 (E.WIN1). The knock gate is a side quest, and I have now spent two experiments and roughly twenty-five minutes of box time on it while being wrong twice. The honest state: **I do not know what admits a knock opportunity on this box**, the packet precondition I removed is genuinely removed, and whoever picks this up should test the daily cap first.
+
+Recording both failures rather than only the eventual answer. Two confident explanations, each plausible, each written up before it was checked, each false — which is the same pattern as the three "reachable but unobserved" overclaims earlier today, and the reason the tests are worth running before the prose.

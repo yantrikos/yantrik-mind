@@ -6375,3 +6375,18 @@ First real `ym delegate` run of the T1 brief on the fixed lane:
 | Visible, never silent | The write message names the duplicated path so the review can act on it. |
 | No other refusal weakens | Traversal, absolute paths, file count, size and depth limits all still refuse. This is the one refusal that changes, and only for duplicates. |
 | Inert otherwise | A set with no duplicates produces a byte-identical message. |
+
+### E.WIN6 — RESULT: shipped; the duplicate is recovered and reported
+A repeated path now keeps its **last** definition and the repeat is reported on the write message, which reaches the review (E.WIN4) — so a wrong winner can be corrected rather than passing silently.
+
+| Kill criterion | Outcome |
+| --- | --- |
+| No longer fatal | The set that killed job 255216 now writes |
+| Last definition wins | Asserted on content, not just count — the lane's own "replaces the old one wholesale" rule |
+| Visible, never silent | The write message names the repeated path |
+| No other refusal weakens | Empty, traversal, directory-clash, count, size and depth all still refuse; only the duplicate case changed |
+| Inert otherwise | A clean set says nothing about duplicates |
+
+Two mutants killed: the FIRST definition winning instead of the last, and the repeat never being reported. **Two existing tests failed and were updated rather than deleted** — they encoded the old contract, which I changed deliberately and preregistered; the empty/traversal/directory-clash cases they also cover are untouched.
+
+**What this run bought.** The leg produced no artifact and no score, and was still the most valuable thing I ran today: it found a defect that costs an entire build, and that no amount of reading the file-set code would have surfaced, because the code is *correct* — "one path, one file" is a reasonable rule that happens to be catastrophic against a model that occasionally says a thing twice. Suite 1808/1808.

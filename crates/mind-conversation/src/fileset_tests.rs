@@ -186,10 +186,7 @@ fn every_refusal_names_the_entry_and_the_reason() {
             plan_file_set(&[e("../x.txt", "x")]).unwrap_err(),
             "../x.txt",
         ),
-        (
-            plan_file_set(&[e("a.txt", "x"), e("a.txt", "y")]).unwrap_err(),
-            "a.txt",
-        ),
+
         (
             plan_file_set(&[e("a/b/c/d/e.txt", "x")]).unwrap_err(),
             "a/b/c/d/e.txt",
@@ -252,10 +249,31 @@ fn the_caps_are_enforced_at_their_edges() {
 #[test]
 fn an_empty_set_a_duplicate_and_a_directory_are_each_refused() {
     assert_eq!(plan_file_set(&[]), Err(FileSetRefusal::Empty));
-    assert!(matches!(
-        plan_file_set(&[e("a.txt", "1"), e("b.txt", "2"), e("a.txt", "3")]),
-        Err(FileSetRefusal::DuplicatePath { .. })
-    ));
+    // E.WIN6 — a DUPLICATE no longer refuses the set. It used to, and a real `ym delegate` run of
+    // the T1 brief died on it: the model emitted `run.sh` twice and the build produced nothing at
+    // all. The lane already means "later replaces earlier", so the last definition wins and the
+    // repeat is reported to the review instead of costing the whole artifact.
+    let planned = plan_file_set(&[e("a.txt", "1"), e("b.txt", "2"), e("a.txt", "3")])
+        .expect("a duplicate must no longer destroy the set");
+    assert_eq!(planned.len(), 2, "one path, one file still holds on disk");
+    assert_eq!(
+        planned.iter().find(|x| x.path == "a.txt").map(|x| x.content.as_str()),
+        Some("3"),
+        "the LAST definition is the model's latest intent"
+    );
+    assert_eq!(
+        crate::fileset::duplicate_paths(
+            "=== FILE: a.txt
+1
+=== FILE: b.txt
+2
+=== FILE: a.txt
+3
+"
+        ),
+        vec!["a.txt".to_string()],
+        "and the repeat must be reportable, or a wrong winner is silent"
+    );
     // A path whose parent is already a FILE cannot be written; the error is reported, not ignored.
     let s = Scratch::new("dirclash");
     write_file_set(s.path(), &[e("a.txt", "x")]).unwrap();

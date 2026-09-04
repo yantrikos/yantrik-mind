@@ -15401,3 +15401,52 @@ fn the_review_step_is_shown_what_the_write_step_observed() {
         "showing the defects is not enough; the review must be told to act on them"
     );
 }
+
+/// E.WIN6 — a duplicated path must not destroy the build, and must not be silent either.
+///
+/// The first real `ym delegate` run of the T1 brief died on exactly this: the model emitted
+/// `run.sh` twice and `plan_file_set` refused the WHOLE set, so the build produced nothing at all.
+/// In a graded leg that is a near-zero for a trivially recoverable slip.
+#[tokio::test]
+async fn a_duplicated_path_keeps_the_last_and_says_so() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+    let dup = "=== FILE: run.sh\necho first\n\
+               === FILE: server.py\nprint(1)\n\
+               === FILE: run.sh\necho second\n";
+
+    let msg = host
+        .call_tool("write_files", &serde_json::json!({"project": "dupe", "stream": dup}))
+        .await
+        .expect("a duplicated path must no longer fail the whole build");
+    assert!(
+        msg.contains("run.sh") && msg.contains("written twice"),
+        "the duplicate must be reported so the review can check the right one won: {msg}"
+    );
+
+    // The LAST definition is the one kept — the lane's own "replaces the old one wholesale" rule.
+    let planned = crate::fileset::plan_file_set(&crate::fileset::parse_file_stream(dup).entries)
+        .expect("planning must succeed");
+    let run = planned
+        .iter()
+        .find(|e| e.path == "run.sh")
+        .expect("run.sh must be written exactly once");
+    assert!(
+        run.content.contains("second"),
+        "the later definition is the model's latest intent: {:?}",
+        run.content
+    );
+    assert_eq!(
+        planned.iter().filter(|e| e.path == "run.sh").count(),
+        1,
+        "one path, one file still holds on disk"
+    );
+
+    // A clean set is untouched and says nothing about duplicates.
+    let clean = "=== FILE: run.sh\necho hi\n=== FILE: server.py\nprint(1)\n";
+    let ok = host
+        .call_tool("write_files", &serde_json::json!({"project": "clean", "stream": clean}))
+        .await
+        .expect("writes");
+    assert!(!ok.contains("written twice"), "no duplicate, no note: {ok}");
+}

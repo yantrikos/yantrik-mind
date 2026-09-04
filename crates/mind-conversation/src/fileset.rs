@@ -154,7 +154,48 @@ fn check_path(path: &str) -> Result<String, FileSetRefusal> {
 /// Validate a whole file set. `Ok` means every entry may be written; `Err` means NONE of them is.
 ///
 /// Pure: no filesystem, no clock, no environment. The write below applies exactly this plan.
+/// Paths a build stream states more than once, in the order first repeated.
+///
+/// E.WIN6: the set now keeps the LAST definition rather than refusing everything, so the repeat
+/// has to be REPORTED or a wrong winner is silent. Named here beside the parser it uses.
+pub fn duplicate_paths(stream: &str) -> Vec<String> {
+    let parsed = parse_file_stream(stream);
+    let mut seen: Vec<String> = Vec::new();
+    let mut dup: Vec<String> = Vec::new();
+    for e in &parsed.entries {
+        if seen.iter().any(|s| s == &e.path) {
+            if !dup.iter().any(|d| d == &e.path) {
+                dup.push(e.path.clone());
+            }
+        } else {
+            seen.push(e.path.clone());
+        }
+    }
+    dup
+}
+
+/// Plan a set, and report which paths were stated more than once.
+///
+/// E.WIN6: a repeated path used to refuse the whole set. It now keeps the LAST definition and
+/// names the path, so the caller can tell the review round that a file was written twice — a
+/// silent pick is how the wrong version wins unnoticed.
+pub fn plan_file_set_reporting(
+    entries: &[FileEntry],
+) -> Result<(Vec<FileEntry>, Vec<String>), FileSetRefusal> {
+    let mut duplicated: Vec<String> = Vec::new();
+    let planned = plan_inner(entries, &mut duplicated)?;
+    Ok((planned, duplicated))
+}
+
 pub fn plan_file_set(entries: &[FileEntry]) -> Result<Vec<FileEntry>, FileSetRefusal> {
+    let mut ignored = Vec::new();
+    plan_inner(entries, &mut ignored)
+}
+
+fn plan_inner(
+    entries: &[FileEntry],
+    duplicated: &mut Vec<String>,
+) -> Result<Vec<FileEntry>, FileSetRefusal> {
     if entries.is_empty() {
         return Err(FileSetRefusal::Empty);
     }
@@ -183,8 +224,15 @@ pub fn plan_file_set(entries: &[FileEntry]) -> Result<Vec<FileEntry>, FileSetRef
                 cap: MAX_TOTAL_BYTES,
             });
         }
-        if planned.iter().any(|p| p.path == path) {
-            return Err(FileSetRefusal::DuplicatePath { path });
+        if let Some(prev) = planned.iter().position(|p| p.path == path) {
+            // E.WIN6 — a duplicate used to refuse the WHOLE set, and a real `ym delegate` run died
+            // on it: the model emitted `run.sh` twice and the build produced nothing at all. The
+            // lane already means "later replaces earlier" — the review step's own instruction is
+            // that any file it outputs replaces the old one wholesale — so the second statement is
+            // the latest intent. Keep it, and let the caller SAY the path repeated, because a
+            // silent pick is how the wrong version wins unnoticed.
+            duplicated.push(path.clone());
+            planned.remove(prev);
         }
         planned.push(FileEntry {
             path,

@@ -4279,6 +4279,7 @@ pub(crate) fn publish_file_set(
             }
         ));
     }
+    // E.WIN6: a repeated path keeps its LAST definition instead of destroying the whole set.
     let planned = crate::fileset::plan_file_set(&parsed.entries).map_err(|r| r.message())?;
     let dir =
         std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
@@ -14719,6 +14720,11 @@ impl RecipeHost for MindRecipeHost {
                         // silently dropped and four checks hung off it. Empty when code and
                         // templates agree, which keeps this message byte-identical.
                         findings.extend(crate::required_literals::placeholder_mismatches(stream));
+                        for d in crate::fileset::duplicate_paths(stream) {
+                            findings.push(format!(
+                                "`{d}` was written twice in one set; the LAST definition was kept —                                  check it is the one you meant"
+                            ));
+                        }
                         if !findings.is_empty() {
                             msg.push_str(&format!(
                                 "

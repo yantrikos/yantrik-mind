@@ -7659,3 +7659,15 @@ Two notes from the run: (1) the mind renders a *timeout* as "the local lane is u
 - `last_assistant_text(workdir)` in mind-tools reads the CLI's own `.claude/projects/*/*.jsonl`; used when `summary` is empty and the exit was unclean — the E.CODER403 403 now reaches the board. Fixture built from the transcript's exact row shapes; mutant (first row instead of last) failed by name.
 - `critic_choice(named, household_csv, private_csv)`: a named critic outside `YM_PRIVATE_PROVIDERS` is not used; the house pool judges and the label carries the reason. `critic_misconfiguration()` prints it once at startup (main.rs, before the channel branches). Scope stays `Private`; E.SEC15's audit untouched. Mutant (allowlist ignored) failed by name.
 - Witness planned on staging after deploy: startup line present in the journal; one `delegate` with `YM_CODER_PROVIDER=minimax` (key present on `.95`) ends `reviewed=true` by the house pool instead of "critic unavailable". Kill: if the house pool refuses under `Private` on `.95`, only the message ships and the row says so.
+
+### Filed from the E.TIMEOUT3 runs (not started)
+- **E.URL1 — a compiled default that is production's address.** `YM_WEB_URL` unset → `http://192.168.4.90:8088` (lib.rs:4198, 4311); staging handed out production links until the env carried its own. A default that names one specific box is wrong on every other box; the honest default is the host's own address, or no link with a line saying why. Staging is patched by config at deploy (`YM_WEB_URL=http://192.168.4.95:8088`); the code stays filed.
+- **E.MSG1 — a timeout is not "unreachable".** With a 5 s knob the build said "the local lane is unreachable: … timeout: global". True for the caller, misleading for the operator who then checks the network. The message should say the lane answered nothing within N s and name the knob.
+
+### E.BOARD1 + E.CRITIC1 — DEPLOYED to staging (`13f2d1c`), gate on bytes
+| literal | fresh binary | deployed |
+| --- | --- | --- |
+| `the coder produced nothing; its last words` | 2 | 2 |
+| `judged by the house pool` | 1 | 1 |
+| absent control | 0 | — |
+First gate attempt read **0** for the E.BOARD1 literal: `strings` emits ASCII runs and the phrase has an em-dash, so it surfaces as two strings. Re-gated with `grep -ac` on bytes; banked. Health 200; `YM_WEB_URL=http://192.168.4.95:8088` added to staging's env (E.URL1 stays filed). **Startup line, verbatim from the journal:** `[critic] named critic 'ollama-cloud:deepseek-v4-pro' is not in YM_PRIVATE_PROVIDERS (ollama-local) and the critic lane is Private — judged by the house pool instead`. Witness runs in flight: (A) `minimax` coder, `YM_DELEGATE_ROUNDS=2` — expect a review by the house pool, not "critic unavailable"; (B) a `custom` coder on a dead port — expect `❌ failed` and the CLI's last words on the board.

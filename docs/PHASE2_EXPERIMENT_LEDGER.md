@@ -6054,3 +6054,18 @@ FAIL: unit_oracle.py — stderr: Traceback ... File "/tmp/ym_sbx_.../prog.py", l
 | The fix | Use the sandbox the way its own header describes: *"code + inputs live in a throwaway scratch dir passed as FILES"*. The forge was passing a path instead of the input. Add a `run_python_with` that takes one extra input file, and have the check read `target.py` from the scratch dir rather than reaching into the host. |
 | Kill criteria | A syntactically valid file must PASS (today impossible for any file). A file with a real syntax error must still report SYNTAX. The check must not reference a host path at all. If the sandbox is unavailable the existing SKIP behaviour must be unchanged — never a silent pass. |
 | **How it will be verified** | Not locally: `Sandbox::available()` is false on Windows (no user namespaces), so no local test can execute it. The proof is on staging — re-drive the same venture's test stage and see PASS where it just said FAIL. That is precisely the kind of verification the box exists for, and precisely what I was not doing when I reported staging as "empty". |
+
+### E.FORGE1 — OBSERVED HARM: the defect killed a venture, live
+Driving `v496495` on after the fix was deployed produced the cost of the bug rather than the proof of the fix:
+
+```
+tick: ⚒️ `v496495` rated 2/10 — a kill criterion FIRED
+tick: ⚒️ `v496495` KILLED by its own pre-registered criterion:
+      "The artifact fails to execute (crash) and does not meet the acceptance criteria..."
+```
+
+The rate stage was scoring the **false RED** the old binary's checker had written, and the venture's own kill criterion — a correct, well-designed criterion, firing exactly as intended — destroyed it. The stated reason was *"the artifact fails to execute (crash)"* for a file that was **never executed and never even read**: the check crashed trying to `open()` it through a tmpfs mask.
+
+This matters beyond the forge. Three entries earlier today record defects as *reachable but with no observed instance*, and I wrote a memory about the difference between proving a failure **can** happen and showing that it **did**. This one is on the other side of that line: a real venture, on a real box, killed by a checker that could not see the thing it was judging. Nothing in the log says "the checker failed" — it says the artifact crashed. **A broken check does not report itself as broken; it reports its subject as broken**, which is what makes this family expensive to find by reading and cheap to find by driving.
+
+The fix is deployed at `36e4be2`; a fresh venture is being driven to the test stage to show a PASS where this one could only ever produce a FAIL.

@@ -7121,3 +7121,25 @@ Measuring the field combination production actually sends (`think:false` **plus*
 **Consequence for the work Pranab asked for.** The whole point of the level design is `timeout_for(level)` — and **a timeout table cannot be built on n=1 when one cell varies 2.7×**. Doing it anyway would produce exactly the artefact `DECISIONS_WAITING` item 6 already lists four of: a bound that is judgment wearing a measurement's clothes. Before any duration is written into code, each cell needs repeats and a spread, not a point.
 
 **The error, named.** I ran one sample per configuration, saw differences, and reported them as measured findings — twice, in two ledger entries, to Pranab and to Codex. The discipline I applied all day to *code* (mutate it, watch it fail, assert exact counts) I did not apply to *measurement*: no repeats, no variance, no control. A single draw is not a measurement, and calling it one is the same class of error as asserting a property of code I had not run.
+
+### E.SYNTAX1 — PREREG: the build lane can syntax-check with the machinery the forge already uses
+**Kill criterion zero, applied FIRST: does this already exist?** In the **forge**, yes — `code.rs:1413` runs `import ast; ast.parse(src)` inside `Sandbox::run_python_with`. In the **build lane**, no: `delegate.rs` has no sandbox call at all. Same producer, same failure mode, one lane hardened and the other not — the E.FENCE1 shape, except this time the answer is *use the existing mechanism*, not duplicate it.
+
+**The gap, with a fresh artifact.** E.OSS20-CHECK: the Mind on `gpt-oss-backup:20b` produced an `app.py` whose line 89 is a JavaScript template literal inside Python. `SyntaxError: expression cannot contain assignment`. The server never starts; every request returned `000`. **All four mechanical checks stayed silent and each was correct to** — imports resolve, the entry script names a file that exists, that file has a `__main__` guard so it is not a dead entry point, nothing repeats, the dashboard is not a snapshot. Every check answered its own question correctly and the deliverable was worthless, because none asks whether the file is valid Python.
+
+**Why this does not need the `rustpython-parser` decision, and does not run untrusted code.**
+- `ast.parse` **parses; it never executes**. `delegate.rs`'s comment declines to *run* the artifact — *"executing it unsandboxed could burn capped model requests… running untrusted output is its own slice with its own security review"* — and that is right about running. It conflates running with parsing; the forge already separates them.
+- No new dependency. The sandbox needs `python3`, and **the forge already depends on exactly that**, on the same boxes. A second caller of an existing dependency is not a new one.
+- No new capability. `Sandbox` is already used by two call paths and is already imported into the write path's module.
+
+**Behaviour where the sandbox is unavailable.** `Sandbox::available()` PROBES rather than assumes, and returns false inside the cb2 benchmark container (no unprivileged userns) — where this must then produce **no finding and no error**, leaving graded legs byte-identical. It returns true on staging, measured today with the exact command `Sandbox::run` builds. So this improves the real product and **cannot** move a graded reading, which is the honest statement of its value and the opposite of what I claimed about execution this morning.
+
+**KILL CRITERIA.**
+1. Fires on the real `oss20_app_jsinpython.py` fixture, naming the file and the syntax error.
+2. **Zero** fires across every healthy `.py` in the corpus — exact count, not "no worse than".
+3. With the sandbox unavailable it yields **no finding and no error**, and the write message is byte-identical to today's.
+4. Watched to FAIL, with the mutation confirmed present in the file before its run.
+5. Shown to reach the review round, or it does not ship.
+6. It must not add a sandbox spawn to a build with no `.py` files — a healthy non-python deliverable pays nothing.
+
+**Not claimed:** that this improves any benchmark score. It cannot; the container refuses the sandbox. It closes the fifth way a Mind artifact has actually died, on real deployments.

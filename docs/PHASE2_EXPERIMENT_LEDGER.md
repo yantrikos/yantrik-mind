@@ -7548,3 +7548,17 @@ Codex is out of usage (Pranab, this evening), so item 8 of `DECISIONS_WAITING` i
 3. A malformed or missing line number never panics and never invents a cause — silence on the cause, symptom text unchanged.
 4. Watched to FAIL, mutation confirmed present first.
 5. Full workspace suite green.
+
+### E.SYNTAX2 — SHIPPED, all five kill criteria on evidence
+| # | criterion | evidence |
+| --- | --- | --- |
+| 1 | cause named on the real artifact | `names_the_cause_on_the_real_artifact…` against `oss20_app_jsinpython.py`, whose line 89 is asserted to contain `${` |
+| 2 | byte-identical otherwise | `stays_silent_when_the_failing_line_has_no_template_literal` — `cause_hint` returns `None`, so the format string's `{}` slot is empty |
+| 3 | no panic, no invented cause on a bad line number | six malformed messages, including `line 0`, `line 99`, `line abc` — all `None` |
+| 4 | watched to FAIL | gate mutated to `if false`, confirmed present, real-artifact test failed with *"line 89 contains ${ and must yield the cause"* |
+| 5 | full suite green | 47 result blocks |
+
+**One trap in the doing, recorded because it produced a false suite failure.** The mutation's restore was `shutil.copy` to `/tmp` from Python, then `cp /tmp/…` from Git Bash — **two different `/tmp` directories on Windows**. The restore silently no-op'd, the file stayed mutated, and the full suite reported one failure that was my mutant, not a defect. Caught because the failing test was the one the mutant targets; restored by exact string instead. *A restore is part of the mutation and must be verified like the mutation itself.*
+
+### E.DARK1 — SHIPPED (`b3d6e5d` in yantrik-companion): 40/40, six failures fixed on evidence
+Closes `DECISIONS_WAITING` item 8 without Codex. Fixed toward the **tests**: `summary()` arg order (a local divergence — `{:.1}B` had been receiving `self.family`), the `< 4.0` tier boundary, the native-tools override erasing Tiny/Small MCQ (local divergence; now Medium/Large only, with a guard test), the `matches / keywords.len()` scorer that let the shorter table win ties by construction (now a raw count, pinned by a test whose mutant fails with `0.1538 vs 2.0`), Schedule's bare time words, System's missing `deploy`/`run the`. Fixed toward the **code**, with evidence: `max_tokens` 2048 (2048 upstream too) and two assertions expecting `StructuredJSON` for a Medium Qwen, where `NativeFunctionCall` is deliberate and is how the live agent loop calls tools. Both dependents build.

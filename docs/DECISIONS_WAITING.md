@@ -260,7 +260,10 @@ forge's own sandboxed `ast.parse` (parses, never executes); 687 python files jud
 re-confirmed unparseable, and one of them was reading 6's lost point. Whatever else the crate was
 wanted for, it is no longer wanted for this.
 
-### 8. Six failing tests in `yantrik-ml`'s `capability.rs` — tests or code? *(for Pranab / Codex)*
+### 8. ~~Six failing tests in `yantrik-ml`'s `capability.rs` — tests or code?~~ — RESOLVED on evidence (E.DARK1, `b3d6e5d`)
+Codex is out of usage, so this became mine. Upstream `yantrikos/yantrik-ml` was cloned to ask kill criterion zero; none were fixed there and two were local divergences. Four fixed toward the tests as real defects, two tests updated toward deliberate code with upstream evidence. 40/40. Details in the ledger under E.DARK1.
+
+The original filing, kept for the record:
 Giving `crates/yantrik-ml` its own `[workspace]` table (`937084b` in yantrik-companion) made its
 unit suite runnable for the first time: **24 tests, 18 pass, 6 fail**, all assertion drift. Five
 of the six sit in `capability.rs`, the module holding `ModelCapabilityProfile` — precisely where

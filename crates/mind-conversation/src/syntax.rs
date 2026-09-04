@@ -79,6 +79,36 @@ fn read_verdict(rendered: &str) -> Verdict {
     Verdict::Unknown
 }
 
+/// E.SYNTAX2 — when the failing line is visibly JavaScript-inside-Python, say so.
+///
+/// Measured (E.REPAIR5, n=20 per arm, prediction recorded first): a finding that names only the
+/// SYMPTOM repaired 8/20; one that names this CAUSE repaired 14/20. The failure classes explained
+/// the gap — 11 of 12 symptom-arm failures re-committed the same `${…}`-in-an-f-string
+/// misconception, while the cause arm's few failures were unrelated slips. A model cannot act on a
+/// symptom whose cause it does not recognise as a cause.
+///
+/// Bounded on purpose: this reads ONLY the line Python reported, and speaks ONLY when that line
+/// contains `${`. Every other syntax error keeps the symptom wording byte-for-byte, so the finding
+/// is never broadened past what was measured. A missing or malformed line number yields `None`,
+/// never a guess.
+fn cause_hint(src: &str, why: &str) -> Option<&'static str> {
+    // Python's message ends "(<unknown>, line N)". Take the last "line N" it mentions.
+    let at = why.rfind("line ")?;
+    let n: usize = why[at + "line ".len()..]
+        .trim_end_matches(')')
+        .trim()
+        .parse()
+        .ok()?;
+    let line = src.lines().nth(n.checked_sub(1)?)?;
+    if line.contains("${") {
+        Some(
+            " THE CAUSE: that line contains JavaScript template-literal syntax `${...}` inside a              Python string. Python does not understand it — inside an f-string `{` begins a Python              expression and `$` is not valid there, so the JavaScript is being parsed as Python and              fails. Build the JavaScript WITHOUT an f-string (a plain non-f string for the whole              <script> block, substituting values with str.replace), or double every brace that              belongs to the JavaScript ({{ and }}).",
+        )
+    } else {
+        None
+    }
+}
+
 /// Findings for python files in this set that do not parse.
 ///
 /// Empty for every healthy build, which keeps the write step's message byte-identical.
@@ -100,11 +130,9 @@ pub(crate) async fn unparseable_python(stream: &str) -> Vec<String> {
         match read_verdict(&rendered) {
             Verdict::Parses => {}
             Verdict::Broken(why) => out.push(format!(
-                "`{}` is not valid Python — {why}. Nothing that runs it can start, so the whole \
-                 deliverable is dead however good the rest of it is. Rewrite that file; a stray \
-                 fragment of another language (a JavaScript template literal, a shell line) is the \
-                 usual cause.",
-                e.path
+                "`{}` is not valid Python — {why}.{} Nothing that runs it can start, so the whole                  deliverable is dead however good the rest of it is. Rewrite that file; a stray                  fragment of another language (a JavaScript template literal, a shell line) is the                  usual cause.",
+                e.path,
+                cause_hint(&e.content, &why).unwrap_or("")
             )),
             // Inconclusive answers mean the environment cannot check, not that the file is bad.
             // Stop for this build so an unusable sandbox costs one attempt, not one per file.
@@ -234,6 +262,41 @@ mod tests {
                 !out.status.success(),
                 "accused a file python accepts -- a FALSE ACCUSATION, the one failure this check                  must never make: {f}"
             );
+        }
+    }
+
+    // ── E.SYNTAX2 ──────────────────────────────────────────────────────────────────────────────
+
+    /// The real artifact: line 89 holds a JavaScript template literal. The cause must be named.
+    #[test]
+    fn names_the_cause_on_the_real_artifact_whose_failing_line_has_a_template_literal() {
+        let src = include_str!("../fixtures/entrypoint/oss20_app_jsinpython.py");
+        let why = "expression cannot contain assignment, perhaps you meant \"==\"? (<unknown>, line 89)";
+        let hint = cause_hint(src, why).expect("line 89 contains ${ and must yield the cause");
+        assert!(hint.contains("template-literal"), "{hint}");
+        assert!(src.lines().nth(88).unwrap().contains("${"), "the fixture's line 89 must contain ${{");
+    }
+
+    /// Kill criterion 2: a syntax error whose failing line has no `${` gets NO hint, so the
+    /// finding stays byte-identical to today's for every other class of error.
+    #[test]
+    fn stays_silent_when_the_failing_line_has_no_template_literal() {
+        let src = "import os
+
+def f(:
+    pass
+";
+        let why = "invalid syntax (<unknown>, line 3)";
+        assert_eq!(cause_hint(src, why), None);
+    }
+
+    /// Kill criterion 3: a malformed or missing line number never panics and never invents a cause.
+    #[test]
+    fn a_bad_line_number_yields_nothing_rather_than_a_guess() {
+        let src = "x = `${a}`
+";
+        for why in ["invalid syntax", "line", "line abc", "line 0", "line 99", "(<unknown>, line )"] {
+            assert_eq!(cause_hint(src, why), None, "{why:?} must not produce a cause");
         }
     }
 

@@ -5912,3 +5912,16 @@ This is the list-bounded guard problem again: **a completeness check is only as 
 - `MANIFEST.json` declares the expected names per task — consistent with the manifest already being the authority for the taxonomy, but introduces drift between manifest and checker.
 
 Recorded so the next person does not read `score.py`'s confident docstring and assume the denominator is proven. It is *derived*, and derivation has a failure mode.
+
+### Staging deploy — 12aeb43 (2026-09-04 03:36 UTC)
+Carries E.LOOP-F (the forge's bounded give-up), E.LOOP-G (foresight closing an ungradeable prediction as `unjudged`), and E.LOOP-J (the observed-throughput budget). The first two are live-behaviour fixes and are the reason to deploy; E.LOOP-J rides along and, by its own recorded scope, does nothing measurable until the process has made five admissible calls.
+
+| Step | Evidence |
+| --- | --- |
+| Box safe to build on | Checked first, not assumed: no benchmark leg running, no containers, `mind-core` at 1.7% CPU. Building on top of an in-flight reading would have corrupted it. |
+| Provenance | Cloned fresh at `12aeb43`; companion parity confirmed on both sides at `5c9cc4f`. A mid-build `git reset --hard` I ran was a **no-op** — `origin/main` was still `12aeb43` at that moment — so the sources never moved under the compiler. Checked rather than hoped. |
+| Reversible before touching anything | `mind-core.prev-20260904T0336`, alongside the five earlier timestamped backups. |
+| Build | `cargo build --release -p mind-core`, `EXIT=0`, 81,625,648 bytes. Disk 12G free throughout — watched, because filling a box that runs a live mind breaks its SQLite writes. |
+| Health, not just "active" | 0 restarts, 0 panics/errors in the journal, clean startup lines, and all three surfaces answering (web `200`; the `404`s on `/` for `:8088` and `:8077` are "no route at /", not a dead process). A crash loop also reports `active` for a moment, which is why the restart count is the check that matters. |
+
+Production remains untouched and still waits on Pranab's word, as does reading 8.

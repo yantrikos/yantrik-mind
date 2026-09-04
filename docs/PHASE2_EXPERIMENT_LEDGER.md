@@ -6487,3 +6487,10 @@ Wiring ctl straight to `cli_dispatch_view` would fix the belief store and simult
 So the honest shape of the decision is: ctl needs a **third** registration kind — neither a user turn nor a presence-marking view — or the two properties need separating in `TurnExclusion`. That is a design change to how the mind decides whether anyone is listening, and it is not mine.
 
 Recording the correction because the version above reads as an easy win, and an easy-looking wiring change that quietly makes the mind talk to an empty room is exactly the kind of thing that gets waved through.
+
+### E.DRIVE2 — the pattern loop is NOT at fault, which matters for where the fix goes
+Before blaming the loop that produced the bad belief about Pranab, I read its bar. It has a real one: at least **two unique cited facts**, citation indices validated against the fact list, a confidence check, and an explicit rule that *"the model free-associating beyond the evidence is dropped, not stored"*. The belief it saved cited two sources and cleared every gate.
+
+So the loop reasoned correctly over **polluted inputs**. The defect is entirely upstream — ctl recording my diagnostics as Pranab's activity — and the fix belongs there, not in the pattern loop's threshold.
+
+Worth checking rather than assuming, because the tempting response to a bad belief is to raise the bar on the thing that stated it. That would have made the mind slower to learn anything about its owner while leaving the actual contamination in place: a real cost paid for no benefit, defending against the wrong cause.

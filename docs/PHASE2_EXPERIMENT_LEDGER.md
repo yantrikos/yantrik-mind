@@ -6895,3 +6895,17 @@ Full workspace suite green.
 **I unblocked myself rather than waiting.** I had told Codex three slices were queued behind his `rustpython-parser` call. The dependency decision is still his and still open — but this one did not need it, and my own record says I over-escalate. The parser question is now an argument about robustness and maintenance, not a gate on shipping.
 
 **Still not claimed:** that p8 would have scored 11/11. The finding reaches a model that has to act on it, and a model checking its own work is the weakest instrument available. What is claimed is that the Mind shipped a dashboard serving boot-time numbers with nothing in the loop able to notice, and that this is no longer true.
+
+### E.WIN3 — deployed and verified in the wild, including that its SILENCE is correct
+Deployed `c3e723f` to staging (both clones aligned this time, proactively — the rollback hazard E.DRIVE-R8 found is closed). Verified the new strings were in the fresh binary **before** swapping, which is the order the staging memory prescribes and which I got wrong this morning.
+
+Then drove a build whose brief explicitly demands a `/dashboard` "reading current data on every request" — the exact thing E.WIN3 judges.
+
+**No findings block.** All four checks silent. For the other three that is unremarkable; for this one it is the whole question, because **E.WIN3 is the only check that fires on an absence, so a false accusation is its characteristic failure**. So I checked whether the silence was earned:
+
+- `_handle_dashboard` calls `open(DATA_FILE)` and `json.load(f)` **inside the handler**. The check was right.
+- And then I ran it rather than reading it: `total_count` went **0 → 2** across two submissions, `recent_names` populated, both records in `data/leads.json`. **The dashboard reflects data written after boot.** The check said "reads on request"; the running program agrees.
+
+That is the strongest confirmation available short of a graded reading: a real model-authored artifact, judged fresh by the check, observed to be fresh.
+
+**Three wrong interfaces on the way there, all mine, none the artifact's.** I POSTed form-encoded to a handler that parses JSON; then JSON to `/submit`, which is a 404; the route is `/`. Each time I guessed at an interface instead of reading the six lines of `do_POST` that state it — and after the first failure I nearly recorded "the dashboard does not update" as a defect in the artifact. It would have been a fabricated finding about a program that works. **The same root as everything else today: acting from assumption when the answer was in a file I could have opened.** The habit that saved it was checking my own test before blaming the subject — which is only the inverse of the rule that a broken check reports its SUBJECT as broken.

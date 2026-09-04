@@ -7571,3 +7571,28 @@ I wrote in E.REPAIR5 that they "should compound": the cause finding converts a s
 **PREDICTION, recorded first:** round 1 ≈ 70% (E.REPAIR5's number); round 2 lifts the cumulative to **~85%**, because the residual failures after a cause-naming round are mostly slips. **If round 2 adds ≤ 1**, the compounding claim is false and the second round's value on this class is nil even with a better finding — recorded either way.
 
 **Kill criteria.** Report round-1, round-2-only and cumulative out of 20; log failure classes with the `${ still present` marker so "same misconception" vs "slip" is visible; no product change follows from this — it only tests a claim already in the ledger.
+
+### E.REPAIR6 — CONFIRMED: the cause finding and the second round compound. 40% → 90%.
+
+| | count | rate |
+| --- | --- | --- |
+| repaired at round 1 (cause finding) | 16/20 | 80% |
+| repaired at round 2 only | 2 | — |
+| **cumulative after round 2** | **18/20** | **90%** |
+| never | 2 | 10% |
+
+**The prediction (~70% → ~85%) held and was slightly exceeded.** Both round-2 successes were **slips** — `unmatched ')'`, `'(' was never closed` — exactly the class E.REPAIR4 said a re-roll fixes. The two `never` runs re-committed `${` twice; those are the residue a wording cannot reach.
+
+**The arc, all measured on one real artifact, n=20 each:** symptom finding + one round **40%** (four runs: 30/45/50/40) → cause finding, one round **70–80%** (E.REPAIR5 14/20, here 16/20) → cause finding + bounded second round **90%**. The second round was worth ~5 points on its own (E.REPAIR4) and ~10 on top of the cause finding, because the cause finding hands it the failure class it can actually fix.
+
+**Deployed and verified on staging (`ee7b625` + companion `b3d6e5d`):** cause-hint and second-round strings confirmed in the fresh binary *before* the swap, health 200, autodeploy clone aligned, and the on-box wiring test (`YM_SANDBOX_TESTS=1`, real sandbox, service source tree) passed.
+
+### E.TIMEOUT1 — CORRECTION: the knob shipped on a path the product never runs
+The same deploy verification printed **`YM_LLM_TIMEOUT_S 0`** in the fresh binary. Two facts, both checked rather than assumed:
+
+1. `ApiLLM` (`llm/api.rs`, where I put the knob) is referenced from the mind at **one site, and it is a test** (`mind-inference/src/lib.rs:3545–3555`). The release binary strips it, string and all.
+2. **The local lane — the one that measured 312 s and was cut — uses `provider/generic_openai.rs`, which carries its own hardcoded `timeout_global(300 s)` at line 211.** The knob never reached it.
+
+So E.TIMEOUT1's claim — *"the hardcoded 300 s becomes a knob"* — was true of `api.rs` and **false of the lane that matters**. Its prereg counted "three sites in `api.rs`" and never asked *which client does the failing lane use?* — a fact E.THINK2's retraction had already established that afternoon (`GenericOpenAIBackend::for_provider("ollama", …)`). I had it, and did not carry it across. **The `strings` check before the swap is what caught it**, which is the whole reason that step exists.
+
+**E.TIMEOUT2, in flight:** `call_timeout()` moved to a **feature-independent** `src/call_timeout.rs`; `api.rs`'s three sites and `generic_openai.rs`'s one all use it; the site-count test now sweeps **both** clients, cut at their test modules so it cannot match itself. 39/39. Mutation on the *local lane's* site and both dependents' builds are running; the redeploy must show `YM_LLM_TIMEOUT_S ≥ 1` in the binary or it is not done.

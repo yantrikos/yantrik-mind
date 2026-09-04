@@ -1,3 +1,10 @@
 # Shell scripts must stay LF — they run on Linux boxes (CRLF breaks the shebang/`set` line).
 *.sh text eol=lf
 deploy/* text eol=lf
+
+# The cb2/cb2n benchmark fixture trees are proven by BYTE-EXACT re-derivation (scratch/rederive.sh)
+# and by sha256 hashes pinned in the ledger. A line-ending conversion at checkout silently breaks
+# that proof on one platform only: rederive.sh failed on a Windows checkout while passing on the
+# Linux box, because two .profile files came back one byte per line larger. A reproducibility
+# guarantee that depends on which machine checked the tree out is not a guarantee.
+crates/mind-evals/fixtures/** text eol=lf

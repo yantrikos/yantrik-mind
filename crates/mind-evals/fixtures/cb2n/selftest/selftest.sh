@@ -33,6 +33,8 @@ if python3 "$FIX/selftest/scan_checker_guard.py" "$FIX/checks/check_web.mjs"; th
 if bash "$FIX/selftest/image_freshness.sh"; then echo "image_freshness: agree"; else echo "image_freshness: DISAGREE"; BAD=1; fi
 # The receipt decision, driven through every classification without a graded leg.
 if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi
+# The check SCORE, driven through every way a denominator can lie, without a graded leg.
+if python3 "$FIX/selftest/score_cases.py" >/dev/null; then echo "score_cases: agree"; else echo "score_cases: DISAGREE"; BAD=1; fi
 S=$(mktemp -d /tmp/cb2-tree-self-XXXX)
 mkfifo "$S/pipe"
 TREE=$(timeout -k 1 5 python3 "$FIX/tools/tree_hash.py" "$S"); TREE_RC=$?

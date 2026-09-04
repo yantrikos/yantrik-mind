@@ -6662,3 +6662,39 @@ a/run.sh → b/run.sh
 - Whether Hermes executed anything in reading 7. The stdout renders diffs; it may simply not surface tool invocations at all, so absence of evidence here is not evidence of absence. I do not know, and I will not claim it either way without a trace that records tool calls.
 
 **The consequence for the decision.** "The opponent executes and we cannot" was the sharpest version of the case and it is not currently supported. What is supported is narrower and still substantial: **the opponent is given execution tools and iterates on its artifact; the Mind is given neither.** That is enough to make the question worth asking and not enough to answer it.
+
+### E.ENTRY1 — PREREG: the entry point the deliverable names must actually do something
+**Preregistered before any code. Kill criteria stated first.**
+
+**Where this came from.** Pranab's challenge — find how other agents work, then optimise ours. The survey produced one physically-evidenced fact and one decomposed failure.
+
+*Hermes executes, and this time the evidence is not a string in a log.* `out-r7/artifacts/hermes_T1/` contains `__pycache__/server.cpython-313.pyc` (23:08:17) and `data/leads.json`, 2 bytes, `[]` (23:08:06), both uid 10001, both created AFTER `server.py` was written at 23:06–23:07. CPython writes `__pycache__` only on import; `data/` exists only because the lead-storage code ran. Hermes started its server and posted to it. My earlier claim was right and my evidence for it was worthless; this is the replacement.
+
+*The Mind's T1 failure is NOT "we cannot execute".* Decomposed from the artifact:
+- `server.py` **parses cleanly** — and so do 10/10 python artifacts in r7. A syntax check would have caught nothing. That hypothesis was probed and killed.
+- `server.py`'s module body contains **only imports, defs and constants**. No `serve_forever`, no `__main__`. `run.sh` runs `python3 server.py`, which defines a handler class and exits. That is the `ERR_CONNECTION_REFUSED`.
+- `RESULT.md` says *"(1 files: run.sh) — the generation hit its token limit, so server.py was cut and NOT written"* while server.py sits beside it at 2814 bytes. The completion pass wrote it; the message never updated.
+
+**Two defects, and the second one decides whether the first is worth building.**
+
+**D1 — nothing checks that the named entry point does anything.** The review prompt asks the model *"Does anything reference a file that is not in the set?"* — a question a short function answers exactly, which is the same argument that produced `pyimports` and `required_literals`.
+
+**D2 — the review round reads a STALE message.** The completion write stores to `completion_url`; the review interpolates `{{project_url}}`, which still holds the FIRST write's text. In T1 the review was told server.py did not exist while it did. So a D1 finding raised on the completion write would land in a variable the review never reads — **the exact wiring defect I already shipped once this session** (two detectors wired to a step with no mandate to act). D1 without D2 is inert, so D2 ships with it or neither does.
+
+**The rule under test.** Parse the module; walk the TOP-LEVEL body only; if every statement is an import, a def, a class, or a plain constant assignment, then running that file as a script is a no-op. Judge a file ONLY when an entry script actually invokes it, and read that mapping from the entry script's text rather than guessing — a test module or a library is supposed to be all definitions, and judging one would be a false positive.
+
+**Validation already performed, on real artifacts, before writing Rust.** ~24 runs on the box, every artifact directory:
+- **Exactly one** `DEAD ENTRY POINT`: `out-r7/mind_T1/server.py` — the leg that failed with `ERR_CONNECTION_REFUSED`.
+- **Zero** false positives across 16 judged files, including `hermes_T1` on four separate runs and the whole p1–p8 corpus (which contains both 11/11 and 2/11 legs).
+- Abstained wherever no entry script named a python file.
+- One incidental `unparseable` (`out-v3/mind_T1/main.py`) — a different defect, not built on here.
+
+**KILL CRITERIA, declared now.**
+1. If the Rust port fires on ANY artifact the python probe judged `ok`, it is wrong and nothing ships. The two must agree file-for-file — **exact agreement, not "no worse than"**.
+2. If it fires on a test module or a library, the scoping rule is wrong; kill it.
+3. If the D2 change makes the review read anything OTHER than the freshest write message in any of the three branches (completion skipped / succeeded / errored), revert both.
+4. A test must be watched to FAIL before it is evidence: the D2 wiring test has to fail against today's `completion_url` and pass only after the change. A test that passes both ways proves nothing.
+
+**What this does NOT claim.** It does not claim T1 would then score 11/11 — the finding reaches a model that still has to act on it, and a model checking its own work is weaker than executing it. It claims the Mind currently ships a dead entry point with nothing in the loop able to notice, and that this is the failure r7 actually recorded.
+
+**Not in scope.** Granting the Mind execution. `Sandbox::available()` PROBES rather than assumes (it runs `echo ok` through the sandbox), and correctly returns false in the benchmark container, which refuses unprivileged userns. Hermes needs no sandbox because the container IS its boundary; the Mind carries its own because it has to be safe on a real machine. Closing that gap means an operator declaring "this process is already inside a disposable boundary", which disables a safety property and is Pranab's call, not mine.

@@ -7249,3 +7249,19 @@ Three consequences, none of which I had checked before editing:
 **The work is not lost.** The design is in `PROPOSAL_think_levels.md` under the configuration surface, the change is ~20 lines at three sites, and the evidence for it is in E.THINK5. What it needs is a decision that is not mine: whether this session edits, tests and commits in `yantrik-companion`/`yantrik-ml` at all.
 
 **And the general lesson.** I checked *"does this capability already exist?"* — the criterion I added this morning — and it correctly returned no. I did not check **"is this file mine to change?"**, which is a different question and turns out to matter just as much. `grep` found the constant; nothing in the grep result said it belonged to another project. Adding that to the pre-flight: **before editing, establish which repository owns the file and whether its tests can run.**
+
+### E.SYNTAX1 — deployed, and verified to work as the SERVICE USER rather than as root
+Deployed `8e046c6` to staging: new strings confirmed in the fresh binary **before** the swap, health check 200, both clones aligned so nothing can roll it back.
+
+**The integration risk I nearly left unchecked.** Every sandbox measurement today was taken **as root**. The service runs as `yantrikmind` under systemd, and a unit with `PrivateUsers=yes`, `RestrictNamespaces=yes` or `NoNewPrivileges=yes` would refuse unprivileged user namespaces — leaving the syntax check **silently inert in production** while every test I ran said it worked. That is the "wired to something that cannot act" failure with a new cause, and it would have been invisible: the check's own design turns an unusable sandbox into silence.
+
+Measured rather than assumed:
+
+```
+User=yantrikmind   PrivateUsers=no   ProtectSystem=no
+NoNewPrivileges=no RestrictNamespaces=no
+su -s /bin/sh yantrikmind -c "timeout -s KILL 10 unshare --user --map-root-user … prlimit … run.sh"
+→ ok
+```
+
+So the check is live for the process that actually runs it. **"It works as root" is not "it works as the service"** — a different question with a different answer available, and the second one is the one that matters.

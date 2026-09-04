@@ -7170,3 +7170,17 @@ I inherited that diagnosis and repeated it without checking the artifact — the
 **So the check now has two real targets, not one:** today's `app.py` (JavaScript template literal, gpt-oss-20b) and reading 6's `test_tracker.py` (stray marker, a graded leg, the only point that reading lost). Two different models, two different causes, one class.
 
 **One thing observed and deliberately NOT built on.** Both new-class failures involve a marker or a foreign fragment leaking into a file body. A writer that stripped a trailing `=== END===` would have fixed this one. I am not proposing it: a model can invent any terminator, and a rule aimed at the one string I have seen would be fitted to a single artifact — exactly the corpus-is-not-the-population error from this morning. The parse check is the general answer and it already covers both.
+
+### E.SYNTAX1 — all six kill criteria closed
+| # | criterion | evidence |
+| --- | --- | --- |
+| 1 | fires on the real artifact | corpus test on the box: **3 of 687** python files, including today's `app.py` class and reading 6's `test_tracker.py` |
+| 2 | zero false accusations | every fire re-checked against python's own `ast.parse` **inside the test**; a file python accepts fails the test by name |
+| 3 | silent when the sandbox is unavailable | the three-way verdict rule, unit-tested over six inconclusive outputs; the dev box IS that case and the check is inert there |
+| 4 | watched to FAIL | two mutations, each confirmed present in the file first — `Unknown`→`Broken` failed two verdict tests; unwiring failed the wiring test |
+| 5 | reaches the review round | wiring test on the box, and its mutant failed showing the bare message `(1 files: app.py)` with no finding |
+| 6 | no spawn without python | unit test through the public entry point, which returns before constructing a sandbox |
+
+**Five mechanical checks now cover the five ways a Mind artifact has actually died:** an import that cannot resolve, an entry point that runs nothing, a generation that looped, a route serving boot-time numbers, and a file that is not valid Python. Each was built only after a probe separated real artifacts; each is silent on every healthy artifact measured.
+
+**Honest ledger of what this one is worth.** It cannot move a benchmark reading — the cb2 container refuses the sandbox, so graded legs stay byte-identical. Its value is on real deployments, plus one thing worth more than a point: it found that reading 6's lost point was **misdiagnosed for a day**, and the fix that diagnosis implied (an iteration round, one model call per build, forever) was aimed at a failure that a parse check catches for one sandbox spawn on the builds that have python.

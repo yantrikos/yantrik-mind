@@ -5889,3 +5889,17 @@ The observed-rate store is in-memory and per-process, and the threshold is five 
 Persisting the samples would make it engage in legs too, and that is exactly why it must not. A rate carried in from an earlier run would make a reading a function of what happened before it rather than of the leg, and the whole cb2n design — an immutable run state, a cap that refuses to change mid-run, a re-derivable tree — exists to keep a leg a function of its own inputs. Process-local is not a limitation here; it is the property that keeps legs independent.
 
 Stated because the change looks like a benchmark improvement and is not one. The number that would move a reading is still `ASSUMED_TOKENS_PER_SECOND = 15`, and it is still a guess from three legs — which is the honest place to say so.
+
+### E.CB2-S3 — the scorer was validated against REAL verdicts, and failed
+Eighteen synthetic cases passed. Then the scorer was pointed at the three real T3 verdicts on the staging box, and **all three came back UNTRUSTWORTHY**, naming six checks as foreign: `add_prints_added_1`, `add_prints_added_2`, `list_two_open_lines`, `done_prints_done_1`, `list_marks_done`, `today_lists_open_tasks_added_today`.
+
+The verdicts were right and my parser was wrong. `check_t3.py` declares six of its ten checks as rows in a `steps` table that a loop later feeds to `check`, not as direct `check("...")` calls. The parser read only the direct form and recovered four.
+
+| What happened | What it shows |
+| --- | --- |
+| The tool refused to score rather than scoring wrong | The closed-schema wall worked **as designed** — it declined to divide by a denominator it could not justify instead of quietly reporting 4/4 and treating six real checks as foreign. A wrong answer would have been far worse than a refusal. |
+| My own case had asserted `len(names) >= 4` | **A `>=` on a count cannot notice a parser that finds too few** — the exact thing it existed to check. It passed the whole time six names were missing. The counts are exact now (15 and 10), plus a case asserting every name a real T3 verdict carries is recognised. |
+| The fix was immediately too loose in the other direction | The first row pattern matched `spawn("bash", ["run.sh"], ...)` in `check_web.mjs` and invented a check called `bash`. Anchored to line start. **Only the new exact-count assertion caught it**, about a minute after being written — the weak `>=` would have shipped it. |
+| After the fix | The same real verdict scores **`T3: 10/10`**, trustworthy, exit 0. |
+
+The lesson is not "test against real data" in the abstract. It is that synthetic cases share the author's misconception: mine invented their own check vocabulary (`a`, `b`, `c`), so no number of them could ever discover that a real checker declares names a second way. The real file was the only thing that knew.

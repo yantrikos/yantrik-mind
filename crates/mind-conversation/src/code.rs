@@ -1595,8 +1595,11 @@ impl super::ConversationEngine {
                 );
             }
         } else {
+            // Only the count is cleared: `stage_tries_for` is deliberately left as it is. A
+            // zeroed count reads as zero whether or not its stage label is current, so writing
+            // one here changes nothing — a mutant deleting it survived every test, which is what
+            // proved it redundant rather than untested.
             all[&id]["stage_tries"] = serde_json::json!(0_i64);
-            all[&id]["stage_tries_for"] = serde_json::json!(ended_on.clone());
         }
         all[&id]["updated_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
         if let Some(l) = all[&id]["log"].as_array_mut() {

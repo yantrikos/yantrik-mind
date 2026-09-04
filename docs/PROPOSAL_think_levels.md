@@ -1,92 +1,150 @@
-# Proposal — thinking as a LEVEL, and a timeout sized to it
+# Proposal — thinking as a LEVEL, per model, with a timeout sized to it
 
-**Status: proposal. Nothing implemented.** Written after Pranab's observation that qwen3.8 is a
-thinking model and that the mind needs *"multi level low thinking high thinking max and set timeout
-accordingly."* The measurement that fixes the numbers is running; **every duration below is a blank
-to be filled from it, not a guess.** Bounds chosen by judgment rather than measurement are already
-one of the open items on `DECISIONS_WAITING`, and this proposal must not add a fifth.
+**Status: proposal. Nothing implemented.** Rewritten 2026-09-04 after measurement. The first draft
+rested on a causal chain that has since been **retracted** (E.THINK2), and its timeout table was
+left blank on purpose; the blanks are still blank, and this version explains why that is the correct
+outcome rather than an omission.
 
-## The problem, in one sentence
+## What was retracted, and what replaced it
 
-Thinking is a **boolean** everywhere in the stack, and the timeout that has to accommodate it is a
-**single hardcoded constant** — so there is no way to say "think a little here, a lot there", and no
-way for the timeout to follow the choice.
+The first draft argued the Mind fails to recognise its own ollama gateway, falls back to `/v1`, and
+discards `config.think`. **False.** That URL sniffing lives in `ApiLLM::new`, which the local lane
+never calls; the lane uses `GenericOpenAIBackend::for_provider("ollama", …)` — provider **declared**,
+native `/api/chat`, `think` honoured — and the comment above that call names the TLS-gateway hazard
+explicitly, because someone already hit it and fixed it. So there is no detection bug to fix here,
+and the 312 s that disqualified three legs of reading 8 was **genuine generation**.
 
-## What today's code actually does
+What survived is measured, and it is enough on its own.
 
-Three facts, read from the source rather than assumed:
+## The measurements (E.THINK1, E.THINK3, E.THINK5)
 
-1. `yantrik-companion/crates/yantrik-ml/src/types.rs:149` — `pub think: Option<bool>`. Two states.
-2. `.../llm/api.rs:175` — `timeout_global(Some(Duration::from_secs(300)))`, **hardcoded, no env
-   knob**, on every ollama call regardless of what was asked of the model.
-3. The two transports disagree, and the code says so. The native `/api/chat` path honours a per-call
-   `config.think` (`api.rs:145`). The OpenAI-compat `/v1` path **ignores `think` entirely** — its
-   own comment records this — and suppresses reasoning with `reasoning_effort: "none"` instead, but
-   **only when the template family opts in** via `disable_thinking()`, never from the per-call
-   config. So on `/v1` a caller asking for less thinking is silently not heard.
+n=5 per cell, native `/api/chat`, one authoring prompt, `num_predict` 4000:
 
-There is already a good extension point: **`mind_inference::think_for(role, default)`**, with a
-`YM_THINK_<ROLE>` env override that accepts on/off. Call sites already pass a role
-(`think_for("plan", Some(false))`, `think_for("reasoning", Some(false))`). **Levels belong there**,
-not in a new parallel mechanism.
+| model | `think` | med_s | max/min | thinking chars | files per run |
+| --- | --- | --- | --- | --- | --- |
+| gpt-oss:20b | `false` | 29.2 | 1.58x | 16094 | **[0,0,0,4,4]** |
+| gpt-oss:20b | `low` | **7.5** | **1.22x** | 484 | **[3,3,4,4,4]** |
+| gpt-oss:20b | `high` | 29.4 | 1.01x | 17328 | [0,0,0,0,0] |
+| qwen3.8:27b | `false` | 136.7 | 1.84x | **0** | [1,2,3,4,4] |
+| qwen3.8:27b | `low` | 147.3 | 1.82x | 1417 | [3,3,3,3,3] |
+| qwen3.8:27b | `high` | 149.3 | 1.35x | 1224 | [3,3,3,3,3] |
 
-## What it cost, measured today
+**Four facts follow, and each is the reason for one part of the design.**
 
-`E.CB2-R8`: a T1 authoring call on qwen3.8:27b took **312–316 s** and was cut at 300 s. The Mind
-then failed closed — correctly — and three legs were disqualified. The same task on
-`gpt-oss-backup:20b` finished in **179.7 s**.
-
-The instructive part is that `QwenTemplate::disable_thinking()` **is** `true`, so the client already
-believes it is suppressing thinking on this family. Either the suppression is not reaching the wire
-on the transport in use, or 312 s is genuine generation. **The measurement now running answers
-exactly that**, by reporting the reasoning/content split per level — and until it lands, the cause
-is undetermined and is written here as undetermined.
+1. **The same value means different things per model.** `think:false` suppresses completely on qwen
+   (0 chars, 5/5) and not at all on gpt-oss (16094). A shared default is provably wrong for one of
+   these two whichever value is chosen. → **per-model descriptor.**
+2. **A level can be catastrophic on one model and harmless on another.** `high` yields **0 files in
+   all five runs** on gpt-oss and a steady 3 on qwen. → **per-model, and never a blind default.**
+3. **Within one model, speed and completeness disagree.** On qwen, `false` is fastest but least
+   complete ([1,2,3,4,4]); `low`/`high` are slower and consistently complete. So "best" depends on
+   what the caller wants. → **per-workload, which `think_for(role, …)` already expresses.**
+4. **We cannot say any of this today.** `GenerationConfig.think` is `Option<bool>`, and ollama
+   native already accepts `"low"`/`"high"` — the capability is missing from **our type**, not from
+   the wire. → **the level enum.**
 
 ## The proposal
-
-**One enum, one policy function, one timeout function.**
 
 ```rust
 pub enum Think { Off, Low, Medium, High }
 ```
 
-- `think_for(role, default) -> Think`, keeping the existing shape. `YM_THINK_<ROLE>` accepts
-  `off|low|medium|high`, and — for compatibility with every value already in anyone's env file —
-  `off/false/0/no` → `Off` and `on/true/1/yes` → the level named by `YM_THINK_DEFAULT_ON`
-  (itself defaulting to `Medium`). **No existing env file changes meaning.**
-- `timeout_for(level) -> Duration` replaces the 300 s constant. One table, one place.
-- Wire mapping, transport-aware, because the two transports genuinely differ:
-  - native `/api/chat`: `think: false` for `Off`, `think: true` otherwise (plus the level where the
-    server accepts one).
-  - `/v1`: `reasoning_effort` = `none|low|medium|high` — **read from the call's level**, not only
-    from `disable_thinking()`. This is the actual bug fix in the slice: a per-call request for less
-    thinking is currently discarded on this path.
+- `think_for(role, default) -> Think`, keeping today's shape. `YM_THINK_<ROLE>` gains
+  `off|low|medium|high`; `off/false/0/no` → `Off` and `on/true/1/yes` → `YM_THINK_DEFAULT_ON`
+  (default `Medium`), so **no existing env file changes meaning**. Staging currently sets
+  `YM_THINK_DISPATCH=off`, `YM_THINK_REASONING=on`, `YM_THINK_PLAN=on`; all three must keep behaving
+  exactly as they do now.
+- A **capability descriptor per (provider, model)**: which levels that model honours, and which
+  level each workload gets. Two models already disagree on every axis, so this is not speculative
+  generality — it is the minimum that can express what was measured.
+- Wire mapping, transport-aware: native `/api/chat` takes `think` (bool **or** level string);
+  `/v1` takes `reasoning_effort`, and **`Off` must not map to `"none"`** — measured as the worst
+  available value on both models (E.THINK1). The Anthropic body carries no thinking field at all
+  and needs `thinking: {type, budget_tokens}` to stop silently dropping the request.
 
-**Back-compat is a hard requirement.** `Option<bool>` → `Think` is 63 call sites in `mind-` and 12
-in the companion crate. `None` and `Some(false)` must keep their present behaviour exactly, or a
-wide mechanical change becomes a behaviour change nobody reviewed — the failure that produced the
-twin-lane shadowing.
+**Back-compat is a hard requirement.** `Option<bool>` → `Think` is ~75 call sites. `None` and
+`Some(false)` must keep their exact present behaviour, landing as a **pure refactor first**, before
+any call site adopts a new level. That ordering is the whole safety argument and is the same one the
+`ctl` registration proposal makes.
 
-## Where the levels would be used
+## The timeout, and why there is still no table
 
-| call site | today | proposed | why |
-| --- | --- | --- | --- |
-| `build_recipe` authoring | `Some(false)` | `Off` | Its own comment: a build is a specification problem, and thinking spends budget the FILES need. |
-| `build_recipe` review | `Some(false)` | `Low` | Checking your own work against a brief is the one step in the chain that is actually reasoning. |
-| dispatch / tool-selection | `Some(false)` | `Off` | Latency path; the existing dual-mode split already says so. |
-| `reasoning` / compose | `Some(false)` | `Medium` | Where `prefer_reasoner` routing already sends work. |
+`timeout_for(level)` should replace the hardcoded `timeout_global(300 s)` (`llm/api.rs:175`). What
+the numbers support:
 
-## What this does NOT fix
+- **300 s is marginal-to-insufficient for qwen-class authoring.** Worst probe draw 195 s, and the
+  real T1 prompt measured **312 s** — the probe underestimates the real workload by ~1.6x.
+- **300 s is comfortable for gpt-oss:20b.** Worst probe draw 30.4 s; real T1 179.7 s.
+- So one global constant is generous for one model and short for the other. **The timeout must be
+  per-model, not merely per-level.**
 
-- It does not make a 27B model finish a 16k-token authoring call. If the measurement shows the 312 s
-  was generation rather than reasoning, the honest answer is that **the model is too slow for that
-  workload on this hardware**, and a bigger timeout only converts a fast failure into a slow one.
-- It does not touch the fail-closed privacy guard, which behaved correctly and must keep behaving
-  correctly: a timeout must still refuse to escalate private context to cloud.
+What the numbers do **not** support is a specific number. These cells span 1.01x–1.84x, but a
+separately observed **227.5 s** draw for qwen `false` lies *outside* the [89.9, 165.0] range of the
+five samples — a rare slow draw that five repeats did not capture. Writing a duration into code from
+data that already missed a known outlier would produce the fifth entry on `DECISIONS_WAITING`'s list
+of *bounds that are judgment, not measurement*. **What is needed first: repeats on the real T1
+workload rather than the probe**, since the probe is ~1.6x short.
 
-## Cost and risk
+## The one change the evidence supports today
 
-One enum, one policy function, one timeout table, two wire mappings, and a mechanical sweep of ~75
-call sites that must be a **pure refactor first** — every existing value mapped, nothing's behaviour
-changed — before any call site adopts a new level. That ordering is the whole safety argument, and
-it is the same one the `ctl` registration proposal makes for the same reason.
+**gpt-oss authoring should use `low`, not off.** Four times faster, the tightest spread in the table,
+and files on every run instead of two in five. It cannot be made without the level enum, which is
+the practical argument for doing the refactor first.
+
+## What this does not fix
+
+It does not make a 27B model quick at authoring, and it does not touch the fail-closed privacy guard,
+which behaved correctly under a real timeout and must keep doing so.
+
+## Configuration surface — what is tunable today, and what this adds
+
+Pranab asked whether all of this is configurable, with defaults, overridable by config. **Today it
+is half true**, and the half that is missing is the half that matters.
+
+**Already configurable, verified in the source:**
+
+| knob | domain | effect |
+| --- | --- | --- |
+| `YM_THINK_<ROLE>` | `on` / `off` | per-workload thinking, via `think_for(role, default)`. Live on staging: `DISPATCH=off`, `REASONING=on`, `PLAN=on` |
+| `YM_LOCAL_THINK` | `on` / `off` | the local lane's default |
+| `YM_PROVIDER_DEADLINE_S` | seconds | what the authoring budget clamp sizes against |
+| `YM_LOCAL_OLLAMA_URL` / `_MODEL`, `YM_BRAIN_POOL`, `YM_ROLE_*` | — | which provider and model a lane uses |
+
+**NOT configurable today — each hardcoded, each measured to matter:**
+
+| thing | where | why it matters |
+| --- | --- | --- |
+| the **300 s ollama timeout** | `llm/api.rs:175`, `timeout_global` | **zero** env references near it. Insufficient for qwen-class authoring, generous for gpt-oss |
+| the **level** | `GenerationConfig.think: Option<bool>` | `low` is the best setting on gpt-oss and cannot be expressed at all |
+| **per-model behaviour** | `disable_thinking()`, compiled into the family template | the same value suppresses on qwen and not on gpt-oss |
+| the `reasoning_effort` **value** | hardcoded `"none"` | measured as the worst available value on both models |
+
+**Proposed surface — everything gets a default and an override, and precedence is explicit.**
+
+```text
+YM_THINK_<ROLE>        off | low | medium | high      # extends today's on/off
+YM_THINK_DEFAULT_ON    low | medium | high            # what a legacy "on" means (default: medium)
+YM_THINK_MODELS        "<model>=<level>; <model>=<level>"   # per-model override
+YM_LLM_TIMEOUT_S       seconds                        # global default, replaces the constant
+YM_LLM_TIMEOUT_<LEVEL>_S   seconds                    # per level
+YM_LLM_TIMEOUT_MODELS  "<model>=<seconds>; ..."       # per model, most specific
+```
+
+`YM_THINK_MODELS` and `YM_LLM_TIMEOUT_MODELS` use the `;`-separated `key=value` shape
+`YM_BRAIN_POOL` already uses, because model tags (`qwen3.8:27b-q4_K_M`) contain characters an
+environment variable name cannot hold — which is the reason a per-model knob cannot simply be
+`YM_THINK_<MODEL>`.
+
+**Precedence, most specific wins:** per-model override → per-role (`YM_THINK_<ROLE>`) → global
+default → the compiled default for that (provider, model). Every layer optional; every layer has a
+default; nothing is required for existing deployments to keep behaving exactly as they do.
+
+**Two rules the config must obey, both learned the hard way today:**
+1. **A default that came from a measurement must record which model it was measured on.**
+   `reasoning_effort:"none"` was verified on qwen3.6, written down as verified, and is now wrong on
+   both models we run — E.MODEL1's shape, a tuning constant outliving its model. A compiled default
+   should carry the model it was measured against so its staleness is visible.
+2. **No duration ships until it is measured on the real workload.** The probe underestimates T1 by
+   ~1.6x and n=5 already missed a known outlier, so `YM_LLM_TIMEOUT_*` should ship with the
+   **current 300 s** as its default — a pure refactor of a constant into a knob — and the number
+   changed only when repeats on the real workload justify it.

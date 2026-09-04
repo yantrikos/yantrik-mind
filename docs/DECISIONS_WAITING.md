@@ -90,6 +90,13 @@ its first action (crash-proof, changes the verdict schema), or `MANIFEST.json` d
 
 - **The import check is unverified end-to-end.** The finding demonstrably reaches the review round;
   whether the review *acts* on it well needs a reading.
-- **Staging verifies startup, not behaviour.** It is a headless canary with 22 profile rows, no
-  predictions and no forge ventures — which is also why E.LOOP-F and E.LOOP-G are proven reachable
-  but have **no observed instance in the wild**.
+- ~~**Staging verifies startup, not behaviour.**~~ **Wrong, and corrected the same day.** I had
+  verified that the service started and its ports answered, then concluded the box could not tell
+  me anything about behaviour. It can: `POST` the command line to `127.0.0.1:8077/cli` with the
+  token from `/var/lib/yantrik-mind/console.token`. Driving it that way immediately showed a live
+  mind (197 DMN opportunities in 24 h), showed the forge was cold only because `forge start` had
+  never been called, and inside ten minutes produced **two findings reading could not have given
+  me**: a client-cancelled tick never reaches the give-up bookkeeping, and the forge's syntax check
+  had been failing every python file it ever built (E.FORGE1). E.LOOP-F and E.LOOP-G still have no
+  observed instance — but that is now a statement about what the mind has been asked to do on that
+  box, not about what the box can show.

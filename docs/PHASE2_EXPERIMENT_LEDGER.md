@@ -5709,3 +5709,19 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | What this settles | ARCH8 listed "verify by executing" third. It is **first**. Truncation is now largely handled, and what remains are **runtime** failures a model reviewer cannot see by reading — the review step's own comment already said so: *"a model checking its own work is weaker than executing it."* This is that sentence, measured, on leg 4 of a live run. |
 | The caution that does not go away | Executing generated code is a security decision. It was tried inside the benchmark container and abandoned for good reasons, and nothing here changes that. The question is whether a **box that already trusts the mind** should run its own build before announcing it — which is a different question, and one nobody has asked. |
 | Honest accounting of the change | The budget note is a **partial** win: it removes truncation without improving the score distribution, because the next failure was waiting underneath. I will not claim it as a score improvement. |
+
+## E.CB2-P — RESULT over 8 legs: truncation down, score unchanged, ceiling moved
+| | baseline | with the budget note |
+| --- | --- | --- |
+| truncated | **3/8** | **1/8** — and that one **recovered to 11/11** |
+| scores | 11,11,11,11,2,11,11,2 | 11,11,7,2,11,11,11,8 |
+| mean | **8.75/11** | **9.00/11** |
+
+| Field | Value |
+| --- | --- |
+| **The statistic, as preregistered** | Fisher exact two-tailed on the truncation table: **p = 0.57**. The drop from 3/8 to 1/8 is **not statistically distinguishable from noise** at this n. I said before running that 8 legs could only be suggestive, and it is less than that. |
+| What IS solid, and is not a rate | **Mechanistic**: every one of the 8 legs decomposed the way the note asked — `run.sh` + `server.py` + `templates/` + `data/` — where the baseline produced monoliths. The instruction demonstrably changes the model's decomposition; whether that translates to fewer cuts needs more legs than a change of this size deserves. |
+| The mean did not move | 8.75 → 9.00. **The ceiling moved rather than lifted**: failures shifted from truncation to runtime defects, which is exactly what the preregistration predicted and refused to claim as an improvement. |
+| The remaining ceiling, named | Leg 4 — 2/11, complete and parseable, dead at import (`TCPServer` imported from `http.server`). Leg 3 — 7/11, starts and serves, fails four checks. Leg 8 — 8/11. **None of these is a truncation descendant, and none is visible to a model reading its own files.** |
+| Verdict on the change | **Keep it**: it costs nothing (no extra call), it demonstrably changes decomposition, the one truncation that occurred recovered fully, and it removes a failure mode whose recovery costs a model call. **But it is not a score improvement and is not recorded as one.** |
+| What this measurement actually bought | The clearest possible statement of where the next value is. With truncation handled, the distribution is capped by defects that only execution can find. That is now the top of the ARCH8 list on evidence, not on argument. |

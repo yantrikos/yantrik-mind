@@ -6859,3 +6859,25 @@ Corrected, 15 of 35 legs score below 90%. Every one decomposes:
 2. **Execution** — and per E.DRIVE-R8 the sandbox already works outside the benchmark container, so that is a security review of using an existing guard, not a capability request.
 
 **And my new kill criterion earned itself twice today.** E.FENCE1 was killed as a duplicate only after I had written the code; here, "does this already exist?" was asked FIRST and stopped me building a router fix for a cluster that was fixed two days ago. The corpus is full of artifacts from before fixes landed, and an old `out-*` directory is not evidence about today's code.
+
+### E.WIN3 — PREREG: the route that serves live numbers must actually read them
+**Unblocking myself.** I told Codex three slices were queued behind his `rustpython-parser` call. The DEPENDENCY decision is genuinely his — supply chain, build time, binary size. Whether this check ships **now**, hand-rolled and validated the way E.ENTRY1 was, is mine. My own record says I over-escalate (*"2 of 7 filed decisions were mine to make"*), so this is me taking back the half that is.
+
+**Does it already exist?** No — the criterion applied first, as standing policy since E.FENCE1. Nothing in `mind-conversation` checks route freshness.
+
+**The defect, read from the artifact.** `out-p8/mind_T1/server.py` scored **8/11**, losing exactly the three dashboard checks. Its handler is `elif self.path == '/dashboard': self.serve_dashboard()`, and `serve_dashboard` computes `total = len(leads)` from a **module-level global loaded once at startup**. It never re-reads `data/leads.json`. Submissions land; the dashboard keeps showing the numbers from boot.
+
+**Why every existing check is silent.** It parses. Its imports resolve. It has an entry point and binds. It repeats nothing. It is a completely healthy-looking file that serves stale data — which is why the model review round read it and approved it.
+
+**Reference measurement, whole corpus** (`probe_branch.py`, `ast`-based): **18 artifacts, 16 judged, 15 `ok`, exactly one `SNAPSHOT-SUSPECT` — `out-p8` — and 2 unparseable abstained.** One fire, on the one leg that lost those points.
+
+**THE RISK IS INVERTED HERE, and that governs the design.** Every other check I have built fires on the PRESENCE of something wrong, so an uncertain scanner falls silent. This one fires on the **ABSENCE of a read** — so a scanner that fails to *find* a read that exists produces a **false accusation**. The safe direction is therefore the opposite of E.ENTRY1's, and must be stated explicitly: anything unreadable, and any file where the dashboard guard cannot be located, yields silence; and the read vocabulary must be at least as generous as the AST probe's, never narrower.
+
+**KILL CRITERIA.**
+1. Fires on exactly **one** artifact across the corpus, and it is `out-p8`. Exact count.
+2. **File-for-file agreement with the `ast` probe** — not "no worse than".
+3. Zero fires on the 15 healthy legs, including every 11/11 leg.
+4. Watched to FAIL, with any mutation confirmed present in the file before its run is counted.
+5. Shown to reach the review round, or it does not ship (standing since E.ENTRY1/D2).
+
+**Not claimed:** that p8 would have scored 11/11. The finding reaches a model that still has to act on it. What is claimed is that the Mind currently ships a dashboard serving boot-time numbers with nothing in the loop able to notice.

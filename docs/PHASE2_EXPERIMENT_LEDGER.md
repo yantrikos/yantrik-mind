@@ -7403,3 +7403,22 @@ E.REPAIR1 settled where the weakness is: detection triples the odds (45% told vs
 **A replication worth noting.** `rewrite` scored 10/20 here against E.REPAIR1's told arm at 9/20 — two independent runs, 45% and 50%. **The 45% figure replicates**, which is more than could be said for anything I measured at n=5 today.
 
 **So the weak link stands and this lever did not move it.** The review round repairs about half the time when told, the checks triple the odds of it trying, and the wording is already the better of the two tested. The remaining candidates are a **second repair round** — already expressible per model via `max_repair_attempts`, which the recipe never consults — and giving the review something stronger than its own reading, which is the execution question.
+
+### E.TIMEOUT1 — SHIPPED after Pranab's "all is ours", and the enabling step found six dark failures
+Pranab granted the boundary I had stopped at. Two commits in `yantrik-companion`.
+
+**First, the enabling change (`937084b`), which turned out to matter more than the feature.** `crates/yantrik-ml` is consumed as a git dependency with a `[patch]` to the local path, so it is deliberately not a workspace member — but without its own `[workspace]` table it inherited the parent's, and cargo refused every command with *"current package believes it's in a workspace when it's not"*. **Its entire unit suite was dark.**
+
+Running it revealed **24 tests, 18 passing, SIX FAILING** — all assertion drift where the code has moved away from its tests: `profile_summary`, `profile_from_model_name`, `tool_family_routing`, `tool_family_best_for_query`, `yantrik_trained_profile`, and `generation_config_default` (max_tokens 2048 against an expected 512). **Five of the six are in `capability.rs`** — the module holding `ModelCapabilityProfile`, which is exactly where the per-model thinking level and timeout are meant to go. Extending a module whose own tests fail unseen is how a second drift starts.
+
+**I did not fix them.** Which side is authoritative — tests encoding intent that regressed, or code changed deliberately with tests left stale — is a product question, and guessing it silently is what produced the situation.
+
+**Then the knob (`efd71ef`).** Three sites (199, 205, 880) become `YM_LLM_TIMEOUT_S`, **default the same 300 s**, so an unset environment is byte-identical. Every malformed value falls back to the default — never to something shorter, because a typo that shortened it would turn a working lane into one that fails closed, silently, which is the failure the knob exists to fix.
+
+**Kill criteria, all five met**: unset resolves to 300 s; a valid value is honoured; nine malformed inputs all fall back; all three real sites wired; and two mutations each confirmed present before its run — default 300→30 failed three tests, and un-wiring a real site failed the wiring test with `left: 2, right: 3`.
+
+**Two traps caught in the doing, both on my own record already.**
+1. **A test that could not exist.** `api.rs` sits behind the **non-default** `api-llm` feature, so `cargo test --lib` compiled none of it and reported "0 passed, 24 filtered" — my five tests were absent, not passing. `--features api-llm` was required. *A test suite that runs is not the same as a test suite that includes your test.*
+2. **The search found itself.** My first attempt at the un-wiring mutation hit the last match in the file — the assertion's own string literal inside the test module — and "failed" with `left: 0` for the wrong reason. Discarded and redone against a real site; the test now cuts the source at `#[cfg(test)]` first. Identical in shape to `pgrep -f` matching its own shell, which is already a memory.
+
+Regression: 38 lib tests, 32 pass, the same 6 pre-existing failures, none new. `yantrik-companion` and `yantrik-mind` both build.

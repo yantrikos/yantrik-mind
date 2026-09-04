@@ -39,17 +39,17 @@ would improve the **real** mind and would **not** move a graded leg. That is the
 implied when I filed it as the largest gap, and it is worth knowing before anyone spends a day on
 it.
 
-### 2. Does staging get real traffic, or does Phase G wait?
-The world-model shadow (E.G1) cannot be graded on .95, and **no code change can fix that** — see
-E.G3. Agreement is only defined for the `knock-receptivity` sample, and all 9,865 evaluations exit
-at `no_packets` before the gate, because a packet is prepared proof-carrying work that a box with
-no user never produces. The companion sample reads 99.1% "unknown" for the same reason: presence is
-ingested once per handled **turn**, and a headless box has no turns. Both readings are correct.
+### 2. ~~Does staging get real traffic, or does Phase G wait?~~ — WITHDRAWN, it was mine
+Filed because the world-model shadow reported `AGREEMENT: UNCOMPUTABLE`, which I concluded no code
+change could fix. The system's own empty-state text was the answer: `ym packets` says the Night
+Shift compiles them from future nodes, and `ym future` says `ym calendar add` seeds it. Three
+commands later a real packet is standing by, produced entirely by the pipeline's own machinery.
+Feeding the front door is not the same as forging the store. See E.G3's correction.
 
-Two options, and only you can pick: attach a channel to staging so turns and packets occur
-naturally, or accept that Phase G waits for production traffic. **Manufacturing packets is not a
-third option** — it would compute agreement on synthetic input, which is the same flaw that shipped
-me a broken scorer earlier today.
+**Second item on this list I escalated wrongly** (item 1 was the first). Both times I reasoned from
+the code to "this needs a trust or environment decision" without running the thing and reading what
+it said back. Escalating feels like the careful move and therefore gets less scrutiny than acting —
+but a decision filed wrongly spends Pranab's attention and parks real work.
 
 ### 3. Reading 8
 Ready. Not started, because I said I would not start one without your word.

@@ -43,6 +43,7 @@ mod book;
 mod briefing;
 mod calendar;
 mod capabilities;
+mod pyimports;
 mod cloud_photos;
 pub mod cognitive;
 mod crypto_trader;
@@ -14701,6 +14702,25 @@ impl RecipeHost for MindRecipeHost {
                                     unterminated.join(", ")
                                 )
                             });
+                        }
+                        // E.LOOP-I2: imports that cannot resolve, named for the review round that
+                        // already reads this message. Leg 4 scored 2/11 on `from http.server
+                        // import TCPServer` and the model review READ that file and approved it —
+                        // a model checking its own work is weaker than resolving one import.
+                        //
+                        // Deliberately inert: with no findings — which is every leg measured so
+                        // far but one — not a byte of this message changes, so legs without an
+                        // import defect behave exactly as before and readings stay comparable.
+                        let findings = crate::pyimports::stdlib_import_findings(stream);
+                        if !findings.is_empty() {
+                            msg.push_str(&format!(
+                                "
+
+IMPORTS THAT DO NOT RESOLVE — fix these, they are why the                                  program cannot start:
+{}",
+                                findings.join("
+")
+                            ));
                         }
                         Ok(msg)
                     }

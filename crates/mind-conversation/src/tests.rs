@@ -15010,3 +15010,130 @@ fn the_truncation_marker_ties_the_publisher_to_the_recipe() {
         "a literal copy of the marker has reappeared in the recipe; it must come from the constant"
     );
 }
+
+/// E.LOOP-I2 — the import check, driven by the REAL corpus rather than invented lines.
+///
+/// These sixteen `from ... import ...` lines are every distinct one appearing across the Mind's 35
+/// real T1/T3 artifacts on the staging box. Exactly one of them is the defect that made leg 4
+/// score 2/11 — `TCPServer` is in `socketserver`, not `http.server` — and the model review step
+/// read that file and approved it. The other fifteen come from legs that ran, several of them
+/// 11/11, so a finding on any of them is a false positive on working code.
+#[test]
+fn the_import_check_flags_the_real_defect_and_nothing_else() {
+    // Verbatim from the corpus.
+    const GOOD: &[&str] = &[
+        "from pathlib import Path",
+        "from datetime import datetime, timedelta",
+        "from urllib.parse import parse_qs",
+        "from http.server import BaseHTTPRequestHandler, HTTPServer",
+        "from datetime import datetime",
+        "from datetime import datetime, timezone",
+        "from datetime import datetime, timedelta, timezone",
+        "from wsgiref.simple_server import make_server",
+        "from urllib.parse import urlparse",
+        "from urllib.parse import parse_qs, urlparse",
+        "from typing import List, Dict",
+        "from http.server import SimpleHTTPRequestHandler, HTTPServer",
+        // The one E.LOOP-I's FIRST version got wrong: a submodule import, valid Python, on a leg
+        // whose server started fine.
+        "from http import server",
+        "from http import HTTPStatus",
+        "from datetime import datetime, timezone, timedelta",
+        "from __future__ import annotations",
+        // Found only on the SECOND extraction: the first anchored `grep "^from "` to line start
+        // and missed every indented import. `io` is not in the table, so the check correctly says
+        // nothing about it — the list-bounded design absorbing an unknown module exactly as
+        // intended, on a real line I had not seen when the table was written.
+        "from io import StringIO",
+    ];
+    for line in GOOD {
+        let found = crate::pyimports::stdlib_import_findings(line);
+        assert!(
+            found.is_empty(),
+            "flagged working code from a real leg — a checker that cries wolf gets turned off: \
+             {line} -> {found:?}"
+        );
+    }
+
+    // The one real defect in the whole corpus.
+    let bad = crate::pyimports::stdlib_import_findings(
+        "from http.server import BaseHTTPRequestHandler, TCPServer",
+    );
+    assert_eq!(bad.len(), 1, "expected exactly the TCPServer finding, got {bad:?}");
+    assert!(
+        bad[0].contains("TCPServer") && bad[0].contains("socketserver"),
+        "the finding must name the symbol AND where it actually lives, so the repair is aimed \
+         rather than guessed: {}",
+        bad[0]
+    );
+}
+
+/// The check is LIST-BOUNDED, and its only permitted error is silence. A module it does not know
+/// must never produce an accusation, however wrong the import looks.
+#[test]
+fn the_import_check_stays_quiet_rather_than_guessing() {
+    for line in [
+        "from json import Nonsense",            // known module, not in the table
+        "from mypackage.thing import Whatever", // third-party
+        "from os.path import definitely_not_real",
+        "from http.server import (\n    BaseHTTPRequestHandler,\n    TCPServer,\n)", // list not fully visible
+        "from http.server import *",
+    ] {
+        let found = crate::pyimports::stdlib_import_findings(line);
+        assert!(
+            found.is_empty(),
+            "accused on incomplete knowledge, which is the one direction this check must never \
+             fail in: {line} -> {found:?}"
+        );
+    }
+    // An alias still resolves the underlying name, and a real defect behind an alias is still real.
+    assert!(crate::pyimports::stdlib_import_findings("from http.server import HTTPServer as S").is_empty());
+    assert_eq!(
+        crate::pyimports::stdlib_import_findings("from http.server import TCPServer as S").len(),
+        1
+    );
+}
+
+/// E.LOOP-I2 WIRING — the findings must reach the review round, and must vanish when there are none.
+///
+/// The pure-function cases above would all still pass with the checker never called from anywhere.
+/// This drives the real `write_files` tool, because the whole design rests on the write message
+/// already flowing into the review step: that is what makes this need no new recipe step and no
+/// extra model call. It also pins the INERTNESS claim — with no findings not a byte changes, which
+/// is what keeps legs without an import defect comparable to readings 3-6.
+#[tokio::test]
+async fn import_findings_reach_the_review_and_are_absent_when_clean() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+
+    let bad = "=== FILE: server.py\nfrom http.server import BaseHTTPRequestHandler, TCPServer\n\
+               print(1)\n";
+    let msg = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "impbad", "stream": bad}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        msg.contains("IMPORTS THAT DO NOT RESOLVE") && msg.contains("socketserver"),
+        "the review round must be handed the unresolvable import, naming where the symbol really \
+         lives, or the repair is guessed: {msg}"
+    );
+
+    // The same set with the import corrected: the message must be exactly what it always was.
+    let good = "=== FILE: server.py\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\
+                print(1)\n";
+    let clean = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "impgood", "stream": good}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        !clean.contains("IMPORTS THAT DO NOT RESOLVE"),
+        "a leg with no import defect must be byte-identical to before this change, or every \
+         earlier reading stops being comparable: {clean}"
+    );
+}

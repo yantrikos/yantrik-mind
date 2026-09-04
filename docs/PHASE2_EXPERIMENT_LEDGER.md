@@ -6950,3 +6950,26 @@ All three Mind legs disqualified; Hermes was never invoked. **No verdicts, no to
 **A harness property worth recording.** `run_all.sh:49` does `continue 2` on a disqualified leg, which skips the PAIRED leg for that task. That is defensible for a paired comparison — grading one half of a broken pair buys nothing — but the consequence is that a Mind-side environment failure yields **zero** data about the opponent. Three Mind DQs therefore cost six legs of information, not three.
 
 **What the reading did buy**, since it bought no score: the 300 s ceiling is now known and located; the fail-closed privacy path is confirmed working under real load rather than in a test; the preflight caught two harness defects before any graded request; and the pinned-binary discipline held (`binary_sha256 0ba1d640…`, `binary_provenance c3e723f` in every receipt).
+
+### E.OSS20-CHECK — the Mind on the local 20B, and a fresh artifact that falsifies my own argument
+**A check, not a graded reading**: no proxy, no containment claim, no verdict. The receipt's `disqualified: true` is my stub proxy file reporting 0 requests against a ledger of 3, and means nothing here.
+
+**The lane works, and works well.** Pointed at `192.168.4.35:11434` with `gpt-oss-backup:20b`, the Mind completed T1 in **179.7 s** with **4 files** (`app.py`, `index.html`, `data/leads.json`, `run.sh`), `routed_kind: build`, **3 model requests**. No timeout, no privacy failure. Against qwen3.8:27b the same task needed 312 s and died on the client's hardcoded 300 s ceiling — **the 20B finishes with 40% of the budget to spare where the 27B could not finish at all.**
+
+Both files the brief NAMES (`run.sh`, `data/leads.json`) are present; `run.sh` runs `python3 app.py`; `app.py` has a `__main__` guard, binds `0.0.0.0:8123` and calls `serve_forever()`.
+
+**And it is dead on arrival.** Line 89 of `app.py`:
+
+```
+${Object.entries(data.per_day).map(([d,c])=>`${d}: ${c}`).join('\n')}
+```
+
+**JavaScript template-literal syntax inside the Python file.** `SyntaxError`. The server never starts; `GET /`, `GET /dashboard` and `POST /` all returned `000`.
+
+**All four of today's checks stayed silent, and each was RIGHT to.** The write step's message carried no findings block. The imports resolve. The entry script names a file that exists. That file's module body contains a `__main__` guard, so it is not a dead entry point. Nothing repeats. The dashboard route is not a snapshot. **Every check answered its own question correctly, and the deliverable is still worthless** — because none of them asks whether the file is valid Python.
+
+**THIS FALSIFIES MY OWN CORRECTION FROM THIS MORNING.** In `DECISIONS_WAITING` I wrote that item 5 (`rustpython-parser`) "gates nothing concrete any more", on the grounds that the corpus's three unparseable artifacts were each covered by something else — `unfence`, E.REPEAT1, and the truncation observation. That reasoning was sound about the corpus and **wrong as a general claim**, and it took one fresh artifact to show it: a syntax error class that is not a fence, not a repetition loop, not a truncation, and not a missing block body. **I generalised from a fixed corpus to the space of things a model can emit.** The corpus is what has already happened; it is not the population.
+
+So item 5 is **re-opened with real evidence**, and the evidence is stronger than what it had before: not a historical artifact from a pre-fix run, but a defect produced today, on the model Pranab has chosen, that four purpose-built checks all miss by construction.
+
+**Also worth recording**: `has_block_without_body` (added to `freshness.rs` for exactly the "cannot compile" case) does not catch this either. It was built to make the freshness check ABSTAIN on unparseable files, not to report them — the right scope for that check, and a reminder that a guard which silences is not a guard that warns.

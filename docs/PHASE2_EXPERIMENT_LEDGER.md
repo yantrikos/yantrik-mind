@@ -6756,3 +6756,33 @@ This is the **"locally correct rule that is catastrophic in context"** class aga
 - `a_readme_that_opens_and_closes_with_a_fence_is_not_mangled` — the new guard. **Watched to fail** with the guard deleted by line address, after a first mutation attempt silently failed to apply and its "pass" was correctly discarded.
 
 Full workspace suite green.
+
+### E.REPEAT1 — PREREG: a generation that degenerated into repetition must not be reported as fine
+**Preregistered before code, and the new kill criterion is applied FIRST this time.**
+
+**Does this already exist?** No. `grep` for repetition/degeneracy handling across `mind-conversation` and `mind-inference` returns only unrelated `str::repeat` in tests and one comment about summaries. Asking this question is the criterion E.FENCE1 lacked, and it is asked here before a line is written.
+
+**The artifact.** `out-ds-pilot3/mind_T1/server.py` ends with `if __name__ == "__main__":` repeated **49 times**. It does not parse (`expected an indented block after class definition on line 280`). The generation degenerated into a loop.
+
+**What the system said about it.** *"(3 files: run.sh, server.py, data/leads.json) — NOTE: the stream ended without a newline, so data/leads.json may be incomplete."* It named the **last** file as possibly incomplete and said nothing at all about `server.py`, which is the one that is destroyed. Contrast `out-ds-pilot`, where the same observation named `server.py` correctly and the guard did its job — so this is not a broken guard, it is an **uncovered failure mode**.
+
+Every other check is correctly silent: `pyimports` resolves what it sees, `entrypoint.rs` abstains because the file will not parse (its uncertainty rule sends it to silence), and the duplicate-path check has nothing to say. The file was written, reported as built, and cannot run.
+
+**The rule.** For each file, the longest run of consecutive identical NON-BLANK lines. Report when it reaches a threshold.
+
+**The threshold is measured, not chosen.** Across all 229 real artifacts:
+
+| longest identical run | files |
+| --- | --- |
+| 1 | **228** |
+| 49 | 1 |
+
+Nothing in between — **no healthy artifact has even two consecutive identical non-blank lines.** Threshold **5**: four above anything ever observed in a good file, and a tenth of the one bad case. Per extension the healthy maximum is 1 for `.py`, `.json`, `.html`, `.js`, `.md`, `.sh` and `.css` alike, so no file type needs excluding.
+
+**KILL CRITERIA.**
+1. Fires on exactly **one** file in the corpus, and it is `out-ds-pilot3/mind_T1/server.py`.
+2. Zero fires on the other 228 — asserted as an exact count.
+3. It must be watched to FAIL before counting as evidence, and any mutation that does not visibly apply is discarded rather than counted (this went wrong twice today and both non-results were thrown away).
+4. If the check cannot be shown to reach the review round — the step that can act on it — it does not ship. That is the E.ENTRY1/D2 lesson and it is now standing.
+
+**Stated honestly: one occurrence in 229 files, from a `ds-pilot` run.** The case for building it is not frequency. It is that the blast radius is total, nothing covers it, the separation is perfect, and degeneration is a model-generic failure rather than a quirk of one provider — the Mind has already been bitten once by a model changing under it (E.MODEL1).

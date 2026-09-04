@@ -337,6 +337,39 @@ pub fn household_callsite_stats() -> Vec<(String, u64)> {
     rows
 }
 
+/// Name the condition behind a failed private-lane call, from the error text. Every branch
+/// used to collapse into "the local lane is unreachable"; E.MSG1 found a 5 s call timeout reported
+/// that way — true for the caller, wrong for the operator, who then checks the network instead of
+/// the knob. A timeout names the knob and the seconds it waited.
+pub fn lane_failure(detail: &str) -> (String, &'static str) {
+    let d = detail.to_ascii_lowercase();
+    if d.contains("429") {
+        (
+            "the local lane is RATE LIMITING (429 after retries)".to_string(),
+            "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots",
+        )
+    } else if ["502", "503", "504"].iter().any(|c| d.contains(c)) {
+        // Distinct from unreachable: the gateway answered, its worker did not.
+        (
+            "the local lane is FLAKY (gateway error after retries)".to_string(),
+            "the endpoint is up but its backend is failing intermittently — check the model host",
+        )
+    } else if d.contains("timeout") || d.contains("timed out") {
+        (
+            format!(
+                "the local lane TIMED OUT (no answer within {} s — YM_LLM_TIMEOUT_S)",
+                yantrik_ml::call_timeout::call_timeout().as_secs()
+            ),
+            "raise YM_LLM_TIMEOUT_S, lower the thinking level, or pick a faster model",
+        )
+    } else {
+        (
+            "the local lane is unreachable".to_string(),
+            "check YM_LOCAL_OLLAMA_URL and the endpoint",
+        )
+    }
+}
+
 pub fn privacy_report(provider: &str) -> String {
     use std::sync::atomic::Ordering;
     let household =
@@ -989,21 +1022,7 @@ impl InferencePool {
                     // after the retries were exhausted, which is a load problem with a different
                     // fix (fewer permits, more slots) than an outage.
                     let detail = format!("{e:#}");
-                    let (why, hint) = if detail.contains("429") {
-                        (
-                            "the local lane is RATE LIMITING (429 after retries)",
-                            "reduce YM_INFER_PERMITS below the endpoint's slot count, or add slots",
-                        )
-                    } else if ["502", "503", "504"].iter().any(|c| detail.contains(c)) {
-                        // Distinct from unreachable: the gateway answered, its worker did not.
-                        ("the local lane is FLAKY (gateway error after retries)",
-                         "the endpoint is up but its backend is failing intermittently — check the model host")
-                    } else {
-                        (
-                            "the local lane is unreachable",
-                            "check YM_LOCAL_OLLAMA_URL and the endpoint",
-                        )
-                    };
+                    let (why, hint) = lane_failure(&detail);
                     eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {why}: {detail}");
                     return Err(anyhow::anyhow!(
                         "private inference unavailable — {why}; refusing to route private context to a cloud provider. Fix: {hint}"
@@ -4898,5 +4917,28 @@ mod system_merge_tests {
             ChatMessage::user("hi"),
         ]);
         assert_eq!(blank[0].content, "persona");
+    }
+}
+
+#[cfg(test)]
+mod lane_failure_tests {
+    use super::lane_failure;
+
+    #[test]
+    fn a_timeout_names_the_knob_and_the_seconds_not_the_network() {
+        // The exact text E.TIMEOUT3 produced with YM_LLM_TIMEOUT_S=5 on staging.
+        let (why, hint) = lane_failure("Ollama API request failed: timeout: global");
+        assert!(why.contains("TIMED OUT"), "{why}");
+        assert!(why.contains("YM_LLM_TIMEOUT_S"), "{why}");
+        assert!(why.contains(" s "), "carries the seconds it waited: {why}");
+        assert!(!why.contains("unreachable"), "{why}");
+        assert!(hint.contains("YM_LLM_TIMEOUT_S"), "{hint}");
+    }
+
+    #[test]
+    fn the_other_conditions_keep_their_names() {
+        assert!(lane_failure("HTTP 429 Too Many Requests after 3 retries").0.contains("RATE LIMITING"));
+        assert!(lane_failure("502 Bad Gateway").0.contains("FLAKY"));
+        assert!(lane_failure("connection refused (os error 111)").0.contains("unreachable"));
     }
 }

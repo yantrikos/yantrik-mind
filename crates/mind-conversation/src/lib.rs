@@ -47,6 +47,7 @@ mod entrypoint;
 mod freshness;
 mod pyimports;
 mod repetition;
+mod syntax;
 mod required_literals;
 mod cloud_photos;
 pub mod cognitive;
@@ -14772,6 +14773,13 @@ impl RecipeHost for MindRecipeHost {
                         // a port, it repeats nothing. Unlike its neighbours this fires on the
                         // ABSENCE of a read, so everything it cannot read confidently stays quiet.
                         findings.extend(crate::freshness::stale_route_findings(stream));
+                        // E.SYNTAX1: a written .py that does not parse. The forge has checked
+                        // this since E.FORGE1 with the same sandbox and the same ast.parse; the
+                        // build lane never did, and a real artifact shipped with a JavaScript
+                        // template literal on line 89 while all four other checks stayed silent
+                        // and each was right to. Parses, never executes. Silent and free when the
+                        // sandbox is unavailable or the set has no python.
+                        findings.extend(crate::syntax::unparseable_python(stream).await);
                         if !findings.is_empty() {
                             // The header used to say "IMPORTS THAT DO NOT RESOLVE", which was true
                             // when imports were the only finding and became a lie as soon as

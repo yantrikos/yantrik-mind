@@ -6524,3 +6524,13 @@ So it is a snapshot that nothing reads as state, exactly as the earlier entry su
 The residual is a naming hazard rather than a bug: a field called `status` inside a durable blob, which will read as current to the next person who opens it. Worth a comment if anyone is in there; not worth a change on its own, and certainly not worth one from me given the record above.
 
 **Also connects two blocked lanes.** E.D1 closed with *"a box with contested attention: real packets, real presence… Two separate Phase measurements are now blocked on one piece of infrastructure."* That is the same presence I diagnosed for knock in E.G3. **Phase D, Phase G and the knock gate are all blocked on the same missing thing** — a device paired to a cockpit, or a real channel. `DECISIONS_WAITING` item 8 unblocks three measurements, not one, which is worth knowing when it is weighed.
+
+### Harness preflight — cb2n self-test suite GREEN after today's changes
+My own rule is that harness changes need a preflight, and it exists because **four benchmark readings died from harness defects whose first run was a graded one**. Today I added `run/score.py`, added `selftest/score_cases.py`, and wired the latter into `selftest.sh`. Ran the full suite on the box:
+
+- **0 `DISAGREE` lines, exit 0.** Every case agrees, including the whole liveness family (`named_400` → gone, the 429/5xx/401/403/transport set → inconclusive), the model-retirement `gone/*` cases, `verdict_cases`, `tree_special` (special node detected, checker refused), and **`score_cases: agree`** — the new self-test now runs inside the suite rather than only under my hand.
+- `rederive.sh` passes: the tree still derives byte-exactly from frozen `cb2` plus `scratch/cb2n_patch.py`, with `score.py` and `score_cases.py` added through the patch rather than beside it.
+
+**So reading 8 can start the moment it is authorised**, with the preflight already banked rather than discovered at the start of a graded sequence. That is the only part of reading 8 I can do without the word, and it is done.
+
+Recorded plainly because a green preflight is unremarkable and its absence is expensive — the whole reason the rule exists is that the cheap check was skipped four times and each skip cost a reading.

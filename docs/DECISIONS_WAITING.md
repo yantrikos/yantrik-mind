@@ -166,3 +166,60 @@ What it buys: the world-model shadow has recorded 9,865 knock evaluations that a
 the gate, so `AGREEMENT` has been `UNCOMPUTABLE` since E.G1 shipped. With presence, the next
 evaluation reaches the receptivity gate and the shadow finally produces the number it exists for.
 
+
+---
+
+## Correction, later on 2026-09-04 — two entries above are now false
+
+**"startup snapshot (leg p8, 8/11) — cannot be detected without a parser" is WRONG.** It shipped as
+E.WIN3 (`e3a2d79`) with no parser, validated **file-for-file** against an `ast` probe across the
+corpus: exactly one fire, on `out-p8`, zero on the fifteen healthy legs including every 11/11.
+
+The reason the earlier conclusion was wrong is instructive. The note above says *"I probed the
+regex-only version of the latter and it found nothing on the defective leg — p8's load sits at
+module scope but nested inside `if`/`with`."* That was true of the algorithm I probed, which asked
+*where does the load happen*. The one that works asks a different question — **is a read reachable
+from the branch that guards the route** — and that inverts the problem: it never has to locate the
+load at all. Two probes failed on the first question; the third separated 7/7 on the second, and
+17/17 across the whole corpus. **The dependency looked necessary because the algorithm was wrong,
+not because the language was.**
+
+**Item 5 (`rustpython-parser`) therefore gates nothing concrete any more.** It was filed as gating
+"two pieces of T1 value". Both are gone:
+- p8's snapshot detector — shipped without it.
+- "leg v3's class" of unparseable file — v3 is a file written inside a ```python fence, which
+  `unfence` already strips (it is the *pre-fix artifact* for that fix). The corpus holds exactly
+  three unparseable artifacts and each is covered by something else: v3 by `unfence`, ds-pilot3's
+  degenerate repetition by E.REPEAT1, and ds-pilot's mid-template truncation by the write step's
+  own "stream ended without a newline" observation, which named the right file. E.WIN3 also added
+  `has_block_without_body`, which detects one syntax-error class soundly and without a parser.
+
+So item 5 is now a **robustness and maintenance** question — is a hand-rolled tokenizer that biases
+every uncertainty to silence the right long-term shape? — and not a gate on any shipped value.
+Codex should decide it on those terms. I told him twice today that he was the bottleneck on three
+slices; that was true when I said it and is not true now, and the correction is mine to make loudly
+because **a decision filed wrongly spends someone else's attention and parks real work** — the
+lesson item 2 above already records me learning, and evidently not learning well enough.
+
+**Item 1 gains a positive measurement.** The entry says execution "would improve the real mind and
+would not move a graded leg", which stands. What was missing is that the capability is **verified
+working outside the benchmark**: on staging, the exact command `Sandbox::run` builds —
+`timeout -s KILL … unshare --user --map-root-user --fork --pid --mount-proc --net --uts --ipc … prlimit …`
+— returns `ok`, exit 0, with `max_user_namespaces` at 2147483647 and all three binaries present. So
+the remaining question is purely *should the build lane call the guard it already has*, with no
+capability request and no safety property disabled.
+
+**The T1 table above is now:**
+
+| defect | state |
+| --- | --- |
+| duplicated path destroyed the whole build | closed and verified |
+| findings reached a step with no mandate to fix them | closed and verified |
+| unresolvable import (p4, 2/11) | fixed and mutation-checked; **repair unverified** |
+| placeholder mismatch (p3, 7/11) | fixed and mutation-checked; **repair unverified** |
+| startup snapshot (p8, 8/11) | **closed** — E.WIN3, mutation-checked; repair unverified |
+| dead entry point (r7, 2/5) | **closed** — E.ENTRY1, mutation-checked; repair unverified |
+| degenerate generation (ds-pilot3) | **closed** — E.REPEAT1, mutation-checked |
+
+Every remaining "unverified" is the same single thing: **whether the review round ACTS on a finding
+it receives.** That is one reading, and it is item 3. There is no engineering left in front of it.

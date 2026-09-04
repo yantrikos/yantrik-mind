@@ -189,3 +189,6 @@ stops applying the moment the tag changes, instead of silently outliving it.
 the time when told, 15% when not. Whether to spend a second repair round is therefore already
 expressible per model rather than as a global recipe decision — the recipe simply does not consult
 it. Worth checking before any second-round design is drawn.
+
+
+**Status 2026-09-04 (E.PROFILE1):** the per-model layer is built in yantrik-ml — `YM_THINK_MODELS` and `YM_LLM_TIMEOUT_MODELS` (substring match on the model name) resolve at the backend at send time, above the caller's per-role/global value, above `ModelCapabilityProfile` (`think_default`, `call_timeout_s`), above the compiled default. Per-role `YM_THINK_<ROLE>` stays in the mind. Levels (low/medium/high) remain a proposal: the knob today is a switch, because only the native `/api/chat` path honours a level and only for some models.

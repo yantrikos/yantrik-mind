@@ -7706,3 +7706,11 @@ Gate on bytes: `TIMED OUT (no answer within` **1**, E.BOARD1 literal 2, absent c
 
 ### E.MSG1 — WITNESSED on staging
 First attempt inconclusive: a `hello.py` build finishes inside 5 s on local qwen, so nothing timed out. With the Flask task and `YM_LLM_TIMEOUT_S=5`, journal and board, verbatim: `the local lane TIMED OUT (no answer within 5 s — YM_LLM_TIMEOUT_S): Ollama API request failed: timeout: global` / `❌ failed … I couldn't finish the build: LLM error: private inference unavailable — the local lane TIMED OUT (no answer within 5 s — YM_LLM_TIMEOUT_S)`. Env restored.
+
+### E.PROFILE1 — BUILT in yantrik-ml (tests + three mutants), deploy pending the mind's full suite
+- `model_overrides::lookup(csv, model)` — one parser for `"qwen3.8=600, GPT-OSS = 120"`, substring match on the lowercased model name, malformed entries ignored.
+- `call_timeout::resolve_timeout_secs(model, per_model, global, profile)` and `call_timeout_for(model)`; **every client site** in `api.rs` (3) and `generic_openai.rs` (1) uses the model-aware knob, and the site-count test now rejects the model-less `call_timeout()` at a client site.
+- `think_policy::resolve_think(model, per_model, requested, profile)` and `think_for_model`; the three `match config.think` sites wrap it. Unknown switch words fall through rather than guess.
+- `ModelCapabilityProfile` gains `think_default: Option<bool>` (all `None` — unmeasured) and `call_timeout_s: Option<u64>` — **Large tier `Some(600)`**, others `None`. Measured basis: 312 s on `qwen3.8:27b`; the boundary is the crate's own (≥14B is Large), so `gpt-oss-backup:20b` earns it too — a ceiling, not a wait, and my first test expectation had the boundary wrong, not the parser.
+- Mutants: profile level dropped from the timeout precedence; per-model lookup dropped from the think precedence; the local lane back on the model-less knob — each failed by name. 44/44 `--features api-llm`; companion and mind both build.
+Witness planned on staging: `YM_LLM_TIMEOUT_MODELS="qwen3.8=5"` with no global knob → the Flask build dies with the E.MSG1 line naming **5 s**; then the same with `YM_THINK_MODELS="qwen3.8=on"` is *not* witnessed here (no observable in the journal yet) — that stays a unit-level claim until a think observable exists.

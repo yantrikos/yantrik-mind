@@ -223,3 +223,17 @@ capability request and no safety property disabled.
 
 Every remaining "unverified" is the same single thing: **whether the review round ACTS on a finding
 it receives.** That is one reading, and it is item 3. There is no engineering left in front of it.
+
+## Correction — "qwen narrates instead of emitting `=== FILE:` markers" is FALSE
+The note under **item 3** says staging cannot verify the repair link because *"its primary brain is
+`ollama-local:qwen3.8:27b` … and that model narrates instead of emitting `=== FILE:` markers."*
+
+**Measured 2026-09-04, with `build_recipe`'s actual authoring prompt against the real endpoint:
+3 markers, 3 paths (`index.html`, `server.py`, `run.sh`), zero markdown fences, no preamble** — the
+response begins `=== FILE: index.html` and goes straight into the file. The claim was a note, never
+a measurement, and it was load-bearing: it was the stated reason staging could not test the repair
+link, and it very nearly vetoed the profile Pranab chose for reading 8.
+
+The same shape as the day's other errors — asserting a property of something I had not run. Filed
+here rather than only in the ledger because this entry is what someone would read before deciding
+where a reading can be taken.

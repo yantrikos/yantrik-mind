@@ -4240,6 +4240,15 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
 /// fails if the two ever drift.
 pub(crate) const TRUNCATION_MARKER: &str = "was cut";
 
+/// E.REPAIR3 — the phrase that opens the write step's findings block, shared with the recipe's
+/// second-round `JumpIf` for the same reason `TRUNCATION_MARKER` is shared with the completion
+/// pass: the writer says it and the recipe tests for it, and two copies of one string drift.
+///
+/// Its presence in `project_url` after the review's write means the first repair did not clear
+/// every mechanical defect — E.REPAIR1/2 measured that outcome at 50–55% of repairs — and is the
+/// one condition under which a second, bounded repair round is worth a model call.
+pub(crate) const FINDINGS_MARKER: &str = "DEFECTS FOUND MECHANICALLY";
+
 pub(crate) fn page_filename(required: Option<&str>, html: &str, name: Option<&str>) -> String {
     required
         .map(str::to_string)
@@ -14789,7 +14798,7 @@ impl RecipeHost for MindRecipeHost {
                             msg.push_str(&format!(
                                 "
 
-DEFECTS FOUND MECHANICALLY IN WHAT YOU JUST WROTE — each of                                  these was checked, not guessed, and each one is enough on its own to stop the                                  program working. Fix every one:
+{FINDINGS_MARKER} IN WHAT YOU JUST WROTE — each of                                  these was checked, not guessed, and each one is enough on its own to stop the                                  program working. Fix every one:
 {}",
                                 findings.join("
 ")

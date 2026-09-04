@@ -524,6 +524,67 @@ YOUR BUDGET FOR THIS RESPONSE IS ABOUT {budget} TOKENS, and it is a hard cut, no
                 store_as: "project_url".into(),
                 on_error: ErrorAction::Skip,
             },
+            // E.REPAIR3 — A SECOND REPAIR ROUND, BOUNDED, AND ONLY WHEN FINDINGS REMAIN.
+            //
+            // E.REPAIR1/2 measured the review above repairing a named defect 45–50% of the time
+            // (9/20 and 10/20, two independent runs). So more than half the time the repaired
+            // artifact is STILL broken — and since E.VERIFY1 the write step's re-check of it now
+            // lands in `project_url`, where the findings header is present exactly when that
+            // happened. This is the one condition under which a second model call is worth
+            // spending, and the JumpIf makes a clean build pay nothing: no header, straight to the
+            // Notify, byte-identical to before this slice.
+            //
+            // Same shape as the completion pass's JumpIf on TRUNCATION_MARKER, for the same
+            // reason: the writer says the phrase and the recipe tests for it, from ONE constant.
+            //
+            // Bounded on purpose. One extra round, never a loop back — a jump backward would let
+            // a defect the model cannot fix consume model calls forever. If the second round also
+            // fails, the Notify below reports it truthfully, and that is the whole point of
+            // E.VERIFY1: the mind knows and now says.
+            RecipeStep::JumpIf {
+                condition: Condition::Not {
+                    inner: Box::new(Condition::VarContains {
+                        var: "project_url".into(),
+                        substring: crate::FINDINGS_MARKER.into(),
+                    }),
+                },
+                target_step: 10,
+            },
+            RecipeStep::Think {
+                prompt: format!(
+                    "Your first repair did NOT clear every defect. This is a SECOND pass, and it is \
+                     the last one — whatever you output here ships.\n\n\
+                     THE BRIEF: {task}\n\n\
+                     THE ORIGINAL FILES:\n{{{{files}}}}\n\n\
+                     WHAT YOUR FIRST REPAIR REPLACED (these supersede the originals above; a file not \
+                     listed here kept its original contents):\n{{{{reviewed}}}}\n\n\
+                     WHAT THE WRITE STEP OBSERVED after that repair. Every item was checked \
+                     mechanically against the files as they now are, and each one still stops the \
+                     program working:\n{{{{project_url}}}}\n\n\
+                     Fix every listed defect. Do not repeat the approach that left it standing: if a \
+                     file was rewritten and is still not valid, the fault is in what was rewritten, \
+                     so rewrite it differently and more simply.\n\n\
+                     Then output ONLY the files you are CHANGING, in the same format, with the same markers:\n\
+                     === FILE: <relative/path>\n\
+                     <the complete contents of that one file>\n\n\
+                     Output ONLY files, never prose. Any file you DO output must be complete, \
+                     because it replaces the old one wholesale. A file you do NOT output keeps its old \
+                     contents, so leaving a file out is how you leave it alone, never how you delete it."
+                ),
+                store_as: "reviewed2".into(),
+                on_error: ErrorAction::Skip,
+                max_tokens: Some(mind_inference::authoring_budget(16_000)),
+                think: Some(false),
+            },
+            // Same guarantees as the first review's write: Skip on error so a bad second pass
+            // leaves the set standing, `prior` so the report stays truthful without being lossy,
+            // and `project_url` so the Notify — and the class-level test in fileset_tests — see it.
+            RecipeStep::Tool {
+                tool_name: "write_files".into(),
+                args: serde_json::json!({ "project": project, "stream": "{{reviewed2}}", "stop_reason": "{{reviewed2__stop_reason}}", "allow_empty": true, "prior": "{{project_url}}" }),
+                store_as: "project_url".into(),
+                on_error: ErrorAction::Skip,
+            },
             RecipeStep::Notify {
                 message: format!(
                     "🛠️ [{name}] built — {{{{project_url}}}}\n\nOpen it, and tell me what to change."

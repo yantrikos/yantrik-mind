@@ -7451,3 +7451,21 @@ Notify
 7. Full workspace suite green.
 
 **Not claimed:** the 70%. The mechanism ships; the number is E.REPAIR4.
+
+### E.REPAIR3 — SHIPPED, all seven kill criteria on evidence
+| # | criterion | evidence |
+| --- | --- | --- |
+| 1 | a clean build runs today's steps | the guard `JumpIf Not(VarContains{project_url, FINDINGS_MARKER})` targets the Notify by index — asserted, and the off-by-one mutant (`10→9`) failed with *"must jump to the Notify at index 10, not 9"* |
+| 2 | runs only when findings remain | the guard keys on the write step's own header phrase |
+| 3 | bounded | exactly one Think + one write between guard and Notify, and **no JumpIf in the recipe targets its own index or earlier** — asserted over every step |
+| 4 | one constant | `FINDINGS_MARKER` in `lib.rs` used by the header; the literal-copy mutant in `delegate.rs` failed *"must reference crate::FINDINGS_MARKER, never the literal"* |
+| 5 | target is the Notify | by index, see 1 |
+| 6 | watched to fail | two mutations, each confirmed present in the file first |
+| 7 | full suite green | 47 result blocks, zero failures |
+
+**Three existing tests failed and each was read before being touched.** None was bulldozed:
+- `at_most_one_review_and_it_costs_at_most_one_extra_call` guards a **ceiling against an open loop**, and its own comment records it being deliberately raised 2→3 on a measurement. Raised 3→4 in the same idiom, on E.REPAIR1/2's measurement, with the ceiling property intact and the backward-jump assertion added beside it.
+- `the_completion_pass_is_skipped_when_nothing_was_cut` counted three Thinks; its real check — the truncation guard lands on the **first** review — still holds and still passes.
+- `the_review_asks_for_a_delta_and_only_the_review_may_be_empty` takes the *last* Think as the review and requires `ONLY the files you are CHANGING` plus the keep-old-contents safety sentence. **The second round lacked both, and it should not have** — it has identical write semantics. Fixed in the prompt, not the test.
+
+**Not claimed:** the ~70%. That is E.REPAIR4 — deploy, then measure the second round on the same harness and the same artifact, n=20, with the first-round-only number as the control.

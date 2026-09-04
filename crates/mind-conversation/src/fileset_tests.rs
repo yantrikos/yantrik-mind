@@ -995,7 +995,9 @@ print('this file was cut off mid";
             .filter(|(_, st)| matches!(st, RecipeStep::Think { .. }))
             .map(|(i, _)| i)
             .collect();
-        assert_eq!(think_ix.len(), 3, "author, completion, review");
+        // Four since E.REPAIR3 added a conditional second review; the truncation guard still
+        // lands on think_ix[2], the FIRST review, which is the property that matters here.
+        assert_eq!(think_ix.len(), 4, "author, completion, review, second review");
         assert!(jump_ix < think_ix[1], "the guard must precede the pass it skips");
         assert_eq!(
             target, think_ix[2],
@@ -1239,9 +1241,18 @@ print('cut off mid";
         // than shipped in pieces, and the leg delivered `run.sh` alone: 2/11 against Hermes's
         // 11/11, which was the whole margin of that reading. A cut set with no way to finish is a
         // failed task; one extra call is what a complete set costs.
+        //
+        // RAISED FROM THREE TO FOUR (E.REPAIR3), on a measurement rather than a hunch. E.REPAIR1
+        // and E.REPAIR2 measured the single review round repairing a named defect 45–50% of the
+        // time across two independent runs of twenty — so more than half of repairs still shipped
+        // broken, and E.VERIFY1 made that visible. The fourth call is CONDITIONAL: a `JumpIf` on
+        // FINDINGS_MARKER skips it whenever the first repair cleared everything, so a clean build
+        // still spends exactly three. What has not changed is the property this test guards —
+        // it is a fixed ceiling, not a loop, and a separate test asserts no step jumps backward.
         assert_eq!(
-            thinks, 3,
-            "an open repair loop is how a cost ceiling stops existing; the ceiling is three calls"
+            thinks, 4,
+            "an open repair loop is how a cost ceiling stops existing; the ceiling is four calls, \
+             the fourth taken only when findings remain"
         );
     }
 
@@ -1462,5 +1473,101 @@ fn the_review_write_carries_the_earlier_message_forward() {
         Some("{{project_url}}"),
         "the review write must carry the earlier message forward, or a truthful final report \
          silently drops every finding raised before the review"
+    );
+}
+
+/// E.REPAIR3 — the second repair round exists, is CONDITIONAL, and is BOUNDED.
+///
+/// Three properties, each asserted on the recipe's structure rather than assumed:
+/// 1. A clean build pays nothing: the JumpIf tests `project_url` for the findings marker and, when
+///    absent, jumps straight to the Notify — the same steps as before this slice.
+/// 2. The marker comes from ONE constant, shared with the write step's header. Two copies of a
+///    string drift, and a drifted copy here would silently disable the round forever.
+/// 3. Exactly one extra round, and no step may jump BACKWARD — a backward jump would let a defect
+///    the model cannot fix burn model calls without limit.
+#[test]
+fn the_second_repair_round_is_conditional_bounded_and_shares_its_marker() {
+    use crate::delegate::build_recipe;
+    use mind_recipes::{Condition, RecipeStep};
+
+    let steps = build_recipe("t", "proj", "build a lead form with a server", None).steps;
+    let notify_at = steps
+        .iter()
+        .rposition(|s| matches!(s, RecipeStep::Notify { .. }))
+        .expect("build_recipe ends in a Notify");
+
+    // Find the JumpIf that guards the second round: it tests project_url for the marker.
+    let guards: Vec<(usize, usize)> = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            RecipeStep::JumpIf {
+                condition:
+                    Condition::Not { inner },
+                target_step,
+            } => match inner.as_ref() {
+                Condition::VarContains { var, substring }
+                    if var == "project_url" && substring == crate::FINDINGS_MARKER =>
+                {
+                    Some((i, *target_step))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        guards.len(),
+        1,
+        "exactly one JumpIf must guard the second round on FINDINGS_MARKER; found {guards:?}"
+    );
+    let (guard_at, target) = guards[0];
+
+    // Property 1 + 5: absent findings, the jump lands ON the Notify — not before it (which would
+    // double-run a step) and not past it (which would skip the report).
+    assert_eq!(
+        target, notify_at,
+        "the guard must jump to the Notify at index {notify_at}, not {target}"
+    );
+
+    // Property 3: exactly one Think and one write_files between the guard and the Notify.
+    let between = &steps[guard_at + 1..notify_at];
+    let thinks = between.iter().filter(|s| matches!(s, RecipeStep::Think { .. })).count();
+    let writes = between
+        .iter()
+        .filter(|s| matches!(s, RecipeStep::Tool { tool_name, .. } if tool_name == "write_files"))
+        .count();
+    assert_eq!((thinks, writes), (1, 1), "the second round is exactly one review and one write");
+
+    // Property 3, the other half: no JumpIf anywhere in the recipe targets its own index or earlier.
+    for (i, s) in steps.iter().enumerate() {
+        if let RecipeStep::JumpIf { target_step, .. } = s {
+            assert!(
+                *target_step > i,
+                "step {i} jumps backward/self to {target_step}; a repair loop must be bounded"
+            );
+        }
+    }
+}
+
+/// The write step's header and the recipe's guard must be the SAME string — asserted on the
+/// source, mirroring the TRUNCATION_MARKER test, because a literal copy in either place is how the
+/// two sides drift and the round goes dark.
+#[test]
+fn the_findings_marker_is_not_duplicated_as_a_literal() {
+    let lib = include_str!("lib.rs");
+    let del = include_str!("delegate.rs");
+    let header_uses_constant = lib.contains("{FINDINGS_MARKER} IN WHAT YOU JUST WROTE");
+    assert!(header_uses_constant, "the findings header must interpolate FINDINGS_MARKER");
+    // The literal may appear exactly once in lib.rs: the constant's own definition.
+    assert_eq!(
+        lib.matches("\"DEFECTS FOUND MECHANICALLY\"").count(),
+        1,
+        "the literal must exist only as the constant's definition in lib.rs"
+    );
+    assert_eq!(
+        del.matches("DEFECTS FOUND MECHANICALLY").count(),
+        0,
+        "delegate.rs must reference crate::FINDINGS_MARKER, never the literal"
     );
 }

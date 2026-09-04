@@ -14,20 +14,30 @@ plumbing right up until they are not.
 
 ## For Pranab
 
-### 1. May the mind run the code it writes, on a box that already trusts it?
-**This is the largest single gap in the build lane.** ARCH8 gap (a). The lane authors files, has a
-model review them, and ships. The codebase already states the consequence in its own review step:
-*"a model checking its own work is weaker than executing it, and this may simply not catch what a
-failing test would."* It was measured this session — leg 4 shipped a fatal `TCPServer` import that
-**the model review read and approved**, and reading 6's single Mind failure was a correct tracker
-with an incorrect test suite for it, written in one pass and never seen to fail.
+### 1. ~~May the mind run the code it writes?~~ — CORRECTED: it already does
+**I had this wrong, and driving staging is what showed it.** I wrote this up as an open security
+question. It is not: the mind has a purpose-built sandbox (`crates/mind-tools/src/sandbox.rs`) and
+already runs code in it.
 
-- Inside the benchmark container this was tried and abandoned for good reasons: `unshare -rn` was
-  refused, and generated code there can reach the run proxy.
-- Outside it, on a box that already runs the mind, it is a different question and **has never been
-  asked**. It is a security decision before an engineering one, which is why it is here.
-- Of the measured T1 defects, three (p3, p8, r7) are behavioural and **only execution can catch
-  them**. E.LOOP-I2 caught the structural one without running anything; that well is now dry.
+`unshare` (user+net+pid+mount+uts+ipc) + `prlimit` + `timeout`: no network at all (empty net
+namespace, so nothing can be exfiltrated or reached on the LAN), the mind's own state dir masked
+with a tmpfs, hard cpu/memory/process/file-size/fd caps, a wall-clock kill, non-root, and code
+passed as FILES rather than interpolated into a shell command line. Where user namespaces are
+unavailable, `available()` is false and callers must refuse rather than fall back. Two call paths
+use it today: the raw `run python/shell/rust: …` request, and the forge's test stage — which I
+watched execute on staging.
+
+So the security decision was made and implemented some time ago. What remains is narrower and
+mostly an engineering question: **should the build lane run its authored files through the sandbox
+the mind already has, before shipping them?** That is ARCH8 gap (a), and it is still real — the
+build lane authors, has a model review, and ships, and the model review demonstrably missed a fatal
+`TCPServer` import.
+
+**One honest caveat that changes the value.** Inside the cb2n benchmark container user namespaces
+are unavailable, so `Sandbox::available()` is false there and execution would be skipped. This
+would improve the **real** mind and would **not** move a graded leg. That is the opposite of what I
+implied when I filed it as the largest gap, and it is worth knowing before anyone spends a day on
+it.
 
 ### 2. Reading 8
 Ready. Not started, because I said I would not start one without your word.

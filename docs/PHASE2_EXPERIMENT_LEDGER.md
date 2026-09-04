@@ -7184,3 +7184,30 @@ I inherited that diagnosis and repeated it without checking the artifact — the
 **Five mechanical checks now cover the five ways a Mind artifact has actually died:** an import that cannot resolve, an entry point that runs nothing, a generation that looped, a route serving boot-time numbers, and a file that is not valid Python. Each was built only after a probe separated real artifacts; each is silent on every healthy artifact measured.
 
 **Honest ledger of what this one is worth.** It cannot move a benchmark reading — the cb2 container refuses the sandbox, so graded legs stay byte-identical. Its value is on real deployments, plus one thing worth more than a point: it found that reading 6's lost point was **misdiagnosed for a day**, and the fix that diagnosis implied (an iteration round, one model call per build, forever) was aimed at a failure that a parse check catches for one sandbox spawn on the builds that have python.
+
+### E.THINK5 — the repeated measurement, and what n=5 overturns
+n=5 per cell, native `/api/chat`, same authoring prompt, `num_predict` 4000. Design and the prediction were written into the script before running.
+
+| model | think | n | min_s | med_s | max_s | max/min | think_med | files per run |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gpt-oss:20b | `false` | 5 | 19.3 | 29.2 | 30.4 | 1.58x | **16094** | **[0,0,0,4,4]** |
+| gpt-oss:20b | `low` | 5 | **6.6** | **7.5** | **8.1** | **1.22x** | 484 | **[3,3,4,4,4]** |
+| gpt-oss:20b | `high` | 5 | 29.3 | 29.4 | 29.7 | 1.01x | 17328 | [0,0,0,0,0] |
+| qwen3.8:27b | `false` | 5 | 89.9 | 136.7 | 165.0 | 1.84x | **0** | [1,2,3,4,4] |
+| qwen3.8:27b | `low` | 5 | 107.3 | 147.3 | 195.0 | 1.82x | 1417 | [3,3,3,3,3] |
+| qwen3.8:27b | `high` | 5 | 115.2 | 149.3 | 156.1 | 1.35x | 1224 | [3,3,3,3,3] |
+
+**OVERTURNED by repetition.** I reported from n=1 that `think:false` gives gpt-oss four files. Across five runs it is **[0,0,0,4,4]** — it produces nothing 60% of the time — and it does **not suppress thinking on that model at all** (16094 chars median, against 484 at `low`). The single draw I generalised from was one of the two lucky runs.
+
+**CONFIRMED by repetition**, and these are now safe to build on:
+- `think:false` genuinely suppresses on qwen: **0** thinking characters, 5/5.
+- `high` destroys gpt-oss: **0 files in all five runs**. Not a fluke, and it must never be an authoring default.
+- `low` is the best setting on gpt-oss by every axis at once — 4x faster than any other, the tightest spread in the whole table (1.22x), and files on every run.
+
+**NEW, and it complicates the design.** On qwen, thinking **off** is fastest (136.7 s median) but the *least* reliable for completeness ([1,2,3,4,4] files), while `low` and `high` deliver a consistent 3. **Speed and completeness pull in opposite directions on that model**, so "the best level" is not a single answer even within one model — it depends on whether a caller would rather have a fast partial answer or a slower whole one. That is a per-workload question, which is exactly what `think_for(role, …)` exists to express.
+
+**THE TAIL IS HEAVIER THAN n=5 SHOWS, and this bounds the timeout work.** These cells span 1.01x–1.84x, far tighter than the 2.7x I saw earlier between two isolated runs. But that earlier pair included **227.5 s for qwen `false`**, which lies *outside* the [89.9, 165.0] range of these five samples. So a rare slow draw exists that five repeats did not capture, and any timeout must be sized against that possibility rather than against `max` here.
+
+**What this says about the 300 s ceiling.** On this probe qwen's worst observed authoring call is 195 s, and the real T1 prompt — larger, with grounding — measured **312 s**. So the probe underestimates the real workload by roughly 1.6x, and **300 s is marginal-to-insufficient for qwen-class authoring**. gpt-oss's worst probe draw is 30.4 s against a real T1 of 179.7 s (~6x), comfortably inside. A single global constant cannot serve both: it is generous for one model and short for the other, which is the measured case for `timeout_for(level)` being per-model as well as per-level.
+
+**Not claimed:** a timeout table. Five samples that already missed a known outlier are enough to say the current constant is wrong for qwen and fine for gpt-oss; they are not enough to write a number into code. Doing that would be the fifth "bound that is judgment, not measurement" on `DECISIONS_WAITING`.

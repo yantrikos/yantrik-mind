@@ -5655,3 +5655,14 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | Nothing pins the routing | No test asserts which of the two implementations answers `publish_page`. The page-lane tests exercise the recipe against a stub tool host, so they cannot see it. |
 | The fix, and why this shape | **One source of truth**: the capability defers so the single guarded implementation runs, rather than the guards being copied into a second place to drift again. The codebase already uses this reasoning for `contains_secret` — "the SAME function guarding memory writes (one source of truth)". |
 | Kill criteria | A test must pin that `publish_page` reaches the guarded implementation, and each of the three guards must be shown to apply on the live path. Mutants: re-add the capability arm; drop each guard. |
+
+## E.LOOP-T1 — RESULT: one shadowing case, fixed at the class level
+| Field | Value |
+| --- | --- |
+| The census | 96 plugin-declared tools, 473 built-in dispatch arms, 9 capability arms. Intersecting all three — declared **and** answered by a capability **and** implemented by the built-in — yields exactly **one**: `publish_page`. |
+| Why only one | `write_files` is answered by a capability but **not plugin-declared**, so routing never reaches it and the guarded built-in runs. `make_dashboard` is declared and answered, but the built-in has no arm — the capability is its only implementation. The scan distinguishes these three situations, which is what makes the single hit meaningful rather than alarming. |
+| Fix | The capability **defers** (`"publish_page" => return None`) so the one guarded implementation runs. Guards were not copied into a second place to drift apart again — the same reasoning the codebase already applies to `contains_secret` ("one source of truth"). The plugin spec still owns the tool for enablement and for the model-facing description; only the **behaviour** moved to one place. |
+| The guard is the class, not the case | The test re-derives the intersection from the three sources every run. A future capability arm for a plugin-declared tool the built-in also implements must **defer** or be listed with a reason — silence is what let this one through. It also asserts the scan can still SEE (≥5 capability arms, ≥50 built-in arms, `publish_page` still declared), so it cannot pass vacuously if a parse breaks. |
+| Mutation | Restoring the shadowing arm is caught. |
+| What is now in force on the live page path | Fence unwrapping; refusal of a document cut mid-generation; and E.PAGE1's `required_filename` precedence. **All three were previously live in unreachable code.** |
+| Honest scope | This changes which implementation answers `publish_page`. It is a behaviour change on the agent path, gated by the workspace suite (1780/1780) and by the page-lane recipe tests, but **not yet exercised by a leg**. It should be visible in the next reading rather than asserted now. |

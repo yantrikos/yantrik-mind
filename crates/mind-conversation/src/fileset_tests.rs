@@ -864,6 +864,78 @@ print('this file was cut off mid";
         );
     }
 
+    /// E.LOOP-T1 — A CAPABILITY MUST NOT SILENTLY SHADOW A GUARDED BUILT-IN.
+    ///
+    /// `run_tool` consults the plugin registry BEFORE the built-in dispatch and returns on a hit,
+    /// so a registered capability that answers a tool the built-in also implements makes the
+    /// built-in unreachable. That happened to `publish_page`: three guards — fence unwrapping, the
+    /// refusal of a document cut mid-generation, and E.PAGE1's `required_filename` precedence —
+    /// were live in code that never ran, while the shadowing arm had none of them. Nothing failed;
+    /// the guards were simply not in force.
+    ///
+    /// This is the class, not the instance: any future capability arm for a plugin-declared tool
+    /// that the built-in also implements must either DEFER (`=> return None`) or be listed here
+    /// with a reason. Silence is what let the first one through.
+    #[test]
+    fn no_capability_silently_shadows_a_guarded_builtin() {
+        const PLUGINS: &str = include_str!("plugins.rs");
+        const LIB: &str = include_str!("lib.rs");
+        const CAPS: &str = include_str!("capabilities.rs");
+
+        // Tools a capability answers: `    "name" => ...` at an arm's indentation.
+        let arm_names = |src: &str| -> Vec<String> {
+            src.lines()
+                .filter_map(|l| {
+                    let t = l.trim();
+                    let rest = t.strip_prefix('"')?;
+                    let (name, tail) = rest.split_once('"')?;
+                    if !tail.trim_start().starts_with("=>") {
+                        return None;
+                    }
+                    if name.is_empty()
+                        || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    Some(name.to_string())
+                })
+                .collect()
+        };
+        let cap_tools = arm_names(CAPS);
+        let builtin_tools = arm_names(LIB);
+
+        // A tool is only routed to a capability if some PluginSpec DECLARES it.
+        let declared = |tool: &str| -> bool {
+            let needle = format!("\"{tool}\"");
+            PLUGINS
+                .lines()
+                .any(|l| l.contains("PluginSpec::new(") && l.contains(&needle))
+        };
+
+        // Intentional shadowing, each with a reason. Empty is fine; unexplained is not.
+        const ALLOWED: &[(&str, &str)] = &[];
+
+        let mut offenders: Vec<String> = Vec::new();
+        for tool in &cap_tools {
+            if !declared(tool) || !builtin_tools.contains(tool) {
+                continue; // not routed to the capability, or the capability is the only implementation
+            }
+            let defers = CAPS.contains(&format!("\"{tool}\" => return None"));
+            if !defers && !ALLOWED.iter().any(|(t, _)| t == tool) {
+                offenders.push(tool.clone());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these capability arms shadow a built-in implementation that will therefore never              run; defer with `=> return None` or list them with a reason: {offenders:?}"
+        );
+
+        // The scan must be able to SEE something, or it passes vacuously forever.
+        assert!(cap_tools.len() >= 5, "the capability scan found almost nothing: {cap_tools:?}");
+        assert!(builtin_tools.len() >= 50, "the built-in scan found almost nothing");
+        assert!(declared("publish_page"), "the plugin-declaration scan stopped working");
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

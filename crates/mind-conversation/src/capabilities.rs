@@ -724,20 +724,20 @@ impl CapabilityHandler for DashboardsCapability {
                     Err(why) => format!("(couldn't write the project: {why})"),
                 }
             }
-            "publish_page" => {
-                let (name, html) = (arg(args, "name"), arg(args, "html"));
-                if html.len() < 10 {
-                    return Some("(need html content to publish)".to_string());
-                }
-                match crate::publish_html(if name.is_empty() { "page" } else { &name }, &html) {
-                    Some(url) => match crate::verify_served(&url, &html).await {
-                        PageServe::Ok => format!("Published & verified live — the page loads with the right content (works on your home network):\n{url}"),
-                        PageServe::Mismatch => format!("Published, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
-                        PageServe::Down => format!("I saved the page but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
-                    },
-                    None => "(couldn't publish the page)".to_string(),
-                }
-            }
+            // E.LOOP-T1 — DEFER, do not duplicate. `run_tool` consults this registry BEFORE the
+            // built-in dispatch and returns on a hit, so answering here SHADOWS the built-in
+            // `publish_page` — and that one carries three guards this arm never had: it unwraps a
+            // markdown fence ("the alternative is a prompt that has to win every time"), it refuses
+            // a document cut mid-generation rather than publishing "a live URL, an announcement
+            // that it is ready, and a page that is a hero followed by nothing", and it honours
+            // E.PAGE1's `required_filename`, which exists because a brief asking for `index.html`
+            // got a slug of its <title> instead.
+            //
+            // Returning None hands the tool back to the one implementation that has them, rather
+            // than copying three guards into a second place to drift apart again. The plugin spec
+            // still owns the tool for enablement and for the model-facing description; only the
+            // BEHAVIOUR lives in one place.
+            "publish_page" => return None,
             "make_dashboard" => {
                 // The robust dashboard path: the model gives small STRUCTURED data, Rust renders the
                 // (guaranteed-valid, escaped) HTML — no giant inline HTML string to truncate.

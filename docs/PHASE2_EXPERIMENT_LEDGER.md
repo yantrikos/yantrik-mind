@@ -6025,3 +6025,16 @@ So the honest accounting of what shipped versus what was sized:
 The mean-improvement figure I quoted (**9.0 → ~10.1**) was always p4 alone, so that number stands. What does not stand is any implication that this ships everything E.LOOP-I sized.
 
 **The option, flagged rather than taken.** A Python parser as a Rust crate (`rustpython-parser` and similar) would restore the syntax check with no runtime binary — trading a *runtime* dependency on the box for a *build-time* dependency in the workspace. That is a genuinely different and milder trade, and it may well be the right one. It is still a dependency decision on a system whose build already needs `clang` and `libspeechd-dev` installed by hand on each box, and the pattern this session has been to cost dependency decisions and leave them to Pranab and Codex rather than take them at the end of a long stretch of unreviewed work.
+
+### E.LOOP-F — a CANCELLED tick does not count, found by driving staging rather than reasoning
+Pranab pushed back on my reporting the staging box as empty — .95 exists so the mind can be tested properly, and I had verified startup rather than behaviour. Driving it through the control endpoint immediately corrected the picture: the mind is alive (197 DMN opportunities in 24 h, 7 knock evaluations), the forge was cold only because `forge start` had never been called there, and a venture created on the deployed binary came out carrying the new fields (`max_stage_tries: 3`, `stage_tries: 0`, `stage_tries_for`).
+
+Ticking it produced a real observation no amount of reading would have:
+
+**A tick cancelled by the CLIENT never reaches the bookkeeping.** The build stage authors a whole program; my `curl` gave up at 220 s, the request was dropped, and the async task went with it. The venture came back `stage=build`, `stage_tries=0`, `files: none` — the stage did not advance **and the attempt did not count**. Re-run by hand at the same timeout it would sit there forever, with the give-up bound never engaging, because the bound's increment sits after the `.await` that was cancelled.
+
+Is that a defect? **Partly, and narrowly.** Not counting a cancellation is arguably *right* — the stage did not fail, it was interrupted, and charging a strike for the operator's impatience would kill healthy ventures, which is exactly the mistake the stage-keyed counter exists to avoid. And the automatic path has no client to disconnect, so the bound works there as designed. But it is the same family as everything else found today: the guard's increment is unreachable on one path, and on that path the retry is unbounded again.
+
+Recorded, not fixed. Fixing it means deciding what a cancelled tick *means* — a strike, a no-op, or its own state — and that is a judgment about the forge's contract with its operator rather than a bug with an obvious answer. It goes on the list with the other bounds that are my judgment rather than measurement.
+
+**The wider point is Pranab's.** Three of today's ledger entries said, in effect, "no observed instance". That was true and it was also a consequence of not driving the box that exists to be driven. One session of actually using it produced a real finding in the first ten minutes.

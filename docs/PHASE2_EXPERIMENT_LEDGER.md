@@ -7596,3 +7596,17 @@ The same deploy verification printed **`YM_LLM_TIMEOUT_S 0`** in the fresh binar
 So E.TIMEOUT1's claim — *"the hardcoded 300 s becomes a knob"* — was true of `api.rs` and **false of the lane that matters**. Its prereg counted "three sites in `api.rs`" and never asked *which client does the failing lane use?* — a fact E.THINK2's retraction had already established that afternoon (`GenericOpenAIBackend::for_provider("ollama", …)`). I had it, and did not carry it across. **The `strings` check before the swap is what caught it**, which is the whole reason that step exists.
 
 **E.TIMEOUT2, in flight:** `call_timeout()` moved to a **feature-independent** `src/call_timeout.rs`; `api.rs`'s three sites and `generic_openai.rs`'s one all use it; the site-count test now sweeps **both** clients, cut at their test modules so it cannot match itself. 39/39. Mutation on the *local lane's* site and both dependents' builds are running; the redeploy must show `YM_LLM_TIMEOUT_S ≥ 1` in the binary or it is not done.
+
+### E.TIMEOUT2 — SHIPPED and DEPLOYED (`38b8d69` in yantrik-companion); the gate that caught E.TIMEOUT1 now passes
+| | before swap | after swap |
+| --- | --- | --- |
+| `YM_LLM_TIMEOUT_S` in the binary | **1** (was 0 last deploy) | **1** |
+| control `/api/chat` | 1 | 1 |
+| health | — | HTTP 200, service active, both clones aligned |
+
+`call_timeout()` now lives in feature-independent `src/call_timeout.rs`; `api.rs`'s three sites and **`generic_openai.rs`'s one — the local lane's client, the one that measured 312 s** — all use it. The cross-client site-count test sweeps both files; its mutant (the local lane hardcoded again) failed by name. 39/39 with `--features api-llm`; both dependents build.
+
+**Two tool traps in the doing, both banked.** `strings` is not installed on the Windows dev box — every local count read 0, *including known-present controls*, and I nearly concluded the knob was unlinked; `grep -ac` on `mind-core.exe` gave knob 1 / control 2. And the earlier mutation restore went through two different `/tmp` directories. A zero with no control is not evidence of absence; a restore is part of the mutation.
+
+### E.TIMEOUT3 — PREREG: prove the knob is READ, not merely linked
+A string in the binary proves compilation. It does not prove `std::env::var` is consulted on the live lane. One bounded, reversible probe on staging: set `YM_LLM_TIMEOUT_S=5` in the unit's environment, restart, drive one authoring-sized turn, **expect it to fail inside ~5 s with the lane's timeout error** (the same fail-closed path E.CB2-R8 exercised at 300 s), then remove the variable, restart, confirm health 200. **Prediction:** the turn dies at ~5 s, not ~300. If it runs to completion or dies at 300, the knob is linked but not read, and E.TIMEOUT2 is not done. Kill: the box must be returned to its prior configuration whatever the result.

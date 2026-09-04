@@ -115,6 +115,7 @@ is half true**, and the half that is missing is the half that matters.
 | thing | where | why it matters |
 | --- | --- | --- |
 | the **300 s ollama timeout** | `llm/api.rs:175`, `timeout_global` | **zero** env references near it. Insufficient for qwen-class authoring, generous for gpt-oss |
+| — *status* | **shipped as `YM_LLM_TIMEOUT_S` (E.TIMEOUT2, `38b8d69`)**, default 300 s, on BOTH clients incl. the local lane's; deployed and gate-verified on staging | |
 | the **level** | `GenerationConfig.think: Option<bool>` | `low` is the best setting on gpt-oss and cannot be expressed at all |
 | **per-model behaviour** | `disable_thinking()`, compiled into the family template | the same value suppresses on qwen and not on gpt-oss |
 | the `reasoning_effort` **value** | hardcoded `"none"` | measured as the worst available value on both models |

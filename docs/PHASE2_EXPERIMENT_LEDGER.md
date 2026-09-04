@@ -5764,3 +5764,14 @@ defects on 2026-08-25 and would otherwise survive only as commit messages.*
 | The guard was too narrow and now is not | It only flagged arms whose tool was **plugin-declared** — so it could not have seen this one, because the hazard exists *before* the routing does. It now flags any capability arm duplicating a built-in, declared or not; `declared` survives only to sharpen the message. |
 | Mutants | Both deferrals removed independently, each caught, and each mutation asserted to have actually removed the deferral it names. |
 | Standing | Workspace **1782/1782**. |
+
+## E.PAGE1 — the rule is now testable, and the shadow had made it unverifiable as well as unreachable
+| Field | Value |
+| --- | --- |
+| The situation | E.PAGE1 says a filename the TASK required outranks the page's `<title>` — it exists because a brief asking for `index.html` got a slug of its title, and reading 6 named that as part of the Mind's gap. The rule was **correct, unreachable** (a capability shadowed it — E.LOOP-T1) **and unverifiable** (it lived inline in a match arm), all at once. |
+| Fix | Extracted as `page_filename(required, html, name)` — a pure function that can be asked. The precedence is pinned: a requirement wins; with none, the title; then the caller's name; then `"page"`. An **empty** requirement is not a requirement and falls through rather than producing `""`. |
+| Mutants caught | The title outranking the requirement again (the original bug); an empty requirement counting as one; the arm hardcoding a name beside the rule; the arm no longer reading `required_filename`. |
+| **A weak assertion, found by mutating it** | The first wiring check asked whether the arm *contains* `page_filename(` — and a mutant that called it and **threw the result away** passed. Tightened to require the arm to **bind the name from** the rule. |
+| Stated rather than glossed | This is a **source assertion and cannot prove behaviour**; a determined refactor defeats it. It catches the realistic regression — someone reintroducing a hardcoded name beside the rule — and saying what a check cannot do is part of the check. |
+| Fifth instance today of one class | A value declared and never proven to arrive: `CB2_WALL`'s export, the `Think` stop-reason hand-off, `CB2_PROVIDER_DEADLINE_S`, `authoring_budget` in the recipe, and now the filename rule in the publisher. Every one was found by mutation, none by reading. |
+| Standing | Workspace **1783/1783**. |

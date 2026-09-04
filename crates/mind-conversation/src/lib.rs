@@ -4206,6 +4206,26 @@ fn publish_html(name_hint: &str, html: &str) -> Option<String> {
 /// the QUIET failure — a file that looks written and does not parse — where a refused generation
 /// is loud. E.CB2-B: bounding the build's token budget to fit a provider deadline makes truncation
 /// more common, so it must become detectable in the same change.
+/// E.PAGE1 — which name a published page lands under.
+///
+/// A filename the TASK required outranks the page's title. The order used to be title, then the
+/// caller's `name`, then "page", so an explicit instruction could not reach the filename at all and
+/// a brief asking for `index.html` got a slug of its `<title>` instead. Reading 6 attributed part
+/// of the Mind's gap to exactly that — "one file instead of many, a router rebadging code work as a
+/// page, and a filename".
+///
+/// EXTRACTED so it can be tested. It spent the interval since E.PAGE1 living in an implementation
+/// that a capability shadowed (E.LOOP-T1), which meant the rule was correct, unreachable, and
+/// unverifiable all at once. A rule worth having is worth being able to check.
+pub(crate) fn page_filename(required: Option<&str>, html: &str, name: Option<&str>) -> String {
+    required
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| title_from_html(html))
+        .or_else(|| name.map(str::to_string).filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "page".to_string())
+}
+
 pub(crate) fn publish_file_set(
     project: &str,
     stream: &str,
@@ -14715,19 +14735,11 @@ impl RecipeHost for MindRecipeHost {
                 // to be title, then the caller's `name`, then "page" — so an explicit instruction
                 // could not reach the filename at all, and a brief asking for `index.html` got a
                 // slug of its `<title>` instead.
-                let required = _args
-                    .get("required_filename")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let name = required
-                    .or_else(|| title_from_html(html))
-                    .or_else(|| {
-                        _args
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_else(|| "page".to_string());
+                let name = page_filename(
+                    _args.get("required_filename").and_then(|v| v.as_str()),
+                    html,
+                    _args.get("name").and_then(|v| v.as_str()),
+                );
                 publish_html(&name, html).ok_or_else(|| anyhow::anyhow!("could not write the page"))
             }
             "research" => {

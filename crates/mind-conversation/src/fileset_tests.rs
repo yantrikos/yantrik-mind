@@ -1040,6 +1040,55 @@ print('this file was cut off mid";
         }
     }
 
+    /// E.PAGE1 — a filename the TASK required outranks the page's own title.
+    ///
+    /// The rule existed, was correct, and was **unreachable**: a capability shadowed the
+    /// implementation holding it (E.LOOP-T1), so a brief asking for `index.html` still got a slug
+    /// of its `<title>`. It was also untestable, because it lived inline in a match arm. Both are
+    /// fixed here — the shadow is gone and the rule is a function that can be asked.
+    #[test]
+    fn a_required_filename_outranks_the_pages_title() {
+        let html = "<html><head><title>My Lovely Page</title></head><body>x</body></html>";
+
+        // THE CASE THAT MATTERED: the brief names the file, and the title must not win.
+        assert_eq!(
+            crate::page_filename(Some("index.html"), html, Some("whatever")),
+            "index.html"
+        );
+        // With nothing required, the title names the page — the behaviour before E.PAGE1, kept.
+        assert_eq!(crate::page_filename(None, html, Some("caller")), "My Lovely Page");
+        // With neither, the caller's name; with none of the three, a safe default.
+        assert_eq!(crate::page_filename(None, "<p>no title</p>", Some("caller")), "caller");
+        assert_eq!(crate::page_filename(None, "<p>no title</p>", None), "page");
+        // An EMPTY requirement is not a requirement: it must fall through rather than produce "".
+        assert_eq!(crate::page_filename(Some("   "), html, None), "My Lovely Page");
+        assert_eq!(crate::page_filename(Some(""), "<p>x</p>", Some("caller")), "caller");
+
+        // AND THE PUBLISHER MUST ACTUALLY ASK IT. Testing the rule proves nothing about the arm
+        // that is supposed to obey it -- a mutant that stopped calling `page_filename` and hardcoded
+        // a name passed every assertion above. That is the fifth time today a value was declared
+        // and never proven to arrive, so it gets the same treatment as the others.
+        const LIB: &str = include_str!("lib.rs");
+        let arm = LIB
+            .split("\"publish_page\" => {")
+            .nth(1)
+            .expect("the built-in publish_page arm is gone");
+        let arm = &arm[..arm.len().min(3_000)];
+        // It must BIND THE NAME FROM the rule, not merely mention it: a mutant that called
+        // `page_filename` and threw the result away passed a `contains("page_filename(")` check.
+        // This is a source assertion and cannot prove behaviour -- a determined refactor defeats
+        // it -- but it does catch the realistic regression, someone reintroducing a hardcoded name
+        // beside the rule. Saying what a check cannot do is part of the check.
+        assert!(
+            arm.contains("let name = page_filename("),
+            "the publisher does not take its filename FROM the rule it is supposed to obey"
+        );
+        assert!(
+            arm.contains("required_filename"),
+            "the publisher never reads the filename the task required"
+        );
+    }
+
     #[test]
     fn both_writes_are_told_how_the_generation_ended() {
         let s = steps();

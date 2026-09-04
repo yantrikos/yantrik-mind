@@ -7143,3 +7143,30 @@ Measuring the field combination production actually sends (`think:false` **plus*
 6. It must not add a sandbox spawn to a build with no `.py` files — a healthy non-python deliverable pays nothing.
 
 **Not claimed:** that this improves any benchmark score. It cannot; the container refuses the sandbox. It closes the fifth way a Mind artifact has actually died, on real deployments.
+
+### E.SYNTAX1 — verified on the box, and it finds the point reading 6 actually lost
+The three criteria that needed a real sandbox are closed, run where `Sandbox::available()` is true:
+
+**687 python files judged across the whole benchmark tree; 3 fired.** Every accusation was independently re-checked against python's own `ast.parse` inside the test, so a false accusation — the one failure this check must never make — would have failed the test by name. None did.
+
+| file | why |
+| --- | --- |
+| `out-ds-pilot/mind_T1/server.py` | unterminated triple quote (known) |
+| `out-ds-pilot3/mind_T1/server.py` | degenerate repetition (known) |
+| **`out-nim6/mind_T3/test_tracker.py`** | **new — and it matters** |
+
+**THE THIRD ONE IS READING 6's LOST POINT.** `nim6` is reading 6, the Mind's best result ever at **26/27**. Its T3 verdict: `pytest_passes` **FAIL**, every other check PASS. And line 60 of that test file is:
+
+```
+=== END===
+```
+
+A stray file-format terminator, in the body of a python file. **The model invented an end marker the format does not define** — the stream format has `=== FILE:` and no terminator at all — and the writer stored it verbatim. `SyntaxError: invalid syntax`.
+
+**This corrects a standing diagnosis that has been in the record since reading 6.** It was written up as *"the model wrote a correct tracker and an incorrect test suite for it — a self-consistency failure in one pass, which an iteration round would catch"*, and that framing drove the argument that the build lane needed a repair round. **It was not a semantic mismatch between tests and program.** Every behavioural check passed; the test file simply did not parse. The fix it needed was a parse check costing one sandbox spawn, not an iteration round costing a model call.
+
+I inherited that diagnosis and repeated it without checking the artifact — the same error as everything else today, and this time it had been standing in the ledger for a day shaping a design argument.
+
+**So the check now has two real targets, not one:** today's `app.py` (JavaScript template literal, gpt-oss-20b) and reading 6's `test_tracker.py` (stray marker, a graded leg, the only point that reading lost). Two different models, two different causes, one class.
+
+**One thing observed and deliberately NOT built on.** Both new-class failures involve a marker or a foreign fragment leaking into a file body. A writer that stripped a trailing `=== END===` would have fixed this one. I am not proposing it: a model can invent any terminator, and a rule aimed at the one string I have seen would be fitted to a single artifact — exactly the corpus-is-not-the-population error from this morning. The parse check is the general answer and it already covers both.

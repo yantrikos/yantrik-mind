@@ -6637,3 +6637,28 @@ docker run -d ... --read-only --tmpfs /tmp:size=256m ... cb2-mind /mind-core
 **What I am NOT claiming**: that adding execution would fix T1. That needs a reading. What is now measured is that the decisive capability on the task we lose is present on one side and absent on the other, and that every static detector I built this week is compensation for it.
 
 **What this does to the decision list.** `DECISIONS_WAITING` item 1 was "may the mind run the code it writes?", which I withdrew as already-answered because a sandbox exists. That withdrawal was right about the sandbox and wrong about the consequence. The live question is narrower and sharper: **may the build lane run its artifact inside the benchmark container, where the container is the isolation boundary and the opponent already does exactly that?**
+
+### E.WIN8 — CORRECTION, and it is the same error one message later
+I wrote above that Hermes "used the capability… `hermes_T1_stdout.txt` contains `python3 server.py`. Hermes started its own server." **That is wrong.** The stdout is a sequence of `review diff` blocks, and the string I grepped is the *contents of run.sh*:
+
+```
+a/run.sh → b/run.sh
+@@ -0,0 +1,2 @@
++#!/usr/bin/env bash
++python3 server.py
+```
+
+**I found a string and inferred an action** — in the very entry announcing that I had caught myself reasoning from an unchecked premise. Recording it that way because the timing is the informative part: identifying a failure mode does not stop me committing it, and the only thing that did was looking at the raw file instead of a grep count.
+
+**What still stands, from the invocation line rather than inference:**
+- Hermes is granted `-t file,terminal,code_execution` with a writable `-v $W:/work` mount and `max_turns: 24`.
+- The Mind is launched as `cb2-mind /mind-core`, a daemon on a `--read-only` filesystem with no tool grant.
+- The affordance asymmetry is real and documented in the harness's own script.
+
+**What is newly established, and is the more useful finding:**
+- Hermes **iterates on its own artifact**. The trace shows `server.py` written at 135 lines and then *revised* (`@@ -17,46 +17,39 @@`) — a second pass over the same file within the leg. The Mind's recipe reviews once and ships.
+
+**What is now UNPROVEN in both directions:**
+- Whether Hermes executed anything in reading 7. The stdout renders diffs; it may simply not surface tool invocations at all, so absence of evidence here is not evidence of absence. I do not know, and I will not claim it either way without a trace that records tool calls.
+
+**The consequence for the decision.** "The opponent executes and we cannot" was the sharpest version of the case and it is not currently supported. What is supported is narrower and still substantial: **the opponent is given execution tools and iterates on its artifact; the Mind is given neither.** That is enough to make the question worth asking and not enough to answer it.

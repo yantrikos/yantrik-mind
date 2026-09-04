@@ -77,13 +77,31 @@ try:
 except ValueError:
     say("an_empty_parse_raises", "raised", "raised")
 
-# 7. The parse reads real checker sources, not just the synthetic set above.
+# 7. The parse reads the REAL checker sources, and the counts are EXACT.
+#    This assertion used to be `len(names) >= 4` for check_t3.py, and it passed while the parser
+#    was missing six of that file's ten names — they are declared as rows in a `steps` table
+#    rather than as direct `check("...")` calls. A `>=` on a count cannot notice a parser that
+#    finds too few, which is the whole thing it existed to check. Scored against real T3 verdicts
+#    the gap showed up immediately as UNTRUSTWORTHY on every one of them.
 here = os.path.dirname(os.path.abspath(__file__))
-for rel, want_min in (("../checks/check_web.mjs", 14), ("../checks/check_t3.py", 4)):
+for rel, want in (("../checks/check_web.mjs", 15), ("../checks/check_t3.py", 10)):
     p = os.path.join(here, rel)
     if os.path.exists(p):
         with open(p, encoding="utf-8") as f:
             names = expected_checks(f.read())
-        say(f"parses_{os.path.basename(rel)}", len(names) >= want_min, True)
+        say(f"parses_all_of_{os.path.basename(rel)}", len(names), want)
+
+# 8. And the names a real T3 verdict actually carries must all be RECOGNISED — the regression the
+#    synthetic cases could never have caught, because they invent their own vocabulary.
+REAL_T3 = ["tracker_py_present", "test_files_present", "pytest_passes",
+           "tasks_json_is_a_two_item_array", "add_prints_added_1", "add_prints_added_2",
+           "list_two_open_lines", "done_prints_done_1", "list_marks_done",
+           "today_lists_open_tasks_added_today"]
+p = os.path.join(here, "../checks/check_t3.py")
+if os.path.exists(p):
+    with open(p, encoding="utf-8") as f:
+        names = set(expected_checks(f.read()))
+    missing = sorted(n for n in REAL_T3 if n not in names)
+    say("every_name_a_real_T3_verdict_carries_is_known", missing, [])
 
 sys.exit(BAD)

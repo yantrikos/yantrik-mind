@@ -25,11 +25,22 @@ import re
 # Checks about the harness rather than the artifact. Scored beside the task, never inside it.
 META_CHECKS = frozenset({"checker_completed"})
 
-# `check("name"` in either checker language. Both spell it the same way, which is why one pattern
-# serves; a checker that starts building names dynamically would show up as a drop in the expected
-# count, and `expected_checks` raising on an empty parse is what makes that loud rather than a
-# silent zero-denominator.
+# The TWO ways a checker in this harness declares a check name. Both are needed, and finding that
+# out is the reason to validate a scorer against real verdicts rather than only synthetic ones:
+#   1. `check("name", ...)` — the direct call, in either checker language.
+#   2. `("name", [...], [...])` — a row, ON ITS OWN LINE, in a table of scenarios that a loop
+#      later feeds to `check`. The line-start anchor is load-bearing: without it the pattern also
+#      matched `spawn("bash", ["run.sh"], ...)` in check_web.mjs and invented a check called
+#      "bash". A guard that recognises too much is as wrong as one that recognises too little,
+#      and only the exact-count assertion caught it.
+#      `check_t3.py` declares six of its ten checks this way, and reading only form 1 recovered
+#      four of them. Scored against the real T3 verdicts, every one came back UNTRUSTWORTHY.
+# That refusal was the mechanism working — it declined to divide by a denominator it could not
+# justify, rather than quietly scoring 4/4 and calling six real checks foreign. But a scorer that
+# refuses every real verdict is useless, so the second form is recognised too, and anything it
+# still cannot account for stays loud.
 _CHECK_CALL = re.compile(r'check\(\s*"([a-z0-9_]+)"')
+_CHECK_ROW = re.compile(r'^\s*\(\s*"([a-z0-9_]+)"\s*,\s*\[', re.MULTILINE)
 
 
 def expected_checks(source):
@@ -37,7 +48,7 @@ def expected_checks(source):
 
     Raises on an empty parse: a checker with no checks is a broken read of the source, not a task
     with nothing to verify, and returning an empty set would make every score 0/0."""
-    names = sorted(set(_CHECK_CALL.findall(source)))
+    names = sorted(set(_CHECK_CALL.findall(source)) | set(_CHECK_ROW.findall(source)))
     if not names:
         raise ValueError("no check names found in checker source — the parse is broken, and an "
                          "empty expected set would silently make every score 0/0")

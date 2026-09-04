@@ -6084,3 +6084,18 @@ The fix is deployed at `36e4be2`; a fresh venture is being driven to the test st
 
 ### E.LOOP-G — the healthy path, verified live at the same time
 `foresee the price of tin in 2030` then `resolve all` on the fixed binary: **graded on the first attempt**, `status=unclear`, with a real judge reason (*"no specific LME Tin closing price for 2030"*), and `resolve_fails` never set because nothing failed. Two things confirmed on a live mind: the change did not break normal resolution, and `unclear` — the judge answering "I cannot tell" — stays properly distinct from `unjudged`, which means the judge never answered at all. The failure path itself is still only proven by unit tests watched to fail; forcing three real judge failures is not something to manufacture on a live box.
+
+### E.DRIVE1 — first systematic sweep of the staging surfaces
+Continuing the approach that found E.FORGE1. Read-only surfaces driven through `/cli`; findings ranked by what they would cost if left.
+
+| Surface | Result |
+| --- | --- |
+| `why roles verify` | **All three routes SERVED by their providers** (research → `deepseek-v4-pro-0813`, util → `groq/gpt-oss-120b`, verify → `deepseek-v4-flash-0731`). A clean negative worth having: model retirement is a documented live failure mode here (E.MODEL1), a retired route *looks configured in every other report*, and only the verified read can tell. |
+| `why spend` | Coherent: 9 rows/24 h, 0 malformed, 0 superseded. DMN dominates at 63 requests; the forge's 6 are my own driving. |
+| `why world` | **AGREEMENT: UNCOMPUTABLE.** 9,865 knock evaluations in 14.9 h, every one exiting at `no_packets` before the receptivity gate, so the legacy verdict the shadow exists to be compared against was **never produced**. The instrument is not broken and says so plainly — but it has run for fifteen hours on this box and cannot, in this environment, ever produce its measurement. |
+| `why attention` | 1,310 wakes, 220 carrying a due loop the shadow never considered (`dmn` 213, `ask` 18) — a known gap, "step 2a left unwired". |
+| `curve` | *"No predictions resolved yet — 0 still open"* immediately after one resolved as `unclear`. Consistent with `unclear` contributing nothing to calibration, which is correct; the **wording** is not, since one prediction demonstrably resolved. |
+
+**And a mistake of my own, worth recording because of how nearly it became a finding.** My first sweep ran bare `attention`, which routes to **chat**, and the mind replied *"A security or data-integrity issue in the memory profile needs immediate attention before proceeding."* I was one step from filing a security incident. The real surface is `ym why attention`, and it reports something entirely different. A second call returned nothing at all, which is what exposed it as model prose rather than a report. **Model output that reads like an instrument reading is the most dangerous kind of evidence in this system**, and I have now been caught by it twice today — once as leg 4's review approving a fatal import, once as a hallucinated security alert.
+
+**What the sweep says about the world shadow.** E.G1 shipped it as "live ingestion, one shadowed consult, zero authority". On a headless canary it consults constantly and can never be graded, because the thing it shadows never runs. That is not a defect to fix in the shadow — it is a statement that **this instrument cannot be evaluated where it is currently deployed**, and someone should decide whether to drive knock packets deliberately or accept that the measurement waits for a box with real traffic.

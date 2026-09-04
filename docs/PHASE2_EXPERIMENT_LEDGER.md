@@ -6225,3 +6225,27 @@ The untested candidate is the one the policy line names first and I kept walking
 **Parked deliberately rather than pursued.** Pranab has set the standard as winning every round, and the entire measured gap is T1 (E.WIN1). The knock gate is a side quest, and I have now spent two experiments and roughly twenty-five minutes of box time on it while being wrong twice. The honest state: **I do not know what admits a knock opportunity on this box**, the packet precondition I removed is genuinely removed, and whoever picks this up should test the daily cap first.
 
 Recording both failures rather than only the eventual answer. Two confident explanations, each plausible, each written up before it was checked, each false — which is the same pattern as the three "reachable but unobserved" overclaims earlier today, and the reason the tests are worth running before the prose.
+
+## E.WIN2 — T1's remaining losses, decomposed on real artifacts (PREREGISTERED)
+Re-checked 32 real Mind T1 artifacts inside the checker image (`--network none`, no model call, no NIM request, not a graded leg). The post-fix legs decompose the whole remaining gap into **three causes, one already closed**:
+
+| leg | score | cause | status |
+| --- | --- | --- | --- |
+| p1 | 11/11 | — | clean |
+| p4 | 2/11 | `from http.server import TCPServer` → site never starts | **closed** by E.LOOP-I2 |
+| p3 | **7/11** | `script#cb2-dashboard` **absent** — checker: *"Failed to find element matching selector"* | this slice |
+| p8 | **8/11** | the element is present; `total` / `per_day` / `recent` are **wrong** | needs execution — not this slice |
+
+My prediction was recorded before looking: *failures concentrate, most likely in the dashboard group*. **Correct** — 7 of the 9 remaining lost checks are dashboard checks, and they are not seven independent problems but two: one missing element (4 checks) and one wrong computation (3 checks).
+
+**The slice: verify that identifiers the request names LITERALLY appear in the output.** T1's brief says, in as many words, that `/dashboard` must embed `<script id="cb2-dashboard" type="application/json">…`. p3 simply did not emit it and lost four checks. The build lane never checks that what was explicitly asked for is present.
+
+**This is general behaviour, not teaching to the test.** The rule is "if the request names a literal identifier — an element id, a filename, an endpoint — check the output contains it", which is what any careful author does before saying done. It is not benchmark-specific and would help any user who asks for a named thing. I would refuse to write a check that special-cases `cb2-dashboard`, because that is gaming the measurement rather than improving the mind.
+
+| Kill criteria | |
+| --- | --- |
+| Catches the real case | Must flag p3's missing `cb2-dashboard` given T1's brief. |
+| No false positives on real output | Must **not** flag p1 (11/11) or any other artifact that satisfies its brief. Validated on the 32 rechecked artifacts, not on invented cases — the scorer taught me that lesson today. |
+| Conservative extraction | Only high-confidence literals (quoted attribute values, backticked tokens, explicit paths). Prose words must never become requirements. |
+| Inert by default | With nothing missing, the write tool's message must be **byte-identical**, exactly as E.LOOP-I2 is, so legs that comply behave as before. |
+| Expected effect, stated so it can be wrong | p3 7/11 → 11/11 if the review acts on the finding. Combined with E.LOOP-I2 on p4, the 8-leg set goes 11,11,7,2,11,11,11,8 → potentially 11,11,11,11,11,11,11,8. **p8 stays 8/11** — wrong computed values need execution, and I am not claiming that here. |

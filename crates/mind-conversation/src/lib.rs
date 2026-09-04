@@ -45,6 +45,7 @@ mod calendar;
 mod capabilities;
 mod entrypoint;
 mod pyimports;
+mod repetition;
 mod required_literals;
 mod cloud_photos;
 pub mod cognitive;
@@ -98,6 +99,8 @@ mod chains_window_tests;
 mod ecb2f_tests;
 #[cfg(test)]
 mod entrypoint_tests;
+#[cfg(test)]
+mod repetition_tests;
 #[cfg(test)]
 mod ef2_door_tests;
 #[cfg(test)]
@@ -14755,6 +14758,11 @@ impl RecipeHost for MindRecipeHost {
                         // ~24 real runs and on that one it fires, so a healthy build's message is
                         // unchanged.
                         findings.extend(crate::entrypoint::dead_entry_points(stream));
+                        // E.REPEAT1: the generator looped instead of finishing. One real
+                        // artifact ended with the same line 49 times and did not parse, and the
+                        // write step reported a DIFFERENT file as possibly incomplete. Silent on
+                        // all 228 healthy artifacts of the corpus.
+                        findings.extend(crate::repetition::degenerate_repetition(stream));
                         if !findings.is_empty() {
                             // The header used to say "IMPORTS THAT DO NOT RESOLVE", which was true
                             // when imports were the only finding and became a lie as soon as

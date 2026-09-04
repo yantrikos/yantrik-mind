@@ -6786,3 +6786,12 @@ Nothing in between — **no healthy artifact has even two consecutive identical 
 4. If the check cannot be shown to reach the review round — the step that can act on it — it does not ship. That is the E.ENTRY1/D2 lesson and it is now standing.
 
 **Stated honestly: one occurrence in 229 files, from a `ds-pilot` run.** The case for building it is not frequency. It is that the blast radius is total, nothing covers it, the separation is perfect, and degeneration is a model-generic failure rather than a quirk of one provider — the Mind has already been bitten once by a model changing under it (E.MODEL1).
+
+### E.REPEAT1 — SHIPPED, all four kill criteria met on evidence
+- **KC1/KC2**: fires on exactly **one** file across the 229-artifact corpus, and it is `out-ds-pilot3/mind_T1/server.py`. Asserted as an exact count, not `>=`.
+- **KC3**: `MIN_RUN` raised to 50 (above the real run of 49) — **three tests failed**, including the corpus test. The mutation was confirmed present in the file before the run, after two earlier mutations today silently failed to apply and their passes were discarded.
+- **KC4**: the finding reaches the step that can act on it. Unwiring the one `findings.extend` line made the wiring test fail with `http://…/repdegen/ (1 files: server.py)` — **the ds-pilot3 behaviour exactly reproduced**: reported as built, defect unmentioned. The remaining hop (`project_url` → the review prompt) is pinned by the E.ENTRY1/D2 dataflow test.
+
+Full workspace suite green.
+
+**Three checks now exist that all say the same thing in different languages** — E.LOOP-I2 (an import that cannot resolve), E.ENTRY1 (an entry point that runs nothing), E.REPEAT1 (a generation that looped) — and each was built only after a probe separated real artifacts. Together they cover three of the four ways r7-era artifacts died. The fourth, a truncation inside a triple-quoted template (`out-ds-pilot/mind_T1/server.py`), is **already covered**: that run's message said *"the stream ended without a newline, so server.py may be incomplete"* and named the right file. Checked before proposing anything, which is the E.FENCE1 lesson applied.

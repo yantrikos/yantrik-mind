@@ -15461,3 +15461,52 @@ async fn a_duplicated_path_keeps_the_last_and_says_so() {
         .expect("writes");
     assert!(!ok.contains("written twice"), "no duplicate, no note: {ok}");
 }
+
+/// E.REPEAT1 WIRING — kill criterion 4: the finding must reach the step that can act on it.
+///
+/// This is now standing policy rather than a nicety. Twice in one session a detector was wired to
+/// something that could not act on it — `pyimports` and `required_literals` reported into a
+/// completion pass whose only mandate is "write what is missing", and the completion write stored
+/// its whole message to a variable nothing read. A check nobody receives is not a check.
+///
+/// The chain is: `degenerate_repetition` -> the write step's message -> `project_url` -> the review
+/// prompt. This test pins the first hop by driving the real tool; the last hop is pinned by
+/// `fileset_tests::the_review_round_reads_the_variable_the_completion_write_stores_into`.
+#[tokio::test]
+async fn degenerate_repetition_reaches_the_write_message_and_is_absent_when_clean() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let host = MindRecipeHost::new(None, None, mem);
+
+    let looped = "=== FILE: server.py\nimport os\nSTOP = 1\nSTOP = 1\nSTOP = 1\nSTOP = 1\nSTOP = 1\nprint(2)\n";
+    let msg = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "repdegen", "stream": looped}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        msg.contains("DEFECTS FOUND MECHANICALLY") && msg.contains("repeats the same line"),
+        "the review round must be handed the degeneracy, or the file is reported as built and \
+         cannot run: {msg}"
+    );
+    assert!(
+        msg.contains("`STOP = 1`"),
+        "and the repeated line itself, which is what makes it actionable: {msg}"
+    );
+
+    // The same set without the loop: not a byte of the message changes, which is what keeps a
+    // healthy build comparable to every earlier reading.
+    let clean = "=== FILE: server.py\nimport os\nSTOP = 1\nprint(2)\n";
+    let ok = host
+        .call_tool(
+            "write_files",
+            &serde_json::json!({"project": "repclean", "stream": clean}),
+        )
+        .await
+        .expect("a well-formed set writes");
+    assert!(
+        !ok.contains("DEFECTS FOUND MECHANICALLY"),
+        "a healthy build must carry no findings block: {ok}"
+    );
+}

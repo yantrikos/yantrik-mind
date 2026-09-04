@@ -6194,3 +6194,22 @@ which is a genuinely awkward thing to instrument and worth writing down rather t
 Recording the failed test rather than only the corrected explanation: the first version of this
 entry sounded confident and had not been checked, and the thirteen-minute window is what showed it.
 
+
+## E.WIN1 — "win every round" (Pranab, 2026-09-04): the whole gap is T1
+Pranab set the standard as winning every round and chose to build toward it rather than spend hours re-measuring variance. Reading 8 is **not** preregistered — I had been calling it "ready", which was shorthand for the harness being ready, not for a reading being designed. Correcting that here.
+
+**Where the points actually are**, from reading 7 rather than from impression:
+
+| task | mind | hermes | verdict |
+| --- | --- | --- | --- |
+| T1 | **2/11** | 11/11 | **the entire 7-point gap** |
+| T2 | **6/6** | 4/6 | the Mind **wins** |
+| T3 | 9/10 | 9/10 | tie |
+
+So "win every round" is a **T1 problem and nothing else**. Effort spent anywhere but T1 does not change the result. That is worth stating because the natural instinct after a 24–17 loss is to look everywhere.
+
+**What is already dealt with.** The 8-leg study post-fix scored 11,11,7,2,11,11,11,8 — five 11/11s. The `2` is leg 4's `TCPServer` import, which E.LOOP-I2 now catches before the review round. The remaining shortfalls are **7/11 and 8/11**, both artifacts that start and serve but fail specific checks. Those are behavioural, invisible to a model reading its own file, and are what stands between "usually 11/11" and "11/11 every time".
+
+**Method, before any code.** I do not know which checks those legs fail — the study's verdicts were not kept, only its artifacts. But **32 real Mind T1 artifacts are on the box**, and `run/check.sh` re-checks an artifact inside the checker image with `--network none`: no model call, no NIM request, not a graded leg. Re-checking all 32 gives a per-check failure histogram over real output, which says exactly what to fix rather than what I would guess needs fixing.
+
+Preregistered before looking: **I expect the failures to concentrate in a small number of checks** — most likely the dashboard group (`dashboard_total_exact`, `dashboard_per_day_exact_14_bins`, `dashboard_recent_five_exact_order`), because those demand exact computed values rather than structure, and reading 6 recorded Hermes missing all four dashboard checks on its own T1. If instead the failures are spread evenly across unrelated checks, there is no single fix and the honest conclusion is that T1 quality is model-limited rather than harness-limited — I will say so.

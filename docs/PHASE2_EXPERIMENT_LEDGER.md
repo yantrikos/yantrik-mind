@@ -7835,3 +7835,6 @@ The E.AGENTRETRY2 probe again: **`HTTP/1.1 200 OK`, `Content-Length: 138`**, bod
 
 ### E.CTL1 — BUILT (mind-core)
 `/cli` runs `cli_dispatch` in a spawned task; a `JoinError` becomes `500 Internal Server Error` + "(turn crashed — see the journal for `panicked at`: …)" via pure `crash_reply`. Test in `telegram::ctl1_tests`; mutant (200 back) failed by name. No reproducible witness (the only known panic is fixed) — defense in depth, held to the unit test.
+
+### E.THINKLVL1 + E.CTL1 — DEPLOYED to staging (companion `b6508d6`, mind `6339ede`)
+Gate on bytes: `turn crashed` 2, absent control 0; health 200; one mind. E.CTL1 has no reproducible witness (as preregistered). E.THINKLVL1's end-to-end witness: one authoring build with `YM_THINK_MODELS=qwen3.8=low` — expected to complete with its files (the level reaches the wire and the model still authors); no timing claim is made from n=1.

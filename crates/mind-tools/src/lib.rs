@@ -857,6 +857,19 @@ mod tests {
 /// Vision — analyze an image with a multimodal model (openai-compatible providers). Powers
 /// see_page (rendered-page screenshots) and Telegram photo understanding. Fully env-configured:
 /// YM_VISION_MODEL = "provider:model" (default nanogpt:gpt-4o-mini) + that provider's key env.
+/// The local Ollama root the vision lane talks to: the vision knob, else the private lane's knob
+/// (`YM_LOCAL_OLLAMA_URL` — a second spelling of the same idea), else nothing. A trailing `/v1`
+/// is stripped because native calls hit `/api/chat`. E.URL2: this used to default to one box's
+/// LAN address; a default that names a box is wrong on every other box.
+pub fn vision_ollama_base(vision_url: Option<&str>, private_url: Option<&str>) -> Option<String> {
+    let raw = [vision_url, private_url]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|u| !u.is_empty())?;
+    Some(raw.trim_end_matches('/').trim_end_matches("/v1").trim_end_matches('/').to_string())
+}
+
 pub struct VisionClient {
     base: String,
     key: String,
@@ -876,13 +889,15 @@ impl VisionClient {
             .split_once(':')
             .unwrap_or(("ollama-local", spec.as_str()));
         if prov == "ollama-local" || prov == "local" {
-            // base = ollama root (strip a trailing /v1 if present) — native calls hit /api/chat.
-            let raw = std::env::var("YM_OLLAMA_LOCAL_URL")
-                .unwrap_or_else(|_| "http://192.168.4.35:11434".into());
-            let base = raw
-                .trim_end_matches("/v1")
-                .trim_end_matches('/')
-                .to_string();
+            // E.URL2: no compiled default names a box. Absent means not configured — say so.
+            // base = ollama root (a trailing /v1 is stripped) — native calls hit /api/chat.
+            let Some(base) = vision_ollama_base(
+                std::env::var("YM_OLLAMA_LOCAL_URL").ok().as_deref(),
+                std::env::var("YM_LOCAL_OLLAMA_URL").ok().as_deref(),
+            ) else {
+                eprintln!("[vision] no local Ollama configured — set YM_OLLAMA_LOCAL_URL (or YM_LOCAL_OLLAMA_URL); vision is off");
+                return None;
+            };
             return Some(VisionClient {
                 base,
                 key: "ollama".into(),
@@ -2424,4 +2439,21 @@ pub fn nanogpt_balance() -> Option<(f64, f64)> {
             .unwrap_or(0.0)
     };
     Some((f("usd_balance"), f("nano_balance")))
+}
+
+#[cfg(test)]
+mod vision_base_tests {
+    use super::vision_ollama_base;
+
+    #[test]
+    fn the_vision_knob_wins_then_the_private_lane_knob_and_v1_is_stripped() {
+        assert_eq!(vision_ollama_base(Some("https://aig.mycluster.cyou/v1/"), Some("http://x")).as_deref(), Some("https://aig.mycluster.cyou"));
+        assert_eq!(vision_ollama_base(None, Some(" http://127.0.0.1:11434 ")).as_deref(), Some("http://127.0.0.1:11434"));
+        assert_eq!(vision_ollama_base(Some("  "), Some("http://y/v1")).as_deref(), Some("http://y"), "blank is unset");
+    }
+
+    #[test]
+    fn nothing_configured_is_none_never_a_box_on_someones_lan() {
+        assert_eq!(vision_ollama_base(None, None), None);
+    }
 }

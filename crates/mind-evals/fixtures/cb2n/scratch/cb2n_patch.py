@@ -1479,3 +1479,17 @@ rw('selftest/selftest.sh', [
      'if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi\n'
      'if python3 "$FIX/selftest/tally_cases.py" >/dev/null; then echo "tally_cases: agree"; else echo "tally_cases: DISAGREE"; BAD=1; fi'),
 ])
+
+# ── E.CB2-NS1: the Mind's container permits the Mind's own sandbox ──────────────────────────────
+# Docker's default seccomp profile and masked /proc paths refuse `unshare --user ... --mount-proc`,
+# so every reading so far ran a Mind whose sandbox was silent (E.SYNTAX3 fell back to ast-only;
+# E.SMOKE1 says nothing there by design) — a Mind weaker than the one deployed. Preflight
+# (2026-09-05, throwaway cb2-mind containers, read-only, pids 128, network none): seccomp=unconfined
+# + systempaths=unconfined is the minimal pair that works (fresh /proc, lo up, GET 8123 → 200,
+# egress from the inner namespace blocked); either alone is refused; no capability is added and
+# AppArmor stays default. Hermes's container is untouched: it has no sandbox to permit.
+rw('run/mind_leg.sh', [
+    ('docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \\\n',
+     'docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \\\n'
+     '  --security-opt seccomp=unconfined --security-opt systempaths=unconfined \\\n'),
+])

@@ -11,10 +11,19 @@ use crate::fileset::parse_file_stream;
 const PORT: &str = "8123";
 
 /// The driver the sandbox executes at the scratch root. The artifact lives under `app/` so its own
-/// `run.sh` is never the driver. Loopback up, the program in the background with its output
+/// `run.sh` is never the driver. Loopback up (by ioctl: no `ip` on the benchmark image), the program in the background with its output
 /// captured, a 10 s poll on `/`, then one marker line and the log tail.
-const DRIVER: &str = r#"ip link set lo up 2>/dev/null || true
-echo "SMOKE-PY: $(python3 -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)"
+const DRIVER: &str = r#"echo "SMOKE-PY: $(python3 -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)"
+python3 - <<'PY'
+# E.SMOKE1b: a fresh network namespace has lo down, and the benchmark image has no `ip`.
+import fcntl, socket, struct
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    fcntl.ioctl(s.fileno(), 0x8914, struct.pack('16sH14s', b'lo', 0x1 | 0x40, b''))
+    print("SMOKE-LO: up")
+except Exception as e:
+    print("SMOKE-LO: failed", type(e).__name__)
+PY
 cd app
 ( sh run.sh > ../app.log 2>&1; echo "EXIT:$?" >> ../app.log ) &
 python3 - <<'PY'

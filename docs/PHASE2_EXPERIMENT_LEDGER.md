@@ -8051,3 +8051,5 @@ No capability is added; AppArmor stays default; the rootfs stays read-only.
 **Kill criteria, all must hold on the first graded leg:** (1) `cb2net.sh` containment proof passes unchanged; (2) `mind_T1_stdout.txt` carries no "sandbox unavailable here" line; (3) the receipt shape and run-state hash discipline are unchanged; (4) the leg's model-request count stays within the cap as before; (5) `rederive.sh` prints "re-derives exactly". Any failure: revert the patch, and the leg is void, not graded.
 
 **Measurement:** E.CB2-R8h, a fourth sample on the local 20B, the first in which E.SYNTAX3's real sandbox path and E.SMOKE1 run for the Mind. Reported as the fourth row of the side-by-side table; no winner from n=4 either.
+
+**E.SMOKE1b — BUILT (2026-09-05 04:30 UTC).** The driver raises `lo` by `ioctl(SIOCSIFFLAGS)` and prints `SMOKE-LO: up|failed`; `ip` is gone from it. Staging, real sandbox: the four gated tests pass unchanged (the two 500 cases can only pass with loopback up). Mutant, the ioctl line replaced by `pass`: the synthetic wsgiref case and the R8g witness both FAIL on "no answer"; the other two pass. Restored, md5 verified. Full suite green.

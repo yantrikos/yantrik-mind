@@ -8018,3 +8018,36 @@ Commit dd60b63 (first cut) and its refinement in the following commit. What was 
 ```
 
 Two write rounds, two starts, both answered 200 → silent, as preregistered for a healthy program. The deliverable (`app.py`, `run.sh` = `python3 app.py`) was built and served at :8088. What this proves: the sandboxed start runs inside a real build on the box the Mind serves from, under the real limits, and leaves no finding when the program works. What it does not prove: a live 5xx finding reaching the model — the model wrote a working app, and I did not rig the task to fail. The 5xx branch stands on the on-box tests with the real R8g artifact and the mutant.
+
+### E.SMOKE1b — PREREG: the smoke driver brings loopback up without `ip`
+
+**Fact (preflight, 2026-09-05 04:20 UTC):** the cb2-mind image has `python3`, `prlimit`, `timeout`, `unshare` and no `ip`. In a fresh network namespace `lo` is down, so the driver's `ip link set lo up || true` would silently leave it down there and every start would read "no answer" — silence, by the inverted-risk rule, but silence for a reason that is ours, not the program's. A Python `ioctl(SIOCSIFFLAGS)` brings `lo` up on both the host and the image (probe: `LO_UP_BY_IOCTL`, `GET 200`, egress blocked, on both).
+
+**Change:** the driver brings `lo` up with the ioctl, always, and prints `SMOKE-LO: up|failed`; `ip` is not used. Nothing else moves.
+
+**Kill:** the staging gated tests (wsgiref 500, healthy, crash, the R8g witness both halves) pass unchanged — the two 500 cases can only pass if `lo` came up. The parser tests pass. Mutant: the ioctl line removed → both 500 cases fail with "no answer".
+
+### E.CB2-NS1 — PREREG: the Mind's benchmark container permits its own sandbox
+
+**Problem:** the cb2n mind leg runs the Mind with Docker's default seccomp profile and masked system paths, where `unshare` is refused. The Mind as shipped (staging, production) has a working sandbox; the Mind as measured does not. E.SYNTAX3 fell back to ast-only there; E.SMOKE1 is silent there by design. Every reading so far has measured a Mind weaker than the deployed one on exactly the checks built from the readings' own failures.
+
+**Preflight (throwaway containers, `cb2-mind` image, `--read-only --pids-limit 128 --network none`):**
+
+| security-opt | `unshare --user … --mount-proc` | lo + GET 8123 | egress from inner ns |
+|---|---|---|---|
+| (default) | refused | — | — |
+| seccomp=unconfined | `mount /proc` refused | — | — |
+| seccomp=unconfined + apparmor=unconfined | `mount /proc` refused | — | — |
+| **seccomp=unconfined + systempaths=unconfined** | **works** (`/proc` shows 1, 2) | **200** | **blocked** |
+| systempaths=unconfined alone | refused | — | — |
+| host, no docker | works | 200 | blocked |
+
+No capability is added; AppArmor stays default; the rootfs stays read-only.
+
+**Change:** `run/mind_leg.sh` adds `--security-opt seccomp=unconfined --security-opt systempaths=unconfined` to the Mind's `docker run`, through `scratch/cb2n_patch.py` (the fixtures are derived; `rederive.sh` must print "re-derives exactly"). Hermes's container is untouched: it has no sandbox to permit, and the change is "measure each system as it ships", not "give one system more".
+
+**What loosens:** the Mind's container loses Docker's syscall filter and its masked `/proc` paths. The code the Mind writes still runs one namespace deeper, under its own limits, with no network; the container still has no route beyond `cb2net`. On a benchmark box that is acceptable and it is written here so nobody mistakes it for free.
+
+**Kill criteria, all must hold on the first graded leg:** (1) `cb2net.sh` containment proof passes unchanged; (2) `mind_T1_stdout.txt` carries no "sandbox unavailable here" line; (3) the receipt shape and run-state hash discipline are unchanged; (4) the leg's model-request count stays within the cap as before; (5) `rederive.sh` prints "re-derives exactly". Any failure: revert the patch, and the leg is void, not graded.
+
+**Measurement:** E.CB2-R8h, a fourth sample on the local 20B, the first in which E.SYNTAX3's real sandbox path and E.SMOKE1 run for the Mind. Reported as the fourth row of the side-by-side table; no winner from n=4 either.

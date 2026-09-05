@@ -8158,3 +8158,23 @@ What the family now has that it did not on Sep 1: a coder lane that produces fil
 **Reporting.** A separate table. R9 is not a fifth sample of reading 8: a different model is a different instrument, and pooling would hide exactly what Pranab asked to see. Side by side with reading 6 (the last NIM reading, on the retired 120b: Mind 26/27, Hermes 25/27) and with the local-20B ranges, as context, not as a pool.
 
 **E.CB2-R9 — PREFLIGHT PASSED (07:32–07:37 UTC, `out-r9-preflight`, ungraded).** Containment proven; run state `nim-ds`, upstream resolved to two NIM addresses, model `deepseek-ai/deepseek-v4-pro-0813`, cap 24, wall 3600, deadline 302. Mind T1: `done`, not void, 3 requests, **0 upstream HTTP errors**, 202 s — the first free-DeepSeek NIM leg that has ever completed (the pilots voided at 373–930 s before the clamp). `[smoke] started 2 files under python 3.13.5: Answered(200)` inside the container. Ungraded checker 10/11 (`appended_record_matches_submission_and_schema` failed). Kill criterion 1 holds; the graded sequence (`out-r9-nim`) launched 07:38 UTC.
+
+### E.CB2-R9 — CLOSED (2026-09-05 07:37–08:35 UTC): both systems on NIM `deepseek-v4-pro`
+
+Six legs, **zero voids, zero upstream HTTP errors, no reruns**. Run state `5a0ec2f810db7593`; the Mind 3–5 requests per task, Hermes 17–24 (T1 hit the cap of 24 with 3 refused; the frozen rule for both systems records refused requests and decides nothing on them — reaching the cap is the budget working).
+
+| task | Mind | Hermes | note |
+|---|---|---|---|
+| T1 lead form | **11/11** (408 s) | **11/11** (900 s) | Mind: pass 1 cut at its token limit, `[smoke] Exited(1)` on the cut file, completion pass finished the set — see residual 1 |
+| T2 static site | **5/6** (441 s) | **6/6** (1085 s) | Mind: `relative_links_resolve` — six hrefs to project/writing pages it never wrote (only `ferry.html` exists) |
+| T3 CLI tool | **10/10** (132 s) | **10/10** (405 s) | |
+| **total** | **26/27** | **27/27** | |
+
+**Context, not a pool.** Reading 6, the last on NIM (the retired `gpt-oss-120b`): Mind 26/27, Hermes 25/27. Reading 8 on the local 20B, four samples: Mind 17–27, Hermes 13–23. On a strong model both systems sit at the checker's ceiling and the difference is one check; on the weak model the difference is swamped by each system's own spread. That is the answer to "see": **the model is most of the score; the Mind on NIM V4 Pro is one dangling-link check short of perfect, with a fifth of Hermes's requests and a third of its wall time.** n=1 on this model; a second sample would cost an hour of NIM's free tier.
+
+**What this reading proved about the stack:** the 302 s deadline that voided every free-DeepSeek leg on Sep 3 is not hit any more (six legs, 0 × 504); the authoring clamp works on V4 Pro's token rate. E.SMOKE1 fired inside a graded reading for the first time, on exactly the shape it was built for (a program that dies on start), and the leg ended 11/11 — the finding and the truncation marker both reached the model, so causation is not separable; the sequence is on the record.
+
+**Residuals filed, not fixed:**
+1. **Build-lane headline.** RESULT.md reads "🛠️ I couldn't finish the build: nothing was written: the generation hit its token limit and server.py was cut … THEN, finishing the set: … (1 files: server.py)" — and the driver recorded `status: failed` for an artifact that passed 11/11. The cumulative message leads with pass 1's failure sentence after pass 2 finished the set. E.ROUND2's cousin in the build lane: the headline must describe the set as it stands.
+2. **Dangling internal links** (T2, 5/6): `index.html` links six pages that were never written. A write-step check in the inverted-risk tradition — an internal `href` to a path absent from the written set is explicit evidence — would have named all six before delivery. Candidate E.LINKS1.
+3. The build note "the stream ended without a newline, so server.py may be incomplete" fired again on a complete file (known; low value).

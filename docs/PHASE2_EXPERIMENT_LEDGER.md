@@ -7778,3 +7778,6 @@ Run dirs 8 → **9** after job 1 (`❌ failed`, lane marked), then **9, 9, 9**: 
 
 ### E.AGENTRETRY1 — BUILT: the dead-lane sentence is a terminal tool reply
 `CODER_DEAD_PREFIX` ("the coder lane is dead since") is the one constant behind `CoderDeath::sentence` and `terminal_delivery`'s `code` branch. Test beside the terminal-delivery definition test: the sentence is terminal, "(the coder isn't configured)" is not. Mutant (prefix branch removed) failed by name. Full suite running before push; witness: the `code:` probe leaves exactly one `code` step in the journal.
+
+### E.URL2 — FILED: three more compiled-in box addresses (the E.URL1 class)
+`grep 192.168.` over non-test code: mind-inference lib.rs:3580 and mind-tools lib.rs:881 both default to `http://192.168.4.35:11434` (the PZC ollama) when their env is unset; mind-tools lib.rs:847 probes `http://192.168.4.140:7438/v1/health` with no env at all; mind-evals brain_bench.rs:284 (`YM_BENCH_URL`) is a bench default and acceptable. Rule from E.URL1: a default that names one box is wrong on every other box — each of these gets a named env, and absent means "not configured" said out loud, not a guess at someone's LAN. Not started; each needs the reader of the value understood first (the health probe may be a dead lane already).

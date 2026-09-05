@@ -13,6 +13,7 @@ use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 pub(crate) mod delivery;
 mod loops;
 pub mod setup;
+pub mod anthropic_gateway;
 pub mod telegram;
 pub mod wallet_setup;
 pub mod web;
@@ -452,6 +453,10 @@ fn nonempty(get: &dyn Fn(&str) -> Option<String>, key: &str) -> Option<String> {
     get(key).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
+/// The `nim` lane's token is the local console token, which lives in a file, not the environment;
+/// `coder_plan` stays pure and names it by this marker, and the wiring reads the file.
+pub const CONSOLE_TOKEN_MARKER: &str = "@console-token";
+
 /// Decide the coder's provider, endpoint, model and credential from configuration.
 ///
 /// `None` means NO coder is built, which is the right answer for a misconfiguration: a coder
@@ -485,6 +490,21 @@ pub fn coder_plan(get: &dyn Fn(&str) -> Option<String>) -> Option<CoderPlan> {
         // because one variable was missing would spend someone else's money on the wrong provider.
         // The key is reached by NAME (`YM_CODER_KEY_ENV`) so the credential itself need never appear
         // in a config file or a process listing beside the provider that consumes it.
+        // E.CODERNIM1: NVIDIA NIM, through the mind's own Anthropic-compatible gateway on the
+        // control port. The CLI is given the CONSOLE token (resolved from the state dir by the
+        // wiring, never read here) and the loopback URL; the mind forwards with NVIDIA_API_KEY,
+        // which the CLI never sees. Requires the key: a lane with no upstream is no lane.
+        "nim" => {
+            nonempty(get, "NVIDIA_API_KEY")?;
+            let port = nonempty(get, "YM_CTL_PORT").unwrap_or_else(|| "8077".to_string());
+            Some(CoderPlan {
+                token: CONSOLE_TOKEN_MARKER.to_string(),
+                model: nonempty(get, "YM_CODER_MODEL")
+                    .unwrap_or_else(|| anthropic_gateway::DEFAULT_MODEL.to_string()),
+                base_url: format!("http://127.0.0.1:{port}"),
+                oauth: None,
+            })
+        }
         "custom" => {
             let base_url = nonempty(get, "YM_CODER_BASE_URL")?;
             if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -828,12 +848,24 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         // The DECISION is `coder_plan` (E.CODER1), a pure function over configuration that
         // `coder_plan_tests` exercises branch by branch. What is left here is only the wiring:
         // read the process environment, build the thing, hand it the timeout.
-        let coder = coder_plan(&|k| std::env::var(k).ok()).map(|plan| {
-            let c = mind_tools::Coder::new(plan.token, plan.model, plan.base_url, scratch);
-            match plan.oauth {
+        let coder = coder_plan(&|k| std::env::var(k).ok()).and_then(|plan| {
+            let token = if plan.token == CONSOLE_TOKEN_MARKER {
+                let path = format!("{}/console.token", telegram::state_dir());
+                match std::fs::read_to_string(&path) {
+                    Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+                    _ => {
+                        eprintln!("[coder] nim lane: no console token at {path} — no coder built");
+                        return None;
+                    }
+                }
+            } else {
+                plan.token
+            };
+            let c = mind_tools::Coder::new(token, plan.model, plan.base_url, scratch);
+            Some(match plan.oauth {
                 Some(t) => c.with_oauth(t), // prefer the Max-plan subscription (real Claude)
                 None => c,
-            }
+            })
         });
         // The struct's 300s default is a scratch-script budget. Improving an EXISTING codebase can
         // spend all of it before the first edit: pointed at the desktop cockpit (190KB across four
@@ -1289,6 +1321,35 @@ mod coder_plan_tests {
     fn plan_from(pairs: Vec<(String, String)>) -> Option<CoderPlan> {
         let m: HashMap<String, String> = pairs.into_iter().collect();
         coder_plan(&move |k: &str| m.get(k).cloned())
+    }
+
+    // ── E.CODERNIM1: the nim lane ─────────────────────────────────────────────────────────────
+    #[test]
+    fn the_nim_lane_points_the_cli_at_the_mind_with_the_console_token_and_needs_the_key() {
+        let p = coder_plan(&env(&[("YM_CODER_PROVIDER", "nim"), ("NVIDIA_API_KEY", "nvapi-x")]))
+            .expect("a coder");
+        assert_eq!(p.token, super::CONSOLE_TOKEN_MARKER, "the file is read by the wiring, not here");
+        assert_eq!(p.base_url, "http://127.0.0.1:8077");
+        assert_eq!(p.model, crate::anthropic_gateway::DEFAULT_MODEL);
+        assert_eq!(p.oauth, None);
+        let custom_port = coder_plan(&env(&[
+            ("YM_CODER_PROVIDER", "nim"),
+            ("NVIDIA_API_KEY", "nvapi-x"),
+            ("YM_CTL_PORT", "8078"),
+            ("YM_CODER_MODEL", "deepseek-ai/deepseek-v4-pro-0813"),
+        ]))
+        .expect("a coder");
+        assert_eq!(custom_port.base_url, "http://127.0.0.1:8078");
+        assert_eq!(custom_port.model, "deepseek-ai/deepseek-v4-pro-0813");
+        // No key: no coder, even with every other lane's credential present.
+        assert_eq!(
+            coder_plan(&env(&[
+                ("YM_CODER_PROVIDER", "nim"),
+                ("MINIMAX_API_KEY", "mm"),
+                ("CLAUDE_CODE_OAUTH_TOKEN", "t"),
+            ])),
+            None
+        );
     }
 
     // ── the three lanes that existed before E.CODER1 must be untouched ────────────────────────

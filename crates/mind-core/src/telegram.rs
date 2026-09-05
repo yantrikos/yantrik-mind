@@ -908,7 +908,10 @@ fn ctl_handle(
             || path == "/transcribe"
             || path == "/chat-stream"
             || path == "/v1/chat/completions"
-            || path == "/v1/responses");
+            || path == "/v1/responses"
+            // E.CODERNIM1: the Anthropic-compatible gateway for the coder lane.
+            || path == "/v1/messages"
+            || path == "/v1/messages/count_tokens");
     if !openai_models_route && !post_route && !security_route {
         send(&mut stream, "404 Not Found", "not found");
         return;
@@ -923,6 +926,9 @@ fn ctl_handle(
                 t.to_string()
             }
         })
+        // E.CODERNIM1: an Anthropic client sends its credential as `x-api-key` when it was given
+        // an API key rather than an auth token. Same token, same store, same check.
+        .or_else(|| header_value(&head, "x-api-key:").map(|v| v.trim().to_string()))
         .unwrap_or_default();
     let Some(authed) = devices.authenticate(&bearer) else {
         // Unknown OR revoked — no oracle, no hint about which.
@@ -1068,6 +1074,18 @@ fn ctl_handle(
         // This is transport compatibility, not an alternate authority path: the authenticated
         // device still supplies the principal and the same governed ConversationEngine runs the
         // turn. Replayed system/assistant context is intentionally not trusted or re-ingested.
+        // E.CODERNIM1: the coder lane's Anthropic-compatible gateway. Not a conversation turn —
+        // no engine, no memory, no person: a translated pass-through to the NIM upstream with the
+        // mind's key, for a CLI that speaks only the Anthropic protocol. Authenticated like every
+        // data route, so only a paired device (the coder holds the console token) reaches it.
+        "/v1/messages" => {
+            crate::anthropic_gateway::handle_messages(&mut stream, &body);
+            return;
+        }
+        "/v1/messages/count_tokens" => {
+            crate::anthropic_gateway::handle_count_tokens(&mut stream, &body);
+            return;
+        }
         "/v1/chat/completions" => {
             let prompt = match openai_user_turn(&body) {
                 Ok(prompt) => prompt,

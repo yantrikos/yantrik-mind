@@ -8118,3 +8118,21 @@ A coder fires calls in quick succession; a model throttled after two is no coder
 Through the gateway with the console token as `x-api-key`: a non-stream "Say OK." → `OK.` from `deepseek-ai/deepseek-v4-pro-0813`, HTTP 200. A model that does not exist upstream → HTTP 404 in the Anthropic envelope with `404:` in the message (kill 4's shape; the 401 shape rests on the unit test, a bad key needing a restart to stage).
 
 **Kill 3, the delegation (`nimwit-053737`, job `128535`, kind `code` → the coder):** the CLI ran a real agentic loop on NIM — 20 gateway calls, 19 streamed, 15 ending in `tool_use`, **zero upstream errors** — and `app.py` on disk gained a correct `GET /health` at 05:38, two and a half minutes into round 1. Then round 2 (the refinement after review) ran from 05:42 to the coder's 300 s wall without finishing, and the board says `❌ failed in round 2: timed out before producing anything` with round 1's checkpoint kept. So: the lane produces files at zero spend, which is what the decision asked for; the job verdict is `failed` because DeepSeek V4 Pro's 5–60 s per call fits about ten calls in a 300 s round. Two things follow, both measured before either is changed: the finalists' bake-off on the same task shape (below), and the round wall, which the ledger already calls "a scratch-script budget" (the nightly builder gives 1500 s). **Finding, not fixed here:** a job whose round 1 delivered and whose round 2 timed out is reported as failed with no word about the delivered edit — the row should say what stands on disk.
+
+**E.CODERNIM1 — bake-off on the same task shape (05:54 UTC, 300 s round wall, `code` kind, a fresh copy of the app each):**
+
+| model | gateway calls | tool-use turns | upstream errors | outcome |
+|---|---|---|---|---|
+| deepseek-ai/deepseek-v4-pro-0813 (05:37) | 20 | 15 | 0 | round 1 delivered the edit in 2.5 min; round 2 hit the 300 s wall |
+| moonshotai/kimi-k3 | 10 | 0 | **10 × 429** | failed in 16 s, nothing touched |
+| minimaxai/minimax-m3 | 6 | 0 | **5 × 429** | failed in 17 s, nothing touched |
+
+The CLI opens a job with several near-simultaneous requests; on the free tier Kimi K3 and MiniMax M3 refuse them at once, DeepSeek V4 Pro does not. **Default confirmed: `deepseek-ai/deepseek-v4-pro-0813`.** Staging's config override removed; the binary's default applies.
+
+### E.ROUND2 — PREREG: a later round that times out with nothing new must not fail the job
+
+**Fact (job `128535`):** round 1 wrote the correct edit to disk; round 2 timed out having touched no file; the row says `❌ failed in round 2: timed out before producing anything`, and nothing tells the person that round 1's work stands. **Cause (delegate.rs, the `r.timed_out && r.files.is_empty()` branch):** it returns `failed` unconditionally. The spawn-error branch above it already does the right thing — `if last.is_some() { break; }` — and the stalemate and provider-failure branches stop with the previous round's work too. This branch is the one of four that forgets an earlier round exists.
+
+**Change:** the timeout-with-nothing branch mirrors the spawn-error branch: with a prior round's result, note "wall clock expired with nothing new — stopping with round N−1's work" and `break` into the normal finalization; without one, fail as today.
+
+**Kill:** deterministic witness on staging with `YM_CODER_TIMEOUT_SECS=200` (round 1 took 150 s on DeepSeek V4 Pro; round 2 took more than 300): the same `code` delegation ends with round 1's edit on disk and a row that is not `failed`; the journal note names the stop. A round-1 timeout with nothing must still read `failed` (unchanged path, covered by the existing branch order). Then the staging wall goes to 900 s as configuration — the ledger already calls 300 s "a scratch-script budget".

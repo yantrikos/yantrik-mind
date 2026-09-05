@@ -2410,6 +2410,18 @@ impl super::ConversationEngine {
                         // the agent overran while double-checking it.
                         scratch_note(&mem, &id2, &format!("round {round}: wall clock expired — salvaging {} file(s) from the cutoff", r.files.len())).await;
                         if r.files.is_empty() {
+                            // E.ROUND2: a LATER round that the wall clock cut off before it touched
+                            // a file has nothing to salvage, but the previous round does. Job 128535
+                            // delivered its edit in round 1 and was reported failed because round 2
+                            // timed out empty. Same rule as the spawn-error branch above: fall
+                            // through to the standing work; only a first round with nothing fails.
+                            if last.is_some() {
+                                scratch_note(&mem, &id2, &format!(
+                                    "round {round}: wall clock expired with nothing new — stopping with round {}'s work",
+                                    round - 1
+                                )).await;
+                                break;
+                            }
                             let msg = format!("🛠️ [{name2}] failed in round {round}: timed out before producing anything");
                             ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
                             q.lock().unwrap().push(msg);

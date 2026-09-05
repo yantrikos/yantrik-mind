@@ -7978,3 +7978,32 @@ R8g: 03:13:55Z → 03:30:32Z with one declared rerun (Hermes T2, checked by the 
 
 ### E.SMOKE1 — PREREG (in full): start it, ask it for `/`, believe only what it answers
 **Where it runs:** the existing sandbox (`timeout` + `unshare --user --map-root-user --net --pid --mount-proc --uts --ipc` + `prlimit`), which already writes a file set and runs a `run.sh` — E.SMOKE1 adds a `run_tree` entry that takes the artifact's own file names (with subdirectories) and a wall of 14 s. **When:** only when the written set has a top-level `run.sh` and some file names port `8123` (the web briefs); otherwise nothing runs and nothing is said. **What:** inside the namespace, `ip link set lo up`, start `sh run.sh` in the background with its output captured, poll `GET http://127.0.0.1:8123/` every 500 ms for up to 10 s, print one line `SMOKE: <status>` or `SMOKE: exited <code>` or `SMOKE: no answer`, then the captured log's tail. **Verdict (inverted risk):** `SMOKE: 5xx` → finding, quoting the last traceback lines from the log ("the site starts but answers 500 to `/` — …"); `SMOKE: exited <non-zero>` → finding quoting stderr ("`run.sh` exits before serving — …"); `no answer` with the process still alive → **silent** (a slow start is not a defect); a sandbox that cannot run (`unshare` refused, `Unknown` render) → silent, as its siblings. Findings join the repair rounds like the others. **Cost:** ≤ 14 s per build, only on web briefs, only where the sandbox works. **Tests (on the box, `YM_SANDBOX_TESTS`):** the R8g shape (a `wsgiref` app returning `str`) → finding names 500 and "bytes instance"; a healthy `http.server` → silent; a script that crashes at import → finding with the traceback line; a set without `run.sh` → silent and no sandbox run. **Mutant:** the 5xx branch never convicts → the first test fails by name. **Witness:** the real R8g `server.py`+`run.sh` stream through `smoke_findings` on staging. **Kill (already passed):** loopback, bind and GET inside the namespace as the service user; no egress.
+
+### E.SMOKE1 — BUILT (2026-09-04)
+
+Commit dd60b63 (first cut) and its refinement in the following commit. What was preregistered is what shipped, with one addition the witness forced.
+
+**Where it runs.** `Sandbox::run_tree` (mind-tools) takes a whole file tree — dynamic names, subdirectories, anything escaping the scratch dir refused — under the same `unshare` namespaces and `prlimit` limits as `run_python_with`, which now delegates to it. The artifact lives under `app/`, so its own `run.sh` is never the sandbox's driver.
+
+**When.** A top-level `run.sh` and the string `8123` somewhere in the set. Without both, no sandbox spawn (a test pins the gate under one second).
+
+**What.** Inside the namespace: `ip link set lo up`, `SMOKE-PY: <python version>`, `sh run.sh` in the background with its log captured, a 10 s poll on `GET http://127.0.0.1:8123/`, then one marker (`SMOKE: <status>` or `SMOKE: no answer`, plus `SMOKE-EXIT: <code>` if the process ended) and the log tail. Limits: wall 16 s, cpu 12 s.
+
+**Verdict (inverted risk).** Only the markers decide. `5xx` → a finding quoting the log tail; a non-zero exit before serving → a finding quoting the log tail; no answer with the process alive, no marker at all, or a sandbox that cannot run here → silence. Chained after `runsh` in `write_files`.
+
+**Results on staging (real sandbox, `YM_SANDBOX_TESTS=1`).**
+
+| case | expected | got |
+|---|---|---|
+| wsgiref app returning `str` (the R8g shape, synthetic) | finding, HTTP 500, "bytes" | finding, HTTP 500, "bytes instance" |
+| healthy `python3 -m http.server 8123` | silent | silent |
+| `import nosuchmodule` at start | finding, exits, ModuleNotFoundError | finding, exit 1, traceback quoted |
+| set without `run.sh` | silent, no spawn | silent, < 1 s |
+| **the real R8g artifact, as-is** | finding, HTTP 500 | **finding, exit 1: `No module named 'cgi'`** |
+| the real R8g artifact minus its `cgi` import | finding, HTTP 500 | finding, HTTP 500, "bytes instance" |
+
+**Mutant.** `if n >= 500` → `if n >= 50000` (the 5xx branch never convicts): the synthetic wsgiref case and the witness both FAIL; the other two still pass. Restored, md5 verified.
+
+**The seam the witness exposed.** The sandbox is the box the Mind runs on, not the target. Staging's Python is 3.13.5, where `cgi` is gone; the checker image runs 3.12.3, where it imports and the program reaches its 500. The as-is finding is therefore true here and would be false there — a true mechanism whose cause differs by environment. Handling: every finding names the interpreter it ran under ("a sandboxed start here, under Python 3.13.5; the target's version may differ, so depend on nothing version-specific"), and the witness accepts either of the artifact's two own faults as-is while requiring the 500 once the version-specific import is removed. Either finding pushes the model toward a program that works on both; neither invents a fault the artifact does not have.
+
+**Not claimed.** That this raises T1 in a reading. Three samples gave three causes; this sees the third. The next reading is the measurement, and n=1 will not settle it.

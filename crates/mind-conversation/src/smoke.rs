@@ -14,6 +14,7 @@ const PORT: &str = "8123";
 /// `run.sh` is never the driver. Loopback up, the program in the background with its output
 /// captured, a 10 s poll on `/`, then one marker line and the log tail.
 const DRIVER: &str = r#"ip link set lo up 2>/dev/null || true
+echo "SMOKE-PY: $(python3 -c 'import sys; print(sys.version.split()[0])' 2>/dev/null)"
 cd app
 ( sh run.sh > ../app.log 2>&1; echo "EXIT:$?" >> ../app.log ) &
 python3 - <<'PY'
@@ -67,6 +68,17 @@ pub(crate) fn verdict_from(rendered: &str) -> Smoke {
     }
 }
 
+/// The interpreter the start ran under. The sandbox is this box, not the target: a module missing
+/// here may exist there (`cgi` under 3.12, gone in 3.13), so every finding names the version.
+fn py_version(rendered: &str) -> String {
+    rendered
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("SMOKE-PY:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 /// The captured program log after the marker, trimmed for a finding.
 fn log_tail(rendered: &str) -> String {
     let after = rendered.split("--- app.log tail").nth(1).unwrap_or("");
@@ -100,13 +112,14 @@ pub(crate) async fn smoke_findings(stream: &str) -> Vec<String> {
         Ok(r) => r.render(),
         Err(_) => return Vec::new(), // no sandbox here: say nothing
     };
+    let py = py_version(&rendered);
     match verdict_from(&rendered) {
         Smoke::Answered(n) if n >= 500 => vec![format!(
-            "`run.sh` starts the program, but `/` answers HTTP {n} — it is up and every request fails, so nothing that opens it can work. The last lines of its own log:\n{}\nFix the handler that serves `/` (a WSGI app must return bytes, not str; a route must not raise).",
+            "`run.sh` starts the program (a sandboxed start here, under Python {py}), but `/` answers HTTP {n} — it is up and every request fails, so nothing that opens it can work. The last lines of its own log:\n{}\nFix the handler that serves `/` (a WSGI app must return an iterable of bytes — a list — never a bare str or bytes; a route must not raise).",
             log_tail(&rendered)
         )],
         Smoke::Exited(code) => vec![format!(
-            "`run.sh` exits with status {code} before serving anything on port {PORT}. The last lines of its own log:\n{}\nThe program must start and keep serving; fix the error above.",
+            "`run.sh` exits with status {code} before serving anything on port {PORT} (a sandboxed start here, under Python {py}; the target's version may differ, so depend on nothing version-specific). The last lines of its own log:\n{}\nThe program must start and keep serving; fix the error above.",
             log_tail(&rendered)
         )],
         _ => Vec::new(),
@@ -125,6 +138,8 @@ mod tests {
         assert_eq!(verdict_from("SMOKE: no answer\n"), Smoke::Silent, "alive but slow: silence");
         assert_eq!(verdict_from("SMOKE: no answer\nSMOKE-EXIT: 0\n"), Smoke::Silent);
         assert_eq!(verdict_from("500 Internal Server Error\nunshare: failed"), Smoke::Silent, "no marker, no verdict");
+        assert_eq!(py_version("SMOKE-PY: 3.13.5\nSMOKE: 500"), "3.13.5");
+        assert_eq!(py_version("SMOKE-PY: \nSMOKE: 500"), "unknown");
     }
 
     #[test]
@@ -140,23 +155,34 @@ mod tests {
     }
 
     /// The witness: the real artifact that scored 2/11 in reading 8g, read from
-    /// `YM_SMOKE_WITNESS_DIR` on the box that holds it. Its `/` answered 500 in the checker image.
+    /// `YM_SMOKE_WITNESS_DIR` on the box that holds it. In the checker image (Python 3.12.3) its
+    /// `/` answered 500; on a 3.13 box its `from cgi import FieldStorage` dies at import first.
+    /// Both are the artifact's own faults, and both convict: as-is, and with that one line gone.
     #[tokio::test]
-    async fn the_real_reading_8g_artifact_is_convicted_by_its_own_500() {
+    async fn the_real_reading_8g_artifact_is_convicted_as_is_and_by_its_500_without_cgi() {
         let Ok(dir) = std::env::var("YM_SMOKE_WITNESS_DIR") else {
             eprintln!("skipped: YM_SMOKE_WITNESS_DIR unset");
             return;
         };
-        let mut stream = String::new();
-        for name in ["run.sh", "server.py"] {
-            let body = std::fs::read_to_string(format!("{dir}/{name}")).expect("artifact file");
-            stream.push_str(&format!("=== FILE: {name}
-{body}
-"));
-        }
-        let f = smoke_findings(&stream).await;
-        assert_eq!(f.len(), 1, "{f:?}");
-        assert!(f[0].contains("HTTP 500") && f[0].contains("bytes instance"), "{}", f[0]);
+        let run_sh = std::fs::read_to_string(format!("{dir}/run.sh")).expect("artifact run.sh");
+        let server = std::fs::read_to_string(format!("{dir}/server.py")).expect("artifact server.py");
+        let stream = |server: &str| format!("=== FILE: run.sh\n{run_sh}\n=== FILE: server.py\n{server}\n");
+
+        let f = smoke_findings(&stream(&server)).await;
+        assert_eq!(f.len(), 1, "as-is: {f:?}");
+        assert!(f[0].contains("under Python "), "{}", f[0]);
+        assert!(
+            f[0].contains("HTTP 500") || f[0].contains("No module named 'cgi'"),
+            "as-is: {}",
+            f[0]
+        );
+
+        let without_cgi: String =
+            server.lines().filter(|l| !l.contains("from cgi import")).map(|l| format!("{l}\n")).collect();
+        assert_ne!(without_cgi, server, "the artifact does import cgi");
+        let f = smoke_findings(&stream(&without_cgi)).await;
+        assert_eq!(f.len(), 1, "without cgi: {f:?}");
+        assert!(f[0].contains("HTTP 500") && f[0].contains("bytes instance"), "without cgi: {}", f[0]);
     }
 
     /// The real sandbox, on a box where it works (`YM_SANDBOX_TESTS=1`). The first case is the
@@ -170,7 +196,7 @@ mod tests {
         let wsgi = "=== FILE: run.sh\npython3 server.py\n=== FILE: server.py\nfrom wsgiref.simple_server import make_server\ndef app(environ, start_response):\n    start_response('200 OK', [('Content-Type','text/html')])\n    return ['<h1>hi</h1>']\nmake_server('0.0.0.0', 8123, app).serve_forever()\n";
         let f = smoke_findings(wsgi).await;
         assert_eq!(f.len(), 1, "{f:?}");
-        assert!(f[0].contains("HTTP 500") && f[0].contains("bytes"), "{}", f[0]);
+        assert!(f[0].contains("HTTP 500") && f[0].contains("bytes") && f[0].contains("under Python 3."), "{}", f[0]);
 
         let healthy = "=== FILE: run.sh\npython3 -m http.server 8123\n=== FILE: index.html\n<h1>hi</h1>\n";
         assert!(smoke_findings(healthy).await.is_empty());

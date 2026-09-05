@@ -154,7 +154,8 @@ try:
     # working and that clause was still disqualifying every capped leg through the DEPENDENT class
     # after the independent rule had been removed — a second path I never looked at.
     receipt_ok = receipt_shape_ok(accepted=acc, refused=ref, upstream_errors=p["upstream_errors"],
-                                  tls_verified=p.get("tls_hostname_verified"), cap=cap)
+                                  tls_verified=p.get("tls_hostname_verified"), cap=cap,
+                                  upstream_scheme=p.get("upstream_scheme"), upstream_reachable=p.get("upstream_reachable"))
 except Exception:
     tls, upe, acc, ref, receipt_ok = False, -1, -1, -1, False
 syml = int(tree.split("symlinks=")[1].split()[0]) if "symlinks=" in tree else 0

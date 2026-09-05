@@ -92,7 +92,8 @@ try:
     d=json.load(open('$CD/requests.json'))
     ok=receipt_shape_ok(accepted=d['model_requests'], refused=d['refused_over_cap'],
                         upstream_errors=d['upstream_errors'],
-                        tls_verified=d.get('tls_hostname_verified'), cap=$CAP)
+                        tls_verified=d.get('tls_hostname_verified'), cap=$CAP,
+                        upstream_scheme=d.get('upstream_scheme'), upstream_reachable=d.get('upstream_reachable'))
 except Exception:
     ok=False
 print('true' if ok else 'false')")

@@ -1409,3 +1409,34 @@ rw('MANIFEST.json', [
     ("the proxy's own startup handshake is recorded as tls_hostname_verified.",
      "the proxy's own startup handshake is recorded as tls_hostname_verified (E.CB2-HTTP: on an http profile the proxy probe prints 'gateway-tcp ok' instead and the startup proof is upstream_reachable; nothing is hostname-verified there, by design)."),
 ])
+# E.CB2-HTTP-b: the receipt-shape check — consulted by BOTH legs — demanded a TLS-verified proxy
+# receipt, which an http profile cannot produce by construction; E.CB2-R8b's first leg was
+# disqualified by it after a clean build. The third and last TLS reader learns the http receipt.
+rw('run/verdict.py', [
+    ('def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap):',
+     'def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap,\n'
+     '                     upstream_scheme=None, upstream_reachable=None):'),
+    ('    return typed and 1 <= accepted <= cap and tls_verified is True\n',
+     '    # E.CB2-HTTP-b: an http profile\'s receipt is never hostname-verified; its proof is reachability,\n'
+     '    # and the receipt says which scheme it was — a TLS receipt with scheme https is unchanged.\n'
+     '    verified = tls_verified is True or (upstream_scheme == "http" and upstream_reachable is True)\n'
+     '    return typed and 1 <= accepted <= cap and verified\n'),
+])
+rw('run/mind_leg.sh', [
+    ('                                  tls_verified=p.get("tls_hostname_verified"), cap=cap)',
+     '                                  tls_verified=p.get("tls_hostname_verified"), cap=cap,\n'
+     '                                  upstream_scheme=p.get("upstream_scheme"), upstream_reachable=p.get("upstream_reachable"))'),
+])
+rw('run/hermes_leg.sh', [
+    ("                        tls_verified=d.get('tls_hostname_verified'), cap=$CAP)",
+     "                        tls_verified=d.get('tls_hostname_verified'), cap=$CAP,\n"
+     "                        upstream_scheme=d.get('upstream_scheme'), upstream_reachable=d.get('upstream_reachable'))"),
+])
+rw('selftest/verdict_cases.py', [
+    ('    ("shape_tls_missing",        dict(tls_verified=None),             False),\n',
+     '    ("shape_tls_missing",        dict(tls_verified=None),             False),\n'
+     '    # E.CB2-HTTP-b: the http receipt is valid when reachable, invalid when not — and never by TLS.\n'
+     '    ("shape_http_reachable",     dict(tls_verified=False, upstream_scheme="http", upstream_reachable=True),  True),\n'
+     '    ("shape_http_unreachable",   dict(tls_verified=False, upstream_scheme="http", upstream_reachable=False), False),\n'
+     '    ("shape_https_unreachable_claim", dict(tls_verified=False, upstream_scheme="https", upstream_reachable=True), False),\n'),
+])

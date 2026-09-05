@@ -96,7 +96,8 @@ def host_independent(*, capture_ok, symlinks, specials, key_leak_hits, receipt_v
     return bool(reasons), reasons
 
 
-def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap):
+def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap,
+                     upstream_scheme=None, upstream_reachable=None):
     """Is the proxy receipt the shape a valid leg produces?
 
     This lived as one expression inside each leg's heredoc — the third rule in this harness to be
@@ -114,7 +115,10 @@ def receipt_shape_ok(*, accepted, refused, upstream_errors, tls_verified, cap):
         and type(upstream_errors) is int
         and refused >= 0
     )
-    return typed and 1 <= accepted <= cap and tls_verified is True
+    # E.CB2-HTTP-b: an http profile's receipt is never hostname-verified; its proof is reachability,
+    # and the receipt says which scheme it was — a TLS receipt with scheme https is unchanged.
+    verified = tls_verified is True or (upstream_scheme == "http" and upstream_reachable is True)
+    return typed and 1 <= accepted <= cap and verified
 
 
 def reported_project(result_text):

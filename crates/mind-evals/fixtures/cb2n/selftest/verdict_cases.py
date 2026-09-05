@@ -178,6 +178,10 @@ SHAPE_CASES = [
     ("shape_zero_requests",      dict(accepted=0),                    False),
     ("shape_untrusted_tls",      dict(tls_verified=False),            False),
     ("shape_tls_missing",        dict(tls_verified=None),             False),
+    # E.CB2-HTTP-b: the http receipt is valid when reachable, invalid when not — and never by TLS.
+    ("shape_http_reachable",     dict(tls_verified=False, upstream_scheme="http", upstream_reachable=True),  True),
+    ("shape_http_unreachable",   dict(tls_verified=False, upstream_scheme="http", upstream_reachable=False), False),
+    ("shape_https_unreachable_claim", dict(tls_verified=False, upstream_scheme="https", upstream_reachable=True), False),
     ("shape_untyped_accepted",   dict(accepted="3"),                  False),
     ("shape_untyped_refused",    dict(refused=True),                  False),
     ("shape_negative_refused",   dict(refused=-1),                    False),

@@ -170,6 +170,19 @@ impl Sandbox {
         files: Vec<(&'static str, String)>,
         run_sh: &str,
     ) -> std::io::Result<ExecResult> {
+        self.run_tree(lim, files.into_iter().map(|(n, c)| (n.to_string(), c)).collect(), run_sh)
+            .await
+    }
+
+    /// E.SMOKE1: run a whole file TREE (dynamic names, subdirectories allowed) under the same
+    /// namespaces and limits. `run_sh` is the driver the sandbox executes; put the tree's own
+    /// scripts under a subdirectory so the driver never overwrites them.
+    pub async fn run_tree(
+        &self,
+        lim: Limits,
+        files: Vec<(String, String)>,
+        run_sh: &str,
+    ) -> std::io::Result<ExecResult> {
         let hidden = self.hidden_dir.clone();
         let run_sh = run_sh.to_string();
         tokio::task::spawn_blocking(move || Self::run_blocking(lim, files, run_sh, hidden))
@@ -179,7 +192,7 @@ impl Sandbox {
 
     fn run_blocking(
         lim: Limits,
-        files: Vec<(&'static str, String)>,
+        files: Vec<(String, String)>,
         run_sh: String,
         hidden: Option<String>,
     ) -> std::io::Result<ExecResult> {
@@ -193,7 +206,19 @@ impl Sandbox {
             std::env::temp_dir().join(format!("ym_sbx_{}_{seq}_{ts}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
         for (name, content) in &files {
-            std::fs::write(scratch.join(name), content)?;
+            // Names are relative and may carry subdirectories (E.SMOKE1 runs whole artifact trees);
+            // anything that would escape the scratch dir is refused, not normalised.
+            let rel = std::path::Path::new(name);
+            if rel.is_absolute()
+                || rel.components().any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(std::io::Error::other(format!("refusing path {name:?}")));
+            }
+            let target = scratch.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(target, content)?;
         }
         std::fs::write(scratch.join("run.sh"), &run_sh)?;
 

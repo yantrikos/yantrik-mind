@@ -48,6 +48,7 @@ mod freshness;
 mod pyimports;
 mod repetition;
 mod runsh;
+mod smoke;
 mod syntax;
 mod required_literals;
 mod cloud_photos;
@@ -14923,6 +14924,9 @@ impl RecipeHost for MindRecipeHost {
                         // E.RUNSH1: what `run.sh` asks the target to run that the target cannot —
                         // reading 8f's T1 said `python` on an image that has only `python3`.
                         findings.extend(crate::runsh::run_script_findings(stream));
+                        // E.SMOKE1: start it in the sandbox and ask it for `/` — the one T1 cause
+                        // of three that no static read sees (a 500 from a process that stays up).
+                        findings.extend(crate::smoke::smoke_findings(stream).await);
                         // E.SYNTAX1: a written .py that does not parse. The forge has checked
                         // this since E.FORGE1 with the same sandbox and the same ast.parse; the
                         // build lane never did, and a real artifact shipped with a JavaScript

@@ -35,7 +35,7 @@ const CHECK: &str = "import ast\nsrc = open('target.py').read()\ntry:\n    ast.p
 
 /// The mind's state directory, masked inside the sandbox so the check cannot read it.
 /// Derived exactly as `mind-core` derives it for the engine's own sandbox.
-fn state_dir() -> String {
+pub(crate) fn state_dir() -> String {
     std::env::var("YM_DB")
         .ok()
         .and_then(|p| {
@@ -49,7 +49,7 @@ fn state_dir() -> String {
 
 /// What one sandbox answer means. Three outcomes, and only one of them convicts.
 #[derive(Debug)]
-enum Verdict {
+pub(crate) enum Verdict {
     Parses,
     Broken(String),
     /// The sandbox could not answer — unavailable, killed, or output we do not recognise. NEVER an

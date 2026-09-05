@@ -8233,3 +8233,20 @@ Proven, not assumed: a new test ingests, then queries 5 ms *before* the observat
 **E.LINKS1 — DEPLOYED and WITNESSED on staging (2026-09-05 17:30 UTC).** Binary `d8414cb`, sha `0c8d1a99c64fb7d0`. A live portfolio-site delegation (`linkswit-173058`, job `9f9e5e`, build lane) wrote five files and the journal carries `[links] checked 4 html file(s) against 5 known path(s): 0 finding(s)`. Every one of its twenty links resolves, verified independently on disk by the witness script rather than taken from the check's own word, so the silence is correct rather than merely quiet. What this witnesses is the wiring, the file count and the silence on a healthy build; it does not witness a finding reaching the model, because the model wrote a correct site. A second witness with a task that must leave links dangling follows, for the one claim the unit tests cannot make: that the finding lands in the message the review round reads.
 
 **Two guard defects met on the way, both mine, both banked.** The deploy gate first refused a good build because its literal (`/v1/messages/count_tokens`) was folded by the compiler into a shared prefix plus a tail; re-gated on a log message of some length. Then the ship chain's green-suite gate, written that morning as `grep -qi "FAILED|panicked|error"`, matched the word "failed" inside every passing line's `0 failed` and stopped a fully green run (862 in mind-conversation, every crate ok). A gate's pattern must not match the benign form of its own keyword, and a gate must be run once against known-good output before it is trusted to stop a push.
+
+**E.LINKS1 — CLOSED: the finding reached the model and the model repaired the artifact (2026-09-05 17:33–17:34 UTC).** The second witness gave the build a task it could only satisfy by leaving links dangling ("index.html's nav must link to about.html, projects.html and writing.html. Do not create those three pages in this step"). Job `a1b8a8`, build lane, chain `author files → write project`. The trail, from the job's own notes rather than from inference:
+
+```
+built: … (2 files: index.html, css/style.css)
+DEFECTS FOUND MECHANICALLY IN WHAT YOU JUST WROTE — …
+`index.html` links 3 file(s) that this build never wrote: about.html, projects.html,
+writing.html. A link is a promise about a file — write those pages, or drop the links
+that lead nowhere.
+THEN, finishing the set: … (1 files: index.html)
+```
+
+Journal: `[links] … 1 finding(s)` at 17:33:39, then `[links] … 0 finding(s)` at 17:34:10 on the rewrite. The delivered `index.html` carries one nav item, `index.html` itself, and the stylesheet: the three links the finding named are gone. The model chose the remedy the task allowed — the finding offers both, and writing those pages was forbidden here.
+
+**Causation, as isolated as one run allows.** This chain has no critic step (`author files → write project`), and no other note in the trail names links, so the mechanical finding is the only feedback that named the defect that was then repaired. One run, one repair; the earlier measured base rate for findings that reach an actor is 45% repaired, so a single success is not a rate.
+
+**Residual filed, deliberately not fixed here.** The findings header the model reads carries a run of stray spaces from its own format string: `each of                                  these was checked`. It is in the prompt, so it is worth fixing — and it changes the message the readings compare, so it belongs in its own slice with the usual before-and-after, not as a drive-by edit inside this one.

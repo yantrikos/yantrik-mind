@@ -1281,3 +1281,119 @@ rw("selftest/selftest.sh", [
     ('if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi',
      'if python3 "$FIX/selftest/verdict_cases.py"; then echo "verdict_cases: agree"; else echo "verdict_cases: DISAGREE"; BAD=1; fi\n# The check SCORE, driven through every way a denominator can lie, without a graded leg.\nif python3 "$FIX/selftest/score_cases.py" >/dev/null; then echo "score_cases: agree"; else echo "score_cases: DISAGREE"; BAD=1; fi'),
 ])
+
+# ── E.CB2-HTTP: a plain-HTTP LAN upstream for the local 20B (reading 8 "in local") ───────────
+# The proxy hardcoded HTTPSConnection(UPSTREAM, 443) and the egress chain allowed only tcp/443, so
+# the only local model (gpt-oss-backup:20b on 192.168.4.35:11434, plain HTTP) could not be a
+# profile at all — E.CB2-R8 died on exactly this. The scheme and port become profile-declared,
+# default https/443 so every existing profile is byte-for-byte unchanged in effect. Plain HTTP
+# cannot be hostname-verified; the local profile records that honestly (upstream_scheme http,
+# tls_hostname_verified false, upstream_reachable true) instead of pretending, and the manifest
+# says so. Containment is unchanged: one ACCEPT per pinned address on the declared port, then DROP.
+rw('proxy/proxy.py', [
+    ('UPSTREAM_IP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")\n',
+     'UPSTREAM_IP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")\n'
+     '# E.CB2-HTTP: scheme and port are the profile\'s to declare; https/443 keeps every earlier profile as it was.\n'
+     'SCHEME = os.environ.get("CB2_UPSTREAM_SCHEME", "https").strip().lower() or "https"\n'
+     'PORT = int(os.environ.get("CB2_UPSTREAM_PORT", "443" if SCHEME == "https" else "80"))\n'
+     '\n'
+     '\n'
+     'def upstream_connection(scheme, host, port, wall, ctx):\n'
+     '    """The one place the upstream leg is opened: TLS with hostname verification for https, a plain\n'
+     '    connection for http. Pure in its inputs so the selftest can drive both branches."""\n'
+     '    if scheme == "https":\n'
+     '        return http.client.HTTPSConnection(host, port, timeout=wall, context=ctx)\n'
+     '    if scheme == "http":\n'
+     '        return http.client.HTTPConnection(host, port, timeout=wall)\n'
+     '    raise ValueError("CB2_UPSTREAM_SCHEME must be https or http, not %r" % scheme)\n'),
+    ('"upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),',
+     '"upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),\n'
+     '         "upstream_scheme": SCHEME, "upstream_port": PORT, "upstream_reachable": False,'),
+    ('        conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=WALL, context=ctx)',
+     '        conn = upstream_connection(SCHEME, UPSTREAM, PORT, WALL, ctx)'),
+    ('        with socket.create_connection((UPSTREAM, 443), timeout=10) as raw:',
+     '        with socket.create_connection((UPSTREAM, PORT), timeout=10) as raw:'),
+    ('    state["tls_hostname_verified"] = tls_self_check()\n',
+     '    # E.CB2-HTTP: a plain-HTTP upstream is reachable or not; it is never "verified", and the receipt says which.\n'
+     '    state["tls_hostname_verified"] = tls_self_check() if SCHEME == "https" else False\n'
+     '    state["upstream_reachable"] = tcp_self_check()\n'),
+    ('def tls_self_check():',
+     'def tcp_self_check():\n'
+     '    """A raw TCP connect to the upstream on the declared port — the http-mode reachability proof."""\n'
+     '    try:\n'
+     '        import socket\n'
+     '        with socket.create_connection((UPSTREAM, PORT), timeout=10):\n'
+     '            return True\n'
+     '    except Exception:\n'
+     '        return False\n'
+     '\n'
+     '\n'
+     'def tls_self_check():'),
+])
+rw('run/proxy.sh', [
+    ('-e CB2_MODEL="$CB2_MODEL" cb2n-proxy',
+     '-e CB2_MODEL="$CB2_MODEL" -e CB2_UPSTREAM_SCHEME="${CB2_UPSTREAM_SCHEME:-https}" -e CB2_UPSTREAM_PORT="${CB2_UPSTREAM_PORT:-443}" cb2n-proxy'),
+    ("d.get('tls_hostname_verified') is True and",
+     "(d.get('tls_hostname_verified') is True or (d.get('upstream_scheme') == 'http' and d.get('upstream_reachable') is True)) and"),
+])
+rw('net/cb2net.sh', [
+    ('-p tcp --dport 443 -j ACCEPT; done',
+     '-p tcp --dport "${CB2_UPSTREAM_PORT:-443}" -j ACCEPT; done'),
+    ('-p tcp -m tcp --dport 443 -j ACCEPT"; done',
+     '-p tcp -m tcp --dport ${CB2_UPSTREAM_PORT:-443} -j ACCEPT"; done'),
+    ('[ "$P" = "gateway-tls-verified ok / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ]',
+     'GATE="gateway-tls-verified ok"; [ "${CB2_UPSTREAM_SCHEME:-https}" = http ] && GATE="gateway-tcp ok"; [ "$P" = "$GATE / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ]'),
+])
+rw('net/probe_proxy.py', [
+    ('UP = os.environ.get("CB2_UPSTREAM", "aig.mycluster.cyou")\n',
+     'UP = os.environ.get("CB2_UPSTREAM", "aig.mycluster.cyou")\n'
+     'SCHEME = os.environ.get("CB2_UPSTREAM_SCHEME", "https").strip().lower() or "https"\n'
+     'PORT = int(os.environ.get("CB2_UPSTREAM_PORT", "443" if SCHEME == "https" else "80"))\n'),
+    ('print(f"gateway-tls-verified {tls_verified(UP)} / internet-tcp',
+     '# E.CB2-HTTP: an http profile proves reachability, not identity — and prints a different word for it.\n'
+     'gate = f"gateway-tls-verified {tls_verified(UP, PORT)}" if SCHEME == "https" else f"gateway-tcp {tcp(UP, PORT)}"\n'
+     'print(f"{gate} / internet-tcp'),
+])
+new('profiles/oss20-local.profile',
+    '# cb2n profile "oss20-local" (E.CB2-HTTP, reading 8 "in local"): the only local model, gpt-oss-backup:20b\n'
+    '# on the PZC Ollama at 192.168.4.35:11434 over PLAIN HTTP. Not hostname-verified: the proxy records\n'
+    '# upstream_scheme http / tls_hostname_verified false / upstream_reachable true, and the manifest says so.\n'
+    '# Containment is the same shape as qwen: one pinned address, one declared port, then DROP.\n'
+    'CB2_UPSTREAM=192.168.4.35\n'
+    'CB2_UPSTREAM_IP=192.168.4.35\n'
+    'CB2_UPSTREAM_IPS=192.168.4.35\n'
+    'CB2_UPSTREAM_RESOLVE=0\n'
+    'CB2_UPSTREAM_SCHEME=http\n'
+    'CB2_UPSTREAM_PORT=11434\n'
+    'CB2_MODEL=gpt-oss-backup:20b\n'
+    'CB2_KEY_FILE=\n'
+    'CB2_MIND_LANE=local\n'
+    'CB2_MIND_PROVIDER=\n'
+    'CB2_MIND_KEY_ENV=\n')
+rw('MANIFEST.json', [
+    ('over hostname-verified TLS;',
+     'over hostname-verified TLS (E.CB2-HTTP: the oss20-local profile is the one exception — plain HTTP to a pinned LAN address on a profile-declared port, recorded as upstream_scheme http / tls_hostname_verified false / upstream_reachable true; NOT hostname-verified, by design and said so);'),
+])
+new('selftest/upstream_cases.py',
+    '"""E.CB2-HTTP: drives proxy.upstream_connection through both schemes and the refusal. Exits 1 on any\n'
+    'disagreement. Runs outside the containers; imports the proxy module without starting it."""\n'
+    'import http.client, importlib.util, os, ssl, sys\n'
+    'HERE = os.path.dirname(os.path.abspath(__file__))\n'
+    'spec = importlib.util.spec_from_file_location("cb2proxy", os.path.join(HERE, "..", "proxy", "proxy.py"))\n'
+    'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+    'bad = 0\n'
+    'c = m.upstream_connection("https", "aig.mycluster.cyou", 443, 30, ssl.create_default_context())\n'
+    'ok = isinstance(c, http.client.HTTPSConnection) and c.port == 443; print("https -> HTTPSConnection:443", ok); bad |= not ok\n'
+    'c = m.upstream_connection("http", "192.168.4.35", 11434, 30, None)\n'
+    'ok = type(c) is http.client.HTTPConnection and c.port == 11434; print("http  -> HTTPConnection:11434", ok); bad |= not ok\n'
+    'try:\n'
+    '    m.upstream_connection("ftp", "x", 21, 30, None); print("ftp   -> refused", False); bad = 1\n'
+    'except ValueError:\n'
+    '    print("ftp   -> refused", True)\n'
+    'sys.exit(1 if bad else 0)\n')
+rw('selftest/selftest.sh', [
+    ('if python3 "$FIX/selftest/score_cases.py" >/dev/null; then echo "score_cases: agree"; else echo "score_cases: DISAGREE"; BAD=1; fi',
+     'if python3 "$FIX/selftest/score_cases.py" >/dev/null; then echo "score_cases: agree"; else echo "score_cases: DISAGREE"; BAD=1; fi\n'
+     '# E.CB2-HTTP: the upstream leg opens the right kind of connection for the declared scheme.\n'
+     'if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi'),
+])

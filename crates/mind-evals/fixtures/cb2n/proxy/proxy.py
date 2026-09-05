@@ -19,6 +19,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = os.environ.get("CB2_UPSTREAM", "aig.mycluster.cyou")
 UPSTREAM_IP = os.environ.get("CB2_UPSTREAM_IP", "192.168.4.203")
+# E.CB2-HTTP: scheme and port are the profile's to declare; https/443 keeps every earlier profile as it was.
+SCHEME = os.environ.get("CB2_UPSTREAM_SCHEME", "https").strip().lower() or "https"
+PORT = int(os.environ.get("CB2_UPSTREAM_PORT", "443" if SCHEME == "https" else "80"))
+
+
+def upstream_connection(scheme, host, port, wall, ctx):
+    """The one place the upstream leg is opened: TLS with hostname verification for https, a plain
+    connection for http. Pure in its inputs so the selftest can drive both branches."""
+    if scheme == "https":
+        return http.client.HTTPSConnection(host, port, timeout=wall, context=ctx)
+    if scheme == "http":
+        return http.client.HTTPConnection(host, port, timeout=wall)
+    raise ValueError("CB2_UPSTREAM_SCHEME must be https or http, not %r" % scheme)
 CAP = int(os.environ.get("CB2_CAP", "8"))
 # E.CB2-W: the per-request ceiling is the RUN STATE'S WALL, not a literal 600. A single model call
 # that outlives the whole leg is worthless, and a fixed 600 became the binding constraint the moment
@@ -36,6 +49,7 @@ state = {"model_requests": 0, "refused_over_cap": 0, "forwarded_other": 0, "upst
          "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "cap": CAP, "by_path": {},
          "profile": os.environ.get("CB2_PROFILE", ""), "model_expected": os.environ.get("CB2_MODEL", ""), "upstream": UPSTREAM, "upstream_ip": UPSTREAM_IP,
          "upstream_ips": os.environ.get("CB2_UPSTREAM_IPS", ""), "resolved_at": os.environ.get("CB2_RESOLVED_AT", ""), "key_injected": bool(KEY),
+         "upstream_scheme": SCHEME, "upstream_port": PORT, "upstream_reachable": False,
          "response_models": {}, "usage": {"responses_with_usage": 0, "prompt_tokens": 0, "completion_tokens": 0}}
 
 
@@ -110,7 +124,7 @@ class H(BaseHTTPRequestHandler):
         t_start = time.time()
         ctx = ssl.create_default_context()
         # by HOSTNAME (SNI and certificate match); the container resolves it through its hosts entry
-        conn = http.client.HTTPSConnection(UPSTREAM, 443, timeout=WALL, context=ctx)
+        conn = upstream_connection(SCHEME, UPSTREAM, PORT, WALL, ctx)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
         headers["Host"] = UPSTREAM
         if KEY:
@@ -241,12 +255,22 @@ class H(BaseHTTPRequestHandler):
         self._forward(False)
 
 
+def tcp_self_check():
+    """A raw TCP connect to the upstream on the declared port — the http-mode reachability proof."""
+    try:
+        import socket
+        with socket.create_connection((UPSTREAM, PORT), timeout=10):
+            return True
+    except Exception:
+        return False
+
+
 def tls_self_check():
     """A verified TLS handshake (CERT_REQUIRED + hostname check) to the upstream by hostname."""
     try:
         ctx = ssl.create_default_context()
         import socket
-        with socket.create_connection((UPSTREAM, 443), timeout=10) as raw:
+        with socket.create_connection((UPSTREAM, PORT), timeout=10) as raw:
             with ctx.wrap_socket(raw, server_hostname=UPSTREAM) as s:
                 return bool(s.getpeercert())
     except Exception:
@@ -255,6 +279,8 @@ def tls_self_check():
 
 if __name__ == "__main__":
     os.makedirs(os.path.dirname(COUNT_FILE), exist_ok=True)
-    state["tls_hostname_verified"] = tls_self_check()
+    # E.CB2-HTTP: a plain-HTTP upstream is reachable or not; it is never "verified", and the receipt says which.
+    state["tls_hostname_verified"] = tls_self_check() if SCHEME == "https" else False
+    state["upstream_reachable"] = tcp_self_check()
     persist()
     ThreadingHTTPServer(("0.0.0.0", 8080), H).serve_forever()

@@ -44,7 +44,7 @@ BR_EGRESS="br-$(docker network inspect cb2egress --format '{{.Id}}' | cut -c1-12
 iptables -N CB2-EGRESS 2>/dev/null || true
 iptables -F CB2-EGRESS
 iptables -A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-for IP in $CB2_UPSTREAM_IPS; do iptables -A CB2-EGRESS -s 172.30.1.0/24 -d "$IP" -p tcp --dport 443 -j ACCEPT; done
+for IP in $CB2_UPSTREAM_IPS; do iptables -A CB2-EGRESS -s 172.30.1.0/24 -d "$IP" -p tcp --dport "${CB2_UPSTREAM_PORT:-443}" -j ACCEPT; done
 iptables -A CB2-EGRESS -s 172.30.1.0/24 -j DROP
 # every DOCKER-USER rule that mentions our subnets goes, including previous jumps; then ONE jump at position 1
 for _ in $(seq 1 32); do
@@ -56,7 +56,7 @@ iptables -I DOCKER-USER 1 -j CB2-EGRESS
 # FAIL CLOSED: the chain must be EXACTLY the expected policy, in order, and the jump must be first.
 NL=$'\n'   # command substitution STRIPS trailing newlines, so the expected policy is joined explicitly
 EXPECT="-N CB2-EGRESS${NL}-A CB2-EGRESS -d 172.30.1.0/24 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT${NL}-A CB2-EGRESS -s 172.30.1.0/24 -d $IP/32 -p tcp -m tcp --dport 443 -j ACCEPT"; done
+for IP in $CB2_UPSTREAM_IPS; do EXPECT="$EXPECT${NL}-A CB2-EGRESS -s 172.30.1.0/24 -d $IP/32 -p tcp -m tcp --dport ${CB2_UPSTREAM_PORT:-443} -j ACCEPT"; done
 EXPECT="$EXPECT${NL}-A CB2-EGRESS -s 172.30.1.0/24 -j DROP"
 GOT=$(iptables -S CB2-EGRESS)
 [ "$GOT" = "$EXPECT" ] || { echo "CONTAINMENT NOT PROVEN: CB2-EGRESS is not the expected policy"; echo "--- got"; echo "$GOT"; echo "--- expected"; echo "$EXPECT"; exit 1; }
@@ -80,6 +80,6 @@ P=$(docker exec cb2probe-proxy python3 -c "$(cat "$HERE/probe_proxy.py")" 2>/dev
 TLS=$(docker exec cb2probe-proxy cat /tmp/c.json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('tls_hostname_verified'))")
 echo "work probe:  $W"; echo "proxy probe: $P"; echo "proxy tls_hostname_verified: $TLS"
 [ "$W" = "proxy-tcp ok / gateway-tcp blocked / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ] || { echo "CONTAINMENT NOT PROVEN (work)"; exit 1; }
-[ "$P" = "gateway-tls-verified ok / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ] || { echo "CONTAINMENT NOT PROVEN (proxy)"; exit 1; }
+GATE="gateway-tls-verified ok"; [ "${CB2_UPSTREAM_SCHEME:-https}" = http ] && GATE="gateway-tcp ok"; [ "$P" = "$GATE / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ] || { echo "CONTAINMENT NOT PROVEN (proxy)"; exit 1; }
 [ "$TLS" = "True" ] || { echo "PROXY TLS VERIFICATION NOT PROVEN"; exit 1; }
 echo "containment proven"

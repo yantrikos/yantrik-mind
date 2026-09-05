@@ -63,12 +63,12 @@ fn mask_token(tok: &str, mask_personal: bool) -> String {
     if core.len() < 7 {
         return tok.to_string();
     }
-    let prefix_len = tok.len()
-        - tok
-            .trim_start_matches(|c: char| !c.is_alphanumeric() && c != '@')
-            .len();
-    let head = &tok[..prefix_len];
-    let tail = &tok[prefix_len + core.len()..];
+    // E.REDACT1: `core` is a sub-slice of `tok`, so its offset is where it actually sits — never
+    // a second predicate's count. Two predicates disagreed on a leading `-`/`.`/`_`/`+` and the
+    // slice ran off the end (`-abcdefgh`: prefix 1 + core 9 = 10 of 9), killing the handler task.
+    let start = core.as_ptr() as usize - tok.as_ptr() as usize;
+    let head = &tok[..start];
+    let tail = &tok[start + core.len()..];
 
     // ── Credentials: masked on EVERY surface. ───────────────────────────────────────────────────
     // Known key prefixes first (highest precision), then the shape rule: long, no spaces, mixes
@@ -124,6 +124,16 @@ fn mask_token(tok: &str, mask_personal: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// E.REDACT1: the exact shape that panicked on staging (byte index 10 of 9).
+    #[test]
+    fn a_token_starting_with_a_kept_punctuation_char_does_not_run_off_the_end() {
+        for tok in ["-abcdefgh", ".abcdefgh", "_abcdefgh", "+abcdefgh", "-abcdefgh.", "(—endpoint"] {
+            let out = super::mask_token(tok, true);
+            assert!(!out.is_empty(), "{tok:?} -> {out:?}");
+        }
+        assert_eq!(super::mask_token("(connection", false), "(connection", "a plain word keeps its punctuation");
+    }
+
     use super::*;
 
     /// The stream rule: personal values are recognisable in shape, never in value.

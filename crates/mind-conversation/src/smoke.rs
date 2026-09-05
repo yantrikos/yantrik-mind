@@ -108,12 +108,20 @@ pub(crate) async fn smoke_findings(stream: &str) -> Vec<String> {
         ..mind_tools::sandbox::Limits::default()
     };
     let sb = mind_tools::Sandbox::new().hiding(crate::syntax::state_dir());
+    let n_files = files.len();
     let rendered = match sb.run_tree(lim, files, DRIVER).await {
         Ok(r) => r.render(),
-        Err(_) => return Vec::new(), // no sandbox here: say nothing
+        Err(e) => {
+            // No sandbox here: say nothing to the model, but leave the fact in the journal.
+            eprintln!("[smoke] sandbox unavailable here ({e}) - no start attempted");
+            return Vec::new();
+        }
     };
     let py = py_version(&rendered);
-    match verdict_from(&rendered) {
+    let verdict = verdict_from(&rendered);
+    // The one trace a witness on the box can look for: the start happened, and what it said.
+    eprintln!("[smoke] started {n_files} files under python {py}: {verdict:?}");
+    match verdict {
         Smoke::Answered(n) if n >= 500 => vec![format!(
             "`run.sh` starts the program (a sandboxed start here, under Python {py}), but `/` answers HTTP {n} — it is up and every request fails, so nothing that opens it can work. The last lines of its own log:\n{}\nFix the handler that serves `/` (a WSGI app must return an iterable of bytes — a list — never a bare str or bytes; a route must not raise).",
             log_tail(&rendered)

@@ -8531,6 +8531,34 @@ async fn emq6_v4_sealed_three_run_eval_on_owned_local_model() {
 
 // ── E.G1: THE WORLD MODEL BECOMES REACHABLE — LIVE INGESTION, SHADOWED CONSULT, ZERO AUTHORITY ──
 
+/// The bitemporal property that made the test below flaky, pinned so it cannot come back silently:
+/// a query whose `known_at` precedes the observation reads Unknown. The model does not claim to
+/// have known a fact before it saw it, which is the whole point of E.G1's honesty, and a test that
+/// asks it to is the thing that is wrong.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_world_model_never_claims_to_have_known_a_fact_before_it_saw_it() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let conv = ConversationEngine::new(
+        Arc::new(mem) as Arc<dyn MemoryFacade>,
+        InferencePool::new(Arc::new(ScriptedLLM::new("x")) as Arc<dyn LLMBackend>, 1),
+        "JARVIS",
+    );
+    let just_before = chrono::Utc::now().timestamp_millis();
+    conv.world_ingest_presence();
+    assert_eq!(
+        conv.world_shadow_presence(just_before - 5),
+        "unknown",
+        "5 ms before the observation the model had not seen it"
+    );
+    let after = chrono::Utc::now().timestamp_millis();
+    assert_eq!(
+        conv.world_shadow_presence(after),
+        "known:active",
+        "at or after the observation it has"
+    );
+}
+
+
 /// Gates (1) and (2): a handled turn ingests presence (Unknown before, Known after; Stale past
 /// the freshness window), and a knock evaluation writes a fully stamped world_shadow event.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -8547,13 +8575,18 @@ async fn the_world_model_sees_turns_and_shadows_the_knock() {
     let log = std::sync::Arc::new(mind_observability::DecisionLog::open(&dir.join("d.jsonl")));
     let conv = conv.with_recorder(log);
 
-    let now = chrono::Utc::now().timestamp_millis();
+    let before = chrono::Utc::now().timestamp_millis();
     assert_eq!(
-        conv.world_shadow_presence(now),
+        conv.world_shadow_presence(before),
         "unknown",
         "before any turn the model honestly knows nothing"
     );
     conv.world_ingest_presence();
+    // The query's known_at must be at or after the observation. Taking it BEFORE the ingest made
+    // this test pass only when both landed in the same millisecond, and fail under a loaded
+    // workspace run -- where the store answered Unknown, correctly, because as of that instant it
+    // had observed nothing. The test was wrong; the model was not.
+    let now = chrono::Utc::now().timestamp_millis();
     assert_eq!(
         conv.world_shadow_presence(now),
         "known:active",

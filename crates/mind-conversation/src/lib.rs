@@ -47,6 +47,7 @@ mod entrypoint;
 mod freshness;
 mod pyimports;
 mod repetition;
+mod links;
 mod runsh;
 mod smoke;
 mod syntax;
@@ -4324,6 +4325,34 @@ pub(crate) fn page_filename(required: Option<&str>, html: &str, name: Option<&st
         .unwrap_or_else(|| "page".to_string())
 }
 
+/// The directory a project's files land in: `YM_WEB_DIR` (or the default) plus the project slug.
+/// One definition, because E.LINKS1 needs to read the same directory the writer writes.
+pub(crate) fn published_root(project: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
+    std::path::Path::new(&dir).join(published_stem(project))
+}
+
+/// Paths already in the deliverable, relative to its root, subdirectories included. Empty when the
+/// directory does not exist, which is the first pass of every build.
+pub(crate) fn deliverable_files(project: &str) -> Vec<String> {
+    let root = published_root(project);
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(&root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn publish_file_set(
     project: &str,
     stream: &str,
@@ -4366,10 +4395,8 @@ pub(crate) fn publish_file_set(
     }
     // E.WIN6: a repeated path keeps its LAST definition instead of destroying the whole set.
     let planned = crate::fileset::plan_file_set(&parsed.entries).map_err(|r| r.message())?;
-    let dir =
-        std::env::var("YM_WEB_DIR").unwrap_or_else(|_| "/var/lib/yantrik-mind/public".to_string());
     let slug = published_stem(project);
-    let root = std::path::Path::new(&dir).join(&slug);
+    let root = published_root(project);
     std::fs::create_dir_all(&root).map_err(|e| format!("could not make the project directory: {e}"))?;
     let written = crate::fileset::write_file_set(&root, &planned).map_err(|e| e.to_string())?;
     let base = web_base_url();
@@ -14924,6 +14951,16 @@ impl RecipeHost for MindRecipeHost {
                         // E.RUNSH1: what `run.sh` asks the target to run that the target cannot —
                         // reading 8f's T1 said `python` on an image that has only `python3`.
                         findings.extend(crate::runsh::run_script_findings(stream));
+                        // E.LINKS1: a link is a promise about a file. Reading 9's T2 offered six
+                        // project and writing pages it never wrote — the single check that
+                        // separated the two systems, and invisible to every other rule here. The
+                        // deliverable as it NOW stands is passed in (this pass has already
+                        // written), so a build is never accused of a link its earlier pass
+                        // already satisfied.
+                        findings.extend(crate::links::dangling_link_findings(
+                            stream,
+                            &crate::deliverable_files(project),
+                        ));
                         // E.SMOKE1: start it in the sandbox and ask it for `/` — the one T1 cause
                         // of three that no static read sees (a 500 from a process that stays up).
                         findings.extend(crate::smoke::smoke_findings(stream).await);

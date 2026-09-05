@@ -8210,3 +8210,22 @@ Three findings, in decreasing order of how well they are supported:
 **Kill criteria.** (1) The R9 fixture fires **one** finding naming **exactly** the six missing pages, and none of the eight links that resolve. (2) `ferry.html` beside it, and a set where every link resolves, are silent. (3) Each silence rule has its own case. (4) A link satisfied by an earlier pass (present on disk, absent from this stream) is silent. (5) Corpus: over every artifact directory in `YM_ENTRY_CORPUS`, every path a finding names must genuinely be absent from that directory on disk — no false positive is tolerated, and the count of firing artifacts is reported rather than asserted to be zero, because the corpus now contains a genuinely broken artifact. (6) Mutants: the presence test deadened → the R9 case fails by name; the external-scheme skip removed → the silence case fails by name. (7) Full suite green before push; witnessed on staging.
 
 **Not claimed.** That this raises a score. It closes the one check that separated the two systems in R9, which is not the same thing, and the next reading is the measurement.
+
+**E.LINKS1 — BUILT (2026-09-05).** `links::dangling_link_findings(stream, present)` chained after `runsh` in `write_files`; `published_root` extracted so the writer and the check read one definition of the deliverable directory, and `deliverable_files` passes what is already on disk so a two-pass build is never accused of a link its own second pass satisfies. One journal line per judged set (`[links] checked N html file(s) against M known path(s): K finding(s)`), because a finding that only reaches the model leaves nothing on the box to witness.
+
+**Kill criteria, all met.**
+
+| criterion | result |
+|---|---|
+| 1. the real R9 artifact | one finding, **exactly the six** missing pages, none of the eight links that resolve |
+| 2–3. silence | fifteen cases: external, protocol-relative, `mailto:`, `tel:`, `data:`, `javascript:`, fragment, root-absolute, directory, `.json`, extensionless, climbing out of the root, `srcset`, unquoted, empty |
+| 4. earlier pass | a link satisfied on disk is silent; one still missing beside it still fires |
+| 5. corpus | **49 artifacts with html, 5 fire, 0 name a file that exists** |
+| 6. mutants | presence test deadened → four tests fail including the R9 one; scheme skip removed → the silence case fails, by name |
+| 7. suite | 861 in mind-conversation, workspace green |
+
+**Two things the corpus said that the prereg did not anticipate.** Of the five artifacts that fire, **four are Hermes's** (`out-r7/hermes_T2`, `out-r8g/hermes_T2`, and two void legs) and one is the Mind's R9 T2 — the dangling-link defect is one both systems make, and Hermes happened not to make it in the reading where it cost the Mind a check. And the corpus walk had to be tightened mid-flight: it first treated any directory holding a file as an artifact, so parent directories aggregated several builds into an imaginary set with relative paths belonging to no build. The no-false-positive assertion held even then, but the count it produced (19 of 442) was meaningless; the honest count is 5 of 49.
+
+**E.LINKS1's push found a latent flake in E.G1's test, and the model was not the one at fault.** The first full-workspace suite run after wiring the check failed on `the_world_model_sees_turns_and_shadows_the_knock` (860/861), and the same test passed alone three times and in two whole-crate runs. Diagnosis, from the code rather than from the symptom: the test captured `now` **before** `world_ingest_presence()` and then asserted `world_shadow_presence(now) == "known:active"`. The store is bitemporal, so a query whose `known_at` precedes the observation reads **Unknown** — correctly, and precisely because of the epistemic honesty E.G1 exists to have. The test therefore passed only when the ingest and the timestamp landed in the same millisecond, and a loaded workspace run is exactly what makes them not.
+
+Proven, not assumed: a new test ingests, then queries 5 ms *before* the observation and requires `unknown`, then queries after it and requires `known:active`. It passes, which is the mechanism demonstrated deterministically rather than inferred from one red run. The old assertion now takes its timestamp after the ingest and keeps all three of its claims (unknown before, known after, stale past the window). Nothing in `mind-world` changed, and nothing should have.

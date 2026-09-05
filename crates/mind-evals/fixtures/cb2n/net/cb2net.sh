@@ -72,7 +72,7 @@ iptables -S CB2-EGRESS | sed 's/^/rule: /'; iptables -S DOCKER-USER | sed -n 2p 
 # probes through a throwaway proxy at a fixed address
 docker rm -f cb2probe-proxy cb2probe-work >/dev/null 2>&1
 trap 'docker rm -f cb2probe-proxy cb2probe-work >/dev/null 2>&1' EXIT
-docker run -d --name cb2probe-proxy --network cb2egress --dns 127.0.0.1 --add-host "$CB2_UPSTREAM:$GW" -e CB2_UPSTREAM="$CB2_UPSTREAM" -e CB2_UPSTREAM_IP="$GW" -e CB2_CAP=1 -e CB2_COUNT_FILE=/tmp/c.json cb2n-proxy >/dev/null
+docker run -d --name cb2probe-proxy --network cb2egress --dns 127.0.0.1 --add-host "$CB2_UPSTREAM:$GW" -e CB2_UPSTREAM="$CB2_UPSTREAM" -e CB2_UPSTREAM_IP="$GW" -e CB2_CAP=1 -e CB2_UPSTREAM_SCHEME="${CB2_UPSTREAM_SCHEME:-https}" -e CB2_UPSTREAM_PORT="${CB2_UPSTREAM_PORT:-443}" -e CB2_COUNT_FILE=/tmp/c.json cb2n-proxy >/dev/null
 docker network connect --ip 172.30.0.9 cb2net cb2probe-proxy
 sleep 3
 W=$(docker run --rm --name cb2probe-work --network cb2net --dns 127.0.0.1 -e CB2_UPSTREAM_IP="$GW" -v "$HERE/probe_work.py:/probe.py:ro" python:3.13-slim python3 /probe.py 2>/dev/null)
@@ -81,5 +81,5 @@ TLS=$(docker exec cb2probe-proxy cat /tmp/c.json 2>/dev/null | python3 -c "impor
 echo "work probe:  $W"; echo "proxy probe: $P"; echo "proxy tls_hostname_verified: $TLS"
 [ "$W" = "proxy-tcp ok / gateway-tcp blocked / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ] || { echo "CONTAINMENT NOT PROVEN (work)"; exit 1; }
 GATE="gateway-tls-verified ok"; [ "${CB2_UPSTREAM_SCHEME:-https}" = http ] && GATE="gateway-tcp ok"; [ "$P" = "$GATE / internet-tcp blocked / host-ssh-tcp blocked / host-http-tcp blocked / dns blocked" ] || { echo "CONTAINMENT NOT PROVEN (proxy)"; exit 1; }
-[ "$TLS" = "True" ] || { echo "PROXY TLS VERIFICATION NOT PROVEN"; exit 1; }
+if [ "${CB2_UPSTREAM_SCHEME:-https}" = http ]; then REACH=$(docker exec cb2probe-proxy cat /tmp/c.json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('upstream_reachable'))"); echo "proxy upstream_reachable: $REACH"; [ "$REACH" = "True" ] || { echo "PROXY UPSTREAM REACHABILITY NOT PROVEN (http profile)"; exit 1; }; else [ "$TLS" = "True" ] || { echo "PROXY TLS VERIFICATION NOT PROVEN"; exit 1; }; fi
 echo "containment proven"

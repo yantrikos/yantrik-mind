@@ -1397,3 +1397,15 @@ rw('selftest/selftest.sh', [
      '# E.CB2-HTTP: the upstream leg opens the right kind of connection for the declared scheme.\n'
      'if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi'),
 ])
+# E.CB2-HTTP (probe path): the containment probe launches its own throwaway proxy; it must carry the
+# same scheme/port, and on an http profile the proof is reachability, not a TLS handshake.
+rw('net/cb2net.sh', [
+    ('-e CB2_CAP=1 ',
+     '-e CB2_CAP=1 -e CB2_UPSTREAM_SCHEME="${CB2_UPSTREAM_SCHEME:-https}" -e CB2_UPSTREAM_PORT="${CB2_UPSTREAM_PORT:-443}" '),
+    ('[ "$TLS" = "True" ] || { echo "PROXY TLS VERIFICATION NOT PROVEN"; exit 1; }',
+     'if [ "${CB2_UPSTREAM_SCHEME:-https}" = http ]; then REACH=$(docker exec cb2probe-proxy cat /tmp/c.json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get(\'upstream_reachable\'))"); echo "proxy upstream_reachable: $REACH"; [ "$REACH" = "True" ] || { echo "PROXY UPSTREAM REACHABILITY NOT PROVEN (http profile)"; exit 1; }; else [ "$TLS" = "True" ] || { echo "PROXY TLS VERIFICATION NOT PROVEN"; exit 1; }; fi'),
+])
+rw('MANIFEST.json', [
+    ("the proxy's own startup handshake is recorded as tls_hostname_verified.",
+     "the proxy's own startup handshake is recorded as tls_hostname_verified (E.CB2-HTTP: on an http profile the proxy probe prints 'gateway-tcp ok' instead and the startup proof is upstream_reachable; nothing is hostname-verified there, by design)."),
+])

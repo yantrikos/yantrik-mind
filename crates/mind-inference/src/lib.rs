@@ -337,6 +337,16 @@ pub fn household_callsite_stats() -> Vec<(String, u64)> {
     rows
 }
 
+/// E.MSG3: the journal line for a failed private-lane call. A `why` that already relays the
+/// client's own "timed out after …" sentence is printed alone; any other reason carries the detail.
+pub fn failure_line(why: &str, detail: &str) -> String {
+    if why.contains("timed out after ") {
+        why.to_string()
+    } else {
+        format!("{why}: {detail}")
+    }
+}
+
 /// Name the condition behind a failed private-lane call, from the error text. Every branch
 /// used to collapse into "the local lane is unreachable"; E.MSG1 found a 5 s call timeout reported
 /// that way — true for the caller, wrong for the operator, who then checks the network instead of
@@ -1031,7 +1041,7 @@ impl InferencePool {
                     // fix (fewer permits, more slots) than an outage.
                     let detail = format!("{e:#}");
                     let (why, hint) = lane_failure(&detail);
-                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {why}: {detail}");
+                    eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {}", failure_line(&why, &detail));
                     return Err(anyhow::anyhow!(
                         "private inference unavailable — {why}; refusing to route private context to a cloud provider. Fix: {hint}"
                     ));
@@ -4952,6 +4962,18 @@ mod lane_failure_tests {
         assert!(why.contains("after 5 s") && why.contains("qwen3.8:27b-q4_K_M"), "{why}");
         assert!(!why.contains("300"), "must not add the model-less number: {why}");
         assert!(hint.contains("YM_LLM_TIMEOUT_MODELS"), "{hint}");
+    }
+
+    #[test]
+    fn the_journal_line_says_a_relayed_timeout_once_and_keeps_the_detail_otherwise() {
+        use super::failure_line;
+        let d = "Ollama API request failed: timed out after 5 s waiting for qwen3.8:27b-q4_K_M (YM_LLM_TIMEOUT_MODELS / YM_LLM_TIMEOUT_S)";
+        let (why, _) = lane_failure(d);
+        let line = failure_line(&why, d);
+        assert_eq!(line.matches("timed out after 5 s").count(), 1, "{line}");
+        let (why429, _) = lane_failure("HTTP 429 after retries");
+        let line429 = failure_line(&why429, "HTTP 429 after retries");
+        assert!(line429.contains("RATE LIMITING") && line429.ends_with("HTTP 429 after retries"), "{line429}");
     }
 
     #[test]

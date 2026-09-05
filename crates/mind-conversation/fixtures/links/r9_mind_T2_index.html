@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arjun Mehta — Software Engineer</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a href="index.html" class="logo">Arjun Mehta</a>
+    <nav aria-label="Primary">
+      <a href="index.html#projects">Projects</a>
+      <a href="index.html#writing">Writing</a>
+      <a href="index.html#contact">Contact</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="container">
+      <p class="eyebrow">Software Engineer</p>
+      <h1>I build reliable systems and write about the craft.</h1>
+      <p class="lede">Arjun Mehta — backend engineer focused on distributed systems, developer tooling, and performance. Previously at Stripe and Datadog. Based in New York.</p>
+      <a href="#contact" class="btn">Get in touch</a>
+    </div>
+  </section>
+
+  <section id="projects" class="section">
+    <div class="container">
+      <h2>Selected Projects</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Ferry</h3>
+          <p>A lightweight job queue for Node.js with at-least-once delivery, retries with exponential backoff, and a pluggable storage layer. Used in production by two startups.</p>
+          <ul class="tags"><li>TypeScript</li><li>Redis</li><li>Node.js</li></ul>
+          <a href="projects/ferry.html">Case study →</a>
+        </article>
+        <article class="card">
+          <h3>Ledgerline</h3>
+          <p>A double-entry bookkeeping library with immutable event sourcing and SQLite persistence. Handles 10k writes/sec on a single node.</p>
+          <ul class="tags"><li>Go</li><li>SQLite</li><li>Event Sourcing</li></ul>
+          <a href="projects/ledgerline.html">Case study →</a>
+        </article>
+        <article class="card">
+          <h3>Patchwork</h3>
+          <p>A CLI that diffs two PostgreSQL schemas and generates safe, reversible migration SQL. Catches destructive changes before they ship.</p>
+          <ul class="tags"><li>Rust</li><li>PostgreSQL</li><li>CLI</li></ul>
+          <a href="projects/patchwork.html">Case study →</a>
+        </article>
+        <article class="card">
+          <h3>Tidepool</h3>
+          <p>A self-hosted dashboard for monitoring background workers: latency percentiles, failure rates, and per-job traces with zero code changes.</p>
+          <ul class="tags"><li>Python</li><li>Prometheus</li><li>React</li></ul>
+          <a href="projects/tidepool.html">Case study →</a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="writing" class="section section-alt">
+    <div class="container">
+      <h2>Writing</h2>
+      <div class="writing-list">
+        <article class="writing-item">
+          <h3><a href="writing/backpressure.html">Backpressure is a Feature, Not a Bug</a></h3>
+          <p class="meta">March 2025 · 6 min read</p>
+          <p>Why shedding load gracefully is the difference between a degraded service and a dead one.</p>
+        </article>
+        <article class="writing-item">
+          <h3><a href="writing/sqlite-at-scale.html">SQLite at Scale: What Actually Breaks</a></h3>
+          <p class="meta">January 2025 · 8 min read</p>
+          <p>Lessons from running a write-heavy workload on SQLite in production for two years.</p>
+        </article>
+        <article class="writing-item">
+          <h3><a href="writing/reviewing-migrations.html">Reviewing Database Migrations Like a Reviewer</a></h3>
+          <p class="meta">November 2024 · 5 min read</p>
+          <p>A checklist for catching the migration mistakes that only show up at 3am.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="contact" class="section">
+    <div class="container contact-inner">
+      <h2>Contact</h2>
+      <p>I'm open to consulting, advisory work, and interesting engineering problems.</p>
+      <p><a href="mailto:arjun@arjunmehta.dev" class="btn">arjun@arjunmehta.dev</a></p>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>© 2025 Arjun Mehta. Built by hand.</p>
+  </div>
+</footer>
+</body>
+</html>
+

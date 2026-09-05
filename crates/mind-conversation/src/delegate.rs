@@ -101,23 +101,7 @@ const MAKE_VERBS: &[&str] = &[
 /// AVOID the words "site", "page" and "dashboard" to reach the coder; the router should never
 /// make the caller do that.
 fn mentions_codebase(tl: &str) -> bool {
-    // Location phrasings only. A bare "repo" is NOT a marker: "a dashboard showing my repos" is a
-    // page ABOUT repositories, not an edit to one — the noun has to be where the work happens
-    // ("in the repo"), not what the artifact displays.
-    const MARKERS: &[&str] = &[
-        "codebase",
-        "source tree",
-        "source files",
-        "the source",
-        "existing code",
-        "our code",
-        "crates/",
-        "in the repo",
-        "in our repo",
-        "in this repo",
-        "in my repo",
-    ];
-    if MARKERS.iter().any(|m| tl.contains(m)) {
+    if names_existing_code(tl) {
         return true;
     }
     // A concrete source-file extension is as decisive as naming the repo. Word-boundary on the
@@ -135,6 +119,30 @@ fn mentions_codebase(tl: &str) -> bool {
                 .unwrap_or(true)
         })
     })
+}
+
+/// Location phrasings only. A bare "repo" is NOT a marker: "a dashboard showing my repos" is a
+/// page ABOUT repositories, not an edit to one — the noun has to be where the work happens
+/// ("in the repo"), not what the artifact displays.
+const MARKERS: &[&str] = &[
+    "codebase",
+    "source tree",
+    "source files",
+    "the source",
+    "existing code",
+    "our code",
+    "crates/",
+    "in the repo",
+    "in our repo",
+    "in this repo",
+    "in my repo",
+];
+
+/// The location phrasings alone, without the extension rule. E.CODERDEAD2b: a filename in a
+/// from-scratch brief ("notes.py") is code for ROUTING purposes, but it is not evidence that
+/// files already exist, so it is no grounds to refuse when the coder is dead.
+fn names_existing_code(tl: &str) -> bool {
+    MARKERS.iter().any(|m| tl.contains(m))
 }
 
 /// Things that are produced as a FILE or a PAGE — the artifact nouns.
@@ -2016,7 +2024,7 @@ impl super::ConversationEngine {
         // This now fires whenever nothing here can serve the KIND the brief actually is, which is
         // the honest outcome: the previous behaviour was to run something else and call it done.
         if let Some(dead) = self.coder_dead_reason() {
-            if refuse_dead_codebase(classified, floor, true, mentions_codebase(&task.to_lowercase())) {
+            if refuse_dead_codebase(classified, floor, true, names_existing_code(&task.to_lowercase())) {
                 return format!(
                     "({dead}; this task edits existing files, which the build path cannot do. Fix the provider or credential and restart the mind.)"
                 );
@@ -3224,6 +3232,16 @@ mod tests {
         assert_eq!(n, "quant-check");
         assert!(t.starts_with("compare"));
         assert_eq!(k, "research");
+    }
+
+    #[test]
+    fn a_filename_in_a_from_scratch_brief_is_not_grounds_to_refuse() {
+        // E.CODERDEAD2b: job 3 of the staging witness, verbatim, was refused as "edits existing files".
+        let from_scratch = "write a small python cli, notes.py, that adds and lists notes in a sqlite file";
+        assert!(!names_existing_code(from_scratch), "a target filename is not an existing file");
+        assert!(mentions_codebase(from_scratch), "...but for routing it still means code, not a page");
+        let existing = "improve the existing code in /var/lib/yantrik-mind/public/x - add a 'delete <id>' command to leads.py";
+        assert!(names_existing_code(existing));
     }
 
     #[test]

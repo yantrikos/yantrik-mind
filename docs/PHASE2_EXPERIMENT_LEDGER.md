@@ -7762,3 +7762,6 @@ Unique names, status pinned per row. **Job 1** `dd1-001525` (existing files) →
 
 ### E.CODERDEAD2b — PREREG: refuse on location phrasings only
 Split `mentions_codebase` into `names_existing_code(tl)` (the MARKERS: "existing code", "in the repo", "crates/", …) and the extension rule; routing keeps both, the dead-coder refusal uses the markers only. **Tests:** "write a small Python CLI, notes.py, …" is not refused; "improve the existing code in /var/lib/…" is. **Mutant:** the markers-only fn delegating to the full rule → the notes.py test fails by name. **Witness:** job 3 of the same script answers "(building — …) the coder lane is dead since … — endpoint unreachable…; building on the mind's own path instead." with no run directory.
+
+### E.CODERDEAD2b — BUILT: the refusal keys on location phrasings only
+`names_existing_code(tl)` = the MARKERS alone; `mentions_codebase` keeps the extension rule for routing. Test: "write a small python cli, notes.py, …" is not grounds to refuse yet still routes as code; "improve the existing code in /var/lib/…" is. Mutant (markers-only fn delegating to the full rule) failed by name. Full suite green. Witness: job 3 of the staging script.

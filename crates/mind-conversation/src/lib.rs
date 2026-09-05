@@ -5733,6 +5733,11 @@ impl ConversationEngine {
         mark_coder_dead(&self.coder_dead, reason);
     }
 
+    #[cfg(test)]
+    pub(crate) fn bg_jobs_for_test(&self) -> usize {
+        self.bg_jobs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn with_coder(mut self, coder: Arc<Coder>) -> Self {
         self.coder = Some(coder);
         self

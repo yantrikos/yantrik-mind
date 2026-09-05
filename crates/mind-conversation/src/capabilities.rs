@@ -523,20 +523,40 @@ impl CapabilityHandler for CoderCapability {
         if task.len() < 3 {
             return Some("(what should I build? describe the script/task)".to_string());
         }
+        // E.CODERDEAD1: this is the third door to the coder (after `delegate` and `code:`); the
+        // dead lane must be dead here too, or the agent pays for the refusal the others refused.
+        if let Some(dead) = host.coder_dead_reason() {
+            return Some(format!("{dead}. Fix the provider or credential and restart the mind."));
+        }
         Some(match &host.coder {
             Some(c) => {
                 if !host.try_acquire_bg(2) {
                     return Some("(I've got a couple of background jobs running already — let those finish and ask again.)".to_string());
                 }
-                let (c, q, jobs, task2) = (
+                let (c, q, jobs, task2, dead_slot) = (
                     c.clone(),
                     host.notify_queue.clone(),
                     host.bg_jobs.clone(),
                     task.clone(),
+                    host.coder_dead.clone(),
                 );
                 tokio::spawn(async move {
                     let out = match c.run(&task2).await {
-                        Ok(r) => format!("🛠️ Code — {task2}:\n\n{}", mind_tools::render_coder(&r)),
+                        Ok(r) => {
+                            let marked = if !r.ok && r.files.is_empty() {
+                                mind_tools::coder::provider_refusal(&r.summary).map(|why| {
+                                    crate::mark_coder_dead(&dead_slot, why);
+                                    format!("\n\n(the coder lane is now marked dead: {why} — fix the provider or credential and restart the mind)")
+                                })
+                            } else {
+                                None
+                            };
+                            format!(
+                                "🛠️ Code — {task2}:\n\n{}{}",
+                                mind_tools::render_coder(&r),
+                                marked.unwrap_or_default()
+                            )
+                        }
                         Err(e) => format!("🛠️ Code — \"{task2}\" failed: {e}"),
                     };
                     q.lock().unwrap().push(out);

@@ -686,3 +686,28 @@ async fn a_dead_coder_lane_is_absent_from_the_kinds_and_says_why() {
     let why = conv.coder_dead_reason().expect("the reason survives");
     assert!(why.contains("dead since") && why.contains("UTC") && why.contains("credential denied (403)"), "{why}");
 }
+
+/// E.CODERDEAD1: the agent's `code` tool is the third door to the coder; against a dead lane it
+/// answers with the reason and spawns nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agents_code_tool_refuses_a_dead_lane_with_the_reason_and_spends_nothing() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CountingBackend { calls: calls.clone() }) as Arc<dyn LLMBackend>;
+    let pool = InferencePool::new(backend, 2);
+    let coder = Arc::new(mind_tools::coder::Coder::new("t", "m", "https://example.invalid", "/tmp"));
+    let conv = ConversationEngine::new(mem.clone(), pool, "JARVIS").with_coder(coder);
+    conv.set_coder_dead_for_test("quota exhausted (429)");
+    let cap = crate::capabilities::CoderCapability;
+    let reply = crate::plugins::CapabilityHandler::handle_tool(
+        &cap,
+        &conv,
+        "code",
+        &serde_json::json!({"task": "write a one-line python script that prints hi"}),
+    )
+    .await
+    .expect("the tool answers");
+    assert!(reply.contains("dead since") && reply.contains("quota exhausted (429)"), "{reply}");
+    assert!(!reply.starts_with("On it"), "must not dispatch a run: {reply}");
+    assert_eq!(conv.bg_jobs_for_test(), 0, "nothing was spawned");
+}

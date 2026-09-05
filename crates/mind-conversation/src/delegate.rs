@@ -902,6 +902,18 @@ pub(crate) fn code_job_status(ok: bool, n_files: usize) -> &'static str {
     }
 }
 
+/// The sentence appended to a delegate reply when a `code`-classified task did not run on the coder
+/// because the lane is dead (E.CODERDEAD1). Empty when the coder ran, or when the task was never
+/// code. Pure, so both reply sites say the same thing.
+pub(crate) fn dead_note(classified: &str, kind: &str, dead_reason: Option<&str>) -> String {
+    match dead_reason {
+        Some(r) if classified == "code" && kind != "code" => {
+            format!(" {r}; building on the mind's own path instead.")
+        }
+        _ => String::new(),
+    }
+}
+
 /// Which judge a delegated build gets. The critic call is `Private` on purpose (E.SEC15: a judge
 /// over an unbounded delegated payload defaults Private), so a named critic outside
 /// `YM_PRIVATE_PROVIDERS` can never serve it. E.CRITIC1 found both boxes configured exactly so —
@@ -2122,7 +2134,8 @@ impl super::ConversationEngine {
                 q.lock().unwrap().push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
-            return format!("(building — `ym jobs` to watch it; id {id})");
+            let note = dead_note(classified, kind, self.coder_dead_reason().as_deref());
+            return format!("(building — `ym jobs` to watch it; id {id}){note}");
         }
         if kind == "page" {
             let engine = self.recipes.clone().unwrap();
@@ -2623,14 +2636,8 @@ impl super::ConversationEngine {
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
         }
-        let dead_note = if classified == "code" && kind != "code" {
-            self.coder_dead_reason()
-                .map(|r| format!(" {r}; building on the mind's own path instead."))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        format!("🧰 Delegated [{id}] \"{name}\" ({kind}).{dead_note} It's on the board — `ym jobs` — and the result lands in chat.")
+        let note = dead_note(classified, kind, self.coder_dead_reason().as_deref());
+        format!("🧰 Delegated [{id}] \"{name}\" ({kind}).{note} It's on the board — `ym jobs` — and the result lands in chat.")
     }
 
     /// `ym jobs [json | checkpoints/resume/rollback <id> | keep/drop/delete <id>]` — the board,
@@ -3202,6 +3209,16 @@ mod tests {
         assert_eq!(n, "quant-check");
         assert!(t.starts_with("compare"));
         assert_eq!(k, "research");
+    }
+
+    #[test]
+    fn the_dead_note_names_the_reason_only_when_code_was_rerouted() {
+        let r = Some("the coder lane is dead since 23:54 UTC — endpoint unreachable (connection refused)");
+        let n = dead_note("code", "build", r);
+        assert!(n.contains("dead since 23:54 UTC") && n.contains("building on the mind's own path instead"), "{n}");
+        assert_eq!(dead_note("code", "code", r), "", "the coder ran: nothing to explain");
+        assert_eq!(dead_note("research", "research", r), "", "never code: nothing to explain");
+        assert_eq!(dead_note("code", "build", None), "", "alive: the substitution needs no excuse");
     }
 
     #[test]

@@ -711,3 +711,10 @@ async fn the_agents_code_tool_refuses_a_dead_lane_with_the_reason_and_spends_not
     assert!(!reply.starts_with("On it"), "must not dispatch a run: {reply}");
     assert_eq!(conv.bg_jobs_for_test(), 0, "nothing was spawned");
 }
+
+/// E.CODERDEAD4: the worker path's local fallback is the fourth door.
+#[test]
+fn the_local_fallback_after_a_worker_error_is_closed_while_the_lane_is_dead() {
+    assert!(crate::local_fallback_allowed(false), "alive: fall back as before");
+    assert!(!crate::local_fallback_allowed(true), "dead: no local run, no spend");
+}

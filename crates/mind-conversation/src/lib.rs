@@ -5118,6 +5118,12 @@ impl CoderDeath {
     }
 }
 
+/// E.CODERDEAD4: may the `code:` path fall back to the LOCAL coder after a worker error?
+/// Not when the lane is dead — that is the same refusal the other doors already declined to pay.
+pub(crate) fn local_fallback_allowed(coder_dead: bool) -> bool {
+    !coder_dead
+}
+
 pub(crate) fn mark_coder_dead(slot: &Arc<std::sync::Mutex<Option<CoderDeath>>>, reason: &str) {
     if let Ok(mut g) = slot.lock() {
         if g.is_none() {
@@ -14301,9 +14307,16 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                     match workers.run_coder(&task, "MiniMax-M2", 260).await {
                         Ok(out) => out,
                         Err(e) => match &self.coder {
+                            // E.CODERDEAD4: production has workers; the local fallback must not pay
+                            // for a refusal the delegate door already refused.
+                            Some(_) if !local_fallback_allowed(self.coder_dead_reason().is_some()) => {
+                                format!("(worker busy: {e}) — {}. Fix the provider or credential and restart the mind.", self.coder_dead_reason().unwrap_or_default())
+                            }
                             Some(c) => match c.run(&task).await {
                                 Ok(r) => format!(
-                                    "(worker busy: {e}) — coded locally:\n\n{}",
+                                    "(worker busy: {e}) — coded locally:
+
+{}",
                                     mind_tools::render_coder(&r)
                                 ),
                                 Err(e2) => format!("Coder failed (worker: {e}; local: {e2})"),

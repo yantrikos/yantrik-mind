@@ -47,6 +47,7 @@ mod entrypoint;
 mod freshness;
 mod pyimports;
 mod repetition;
+mod runsh;
 mod syntax;
 mod required_literals;
 mod cloud_photos;
@@ -14919,6 +14920,9 @@ impl RecipeHost for MindRecipeHost {
                         // a port, it repeats nothing. Unlike its neighbours this fires on the
                         // ABSENCE of a read, so everything it cannot read confidently stays quiet.
                         findings.extend(crate::freshness::stale_route_findings(stream));
+                        // E.RUNSH1: what `run.sh` asks the target to run that the target cannot —
+                        // reading 8f's T1 said `python` on an image that has only `python3`.
+                        findings.extend(crate::runsh::run_script_findings(stream));
                         // E.SYNTAX1: a written .py that does not parse. The forge has checked
                         // this since E.FORGE1 with the same sandbox and the same ast.parse; the
                         // build lane never did, and a real artifact shipped with a JavaScript

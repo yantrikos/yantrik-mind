@@ -1440,3 +1440,42 @@ rw('selftest/verdict_cases.py', [
      '    ("shape_http_unreachable",   dict(tls_verified=False, upstream_scheme="http", upstream_reachable=False), False),\n'
      '    ("shape_https_unreachable_claim", dict(tls_verified=False, upstream_scheme="https", upstream_reachable=True), False),\n'),
 ])
+
+# ── E.CB2-TALLY1: an empty model id is not a model claim ─────────────────────────────────────
+# The Hermes rerun of R8c was disqualified because two streamed chat-completion responses carried
+# "model": "" and the tally counted the empty string as a model id that did not match the profile.
+rw('proxy/proxy.py', [
+    ('        models = {o.get("model") for o in objs if isinstance(o, dict) and isinstance(o.get("model"), str)}\n',
+     '        models = tally_models(objs)\n'),
+    ('def tls_self_check():',
+     'def tally_models(objs):\n'
+     '    """The model ids a response actually claims: non-empty strings only. E.CB2-TALLY1 — an empty\n'
+     '    string in a streamed object is not a claim, and it disqualified a leg by mismatching the profile."""\n'
+     '    return {o["model"].strip() for o in objs\n'
+     '            if isinstance(o, dict) and isinstance(o.get("model"), str) and o["model"].strip()}\n'
+     '\n'
+     '\n'
+     'def tls_self_check():'),
+])
+new('selftest/tally_cases.py',
+    '"""E.CB2-TALLY1: drives proxy.tally_models. Exits 1 on any disagreement."""\n'
+    'import importlib.util, os, sys\n'
+    'HERE = os.path.dirname(os.path.abspath(__file__))\n'
+    'spec = importlib.util.spec_from_file_location("cb2proxy", os.path.join(HERE, "..", "proxy", "proxy.py"))\n'
+    'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+    'CASES = [\n'
+    '    ("empty_id_is_not_a_claim", [{"model": "gpt-oss-backup:20b"}, {"model": ""}], {"gpt-oss-backup:20b"}),\n'
+    '    ("only_empty_is_none",       [{"model": ""}, {"model": "  "}],                 set()),\n'
+    '    ("junk_ignored",            [{"model": 3}, "x", None, {"id": "y"}],           set()),\n'
+    '    ("two_models_both_count",   [{"model": "a"}, {"model": "b "}],                 {"a", "b"}),\n'
+    ']\n'
+    'bad = 0\n'
+    'for name, objs, want in CASES:\n'
+    '    got = m.tally_models(objs); ok = got == want; bad |= not ok\n'
+    '    print(f"{name}: {\'agree\' if ok else \'DISAGREE\'} got={sorted(got)} want={sorted(want)}")\n'
+    'sys.exit(1 if bad else 0)\n')
+rw('selftest/selftest.sh', [
+    ('if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi',
+     'if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi\n'
+     'if python3 "$FIX/selftest/tally_cases.py" >/dev/null; then echo "tally_cases: agree"; else echo "tally_cases: DISAGREE"; BAD=1; fi'),
+])

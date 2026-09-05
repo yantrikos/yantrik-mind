@@ -230,7 +230,7 @@ class H(BaseHTTPRequestHandler):
                         objs.append(json.loads(line[6:]))
                     except Exception:
                         pass
-        models = {o.get("model") for o in objs if isinstance(o, dict) and isinstance(o.get("model"), str)}
+        models = tally_models(objs)
         usage = None
         for o in objs:
             if isinstance(o, dict) and isinstance(o.get("usage"), dict):
@@ -263,6 +263,13 @@ def tcp_self_check():
             return True
     except Exception:
         return False
+
+
+def tally_models(objs):
+    """The model ids a response actually claims: non-empty strings only. E.CB2-TALLY1 — an empty
+    string in a streamed object is not a claim, and it disqualified a leg by mismatching the profile."""
+    return {o["model"].strip() for o in objs
+            if isinstance(o, dict) and isinstance(o.get("model"), str) and o["model"].strip()}
 
 
 def tls_self_check():

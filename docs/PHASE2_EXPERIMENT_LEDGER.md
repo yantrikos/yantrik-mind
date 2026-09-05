@@ -7788,3 +7788,12 @@ Run dirs 8 → **9** after job 1 (`❌ failed`, lane marked), then **9, 9, 9**: 
 
 ### E.URL2 — BUILT: the vision lane has no compiled box address
 `vision_ollama_base(vision_url, private_url)` — `YM_OLLAMA_LOCAL_URL`, else `YM_LOCAL_OLLAMA_URL`, else `None`; `VisionClient::from_env` returns `None` with one `[vision] no local Ollama configured — set …` line, the same shape every cloud provider there already has. Zero `192.168.4.35` literals left in mind-tools. The test caught a bug the rewrite had inherited: `…/v1/` kept its suffix because the slash was stripped after `/v1`, not before. Mutant (absent → the old literal) failed by name. Both boxes set the knob, so no box witness; full suite before push.
+
+### E.CODERDEAD3 — PREREG: the job board tells
+`status` is the studies report, not a system status; the place an operator looks for delegations is `jobs`. **Change:** pure `board_banner(dead: Option<&str>) -> String` — "⚠ <sentence>. Code delegations fall to the build path; tasks that edit existing files are refused.\n" or empty — prepended at the one `render_board` call in `jobs_report_cmd`; the `jobs json` branch gains `"coder_dead": <sentence|null>` so the cockpit can show it. **Test:** banner text for a dead lane, empty for a live one; mutant: banner always empty → fails by name. **Witness:** after marking the lane on staging, `jobs` opens with the banner.
+
+### E.AGENTRETRY1 — DEPLOYED to staging (`b65bf25`) and WITNESSED
+Lane marked by one dead-port job; then `code: write a script that prints the current date`: journal shows **one** `[agent] step 0: code raw args …` and `turn done: 0 steps in 17s … no tools` — no second invocation, reply in 18 s (the earlier pass ran past 120 s retrying). Env restored, one mind. **Wrinkle, filed:** the console body of that turn was empty; the terminal tool reply ended the turn but where it was *delivered* in headless mode is not visible on `/cli` — E.AGENTRETRY2 to find the delivery surface (the notify queue, most likely) and make the console echo it.
+
+### E.CODERDEAD3 — BUILT: the job board tells
+`board_banner(dead)` prepended at the one `render_board` call in `jobs_report_cmd`; `jobs json` carries `"coder_dead"`. Test: banner for a dead lane, empty for a live one; mutant (banner always empty) failed by name. Full suite green. (Two escape slips in the test literal along the way; the compiler's pointer, not my grep, found the line.)

@@ -1320,6 +1320,16 @@ pub(crate) async fn scratch_note(memory: &Arc<dyn MemoryFacade>, id: &str, text:
         .await;
 }
 
+/// E.CODERDEAD3: the board tells. A dead coder lane is the first line an operator reads on
+/// `jobs`, with what it means for the next delegation — not something to discover per job.
+pub(crate) fn board_banner(dead: Option<&str>) -> String {
+    match dead {
+        Some(d) => format!("⚠ {d}. Code delegations fall to the build path; tasks that edit existing files are refused.
+"),
+        None => String::new(),
+    }
+}
+
 pub(crate) fn render_board(rows: &[serde_json::Value], now_ms: i64) -> String {
     if rows.is_empty() {
         return "🧰 No delegations yet. `ym delegate <name>: <task>` starts one — research by default, \
@@ -2692,7 +2702,7 @@ impl super::ConversationEngine {
                 }
                 out.push(r);
             }
-            return serde_json::json!({ "jobs": out }).to_string();
+            return serde_json::json!({ "jobs": out, "coder_dead": self.coder_dead_reason() }).to_string();
         }
         if let Some(args) = rest.strip_prefix("resume ") {
             let mut args = args.split_whitespace();
@@ -3158,7 +3168,7 @@ impl super::ConversationEngine {
                 }
             }
         }
-        render_board(&rows, now)
+        format!("{}{}", board_banner(self.coder_dead_reason().as_deref()), render_board(&rows, now))
     }
 
     /// PROMOTION GATE — the one door from a job's scratch into the mind's real memory. Writes an
@@ -3251,6 +3261,13 @@ mod tests {
         assert!(!refuse_dead_codebase("code", "build", false, true), "no coder configured at all is E.PORT1-B's case, not this one");
         assert!(!refuse_dead_codebase("code", "code", true, true), "the coder ran (flag set mid-flight): not this path");
         assert!(!refuse_dead_codebase("research", "research", true, true));
+    }
+
+    #[test]
+    fn the_board_banner_tells_a_dead_lane_and_is_silent_for_a_live_one() {
+        let b = board_banner(Some("the coder lane is dead since 00:31 UTC — endpoint unreachable (connection refused)"));
+        assert!(b.starts_with("⚠ the coder lane is dead since 00:31 UTC") && b.contains("refused") && b.ends_with('\n'), "{b}");
+        assert_eq!(board_banner(None), "");
     }
 
     #[test]

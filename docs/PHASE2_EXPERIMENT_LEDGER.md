@@ -8178,3 +8178,21 @@ Six legs, **zero voids, zero upstream HTTP errors, no reruns**. Run state `5a0ec
 1. **Build-lane headline.** RESULT.md reads "🛠️ I couldn't finish the build: nothing was written: the generation hit its token limit and server.py was cut … THEN, finishing the set: … (1 files: server.py)" — and the driver recorded `status: failed` for an artifact that passed 11/11. The cumulative message leads with pass 1's failure sentence after pass 2 finished the set. E.ROUND2's cousin in the build lane: the headline must describe the set as it stands.
 2. **Dangling internal links** (T2, 5/6): `index.html` links six pages that were never written. A write-step check in the inverted-risk tradition — an internal `href` to a path absent from the written set is explicit evidence — would have named all six before delivery. Candidate E.LINKS1.
 3. The build note "the stream ended without a newline, so server.py may be incomplete" fired again on a complete file (known; low value).
+
+**E.CB2-R9 — the efficiency question, measured rather than eyeballed (2026-09-05).** From the receipts of all five readings, not from wall-clock impressions:
+
+| reading | model | Mind reqs | Hermes reqs | Mind wall | Hermes wall | Mind tokens | Hermes tokens |
+|---|---|---|---|---|---|---|---|
+| R8e | local 20B | 9 | 13 | 417 s | 206 s | *unreported* | 60,387 |
+| R8f | local 20B | 9 | 18 | 227 s | 145 s | *unreported* | 135,219 |
+| R8g | local 20B | 10 | 21 | 478 s | 238 s | *unreported* | 124,917 |
+| R8h | local 20B | 9 | 15 | 584 s | 188 s | *unreported* | 94,240 |
+| **R9** | **NIM V4 Pro** | **12** | **58** | **981 s** | **2,390 s** | **49,352** | **778,772** |
+
+Three findings, in decreasing order of how well they are supported:
+
+1. **Request count is the durable gap.** The Mind spends 9–12 model requests on the whole three-task sequence in every reading; Hermes spends 13–58. It holds on both models and in all five readings.
+2. **Token cost on R9 is 15.8× (prompt tokens 26.5×).** Hermes re-sends its transcript on every tool-call turn, so its prompt cost grows with the square of its turns while its *completion* tokens are only 1.7× the Mind's. This is one reading; the mechanism is architectural and the same shape the coder loop's own `--continue` warning describes.
+3. **Wall time is NOT a durable Mind advantage, and the R9 reading is the exception.** On the local 20B the Mind was consistently *slower* — 417 vs 206, 227 vs 145, 478 vs 238, 584 vs 188. The Mind's few large generations lose to Hermes's many short turns when per-request latency is small, and win when it is large. "A third of the time" is a fact about NIM V4 Pro, not about the two systems.
+
+**Residual filed — the Mind's own spend is unmeasurable on the local profile.** Its `usage_prompt_tokens` / `usage_completion_tokens` read 0 in all four local-20B readings while Hermes's are populated on the same profile and both are populated on NIM. The Mind's streamed requests do not carry usage back, so four readings can compare requests but not tokens. Zero is a missing measurement, never a cost of zero, and nothing in the ledger may read it as one. Candidate E.USAGE1: ask for usage on the streamed path (`stream_options.include_usage`, already sent by the coder gateway) so spend is comparable on every profile.

@@ -7921,3 +7921,12 @@ The deploy's release build passed its gate, then **`install: No space left on de
 | mind T3 | `c4b0e07717deaf34` | ok, 119 s, 2 files | **PASS 10/10** |
 | hermes T3 | `90a279774b8a5d31` | void, 77 s | — |
 Prediction (c) falsified in Hermes's favour — the T1 rerun did not void; (d) held (≈15 min for the whole sequence). **T3 rerun declared (the one allowed for that task):** `hermes_leg.sh T3` once; if valid, the runner resumes so its own checker runs and the sequence completes; if void or DQ, the reading closes with Hermes T3 void. Nothing on `.35` touched.
+
+### E.CB2-R8e — CLOSED: reading 8 on the local 20B, all six legs judged
+| task | Mind (checks) | Hermes (checks) | notes |
+| --- | --- | --- | --- |
+| T1 | **11/11** (189 s, 4 files) | 2/11 (rerun, 66 s) | Hermes's first leg void on the 20B's 500s; the rerun's artifact has no `run.sh`, no form |
+| T2 | **6/6** (109 s, 8 files) | 2/6 (62 s) | Hermes: console/external-request error, sections missing |
+| T3 | **10/10** (119 s, 2 files) | 9/10 (rerun, 78 s) | Hermes's first leg void (one 500 + cap); rerun fails `pytest_passes` only |
+| total | **27/27** | 13/27 | sequence 02:33:10Z → 02:51:47Z (18.6 min incl. both declared reruns) |
+**Standing of the claim.** One reading, one profile (`oss20-local`, `gpt-oss-backup:20b`, plain HTTP, no key), the Mind's local lane through the same counting proxy and cap (8) as Hermes, the frozen checker for both, receipts and verdicts in `out-r8e-local`. Both Hermes voids were the model refusing large requests (500s), the typed infrastructure class — not a Hermes fault and not a Mind advantage by rule, and each was given the one rerun the harness allows. Hermes T1's and T3's verdicts were produced by invoking the frozen checker on the rerun artifacts by hand, because the runner skips a leg with a valid receipt without checking it — **E.CB2-SKIP1, filed:** a valid receipt with no verdict must trigger the check, not the skip. Predictions vs outcome: (a) held for the Mind, void twice for Hermes; (b) exceeded; (c) falsified in Hermes's favour on the reruns; (d) held. What made the difference on T1 versus R8c's dead artifact is E.SYNTAX3: the check that could not run in containment now runs. No cross-reading number is claimed; readings 5–7 used other upstreams and an older checker denominator.

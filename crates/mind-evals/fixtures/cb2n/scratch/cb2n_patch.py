@@ -1493,3 +1493,10 @@ rw('run/mind_leg.sh', [
      'docker run -d --name "$NAME" --network cb2net --dns 127.0.0.1 --memory 4g --cpus 4 --pids-limit 512 --read-only --tmpfs /tmp:size=256m \\\n'
      '  --security-opt seccomp=unconfined --security-opt systempaths=unconfined \\\n'),
 ])
+rw("MANIFEST.json", [
+    ('"version": 4,', '"version": 5,'),
+    ('bind-mounted READ-ONLY (sha256 + provenance in the receipt), --network cb2net --read-only --tmpfs /tmp, a fresh state volume per task',
+     'bind-mounted READ-ONLY (sha256 + provenance in the receipt), --network cb2net --read-only --tmpfs /tmp, '
+     '--security-opt seccomp=unconfined --security-opt systempaths=unconfined (E.CB2-NS1: the Mind\'s own sandbox — unshare user/pid/net namespaces with a fresh /proc — works inside, as it does where the Mind is deployed; no capability added, AppArmor default; the Hermes container is untouched, having no sandbox to permit), '
+     'a fresh state volume per task'),
+])

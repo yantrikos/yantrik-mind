@@ -7797,3 +7797,9 @@ Lane marked by one dead-port job; then `code: write a script that prints the cur
 
 ### E.CODERDEAD3 — BUILT: the job board tells
 `board_banner(dead)` prepended at the one `render_board` call in `jobs_report_cmd`; `jobs json` carries `"coder_dead"`. Test: banner for a dead lane, empty for a live one; mutant (banner always empty) failed by name. Full suite green. (Two escape slips in the test literal along the way; the compiler's pointer, not my grep, found the line.)
+
+### E.CODERDEAD3 — DEPLOYED to staging (`66d3928`) and WITNESSED
+`jobs` before marking: "🧰 DELEGATIONS — the job board". After one dead-port job: **"⚠ the coder lane is dead since 00:59 UTC — endpoint unreachable (connection refused). Code delegations fall to the build path; tasks that edit existing files are refused."** as the first line; `jobs json` → `coder_dead: "the coder lane is dead since 00:59 UTC — …"`. Env restored, one mind.
+
+### E.AGENTRETRY2 — PREREG: where does a terminal tool reply go on the console?
+**Fact:** the agent loop's terminal branch returns the observation as the turn's reply (`return Ok(obs)`), yet the E.AGENTRETRY1 witness saw an empty `/cli` body after 18 s. Either the body was there and my `head -c 300` swallowed it (a leading newline?), or headless `/cli` delivers agent-turn replies through the notify queue and answers the request with nothing. **Probe:** the same `code:` turn with `curl -i` and `size_download`, then `status` to see whether a held reply drains on the next turn. **Prediction:** the body is non-empty and my earlier read was the harness (I have been wrong that way three times today); if it is empty, the fix is that a terminal observation is both returned and queued, and the entry says which.

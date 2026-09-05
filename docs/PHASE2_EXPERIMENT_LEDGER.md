@@ -7819,3 +7819,6 @@ Lane marked by one dead-port job; then `code: write a script that prints the cur
 
 ### E.REDACT1 — BUILT: the token split comes from where `core` sits
 `start = core.as_ptr() - tok.as_ptr()`; head/core/tail partition the token by construction. Reproducer test (`-abcdefgh`, `.`/`_`/`+` variants, `(—endpoint`) passes; mutant (the two-predicate arithmetic back) panics the reproducer — failed by name. Full suite green. Witness: the `code:` probe on staging must answer HTTP 200 with the dead-lane sentence and add no `redact.rs` panic line.
+
+### E.REDACT1 — DEPLOYED to staging (`7d8b1af`) and WITNESSED; E.AGENTRETRY2 closed by it
+The E.AGENTRETRY2 probe again: **`HTTP/1.1 200 OK`, `Content-Length: 138`**, body = "the coder lane is dead since 01:16 UTC — endpoint unreachable (connection refused). Fix the provider or credential and restart the mind."; journal `step 0: code -> …` then `turn done: 1 steps in 15s`; **0 `redact.rs` panics** in the window (4 the day before). So E.AGENTRETRY2's question — where does a terminal tool reply go — has the plain answer: it was always returned; the handler was dying before it could send. Env restored, one mind.

@@ -7937,3 +7937,12 @@ Prediction (c) falsified in Hermes's favour — the T1 rerun did not void; (d) h
 
 ### E.CB2-R8f — PREREG: the repeat (n=1 has misled this ledger twice this week)
 Identical setup to R8e: staging binary `3f6a2a43…` (`427e5ce`), fixtures `a820e1e`, profile `oss20-local`, runner `run_all_local.sh` (now with SKIP1), fresh out dir `out-r8f-local`, nothing on `.35` touched. **Predictions, written first.** (a) Mind: every leg valid; **≥ 24/27** across the three checkers (variance allowed — E.THINK5 measured files-per-run varying at n=5); a Mind leg below full marks is reported check by check, not averaged away. (b) Hermes: at least one void on the model's 500s, each given its one rerun, checked by the runner itself this time (SKIP1's witness). (c) Under 30 min. **Stop rules** unchanged. If (a) fails, the two readings are reported side by side and no claim is made beyond "27/27 once, X/27 once".
+
+### E.CB2-R8f — CLOSED: the repeat overturns the table; two readings, side by side, no claim beyond them
+| task | R8e Mind | R8f Mind | R8e Hermes | R8f Hermes |
+| --- | --- | --- | --- | --- |
+| T1 | 11/11 | **2/5** (`site_up` false, checker crashed → 5-check denominator; `server.py` parses) | 2/11 (after void+rerun) | **11/11** |
+| T2 | 6/6 | 6/6 | 2/6 | **6/6** |
+| T3 | 10/10 | 9/10 (`pytest_passes`) | 9/10 (after void+rerun) | 6/10 |
+| total | 27/27 | 17/21 | 13/27 | 23/27 |
+R8f: 02:54:22Z → 03:02:18Z (7.9 min), every leg valid, no voids, no reruns; Hermes T1/T3 each took one cap refusal. **Predictions:** (a) **falsified** — Mind 17/21, not ≥ 24/27; (b) **falsified** — Hermes had no void; (c) held. **What stands:** on this profile the Mind produced a parsing project every time (6/6 legs across the two readings) and passed the checker on 4 of 6; Hermes passed 2 of 6 and had 2 voids of its own. The variance between two identical runs is larger than the gap between the systems in either run; one reading in either direction is not a standing. **Follow-ups from the receipts, read below:** why a parsing `server.py` did not come up in 15 s (T1), and which test the model wrote failed (T3).

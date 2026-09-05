@@ -1481,6 +1481,20 @@ mod tests {
     /// The bus serves the ENGINE's terminal-delivery list — a published URL, a delegation ack, a
     /// rich brief all read as terminal through the bounded loop exactly as they do in the legacy
     /// loop, because it is literally the same function. A second list is how the classifier forked.
+    /// E.AGENTRETRY1: on staging the agent re-invoked `code` with a reworded task after the tool
+    /// had answered "the coder lane is dead since … restart the mind". That reply ends the turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_dead_coder_lane_reply_is_terminal_not_a_retry() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let bus = EngineBus::new(engine(&mem), TurnIdentity::primary())
+            .for_turn("code: write a script that prints the date");
+        assert!(bus.is_terminal(
+            "code",
+            "the coder lane is dead since 00:18 UTC — endpoint unreachable (connection refused). Fix the provider or credential and restart the mind."
+        ));
+        assert!(!bus.is_terminal("code", "(the coder isn't configured)"), "an ordinary tool answer is not");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn terminal_delivery_is_one_definition_across_both_loops() {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();

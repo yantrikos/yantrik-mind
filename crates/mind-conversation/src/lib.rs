@@ -5099,6 +5099,11 @@ fn fmt_shares(v: f64) -> String {
     }
 }
 
+/// The first words of every dead-coder-lane sentence. One constant, two readers: the sentence
+/// (E.CODERDEAD1) and `terminal_delivery` (E.AGENTRETRY1) — a tool reply that says "restart the
+/// mind" ends the turn; it is not a failure to try again with a reworded task.
+pub(crate) const CODER_DEAD_PREFIX: &str = "the coder lane is dead since";
+
 /// E.CODERDEAD1: what killed the coder lane, and when.
 #[derive(Debug, Clone)]
 pub(crate) struct CoderDeath {
@@ -5109,7 +5114,7 @@ pub(crate) struct CoderDeath {
 impl CoderDeath {
     pub(crate) fn sentence(&self) -> String {
         let at = chrono::DateTime::<chrono::Utc>::from(self.since).format("%H:%M UTC");
-        format!("the coder lane is dead since {at} — {}", self.reason)
+        format!("{CODER_DEAD_PREFIX} {at} — {}", self.reason)
     }
 }
 
@@ -10626,7 +10631,9 @@ WINDOW: all-time, latest 200
         {
             return true;
         }
-        if tool == "code" && obs.starts_with("On it — building") {
+        if tool == "code"
+            && (obs.starts_with("On it — building") || obs.starts_with(CODER_DEAD_PREFIX))
+        {
             return true;
         }
         if matches!(tool, "publish_page" | "make_dashboard") && obs.contains("http") {

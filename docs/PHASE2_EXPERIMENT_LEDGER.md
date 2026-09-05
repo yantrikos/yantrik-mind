@@ -7962,3 +7962,12 @@ Mind T1 (`aed03a1fd99aff9c`, 169.5 s, 3 files): `run.sh` = `python3` (**E.RUNSH1
 
 ### E.WSGI1 — KILLED at prereg: the static rule does not see the artifact that motivated it
 Proposed rule: a `wsgiref` app with no `.encode(` and no bytes literal cannot answer a request. Checked before writing code: the corpus has **one** `wsgiref` user (0 fires); **the R8g artifact itself has 4 `.encode(`/bytes hits and still returns a `str` on the path that serves `/`** — the rule would be silent on the one case it was for. A `str`-vs-`bytes` return is a runtime fact about one branch; only starting the program and asking it for `/` sees it. Inside the reading's container that would mean executing model-written code beside the mind's own state — not acceptable; the design that would be is a separate sandboxed smoke container per build, which is a different project. Filed as the residual class "runs but answers 500", with the honest note that three readings produced three different one-line causes and the static checks now cover two of them.
+
+### E.CB2-R8g — CLOSED; reading 8 after three samples: the range is the claim
+| task | R8e Mind | R8f Mind | R8g Mind | R8e Hermes | R8f Hermes | R8g Hermes |
+| --- | --- | --- | --- | --- | --- | --- |
+| T1 | 11/11 | 2/5 | 2/11 | 2/11 (rerun) | 11/11 | 7/11 |
+| T2 | 6/6 | 6/6 | 6/6 | 2/6 | 6/6 | 5/6 (rerun) |
+| T3 | 10/10 | 9/10 | 9/10 | 9/10 (rerun) | 6/10 | 6/10 |
+| total | 27/27 | 17/21 | 17/27 | 13/27 | 23/27 | 18/27 |
+R8g: 03:13:55Z → 03:30:32Z with one declared rerun (Hermes T2, checked by the runner under E.CB2-SKIP1 — witnessed: "valid receipt, no verdict; check only"). E.RUNSH1 witnessed: every Mind `run.sh` this sample said `python3`. **What stands after three samples, per task:** Mind T2 passed 6/6 in all three; Mind T3 9–10/10 in all three (the model's own test is the only miss); **Mind T1 is the volatile leg** — 11, 2, 2 — with three different one-line causes, two now caught before the write (E.SYNTAX3, E.RUNSH1) and the third a runtime 500 no static check sees (E.WSGI1 killed). Hermes: T1 2–11, T2 2–6, T3 6–9, with three model-side voids across the samples. **Totals: Mind 17–27, Hermes 13–23 — overlapping ranges; no winner is claimed.** Predictions for R8g: (a) held (RUNSH1 witness), (b) held (both inside their ranges), (c) held (16.6 min). Receipts: `out-r8e-local`, `out-r8f-local`, `out-r8g-local` on `.95`.

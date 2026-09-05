@@ -995,12 +995,19 @@ fn ctl_handle(
                     "the ym console requires an operator device".to_string(),
                 )
             } else {
-                (
-                    "200 OK",
-                    rt.block_on(
-                        conv.cli_dispatch(&body, &mind_types::AccessContext::operator_audit()),
-                    ),
-                )
+                // E.CTL1: the turn runs in its own task, so a panic inside it is a 500 with a
+                // pointer to the journal — not a connection thread dying before any status line
+                // (E.REDACT1 was found that way, from `curl -i` showing nothing at all).
+                let conv2 = conv.clone();
+                let body2 = body.clone();
+                match rt.block_on(rt.spawn(async move {
+                    conv2
+                        .cli_dispatch(&body2, &mind_types::AccessContext::operator_audit())
+                        .await
+                })) {
+                    Ok(text) => ("200 OK", text),
+                    Err(e) => crash_reply(&e.to_string()),
+                }
             }
         }
         // A conversation turn. The speaker is the AUTHENTICATED device's bound person; the turn runs
@@ -5665,5 +5672,24 @@ mod sec7_ports {
                 "{expected} missing from the plan: {names:?}"
             );
         }
+    }
+}
+
+/// E.CTL1: what the console answers when a turn's task did not come back — a status the
+/// client can see and a sentence that says where to look. Pure, so the mutant can be watched.
+fn crash_reply(err: &str) -> (&'static str, String) {
+    (
+        "500 Internal Server Error",
+        format!("(turn crashed — see the journal for `panicked at`: {err})"),
+    )
+}
+
+#[cfg(test)]
+mod ctl1_tests {
+    #[test]
+    fn a_crashed_turn_is_a_500_that_points_at_the_journal() {
+        let (status, body) = super::crash_reply("task 42 panicked");
+        assert_eq!(status, "500 Internal Server Error");
+        assert!(body.contains("panicked at") && body.contains("task 42 panicked"), "{body}");
     }
 }

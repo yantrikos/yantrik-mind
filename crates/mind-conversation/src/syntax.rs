@@ -48,6 +48,7 @@ fn state_dir() -> String {
 }
 
 /// What one sandbox answer means. Three outcomes, and only one of them convicts.
+#[derive(Debug)]
 enum Verdict {
     Parses,
     Broken(String),
@@ -109,6 +110,43 @@ fn cause_hint(src: &str, why: &str) -> Option<&'static str> {
     }
 }
 
+/// E.SYNTAX3: parse WITHOUT the sandbox — `ast.parse` only, which never executes the file — for
+/// the boxes where `unshare` is refused (the benchmark container is one; every reading so far ran
+/// this check blind there and shipped unparseable Python). A temp dir holding only `target.py`,
+/// `timeout 10` bounding the one thing a hostile file can do to a parser, a cleared environment.
+/// The sandboxed path stays first everywhere it works; this is the answer to "cannot check", not
+/// a replacement for containment.
+pub(crate) async fn parse_without_sandbox(content: &str) -> Verdict {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("ym-syntax-{}-{nonce}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Verdict::Unknown;
+    }
+    if std::fs::write(dir.join("target.py"), content).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Verdict::Unknown;
+    }
+    let out = tokio::process::Command::new("timeout")
+        .args(["10", "python3", "-I", "-c", CHECK])
+        .current_dir(&dir)
+        .env_clear()
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .output()
+        .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    match out {
+        Ok(o) => read_verdict(&format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )),
+        Err(_) => Verdict::Unknown,
+    }
+}
+
 /// Findings for python files in this set that do not parse.
 ///
 /// Empty for every healthy build, which keeps the write step's message byte-identical.
@@ -120,22 +158,38 @@ pub(crate) async fn unparseable_python(stream: &str) -> Vec<String> {
     }
     let sb = mind_tools::Sandbox::new().hiding(state_dir());
     let mut out = Vec::new();
+    // E.SYNTAX3: once the sandbox has failed here, every later file goes straight to the fallback.
+    let mut fallback = false;
     for e in pys {
         // ONE run per file. An earlier draft called the sandbox twice — once to classify and once
         // to extract the message — which doubled the cost of the check for no gain.
-        let rendered = match sb.run_python_with(CHECK, "target.py", &e.content).await {
-            Ok(r) => r.render(),
-            Err(_) => return out, // sandbox unusable: stop, accuse nothing
+        let sandboxed = if fallback {
+            None
+        } else {
+            match sb.run_python_with(CHECK, "target.py", &e.content).await {
+                Ok(r) => Some(read_verdict(&r.render())),
+                Err(_) => None,
+            }
         };
-        match read_verdict(&rendered) {
+        let verdict = match sandboxed {
+            Some(Verdict::Unknown) | None => {
+                if !fallback {
+                    eprintln!("[syntax] sandbox unavailable here — parsed with ast only (no execution)");
+                    fallback = true;
+                }
+                parse_without_sandbox(&e.content).await
+            }
+            Some(v) => v,
+        };
+        match verdict {
             Verdict::Parses => {}
             Verdict::Broken(why) => out.push(format!(
                 "`{}` is not valid Python — {why}.{} Nothing that runs it can start, so the whole                  deliverable is dead however good the rest of it is. Rewrite that file; a stray                  fragment of another language (a JavaScript template literal, a shell line) is the                  usual cause.",
                 e.path,
                 cause_hint(&e.content, &why).unwrap_or("")
             )),
-            // Inconclusive answers mean the environment cannot check, not that the file is bad.
-            // Stop for this build so an unusable sandbox costs one attempt, not one per file.
+            // Inconclusive even without the sandbox (no python3 at all): the environment cannot
+            // check, and that is not evidence about the file. Stop for this build.
             Verdict::Unknown => return out,
         }
     }
@@ -145,6 +199,27 @@ pub(crate) async fn unparseable_python(stream: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E.SYNTAX3: the no-sandbox path, on the exact defect R8c's Mind T1 shipped and on a healthy
+    /// file. Gated on a unix python3 — the dev box has neither GNU `timeout` nor /usr/bin/python3.
+    #[tokio::test]
+    async fn the_fallback_parses_with_ast_alone_and_never_executes() {
+        if !std::path::Path::new("/usr/bin/python3").exists() {
+            eprintln!("skipped: no /usr/bin/python3 here");
+            return;
+        }
+        match parse_without_sandbox("x = [1, 2\n").await {
+            Verdict::Broken(why) => assert!(why.contains("never closed"), "{why}"),
+            other => panic!("expected Broken, got {other:?}"),
+        }
+        assert!(matches!(parse_without_sandbox("import os\nprint('hi')\n").await, Verdict::Parses));
+        // Executing the file would create this marker; parsing must not.
+        let marker = std::env::temp_dir().join("ym-syntax3-executed");
+        let _ = std::fs::remove_file(&marker);
+        let src = format!("open({:?}, 'w').write('x')\n", marker.to_string_lossy());
+        assert!(matches!(parse_without_sandbox(&src).await, Verdict::Parses));
+        assert!(!marker.exists(), "ast.parse must never run the file");
+    }
 
     /// The exact bytes the real sandbox returned for the artifact that shipped broken.
     /// Captured on staging rather than invented, because invented cases share the author's

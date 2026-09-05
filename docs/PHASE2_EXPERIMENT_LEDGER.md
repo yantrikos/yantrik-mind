@@ -7909,3 +7909,15 @@ The deploy's release build passed its gate, then **`install: No space left on de
 
 ### E.CB2-R8e — first pass: Mind T1 PASSES the checker (11/11); Hermes T1 void; the single rerun declared
 `sequence.log`: containment 02:33:57; **mind T1 `ok`** — receipt `208ab6647fe7c949`: 189.1 s, `files_added 4`, 3 calls all served by `gpt-oss-backup:20b`, no DQ; **check `rc=0`, verdict `5de603f10758d288`: PASS, 11 of 11 checks** (`site_up` included — the artifact parses; the fallback did its job where the sandbox could not). Predictions: (a) held for the Mind; (b) held and exceeded (the prereg stopped at "parses"). **hermes T1 `void`** — receipt `ab2def8c3498da0b`: 122 s, `upstream_http_errors 2` (500s on model requests), `refused_over_cap 3`, six good responses all from the profile model, no `''` id (TALLY1 held); (c) held — void again on the model's own limit. **Rerun declared (the one allowed):** `hermes_leg.sh T1` once more on the same run state and upstream; if it returns valid, the runner resumes to T2/T3 (valid legs skipped); if it voids or DQs, the reading stops there and no runner resume is attempted (R8c's lesson). Expectation, written first: void again.
+
+### E.CB2-R8e — second pass: the Mind passes every task; Hermes T1 rerun valid, T2 2/6, T3 void; the T3 rerun declared
+| leg | receipt | state | verdict |
+| --- | --- | --- | --- |
+| mind T1 | `208ab6647fe7c949` | ok, 189 s, 4 files | **PASS 11/11** |
+| hermes T1 (void1) | `ab2def8c3498da0b` | void (500s) | — |
+| hermes T1 rerun | — | **ok**, 66 s, 2 accepted | *no verdict yet*: the rerun ran outside the runner, which then skipped the leg and its check; the frozen checker is run on its artifact below (the harness's own step, not a re-run) |
+| mind T2 | `ecc66592bf0804d9` | ok, 109 s, 8 files | **PASS 6/6** |
+| hermes T2 | `a6e6bc8a2d7fd5df` | ok, 62 s | FAIL 2/6 (`loads_without_console_error_or_external_request`, `projects_section_has_4_articles`, `writing_section_has_3_articles`, `contact_section_reachable`) |
+| mind T3 | `c4b0e07717deaf34` | ok, 119 s, 2 files | **PASS 10/10** |
+| hermes T3 | `90a279774b8a5d31` | void, 77 s | — |
+Prediction (c) falsified in Hermes's favour — the T1 rerun did not void; (d) held (≈15 min for the whole sequence). **T3 rerun declared (the one allowed for that task):** `hermes_leg.sh T3` once; if valid, the runner resumes so its own checker runs and the sequence completes; if void or DQ, the reading closes with Hermes T3 void. Nothing on `.35` touched.

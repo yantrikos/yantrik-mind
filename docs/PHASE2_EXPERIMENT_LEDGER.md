@@ -8009,3 +8009,12 @@ Commit dd60b63 (first cut) and its refinement in the following commit. What was 
 **Not claimed.** That this raises T1 in a reading. Three samples gave three causes; this sees the third. The next reading is the measurement, and n=1 will not settle it.
 
 **Correction to "Not claimed" (same day, before any reading was launched on this binary).** A reading does not exercise E.SMOKE1 at all. The cb2n mind leg runs the Mind inside a container (`--read-only`, no user namespaces), where `unshare` is refused; reading 8g's own `mind_T1_stdout.txt` and `mind_T3_stdout.txt` carry E.SYNTAX3's "sandbox unavailable here" line. There the smoke returns silence by design, as preregistered. So the R8g artifact would have gone out unchanged under this binary too, and a fourth sample would measure nothing about this slice. What E.SMOKE1 changes is the Mind on staging and production, where it runs on the host and the sandbox works; the in-flow witness is a build driven on staging's own mind, not a reading. Filed before launching one so the absence of an R8h is not read as an omission.
+
+**E.SMOKE1 — WITNESSED in flow on staging (2026-09-05 04:11–04:14 UTC).** Binary `aa316a4` (sha `5381de11301870f8`; adds one journal line per start, because a finding that only reaches the model leaves nothing on the box to look for). Delegation `smokewit-041128` → job `c3a6f5`, kind `build` (the coder lane is dead on staging; the reply named the lane). The journal, since the delegation:
+
+```
+04:12:39 [smoke] started 2 files under python 3.13.5: Answered(200)
+04:13:59 [smoke] started 2 files under python 3.13.5: Answered(200)
+```
+
+Two write rounds, two starts, both answered 200 → silent, as preregistered for a healthy program. The deliverable (`app.py`, `run.sh` = `python3 app.py`) was built and served at :8088. What this proves: the sandboxed start runs inside a real build on the box the Mind serves from, under the real limits, and leaves no finding when the program works. What it does not prove: a live 5xx finding reaching the model — the model wrote a working app, and I did not rig the task to fail. The 5xx branch stands on the on-box tests with the real R8g artifact and the mutant.

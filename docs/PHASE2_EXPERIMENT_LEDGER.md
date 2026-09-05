@@ -8061,3 +8061,18 @@ No capability is added; AppArmor stays default; the rootfs stays read-only.
 Launched 04:40 UTC into `out-r8h-local`; binary = the installed staging mind `93a4cd1` (sha `8dc416e0…`), source `ym-autodeploy` at the same commit, fixtures `5d83f23`, profile `oss20-local`, cap 8. Same runner, same checker, same model as R8e–R8g. What differs from R8g: the container permits `unshare` (E.CB2-NS1), so E.SYNTAX3 parses in the real sandbox and E.SMOKE1/1b start the program; E.SMOKE1's finding reaches the model only if its program answers 5xx or exits. Reported as the fourth row beside the three; no winner from n=4. Kill: any leg void → the single declared rerun rule as before; any disqualification → reported as such, not graded.
 
 **E.CB2-R8h — interim (04:38–04:48 UTC).** Launched 04:38:37 (not 04:40 as written above); source stamp `5d83f23`; run state `c34f797a9200229d`. Mind T1 **11/11** — and its container log carries `[smoke] started 3 files under python 3.13.5: Answered(200)`, the first Mind leg ever graded with its sandbox live; `run.sh` = `python3 -u server.py`, `server.py` parses. Mind T2 **6/6**. Hermes T1 2/11 (`run_sh_present` failed: no run.sh). Hermes T2 **VOID (infrastructure)** → STOP, the same shape as R8g's. The single rerun of that leg is declared now, as in R8g, and the runner resumed; the void receipt is preserved as `_void1`. The Mind's two results are not touched by the void: they stand as graded.
+
+### E.CB2-R8h — CLOSED (2026-09-05 04:38–04:56 UTC); E.CB2-NS1 — all kill criteria hold
+
+Rerun of Hermes T2 declared at 04:48 (void receipt preserved as `hermes_T2_void1`: 8 requests, 3 refused over cap, **3 upstream HTTP errors** from the local 20B — the same shape as R8g's void, which had 1); the rerun took 4 requests, no errors, 6/6. Runner resumed under E.CB2-SKIP1 (valid receipt without a verdict → check only), then both T3 legs.
+
+| sample | Mind T1 | Mind T2 | Mind T3 | Mind total | Hermes T1 | Hermes T2 | Hermes T3 | Hermes total |
+|---|---|---|---|---|---|---|---|---|
+| R8e | 11/11 | 6/6 | 10/10 | 27/27 | 2/11 | 5/6 | 6/10 | 13/27 |
+| R8f | 2/5* | 6/6 | 9/10 | 17/21 | 11/11 | 6/6 | 6/10 | 23/27 |
+| R8g | 2/11 | 6/6 | 9/10 | 17/27 | 7/11 | 5/6 | 6/10 | 18/27 |
+| **R8h** | **11/11** | **6/6** | **10/10** | **27/27** | 2/11 | 6/6 | 9/10 | 17/27 |
+
+*R8f's T1 checker did not complete (5 checks scored). Ranges after four: Mind 17–27, Hermes 13–23. They overlap; **no winner is claimed at n=4**, and the standing rule holds — the run-to-run spread of either system exceeds the gap between them. The per-task picture is the durable one: Mind T2 4/4 passes, T3 9–10/10 every time, T1 either 11/11 or dead on a single line.
+
+**E.CB2-NS1, kill criteria on the graded legs:** (1) containment proven with the patched tree; (2) no "sandbox unavailable here" in any Mind leg's container log; (3) receipt keys identical to R8g's; (4) Mind 3 requests per task, every leg within the cap; (5) `rederive.sh` exact. The harness change stands. What the sandbox did in this sample: T1 `[smoke] started 3 files under python 3.13.5: Answered(200)` — the program answered, so no finding reached the model; T2 and T3 gate out (no `run.sh` with port 8123), as designed. E.SYNTAX3 parsed in the real sandbox (no fallback line). **Not claimed:** that E.SMOKE1 changed a score — its finding never fired here. It is now measurable in readings, which it was not before today.

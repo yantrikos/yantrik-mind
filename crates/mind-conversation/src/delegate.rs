@@ -914,6 +914,14 @@ pub(crate) fn dead_note(classified: &str, kind: &str, dead_reason: Option<&str>)
     }
 }
 
+/// E.CODERDEAD2: may this delegation be refused outright? Only when a `code` task would fall to
+/// `build` BECAUSE the coder is dead, and the task names existing files — `build` authors from
+/// scratch and cannot edit in place, so rerouting would mint a job that can only fail. A
+/// from-scratch `code` task still falls to `build`; a live coder is never refused here.
+pub(crate) fn refuse_dead_codebase(classified: &str, floor: &str, coder_dead: bool, names_codebase: bool) -> bool {
+    classified == "code" && floor == "build" && coder_dead && names_codebase
+}
+
 /// Which judge a delegated build gets. The critic call is `Private` on purpose (E.SEC15: a judge
 /// over an unbounded delegated payload defaults Private), so a named critic outside
 /// `YM_PRIVATE_PROVIDERS` can never serve it. E.CRITIC1 found both boxes configured exactly so —
@@ -2007,6 +2015,13 @@ impl super::ConversationEngine {
         // Executor presence FIRST — a ledger row for a job that can't run is a lie on the board.
         // This now fires whenever nothing here can serve the KIND the brief actually is, which is
         // the honest outcome: the previous behaviour was to run something else and call it done.
+        if let Some(dead) = self.coder_dead_reason() {
+            if refuse_dead_codebase(classified, floor, true, mentions_codebase(&task.to_lowercase())) {
+                return format!(
+                    "({dead}; this task edits existing files, which the build path cannot do. Fix the provider or credential and restart the mind.)"
+                );
+            }
+        }
         if !runnable_kind(floor) {
             // Name the KIND and what is missing. "No executor is configured" told an operator
             // nothing about which one, and the alternative it replaced — quietly running a
@@ -3209,6 +3224,15 @@ mod tests {
         assert_eq!(n, "quant-check");
         assert!(t.starts_with("compare"));
         assert_eq!(k, "research");
+    }
+
+    #[test]
+    fn only_a_dead_coder_plus_an_existing_files_task_is_refused() {
+        assert!(refuse_dead_codebase("code", "build", true, true), "the E.CODERDEAD1 job 2 shape");
+        assert!(!refuse_dead_codebase("code", "build", true, false), "from scratch: build can do it");
+        assert!(!refuse_dead_codebase("code", "build", false, true), "no coder configured at all is E.PORT1-B's case, not this one");
+        assert!(!refuse_dead_codebase("code", "code", true, true), "the coder ran (flag set mid-flight): not this path");
+        assert!(!refuse_dead_codebase("research", "research", true, true));
     }
 
     #[test]

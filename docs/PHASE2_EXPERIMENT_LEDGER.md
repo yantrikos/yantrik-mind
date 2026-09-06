@@ -8464,3 +8464,15 @@ What run 2 delivered, verbatim and in full — no research report, no identity t
 **One process note.** The deploy gate was passed a multi-word literal and `ssh` split it, so the gate matched a bare "no" and read 3,175 — meaningless, though it did not stop a good deploy. That is the *third* time today an argument with a space has been re-split by ssh. The rule is already banked; it needs to be applied to the deploy script's gate argument, not only to timestamps.
 
 **Not yet done, and it is Pranab's call:** production still runs the old loop and still has no ContextCache repository, so it will keep web-searching the name until both the binary and the `code add` land there.
+
+## PRODUCTION BROUGHT UP TO DATE — 2026-09-06 18:03 UTC, on Pranab's word ("lets bring production upto the latest")
+
+`.90` went `617850f` → **`6857a0b`** (sha `0e839169fecb389a`), companion `b6508d6` → **`ccba45f`**. Built on the box in its own checkout, gate on three literals unique to today's stack (`workops_norepo` 1, the links finding 1, the sandboxed-start line 1, control 0), backup kept, installed SHA verified, health `active` + ctl 200, web 200, Telegram live, no restarts, no panics. First gateway round trip on the new binary answered `OK.` from DeepSeek V4 Pro. 32 GB free.
+
+Then, the configuration that the loop is useless without: **`code add https://github.com/spranab/contextcache`** on production. Its readable repositories are now sdfprotocol.github.io, yantrik-mind, kilo, yantrikdb, yantrikdb-server **and contextcache** — so the next pass on ContextCache reads the code instead of searching the name, for the first time.
+
+**What the family's mind gained today**, beyond this afternoon's slices: the sandboxed start and the dangling-link check on everything it writes; a build that delivered no longer reporting that it could not finish; streamed generations accounted in tokens instead of zero; and WorkOps proposing against the actual commit, remembering what it proposed last time, and staying silent when the repository has not moved.
+
+**What to expect on production over the next few days, so it is not mistaken for noise:** each watched project with no configured repository will say so **once** — ToolFormerMicro, agentweb and anandotsav, one note each as the rotation reaches them — and then stay quiet. That is the loop reporting what it cannot see, and each note names the `code add` that fixes it.
+
+**Still open, and separate:** E.PING1's root cause is untouched. The reconcile phase still writes a fresh belief for the same unresolved tension on every pass, so the twice-daily cadence itself has not changed; what has changed is what it says when it speaks. Three fixes are filed and none is taken.

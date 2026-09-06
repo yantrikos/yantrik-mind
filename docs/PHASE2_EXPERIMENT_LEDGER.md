@@ -8408,3 +8408,33 @@ Measured on PRODUCTION, read-only. The chain, end to end:
 - **Narrowest:** the silence gate ignores weight-0.3 observability notes, so only a real belief change speaks. Fixes the pings, leaves the store growing.
 - **Root:** reconcile writes its note **once per contradiction pair**, updating in place instead of appending, so a re-judgement is a revision rather than a new belief.
 - **Closing:** a judged contradiction is resolved or tombstoned so it stops being re-judged at all — the tombstone table exists and has never been used.
+
+## E.ITER1 — PREREG: the field scan learns across passes instead of restating (2026-09-06, Pranab: "What I want is iterative learning… it should see if there are any improvement chances… Not just saying Pranab is creator of contextcache. That feels disconnected")
+
+**What is actually happening, measured on production today.** The mind *does* form concrete repo-grounded proposals — `spool_work_proposal` asks for one minimal code improvement as JSON and writes it to `/var/lib/yantrik-mind/project-proposals`. It has written **13 since 2026-07-13, and every one of them is the same repo, the same commit, and the same idea**:
+
+| | |
+|---|---|
+| proposals | 13, one every ~3 days |
+| distinct repos | **1** — SDF Protocol |
+| distinct `base_sha` | **1** — `1a929f0`, unchanged for eight weeks |
+| distinct goals | ten wordings of "replace the Starlight starter README" |
+| `p_merge` over time | 0.15, 0.35, 0.64, 0.5, 0.3, 0.7, 0.2, 0.3, 0.2, 0.1, 0.1, 0.1, 0.72 |
+| ever delivered | **never** — visible only via the `proposals` console verb |
+
+So the loop proposes, forgets, and proposes again, while the ping carries the web research report instead. Three separate faults produce the experience Pranab described:
+
+1. **It never reads its own previous proposal.** Nothing loads the spool before deriving a new one, so pass N+1 cannot know pass N proposed the same change and it was not taken.
+2. **It never notices the repo has not moved.** `base_sha` is asked of the *model* ("current commit hash from the digest") rather than taken from git, and it has been the same commit since July. An unchanged repo should not produce a new proposal at all.
+3. **ContextCache has never been read as code.** The six work subjects are SDF Protocol, ContextCache, YantrikDB, ToolFormerMicro, agentweb, anandotsav; the five readable repos are sdfprotocol.github.io, yantrik-mind, kilo, yantrikdb, yantrikdb-server. `code_context_for` matches a subject to a repo by name, and **ContextCache matches nothing**, so every pass on it has been a web search about the name — which is exactly why the output reads as disconnected identity trivia.
+
+**The change, on staging first.**
+- `mind_tools::code::head_sha(repo)` — the current commit from **git**, never from a model; the proposal's `base_sha` is set from it.
+- Before deriving, load the **latest spooled proposal for this repo**. Pass it to the model as "what you proposed last time, and it was not taken", so a new proposal must differ or not exist.
+- **An unchanged head sha with an open prior proposal derives nothing and says nothing.** Re-deriving is the defect, not the silence.
+- When the repo moved, ground the ask in what changed since the prior `base_sha` (recent commits are already available via `recent_commits`).
+- **The delivered message leads with the proposal** — goal, acceptance test, why-not, p_merge, base sha — not the research report. A subject with no repo says so **once**, naming `code add <url>`, and is then silent rather than web-chattering forever.
+
+**Kill criteria.** (1) Unchanged repo with a prior open proposal: no new spool entry, no ping. (2) Moved repo: exactly one new proposal whose `base_sha` equals the real head sha from git. (3) A subject with no repo: one note, then silence. (4) The delivered text contains the goal and the acceptance test and does **not** contain "is the creator of". (5) The same goal cannot be spooled twice for the same `base_sha`. (6) Full suite; witnessed on staging against a repo that has not moved and one that has.
+
+**Operationally, and separately from the code:** ContextCache should be added to the readable repos (`code add https://github.com/spranab/contextcache`) or it cannot be studied however good the loop becomes. I will do that on staging; production is Pranab's word.

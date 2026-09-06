@@ -8314,3 +8314,25 @@ So the zeros in four readings' receipts were the mind never asking, not the mode
 **E.USAGE1 — the deploy gate failed for the third time today on a badly chosen literal.** `include_usage` reads **0** in a release binary that provably contains the code: `YM_STREAM_USAGE` and `prompt_eval_count`, both unique to this change, each read 1. The binary keeps literals in a packed table — `…repeat_penaltythinktoolsYM_STREAM_USAGEstream_optionsfrequency_penalty…` — and a short key that is a suffix of, or shared with, another entry does not survive as a contiguous match. This is the same lesson as this morning's `/v1/messages/count_tokens` gate, now with a concrete mechanism: **gate on the longest literal unique to the change, and confirm it reads non-zero in the built binary before trusting the gate to stop a deploy.** Re-gated on `YM_STREAM_USAGE`.
 
 **And the chain itself had a defect worth recording, because it produced a confident false statement.** A `cd` into the companion repo persisted, so the mind's ledger commit ran there (`pathspec did not match`), `git rev-parse HEAD` returned the COMPANION's sha, and the chain printed "mind pushed ccba45f" — the companion's hash — then told the box to check out that tree as the mind, which failed with `unable to read tree`. The deploy went no further, so nothing was installed and staging stayed on the previous binary. Two rules from it: a multi-repo chain must name each repository explicitly on every command rather than relying on a working directory, and a "pushed X" line must read the sha back from the repository it claims to have pushed.
+
+**E.USAGE1 — WITNESSED, and the witness says the receipt is still blind (2026-09-06 03:42–03:46).** Deployed to staging (mind `7d270c9`, companion `ccba45f`, sha `c21fda5ef624c230`, gate `YM_STREAM_USAGE`=1). One ungraded Mind T1 leg on `oss20-local`: `done`, 4 files, 3 requests, 0 upstream errors — and `usage prompt=0 completion=0 responses=0`, exactly as before. **The fix did not reach this path, and the receipt says why:** the proxy recorded `"by_path": {"POST /api/chat": 3}`. The mind's local lane speaks Ollama's **native** API, not `/v1/chat/completions`, and it does so **blocking**, so neither half of E.USAGE1 applies to it.
+
+Where that leaves each claim, precisely:
+
+| path | who uses it | before | now |
+|---|---|---|---|
+| OpenAI-compat, streaming | NIM and cloud lanes | zero tokens | asks and reads (fixture-tested) |
+| Ollama native, streaming | local lane if it streams | prompt count discarded | carried |
+| Ollama native, blocking | **the local lane, in every reading** | already correct in the mind | unchanged, still correct |
+
+So the mind's own accounting was never wrong on the profile the readings use, and E.USAGE1's real value is the cloud lanes. **The receipt's zeros were the proxy all along**: `_tally` records usage only from an OpenAI-shaped `"usage"` object, and a native response reports the same two numbers as top-level `prompt_eval_count` and `eval_count`. It also parses a stream only when the lines carry an SSE `data: ` prefix, so a native NDJSON stream would tally nothing at all — not even the model id.
+
+### E.USAGE2 — PREREG: the benchmark's meter can read the shape its own profile produces
+
+**Change, entirely in the instrument, through `scratch/cb2n_patch.py`.** (1) `proxy.py` gains a module-level `usage_from(objs)` — pure, so a selftest can drive it, which is the same lesson `tally_models` and `receipt_shape_ok` already carry: a rule written where no test can reach it has been wrong three times in this harness. It reads an OpenAI `usage` object, and failing that a native `eval_count` with its optional `prompt_eval_count`. (2) The body parser accepts NDJSON lines as well as SSE `data:` lines, so a native stream tallies its model and its counts instead of nothing.
+
+**Fairness.** This adds counting of numbers the upstream already returns and changes nothing either agent may do. Hermes's requests are OpenAI-shaped and its counts already worked, so its numbers cannot move; the Mind's come into existence where they were previously absent. The cap, the void rules and the verdict are untouched.
+
+**Kill criteria.** (1) `selftest/usage_cases.py` drives `usage_from` over four shapes — an OpenAI body, a native blocking body, a native NDJSON stream, an SSE stream with a trailing usage chunk — and disagrees loudly on any. (2) The existing `tally_cases` and every other selftest still agree. (3) `rederive.sh` prints "re-derives exactly". (4) The witness is the same ungraded Mind T1 leg on `oss20-local`, whose receipt must now report non-zero prompt and completion tokens with the leg otherwise unchanged: `done`, not void, 3 requests, 0 upstream errors. (5) A mutant that drops the native branch must fail the native case by name.
+
+**Not claimed.** That this changes any score. It makes the Mind's token spend measurable on the local profile, which is the one thing four readings could not compare.

@@ -14988,12 +14988,8 @@ impl RecipeHost for MindRecipeHost {
                         }
                         // Earlier passes first, so the message reads as the cumulative state of the
                         // build rather than as whatever the last call happened to touch.
-                        if !prior.is_empty() {
-                            msg = format!("{prior}
-
-THEN, finishing the set:
-{msg}");
-                        }
+                        // E.BUILT1: the CURRENT state of the set leads, the history follows.
+                        msg = crate::fileset::cumulative_message(&msg, prior);
                         Ok(msg)
                     }
                     Err(why) => anyhow::bail!("{why}"),

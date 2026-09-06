@@ -2143,13 +2143,19 @@ impl super::ConversationEngine {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let built = out.ok && url.starts_with("http");
+                // E.BUILT1: the value may be CUMULATIVE -- a recovered build carries its
+                // earlier passes -- so what proves a set landed is the write step's own success
+                // rendering ANYWHERE in it, never the first characters of the string. Reading 9's
+                // T1 passed the checker 11/11 and was reported, and recorded, as a failure.
+                let landed = crate::fileset::built_url(&url);
+                let built = out.ok && landed.is_some();
                 let msg = if built {
-                    scratch_note(&mem, &id2, &format!("built: {url}")).await;
+                    let deliverable = landed.as_deref().unwrap_or_default();
+                    scratch_note(&mem, &id2, &format!("built: {deliverable}")).await;
                     out.notifications
                         .last()
                         .cloned()
-                        .unwrap_or_else(|| format!("🛠️ [{name2}] built — {url}"))
+                        .unwrap_or_else(|| format!("🛠️ [{name2}] built — {deliverable}"))
                 } else {
                     let why = if url.is_empty() {
                         out.error

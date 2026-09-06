@@ -398,3 +398,43 @@ pub fn parse_file_stream(text: &str) -> ParsedSet {
     }
 }
 
+/// The deliverable URL a write step actually produced, from anywhere in a possibly CUMULATIVE
+/// value.
+///
+/// E.BUILT1: when the first authoring pass is cut, the completion pass carries the earlier message
+/// forward, so the recipe variable that names a URL no longer BEGINS with one. The build lane asked
+/// whether the value started with `http` and therefore called reading 9's 11/11 deliverable a
+/// failure, told its owner "I couldn't finish the build", and wrote `failed` into the ledger.
+///
+/// What proves a set landed is the write step's own success rendering -- a URL followed by
+/// `(N files: ...)` -- so that, and only that, is what is looked for here. A refusal that merely
+/// mentions an address is not a delivery. The FIRST such line wins: `cumulative_message` puts the
+/// newest pass at the top, so scanning forward finds the set as it now stands, and a pass that
+/// wrote nothing correctly falls through to the last one that did.
+pub(crate) fn built_url(value: &str) -> Option<String> {
+    value.lines().find_map(|line| {
+        let (url, rest) = line.trim().split_once(" (")?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return None;
+        }
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 || !rest[digits..].starts_with(" files: ") {
+            return None;
+        }
+        Some(url.to_string())
+    })
+}
+
+/// How a later pass's message joins what came before it.
+///
+/// E.BUILT1: this led with the EARLIER message and appended the new one under "THEN, finishing the
+/// set:", so the first line of a recovered build was its first pass's failure sentence -- which is
+/// what the owner read, what the Notify reported, and what the harness recorded as the leg's
+/// status. The current state of the set leads now; the history follows, because the review round
+/// still needs every finding raised on the files an earlier pass wrote.
+pub(crate) fn cumulative_message(current: &str, prior: &str) -> String {
+    if prior.trim().is_empty() {
+        return current.to_string();
+    }
+    format!("{current}\n\nEARLIER IN THIS BUILD:\n{prior}")
+}

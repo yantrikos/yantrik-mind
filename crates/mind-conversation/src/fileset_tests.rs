@@ -3,8 +3,8 @@
 //! correct wiring because no test asked what actually landed.
 
 use crate::fileset::{
-    plan_file_set, write_file_set, FileEntry, FileSetRefusal, MAX_DEPTH, MAX_FILES,
-    MAX_FILE_BYTES, MAX_TOTAL_BYTES,
+    built_url, cumulative_message, plan_file_set, write_file_set, FileEntry, FileSetRefusal,
+    MAX_DEPTH, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES,
 };
 
 fn e(path: &str, content: &str) -> FileEntry {
@@ -1569,5 +1569,80 @@ fn the_findings_marker_is_not_duplicated_as_a_literal() {
         del.matches("DEFECTS FOUND MECHANICALLY").count(),
         0,
         "delegate.rs must reference crate::FINDINGS_MARKER, never the literal"
+    );
+}
+
+
+// ── E.BUILT1: a build that delivered must not report that it could not finish ────────────────────
+
+fn built_fixture(name: &str) -> String {
+    std::fs::read_to_string(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/built/").to_string() + name,
+    )
+    .expect("fixture present")
+}
+
+/// The real message reading 9's Mind T1 carried. It scored 11/11 and the harness recorded
+/// `status: failed`, because the value did not START with a URL.
+#[test]
+fn the_real_reading_9_message_names_the_deliverable_it_actually_wrote() {
+    let value = built_fixture("r9_mind_T1_RESULT.md");
+    assert!(
+        !value.starts_with("http"),
+        "the fixture must be the cumulative shape that fooled the old test"
+    );
+    assert_eq!(
+        built_url(&value).as_deref(),
+        Some("http://127.0.0.1:8099/cb2-t1-811777/"),
+        "the deliverable is named on a later line and must be found there"
+    );
+}
+
+#[test]
+fn only_the_write_steps_own_success_rendering_counts_as_a_delivery() {
+    // The ordinary single-pass shape.
+    assert_eq!(
+        built_url("http://box:8088/proj-a1/ (3 files: index.html, app.py, run.sh)").as_deref(),
+        Some("http://box:8088/proj-a1/")
+    );
+    // A refusal that merely MENTIONS an address is not a delivery -- the mutant that accepts any
+    // line containing "http" dies here.
+    for refusal in [
+        "the build produced no files",
+        "nothing was written: the generation hit its token limit and server.py was cut",
+        "could not serve at http://box:8088/proj-a1/ because the port was taken",
+        "refused: http://box:8088/proj-a1/ is not a writable path",
+        "http://box:8088/proj-a1/",
+        "http://box:8088/proj-a1/ (files: index.html)",
+        "",
+    ] {
+        assert_eq!(built_url(refusal), None, "must not read a delivery from {refusal:?}");
+    }
+    // Two passes wrote: the LAST one is the deliverable.
+    let two = "http://box:8088/old/ (1 files: a.py)\n\nEARLIER IN THIS BUILD:\nhttp://box:8088/older/ (1 files: b.py)";
+    assert_eq!(built_url(two).as_deref(), Some("http://box:8088/old/"), "the newest pass leads");
+}
+
+#[test]
+fn the_cumulative_message_leads_with_the_set_as_it_now_stands() {
+    assert_eq!(cumulative_message("only pass", ""), "only pass", "no history, no header");
+    assert_eq!(cumulative_message("only pass", "   "), "only pass");
+    let joined = cumulative_message(
+        "http://box:8088/p/ (1 files: server.py)",
+        "nothing was written: the generation hit its token limit and server.py was cut",
+    );
+    assert!(
+        joined.starts_with("http://box:8088/p/ (1 files: server.py)"),
+        "the current state leads: {joined}"
+    );
+    assert!(joined.contains("EARLIER IN THIS BUILD:"), "the history is kept: {joined}");
+    assert!(
+        joined.contains("token limit"),
+        "the review round still needs every earlier finding: {joined}"
+    );
+    assert_eq!(
+        built_url(&joined).as_deref(),
+        Some("http://box:8088/p/"),
+        "and the composed value is judged delivered"
     );
 }

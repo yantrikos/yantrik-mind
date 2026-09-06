@@ -1500,3 +1500,120 @@ rw("MANIFEST.json", [
      '--security-opt seccomp=unconfined --security-opt systempaths=unconfined (E.CB2-NS1: the Mind\'s own sandbox — unshare user/pid/net namespaces with a fresh /proc — works inside, as it does where the Mind is deployed; no capability added, AppArmor default; the Hermes container is untouched, having no sandbox to permit), '
      'a fresh state volume per task'),
 ])
+
+# ── E.USAGE2: the meter reads the shape its own profile produces ────────────────────────────────
+# The mind's local lane speaks Ollama's NATIVE api (`POST /api/chat`, measured in the receipt's
+# by_path), which reports its token counts as top-level `prompt_eval_count` / `eval_count` rather
+# than an OpenAI `usage` object. Four readings therefore compared the two systems' model REQUESTS
+# but not their tokens: Hermes is OpenAI-shaped and counted, the Mind was not. This adds counting
+# of numbers the upstream already returns; it changes nothing either agent may do, and Hermes's
+# numbers cannot move. The extraction is a module-level function so `selftest/usage_cases.py` can
+# drive it — `tally_models` and `receipt_shape_ok` are both here for the same reason.
+rw('proxy/proxy.py', [
+    ('        objs = []\n'
+     '        try:\n'
+     '            objs.append(json.loads(raw))\n'
+     '        except Exception:\n'
+     '            for line in raw.decode("utf-8", "replace").splitlines():\n'
+     '                if line.startswith("data: ") and line[6:].strip() not in ("", "[DONE]"):\n'
+     '                    try:\n'
+     '                        objs.append(json.loads(line[6:]))\n'
+     '                    except Exception:\n'
+     '                        pass',
+     '        objs = parse_bodies(raw)'),
+    ('        usage = None\n'
+     '        for o in objs:\n'
+     '            if isinstance(o, dict) and isinstance(o.get("usage"), dict):\n'
+     '                usage = o["usage"]',
+     '        usage = usage_from(objs)'),
+    ('def tally_models(',
+     'def parse_bodies(raw):\n'
+     '    # Every JSON object in a response body: one document, an SSE `data:` stream, or the\n'
+     '    # NDJSON the native api streams. The SSE-only reader tallied NOTHING for a native\n'
+     '    # stream - not even the model id.\n'
+     '    try:\n'
+     '        return [json.loads(raw)]\n'
+     '    except Exception:\n'
+     '        pass\n'
+     '    objs = []\n'
+     '    for line in raw.decode("utf-8", "replace").splitlines():\n'
+     '        s = line.strip()\n'
+     '        if s.startswith("data:"):\n'
+     '            s = s[5:].strip()\n'
+     '        if not s or s == "[DONE]":\n'
+     '            continue\n'
+     '        try:\n'
+     '            objs.append(json.loads(s))\n'
+     '        except Exception:\n'
+     '            pass\n'
+     '    return objs\n'
+     '\n'
+     '\n'
+     'def usage_from(objs):\n'
+     '    # Provider-reported token counts, in either shape, as an OpenAI-style dict or None.\n'
+     '    # OpenAI puts them in a `usage` object; the native api puts `eval_count` and (usually)\n'
+     '    # `prompt_eval_count` at the top level of its final object. The LAST object carrying\n'
+     '    # either wins, because a stream reports its totals at the end.\n'
+     '    usage = None\n'
+     '    for o in objs:\n'
+     '        if not isinstance(o, dict):\n'
+     '            continue\n'
+     '        if isinstance(o.get("usage"), dict):\n'
+     '            usage = o["usage"]\n'
+     '        elif type(o.get("eval_count")) is int:\n'
+     '            pt = o.get("prompt_eval_count")\n'
+     '            usage = {\n'
+     '                "prompt_tokens": pt if type(pt) is int else 0,\n'
+     '                "completion_tokens": o["eval_count"],\n'
+     '            }\n'
+     '    return usage\n'
+     '\n'
+     '\n'
+     'def tally_models('),
+])
+
+new('selftest/usage_cases.py',
+    '# E.USAGE2: drives proxy.usage_from and proxy.parse_bodies. Exits 1 on any disagreement.\n'
+    'import importlib.util, json, os, sys\n'
+    'HERE = os.path.dirname(os.path.abspath(__file__))\n'
+    'spec = importlib.util.spec_from_file_location("cb2proxy", os.path.join(HERE, "..", "proxy", "proxy.py"))\n'
+    'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+    '\n'
+    'OPENAI_BODY = json.dumps({"model": "x", "choices": [{"message": {"content": "hi"}}],\n'
+    '                         "usage": {"prompt_tokens": 11, "completion_tokens": 7}}).encode()\n'
+    'NATIVE_BODY = json.dumps({"model": "gpt-oss-backup:20b", "message": {"content": "hi"},\n'
+    '                         "done": True, "prompt_eval_count": 70, "eval_count": 16}).encode()\n'
+    'NATIVE_STREAM = ("\\n".join([\n'
+    '    json.dumps({"model": "gpt-oss-backup:20b", "message": {"content": "h"}, "done": False}),\n'
+    '    json.dumps({"model": "gpt-oss-backup:20b", "message": {"content": "i"}, "done": False}),\n'
+    '    json.dumps({"model": "gpt-oss-backup:20b", "done": True, "prompt_eval_count": 5, "eval_count": 3}),\n'
+    ']) + "\\n").encode()\n'
+    'SSE_STREAM = ("\\n".join([\n'
+    '    "data: " + json.dumps({"model": "m", "choices": [{"delta": {"content": "h"}}]}),\n'
+    '    "data: " + json.dumps({"model": "m", "choices": [], "usage": {"prompt_tokens": 76, "completion_tokens": 40}}),\n'
+    '    "data: [DONE]",\n'
+    ']) + "\\n").encode()\n'
+    'NO_COUNTS = json.dumps({"model": "x", "choices": [{"message": {"content": "hi"}}]}).encode()\n'
+    '\n'
+    'CASES = [\n'
+    '    ("openai_body",   OPENAI_BODY,   {"prompt_tokens": 11, "completion_tokens": 7}, {"x"}),\n'
+    '    ("native_body",   NATIVE_BODY,   {"prompt_tokens": 70, "completion_tokens": 16}, {"gpt-oss-backup:20b"}),\n'
+    '    ("native_stream", NATIVE_STREAM, {"prompt_tokens": 5,  "completion_tokens": 3},  {"gpt-oss-backup:20b"}),\n'
+    '    ("sse_stream",    SSE_STREAM,    {"prompt_tokens": 76, "completion_tokens": 40}, {"m"}),\n'
+    '    ("no_counts",     NO_COUNTS,     None,                                           {"x"}),\n'
+    ']\n'
+    'bad = 0\n'
+    'for name, raw, want_usage, want_models in CASES:\n'
+    '    objs = m.parse_bodies(raw)\n'
+    '    got = m.usage_from(objs)\n'
+    '    got_models = m.tally_models(objs)\n'
+    '    ok = got == want_usage and got_models == want_models\n'
+    '    bad |= not ok\n'
+    '    print(name + ": " + ("agree" if ok else "DISAGREE") + " usage=" + str(got) + " want=" + str(want_usage) + " models=" + str(sorted(got_models)))\n'
+    'sys.exit(1 if bad else 0)\n')
+
+rw('selftest/selftest.sh', [
+    ('if python3 "$FIX/selftest/tally_cases.py" >/dev/null; then echo "tally_cases: agree"; else echo "tally_cases: DISAGREE"; BAD=1; fi',
+     'if python3 "$FIX/selftest/tally_cases.py" >/dev/null; then echo "tally_cases: agree"; else echo "tally_cases: DISAGREE"; BAD=1; fi\n'
+     'if python3 "$FIX/selftest/usage_cases.py" >/dev/null; then echo "usage_cases: agree"; else echo "usage_cases: DISAGREE"; BAD=1; fi'),
+])

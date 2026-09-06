@@ -220,21 +220,9 @@ class H(BaseHTTPRequestHandler):
     def _tally(self, raw):
         """From a SUCCESSFUL model response body: the `model` id (tallied) and provider-reported
         usage (summed) — a JSON body, or SSE events. Counts only; the body is discarded."""
-        objs = []
-        try:
-            objs.append(json.loads(raw))
-        except Exception:
-            for line in raw.decode("utf-8", "replace").splitlines():
-                if line.startswith("data: ") and line[6:].strip() not in ("", "[DONE]"):
-                    try:
-                        objs.append(json.loads(line[6:]))
-                    except Exception:
-                        pass
+        objs = parse_bodies(raw)
         models = tally_models(objs)
-        usage = None
-        for o in objs:
-            if isinstance(o, dict) and isinstance(o.get("usage"), dict):
-                usage = o["usage"]
+        usage = usage_from(objs)
         with lock:
             for m in sorted(models):
                 state["response_models"][m[:80]] = state["response_models"].get(m[:80], 0) + 1
@@ -263,6 +251,48 @@ def tcp_self_check():
             return True
     except Exception:
         return False
+
+
+def parse_bodies(raw):
+    # Every JSON object in a response body: one document, an SSE `data:` stream, or the
+    # NDJSON the native api streams. The SSE-only reader tallied NOTHING for a native
+    # stream - not even the model id.
+    try:
+        return [json.loads(raw)]
+    except Exception:
+        pass
+    objs = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        s = line.strip()
+        if s.startswith("data:"):
+            s = s[5:].strip()
+        if not s or s == "[DONE]":
+            continue
+        try:
+            objs.append(json.loads(s))
+        except Exception:
+            pass
+    return objs
+
+
+def usage_from(objs):
+    # Provider-reported token counts, in either shape, as an OpenAI-style dict or None.
+    # OpenAI puts them in a `usage` object; the native api puts `eval_count` and (usually)
+    # `prompt_eval_count` at the top level of its final object. The LAST object carrying
+    # either wins, because a stream reports its totals at the end.
+    usage = None
+    for o in objs:
+        if not isinstance(o, dict):
+            continue
+        if isinstance(o.get("usage"), dict):
+            usage = o["usage"]
+        elif type(o.get("eval_count")) is int:
+            pt = o.get("prompt_eval_count")
+            usage = {
+                "prompt_tokens": pt if type(pt) is int else 0,
+                "completion_tokens": o["eval_count"],
+            }
+    return usage
 
 
 def tally_models(objs):

@@ -38,6 +38,7 @@ if python3 "$FIX/selftest/score_cases.py" >/dev/null; then echo "score_cases: ag
 # E.CB2-HTTP: the upstream leg opens the right kind of connection for the declared scheme.
 if python3 "$FIX/selftest/upstream_cases.py" >/dev/null; then echo "upstream_cases: agree"; else echo "upstream_cases: DISAGREE"; BAD=1; fi
 if python3 "$FIX/selftest/tally_cases.py" >/dev/null; then echo "tally_cases: agree"; else echo "tally_cases: DISAGREE"; BAD=1; fi
+if python3 "$FIX/selftest/usage_cases.py" >/dev/null; then echo "usage_cases: agree"; else echo "usage_cases: DISAGREE"; BAD=1; fi
 S=$(mktemp -d /tmp/cb2-tree-self-XXXX)
 mkfifo "$S/pipe"
 TREE=$(timeout -k 1 5 python3 "$FIX/tools/tree_hash.py" "$S"); TREE_RC=$?

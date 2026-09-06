@@ -167,6 +167,21 @@ pub fn digest(repo_path: &Path) -> String {
 
 /// One-call convenience: sync then digest. `since` = commit subjects in the last N days (for the
 /// "what did I change this week" answer). Blocking; call via spawn_blocking.
+/// The repository's current commit, read from git.
+///
+/// E.ITER1: `base_sha` used to be asked of the MODEL ("current commit hash from the digest"), and
+/// thirteen proposals in a row carried `1a929f0` while nobody checked whether the repo had moved.
+/// A commit is a fact about the checkout, so it is read from the checkout.
+pub fn head_sha(name: &str) -> Option<String> {
+    let dir = workdir().join(name);
+    if !dir.join(".git").exists() {
+        return None;
+    }
+    let out = run_git(Some(&dir), &["rev-parse", "--short", "HEAD"]).ok()?;
+    let sha = out.trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
 pub fn sync_and_digest(git_url: &str) -> anyhow::Result<String> {
     let path = sync_repo(git_url)?;
     Ok(digest(&path))

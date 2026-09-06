@@ -564,6 +564,89 @@ impl ProjectProposal {
     }
 }
 
+/// What an iterative pass should do for one watched subject.
+///
+/// E.ITER1: the scan proposed the SAME change to the SAME repo at the SAME commit thirteen times
+/// between July and September, because nothing ever read what it proposed last time and nothing
+/// ever asked whether the repository had moved. This is that question, as a pure function.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IterStep {
+    /// No repository is configured for this subject, so there is nothing to study. Say it once.
+    NoRepo,
+    /// The commit is the one the last proposal was written against: re-deriving would restate it.
+    Unchanged { base_sha: String, goal: String },
+    /// Derive, grounded in the current commit and in what was proposed before.
+    Derive { base_sha: String, prior: Option<ProjectProposal> },
+}
+
+pub(crate) fn iter_step(head_sha: Option<&str>, prior: Option<&ProjectProposal>) -> IterStep {
+    let Some(head) = head_sha.map(str::trim).filter(|s| !s.is_empty()) else {
+        return IterStep::NoRepo;
+    };
+    match prior {
+        Some(p) if p.base_sha.trim() == head => IterStep::Unchanged {
+            base_sha: head.to_string(),
+            goal: p.goal.clone(),
+        },
+        other => IterStep::Derive {
+            base_sha: head.to_string(),
+            prior: other.cloned(),
+        },
+    }
+}
+
+/// The most recently spooled proposal for one repository, newest by file modification time.
+pub(crate) fn latest_proposal_for(dir: &Path, repo: &str) -> Option<ProjectProposal> {
+    let mut best: Option<(std::time::SystemTime, ProjectProposal)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(proposal) = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| ProjectProposal::from_json(&json))
+        else {
+            continue;
+        };
+        if !proposal.repo.eq_ignore_ascii_case(repo) {
+            continue;
+        }
+        let when = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().map(|(t, _)| when > *t).unwrap_or(true) {
+            best = Some((when, proposal));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// Has this exact goal already been spooled for this repo at this commit? Re-proposing the same
+/// change against the same code is the defect E.ITER1 exists to stop.
+pub(crate) fn already_proposed(dir: &Path, repo: &str, base_sha: &str, goal: &str) -> bool {
+    let want = goal.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(proposal) = std::fs::read_to_string(entry.path())
+            .map_err(|e| e.to_string())
+            .and_then(|json| ProjectProposal::from_json(&json))
+        else {
+            continue;
+        };
+        if proposal.repo.eq_ignore_ascii_case(repo)
+            && proposal.base_sha.trim() == base_sha.trim()
+            && proposal.goal.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase() == want
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Persist at most one valid proposal from a single research pass. The temporary file stays in
 /// the spool directory so the final rename is atomic on the same filesystem.
 fn spool_project_proposals(

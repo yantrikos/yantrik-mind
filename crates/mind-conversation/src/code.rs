@@ -2286,18 +2286,41 @@ impl super::ConversationEngine {
 
     /// Ask for one referee-bound suggestion after a repo-grounded WorkOps scan. Invalid or absent
     /// model output is simply discarded; this shadow path never builds or executes proposals.
-    pub(crate) async fn spool_work_proposal(&self, repo: &str, report: &str, code_ctx: &str) {
+    /// Ask for ONE referee-bound improvement, grounded in the current commit and in what was
+    /// proposed last time. Returns the proposal it spooled, so the caller can actually say it.
+    ///
+    /// E.ITER1: this used to take `base_sha` from the MODEL and never look at its own spool, so it
+    /// wrote the same README change for the same repo at the same commit thirteen times between
+    /// July and September and delivered none of them.
+    pub(crate) async fn derive_work_proposal(
+        &self,
+        repo: &str,
+        report: &str,
+        code_ctx: &str,
+        base_sha: &str,
+        prior: Option<&ProjectProposal>,
+    ) -> Option<ProjectProposal> {
+        let history = match prior {
+            Some(p) => format!(
+                "\n\nWHAT YOU PROPOSED LAST TIME FOR THIS REPOSITORY, AND IT WAS NOT DONE:\n\
+                 goal: {}\nagainst commit: {}\nYou may not restate it. Either propose something \
+                 GENUINELY DIFFERENT that the current code supports, or output null.",
+                p.goal, p.base_sha
+            ),
+            None => String::new(),
+        };
         let prompt = format!(
-            "A WorkOps research pass just studied repository {repo}.\n\nRESEARCH REPORT:\n{report}\n\nREPOSITORY DIGEST:\n{code_ctx}\n\n\
+            "A WorkOps pass just studied repository {repo} at commit {base_sha}.\n\nRESEARCH REPORT:\n{report}\n\n\
+             REPOSITORY DIGEST:\n{code_ctx}{history}\n\n\
              If the evidence supports one concrete, minimal code improvement, output ONLY one JSON object with exactly these fields:\n\
-             {{\"repo\":\"{repo}\",\"goal\":\"one imperative sentence\",\"citations\":[\"source from the report\"],\"base_sha\":\"current commit hash from the digest\",\"acceptance_test\":\"specific test command\",\"why_not\":\"strongest reason not to merge\",\"p_merge\":0.0}}\n\
-             p_merge must be between 0 and 1. Use only citations present in the report. If any field cannot be grounded, output null. This is a shadow proposal only; do not suggest executing it."
+             {{\"repo\":\"{repo}\",\"goal\":\"one imperative sentence\",\"citations\":[\"source from the report\"],\"base_sha\":\"{base_sha}\",\"acceptance_test\":\"one shell command that fails before and passes after\",\"why_not\":\"the strongest reason to reject it\",\"p_merge\":0.5}}\n\
+             p_merge must be between 0 and 1. Use only citations present in the report. If any field cannot be grounded, output null. This is a shadow proposal: nothing is built or executed from it."
         );
         let cfg = GenerationConfig {
             max_tokens: 450,
             ..GenerationConfig::default()
         };
-        let Ok(response) = self
+        let response = self
             .inference
             .chat_household_attributed(
                 vec![ChatMessage::user(&prompt)],
@@ -2305,22 +2328,30 @@ impl super::ConversationEngine {
                 concat!(module_path!(), ":work-proposal"),
             )
             .await
-        else {
-            return;
-        };
-        let Some(start) = response.text.find('{') else {
-            return;
-        };
-        let Some(end) = response.text.rfind('}') else {
-            return;
-        };
-        if end <= start {
-            return;
+            .ok()?;
+        let open = response.text.find('{')?;
+        let close = response.text.rfind('}')?;
+        if close <= open {
+            return None;
         }
-        let Ok(proposal) = ProjectProposal::from_json(&response.text[start..=end]) else {
-            return;
-        };
-        let _ = spool_project_proposals(Path::new(PROJECT_PROPOSALS_DIR), [proposal]);
+        let mut proposal = ProjectProposal::from_json(&response.text[open..=close]).ok()?;
+        // The commit is a fact about the checkout, not a thing the model may assert.
+        proposal.base_sha = base_sha.to_string();
+        let dir = Path::new(PROJECT_PROPOSALS_DIR);
+        if already_proposed(dir, repo, base_sha, &proposal.goal) {
+            return None;
+        }
+        spool_project_proposals(dir, [proposal.clone()]).ok()?;
+        Some(proposal)
+    }
+
+    /// The configured repository URL for a watched subject, if any.
+    pub(crate) async fn repo_for_subject(&self, subject: &str) -> Option<String> {
+        let sl = subject.to_lowercase();
+        self.code_repos().await.into_iter().find(|u| {
+            let n = mind_tools::code::repo_name(u).to_lowercase();
+            sl.contains(&n) || n.contains(&sl.split_whitespace().next().unwrap_or("").to_string())
+        })
     }
 
     pub(crate) async fn work_subjects(&self) -> Vec<String> {
@@ -2442,6 +2473,11 @@ impl super::ConversationEngine {
 
     /// One WorkOps pass: research-revise the next project in the rotation; surface only on change.
     /// A GitHub-activity glance rides along when there's unread work.
+    /// One iterative pass over one watched project.
+    ///
+    /// E.ITER1: it studies the CODE it can actually read, remembers what it proposed last time,
+    /// and says nothing when the repository has not moved. What it delivers is the proposal, not
+    /// the web research that produced it.
     pub async fn work_watch_run(&self) -> Option<String> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let _ = self
@@ -2470,68 +2506,117 @@ impl super::ConversationEngine {
                 &((cursor + 1) % subjects.len()).to_string(),
             )
             .await;
-        // DISAMBIGUATE: a bare project name ("SDF Protocol") collides with unrelated things in
-        // search (Syrian Democratic Forces, Stellar, NIST). Ground the query in what the mind
-        // already knows THIS project is, so the scan is about HIS work, not a namesake.
-        let ident: Vec<String> = self
-            .memory
-            .beliefs_matching(
-                &subject,
-                &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
-                    mind_types::Activity::CodeWork,
-                )),
-            )
-            .await
-            .unwrap_or_default()
-            .iter()
-            .take(3)
-            .map(|b| b.statement.chars().take(140).collect::<String>())
-            .collect();
-        let context = if ident.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " (this is Pranab Sarkar's project — for disambiguation: {})",
-                ident.join("; ")
-            )
+
+        // THE CODE FIRST. A subject with no repository cannot be studied, however much the web
+        // says about its name -- and searching the name is what produced eight weeks of
+        // "Pranab is the creator of ..." instead of anything about the project.
+        let repo_url = self.repo_for_subject(&subject).await;
+        let head = match &repo_url {
+            Some(url) => {
+                let u = url.clone();
+                let name = mind_tools::code::repo_name(&u);
+                let _ = tokio::task::spawn_blocking(move || mind_tools::code::sync_repo(&u)).await;
+                mind_tools::code::head_sha(&name)
+            }
+            None => None,
         };
-        // Ground in the ACTUAL repo when we have it — the scan reasons about current code.
-        let code_ctx = self.code_context_for(&subject).await;
-        // Belief-revising field scan on the project (treasury-gated inside research_revise).
-        let report = self
-            .research_revise(&format!(
-                "{subject}{context} — latest developments in this specific space, competing/similar approaches, and relevant research. Ignore unrelated same-named entities.{code_ctx}"
-            ))
-            .await
-            .ok()?;
-        if !code_ctx.is_empty() {
-            self.spool_work_proposal(&subject, &report, &code_ctx).await;
-        }
-        // GitHub activity glance (proven-strong signal; only when there's genuinely unread work).
-        let mut gh = String::new();
-        if let Some(g) = &self.github {
-            if let Ok(notes) = g.notifications(8).await {
-                if !notes.is_empty() {
-                    gh = format!(
-                        "\n\n📬 GitHub — {} unread: {}",
-                        notes.len(),
-                        notes
-                            .iter()
-                            .take(4)
-                            .map(|n| n.title.clone())
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    );
+        let dir = Path::new(PROJECT_PROPOSALS_DIR);
+        let prior = latest_proposal_for(dir, &subject);
+        match iter_step(head.as_deref(), prior.as_ref()) {
+            IterStep::NoRepo => {
+                // Say it ONCE per subject, then stay quiet: a missing repository is a fact about
+                // configuration, and repeating it every third day is the noise this slice removes.
+                let key = format!("workops_norepo:{subject}");
+                if self.memory.profile_get(&key).await.ok().flatten().is_some() {
+                    return None;
                 }
+                let _ = self.memory.profile_set(&key, &now_ms.to_string()).await;
+                self.ledger_sent("workops", &format!("no repo for {subject}"))
+                    .await;
+                Some(format!(
+                    "🛠 WorkOps — I watch **{subject}** but I cannot read its code: no repository is \
+                     configured for it, so anything I have said about it came from searching the \
+                     name. Add it with `code add <git url>` and I will study the code itself from \
+                     the next pass."
+                ))
+            }
+            // The repository is exactly where it was when the last proposal was written. Deriving
+            // again can only restate it, which is precisely what happened thirteen times.
+            IterStep::Unchanged { .. } => None,
+            IterStep::Derive { base_sha, prior } => {
+                let ident: Vec<String> = self
+                    .memory
+                    .beliefs_matching(
+                        &subject,
+                        &mind_types::AccessContext::operator(mind_types::Purpose::serving_primary(
+                            mind_types::Activity::CodeWork,
+                        )),
+                    )
+                    .await
+                    .unwrap_or_default()
+                    .iter()
+                    .take(3)
+                    .map(|b| b.statement.chars().take(140).collect::<String>())
+                    .collect();
+                let context = if ident.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (this is Pranab Sarkar's project — for disambiguation: {})",
+                        ident.join("; ")
+                    )
+                };
+                let code_ctx = self.code_context_for(&subject).await;
+                let moved = prior
+                    .as_ref()
+                    .map(|p| format!(" It has moved since commit {}.", p.base_sha))
+                    .unwrap_or_default();
+                let report = self
+                    .research_revise(&format!(
+                        "{subject}{context} — latest developments in this specific space, competing/similar approaches, and relevant research.{moved} Ignore unrelated same-named entities."
+                    ))
+                    .await
+                    .ok()?;
+                let proposal = self
+                    .derive_work_proposal(&subject, &report, &code_ctx, &base_sha, prior.as_ref())
+                    .await;
+                // GitHub activity glance (proven-strong signal; only when there is genuinely unread work).
+                let mut gh = String::new();
+                if let Some(g) = &self.github {
+                    if let Ok(notes) = g.notifications(8).await {
+                        if !notes.is_empty() {
+                            gh = format!(
+                                "\n\n📬 GitHub — {} unread: {}",
+                                notes.len(),
+                                notes
+                                    .iter()
+                                    .take(4)
+                                    .map(|n| n.title.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            );
+                        }
+                    }
+                }
+                // WHAT IT DELIVERS IS THE PROPOSAL. With nothing to propose there is nothing worth
+                // a notification; the pass still revised memory.
+                let Some(p) = proposal else {
+                    return (!gh.is_empty()).then(|| format!("🛠 WorkOps — **{subject}**{gh}"));
+                };
+                self.ledger_sent("workops", &format!("proposed for {subject}"))
+                    .await;
+                Some(format!(
+                    "🛠 WorkOps — **{subject}** @ `{base_sha}`\n\n\
+                     **Proposal:** {}\n\
+                     **Check:** `{}`\n\
+                     **Against it:** {}\n\
+                     **Merge odds:** {:.0}%{gh}",
+                    p.goal,
+                    p.acceptance_test,
+                    p.why_not,
+                    p.p_merge * 100.0
+                ))
             }
         }
-        if report.contains("nothing changed in what I believe") && gh.is_empty() {
-            return None; // silent — the scan still updated memory
-        }
-        self.ledger_sent("workops", &format!("field-scanned {subject}"))
-            .await;
-        Some(format!(
-            "🛠 WorkOps — I scanned **{subject}** for you:\n\n{report}{gh}"
-        ))
     }
 }

@@ -4845,6 +4845,112 @@ fn valid_project_proposal() -> ProjectProposal {
     }
 }
 
+// ── E.ITER1: an iterative pass must not restate what it already proposed ────────────────────────
+
+/// Thirteen proposals between July and September named the same repo, the same commit and the
+/// same change, because nothing asked this question. Now something does.
+#[test]
+fn an_unchanged_repository_derives_nothing_and_a_moved_one_carries_the_prior() {
+    let prior = valid_project_proposal();
+
+    // No repository for the subject at all: nothing to study.
+    assert_eq!(iter_step(None, Some(&prior)), IterStep::NoRepo);
+    assert_eq!(iter_step(Some("   "), None), IterStep::NoRepo);
+
+    // The commit the last proposal was written against: re-deriving can only restate it.
+    match iter_step(Some("0123456789abcdef"), Some(&prior)) {
+        IterStep::Unchanged { base_sha, goal } => {
+            assert_eq!(base_sha, "0123456789abcdef");
+            assert_eq!(goal, prior.goal, "it names what it already said");
+        }
+        other => panic!("an unchanged repository must derive nothing: {other:?}"),
+    }
+
+    // The repository moved: derive, and hand the model what it proposed last time.
+    match iter_step(Some("feedface"), Some(&prior)) {
+        IterStep::Derive { base_sha, prior: carried } => {
+            assert_eq!(base_sha, "feedface");
+            assert_eq!(carried.as_ref().map(|p| p.goal.clone()), Some(prior.goal.clone()));
+        }
+        other => panic!("a moved repository must derive: {other:?}"),
+    }
+
+    // Nothing proposed yet: derive with no history.
+    match iter_step(Some("feedface"), None) {
+        IterStep::Derive { prior: None, .. } => {}
+        other => panic!("a first pass must derive with no prior: {other:?}"),
+    }
+}
+
+#[test]
+fn the_spool_yields_the_newest_proposal_for_the_repo_it_was_asked_about() {
+    let dir = std::env::temp_dir().join(format!(
+        "ym-iter1-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.as_path();
+    assert!(latest_proposal_for(dir, "yantrikos/yantrik-mind").is_none());
+
+    let mut older = valid_project_proposal();
+    older.goal = "older goal".into();
+    spool_project_proposals(dir, [older]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut newer = valid_project_proposal();
+    newer.goal = "newer goal".into();
+    spool_project_proposals(dir, [newer]).unwrap();
+
+    let mut elsewhere = valid_project_proposal();
+    elsewhere.repo = "someone/else".into();
+    elsewhere.goal = "not ours".into();
+    spool_project_proposals(dir, [elsewhere]).unwrap();
+
+    let found = latest_proposal_for(dir, "yantrikos/yantrik-mind").expect("a proposal");
+    assert_eq!(found.goal, "newer goal", "the newest for THIS repo");
+    assert_eq!(
+        latest_proposal_for(dir, "nobody/nothing"),
+        None,
+        "a repo with no proposal has none"
+    );
+}
+
+#[test]
+fn the_same_change_cannot_be_proposed_twice_against_the_same_commit() {
+    let dir = std::env::temp_dir().join(format!(
+        "ym-iter1-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.as_path();
+    let p = valid_project_proposal();
+    spool_project_proposals(dir, [p.clone()]).unwrap();
+
+    assert!(
+        already_proposed(dir, &p.repo, &p.base_sha, &p.goal),
+        "the identical proposal is already on the spool"
+    );
+    assert!(
+        already_proposed(dir, &p.repo, &p.base_sha, "  Add   a typed   proposal spool "),
+        "spacing and case are not a new idea"
+    );
+    assert!(
+        !already_proposed(dir, &p.repo, "adifferentsha", &p.goal),
+        "the same change against MOVED code is a fresh question"
+    );
+    assert!(
+        !already_proposed(dir, &p.repo, &p.base_sha, "something genuinely different"),
+        "a different change is not a repeat"
+    );
+}
+
 #[test]
 fn project_proposal_rejects_missing_citations() {
     let mut proposal = valid_project_proposal();

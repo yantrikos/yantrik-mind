@@ -8438,3 +8438,29 @@ So the loop proposes, forgets, and proposes again, while the ping carries the we
 **Kill criteria.** (1) Unchanged repo with a prior open proposal: no new spool entry, no ping. (2) Moved repo: exactly one new proposal whose `base_sha` equals the real head sha from git. (3) A subject with no repo: one note, then silence. (4) The delivered text contains the goal and the acceptance test and does **not** contain "is the creator of". (5) The same goal cannot be spooled twice for the same `base_sha`. (6) Full suite; witnessed on staging against a repo that has not moved and one that has.
 
 **Operationally, and separately from the code:** ContextCache should be added to the readable repos (`code add https://github.com/spranab/contextcache`) or it cannot be studied however good the loop becomes. I will do that on staging; production is Pranab's word.
+
+**E.ITER1 — BUILT, DEPLOYED and WITNESSED on staging (2026-09-06 17:35–17:55). All kill criteria met live, in one rotation of the portfolio.**
+
+Binary `63bc2b7` (sha `3d4253570c13f119`); ContextCache added to staging's readable repos (`code add https://github.com/spranab/contextcache`).
+
+| run | subject | behaviour | criterion |
+|---|---|---|---|
+| 1 | SDF Protocol | "I cannot read its code: no repository is configured… add it with `code add`" | 3 |
+| **2** | **ContextCache** | **a proposal at the real commit `a30aeb5`** | **2, 4** |
+| 3–6 | YantrikDB, ToolFormerMicro, agentweb, anandotsav | the same note, once each | 3 |
+| 7 | SDF Protocol again | **silent** — the note is said once, not every third day | 3 |
+| 8 | ContextCache again | **silent** — unchanged repo with an open proposal derives nothing | **1** |
+
+What run 2 delivered, verbatim and in full — no research report, no identity trivia:
+
+> **ContextCache** @ `a30aeb5`
+> **Proposal:** Add a content hash of each tool schema to the cache key so that modified tool definitions automatically produce a cache miss and trigger re-prefill
+> **Check:** `python -c "from context_cache import ContextCacheClient; …"`
+> **Against it:** The README excerpt does not show the full internal implementation at a30aeb5; the cache key may already incorporate a schema hash… making this a no-op rather than a fix
+> **Merge odds:** 45%
+
+`a30aeb5` is the checkout's actual `git rev-parse --short HEAD`, confirmed independently — criterion 2. The spool holds **exactly one** proposal after eight passes, so the silent pass wrote nothing — criterion 5. The delivered text contains the goal and the acceptance test and does not contain "is the creator of" — criterion 4. Unit tests cover all three decisions and the mutant that lets an unchanged repository derive anyway fails the test named for it.
+
+**One process note.** The deploy gate was passed a multi-word literal and `ssh` split it, so the gate matched a bare "no" and read 3,175 — meaningless, though it did not stop a good deploy. That is the *third* time today an argument with a space has been re-split by ssh. The rule is already banked; it needs to be applied to the deploy script's gate argument, not only to timestamps.
+
+**Not yet done, and it is Pranab's call:** production still runs the old loop and still has no ContextCache repository, so it will keep web-searching the name until both the binary and the `code add` land there.

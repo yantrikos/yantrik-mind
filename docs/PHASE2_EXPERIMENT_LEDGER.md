@@ -8391,3 +8391,20 @@ The pairing joins `attention_shadow.object_id` to `loop_tick.context_fingerprint
 So the slice is: admission reports its measurement, the later gates fill their slots from their own decisions, and the single permitted write moves to the end of the wake. It is a careful change to a concurrency seam, not a wiring pass, and it is worth doing properly rather than quickly — a shadow row that MISREPORTS a gate is worse than one that abstains, which is this ledger's own standard.
 
 **The acceptance test lands first, deliberately.** `crates/mind-evals/runners/l2_pairing.py` is the analysis that produced today's numbers, committed before the change it will judge: it joins every shadow row to its wake's timer rows by cycle label, counts exact agreement, membership agreement and disagreement, and prints **"acted but NEVER a candidate"**, which must go from `[ask, dmn, knock]` to empty. Today's run is its baseline.
+
+## E.PING1 — FILED: why the field scan pings twice a day and never says "nothing changed" (2026-09-06, Pranab: "I was pinged a lot of times… why is it not remembering the already done analysis?")
+
+Measured on PRODUCTION, read-only. The chain, end to end:
+
+1. **The pings are the WorkOps field scan**, twice daily at ~13:00 and ~21:00, walking the project portfolio round-robin: YantrikDB → ContextCache → SDF Protocol → anandotsav → agentweb → ToolFormerMicro. In four days it delivered on **6 of 6 passes**. Its sibling, the work radar, uses the same structure and stayed **silent on 6 of 10** ("pass complete — silent (no belief change)"), so the difference is not the loop, it is what the run function returns.
+2. **The field scan does have a silence gate** (`code.rs:2528`): stay quiet when the report contains "nothing changed in what I believe" and GitHub shows nothing. The phrase is emitted deterministically by `research_revise` when its change list is empty (`research.rs:534`), so the gate is sound — it simply never fires, because the change list is never empty.
+3. **Why it is never empty.** The DMN reconcile phase, for every contradiction it judges, writes a NEW belief each pass: `format!("On the tension '{}' vs '{}': {}", …)` at weight 0.3, commented "low-certainty note for observability" (`proactive.rs:709-721`). The verdict text is model-written, so each pass produces a new distinct string rather than updating one note.
+4. **The scale.** Of 15,692 propositions carrying an evidence version, **903 mention ContextCache and 582 of those begin "On the tension 'Pranab Sarkar is the creator…'"** — one unresolved contradiction, re-judged and re-stored 582 times. 242 distinct openings cover all 903. Nothing has ever been retired: `mind_belief_tombstone` holds **0 rows**.
+5. **This was predicted in August and written down.** The ContextCache research mis-attribution (2026-08-03) closed with: "a contradiction about the patent/authorship claim remains UNRESOLVED in the store and will keep being re-judged by the DMN reconcile phase." It has been, 582 times.
+
+**So the answer to the question as asked:** it *is* remembering — that is the problem. It stores every re-judgement as a new belief instead of recognising it as the same one, and an observability note at weight 0.3 then counts as "something changed in what I believe", which is the exact condition the ping is gated on. Dedup is by exact string; nothing dedups by meaning, and nothing ever closes a tension.
+
+**Three candidate fixes, none taken without Pranab's word** because two of them change what the family's mind says:
+- **Narrowest:** the silence gate ignores weight-0.3 observability notes, so only a real belief change speaks. Fixes the pings, leaves the store growing.
+- **Root:** reconcile writes its note **once per contradiction pair**, updating in place instead of appending, so a re-judgement is a revision rather than a new belief.
+- **Closing:** a judged contradiction is resolved or tombstoned so it stops being re-judged at all — the tombstone table exists and has never been used.

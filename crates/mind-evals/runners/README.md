@@ -11,5 +11,11 @@ The box's `/root/cb2n/fixtures` is the committed `fixtures/cb2n` tree plus one t
 1. `bash fixtures/cb2n/scratch/rederive.sh` must print "re-derives exactly" first.
 2. Locally: `tar --force-local -czf cb2n-tree.tgz --exclude=__pycache__ -C crates/mind-evals/fixtures/cb2n .` and `scp` it to `/tmp` on the box.
 3. On the box, with nothing attached to `cb2net`/`cb2egress`: `cp -a /root/cb2n/fixtures /root/cb2n/fixtures.bak.$(date +%s)`, then `tar --no-same-owner -xzf /tmp/cb2n-tree.tgz -C /root/cb2n/fixtures`, then `echo commit=<sha> > /root/cb2n/SOURCE` (the runner prints it in `sequence.log`).
-4. `FIX=/root/cb2n/fixtures bash /root/cb2n/fixtures/selftest/selftest.sh` — every line "agree".
+4. `FIX=/root/cb2n/fixtures bash /root/cb2n/fixtures/selftest/selftest.sh 2>&1 | grep -E "DISAGREE|FAIL"` — it must print NOTHING.
+   Never `tail` this output: on 2026-09-06 `image_freshness` reported DISAGREE above the last eight lines, the warning was
+   truncated away, and a leg then ran against a stale meter.
+4b. **Rebuild any image whose baked file you changed**, or the tree and the running container disagree:
+   `cd /root/cb2n/fixtures && docker build -t cb2n-proxy -f docker/proxy.Dockerfile .` (same for `cb2-check`).
+   `proxy.py`, `check_web.mjs`, `check_t3.py`, `leads.json` and `expected.json` are all COPYed at build time and no run
+   script rebuilds them; `selftest/image_freshness.sh` is what tells you, if you read it.
 5. Before the first graded run after any harness change: one UNGRADED leg into its own out dir (`CB2_PROFILE=… CB2_OUT=/root/cb2n/out-<name>-preflight`, `net/cb2net.sh` then `run/mind_leg.sh T1 $OUT`) and read the receipt and the Mind's container log. Four readings died from harness defects whose first run was a graded one.

@@ -8336,3 +8336,22 @@ So the mind's own accounting was never wrong on the profile the readings use, an
 **Kill criteria.** (1) `selftest/usage_cases.py` drives `usage_from` over four shapes — an OpenAI body, a native blocking body, a native NDJSON stream, an SSE stream with a trailing usage chunk — and disagrees loudly on any. (2) The existing `tally_cases` and every other selftest still agree. (3) `rederive.sh` prints "re-derives exactly". (4) The witness is the same ungraded Mind T1 leg on `oss20-local`, whose receipt must now report non-zero prompt and completion tokens with the leg otherwise unchanged: `done`, not void, 3 requests, 0 upstream errors. (5) A mutant that drops the native branch must fail the native case by name.
 
 **Not claimed.** That this changes any score. It makes the Mind's token spend measurable on the local profile, which is the one thing four readings could not compare.
+
+**E.USAGE2 — CLOSED (2026-09-06 03:56–03:59). The mind's tokens are measurable on the local profile for the first time.**
+
+| | before | after |
+|---|---|---|
+| `usage_prompt_tokens` | 0 in every reading | **2,019** |
+| `usage_completion_tokens` | 0 in every reading | **16,012** |
+| `usage_responses` | 0 | **2** |
+
+Same profile, same upstream, `by_path` still `POST /api/chat`, models still tallied, 2 requests, 0 upstream errors. All five `usage_cases` agree; the mutant that drops the native branch fails both native cases and leaves the OpenAI ones passing, which is the fairness property stated in the prereg: Hermes's counts cannot move. `rederive.sh` exact. Every other selftest agrees.
+
+**A first fact the new meter produced immediately:** that preflight leg **failed with zero files after spending 16,012 completion tokens**. A leg that burns a full budget and delivers nothing was, until this run, indistinguishable in the receipt from a leg that spent nothing.
+
+**Two process defects, both mine, both worth more than the slice.**
+
+1. **I ran a leg against a stale image and read a zero I could have predicted.** `proxy.py` is COPYed into the `cb2n-proxy` image at build time and `run/proxy.sh` never rebuilds it, so overlaying the fixtures tree changed the source and not the running meter. The harness *caught this*: `selftest/image_freshness.sh` reported `image_matches_tree:cb2n-proxy:proxy.py: DISAGREE` with both hashes.
+2. **My own sync script hid the warning.** It prints `selftest.sh | tail -8`, and the failing line sat above the last eight. A guard's output must be searched for its verdict, never truncated to its tail — `grep -E "DISAGREE|FAIL"` — and the runners README now says so, along with the rebuild step that must follow any change to a file baked into an image.
+
+The pattern across today is one pattern: **three deploy gates, one suite gate and now one selftest guard all failed to tell me something true**, each because of how the check was written or read rather than what it checked.

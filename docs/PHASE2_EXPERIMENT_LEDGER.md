@@ -8250,3 +8250,25 @@ Journal: `[links] … 1 finding(s)` at 17:33:39, then `[links] … 0 finding(s)`
 **Causation, as isolated as one run allows.** This chain has no critic step (`author files → write project`), and no other note in the trail names links, so the mechanical finding is the only feedback that named the defect that was then repaired. One run, one repair; the earlier measured base rate for findings that reach an actor is 45% repaired, so a single success is not a rate.
 
 **Residual filed, deliberately not fixed here.** The findings header the model reads carries a run of stray spaces from its own format string: `each of                                  these was checked`. It is in the prompt, so it is worth fixing — and it changes the message the readings compare, so it belongs in its own slice with the usual before-and-after, not as a drive-by edit inside this one.
+
+### E.BUILT1 — PREREG: a build that delivered must not report that it could not finish (2026-09-05)
+
+**The evidence, verbatim.** Reading 9's Mind T1 scored **11/11** and its own `RESULT.md` reads:
+
+```
+🛠️ [cb2-t1] I couldn't finish the build: nothing was written: the generation hit its
+token limit and server.py was cut
+
+THEN, finishing the set:
+http://127.0.0.1:8099/cb2-t1-811777/ (1 files: server.py) — NOTE: …
+```
+
+The harness recorded `status: failed` for that leg. The file is now a fixture (`fixtures/built/r9_mind_T1_RESULT.md`).
+
+**The cause, read from the code and not inferred from the symptom.** The build recipe stores `write_files`' return in `project_url`. When the first pass is truncated, a `JumpIf` on the truncation marker runs the completion pass, whose `write_files` prepends the earlier message: `{prior}\n\nTHEN, finishing the set:\n{msg}`. The result is stored back into `project_url`, so the variable that names a URL now holds a narrative beginning with the first pass's failure sentence. `delegate.rs:2146` then asks `out.ok && url.starts_with("http")` — false — and the lane reports `I couldn't finish the build`, notes `failed`, and writes `failed` to the ledger, for a deliverable that exists and passes. One site in the tree does this; the page chain's repair replaces its draft rather than accumulating, which is why its two recovery tests pass and never covered this.
+
+**The change.** `fileset::built_url(value)`: the LAST line of the value that is a URL followed by the write step's own success rendering (` (N files: …`) is the deliverable; anything else is not a URL. `built` becomes `out.ok && built_url(&url).is_some()`, the note and the message carry that URL, and the failure path keeps the whole value as its reason, because naming which refusal stopped the write is the thing that path is for.
+
+**Kill criteria.** (1) The real R9 value yields the URL and is judged built. (2) A refusal with no written line yields `None` and stays failed. (3) A plain single-pass URL line is unchanged. (4) A refusal that merely mentions an http address yields `None` — the mutant that accepts any line containing "http" must fail this case by name. (5) A value with two written passes yields the LAST URL. (6) Full suite green; the delegate's build-lane behaviour witnessed on staging with a forced truncation.
+
+**Not claimed.** That this changes a score. R9's T1 already passed the checker; what was wrong was the report of it — which is what the harness records as `status`, and therefore what a later reading of the ledger would believe.

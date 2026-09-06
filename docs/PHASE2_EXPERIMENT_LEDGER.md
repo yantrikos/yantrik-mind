@@ -8355,3 +8355,30 @@ Same profile, same upstream, `by_path` still `POST /api/chat`, models still tall
 2. **My own sync script hid the warning.** It prints `selftest.sh | tail -8`, and the failing line sat above the last eight. A guard's output must be searched for its verdict, never truncated to its tail — `grep -E "DISAGREE|FAIL"` — and the runners README now says so, along with the rebuild step that must follow any change to a file baked into an image.
 
 The pattern across today is one pattern: **three deploy gates, one suite gate and now one selftest guard all failed to tell me something true**, each because of how the check was written or read rather than what it checked.
+
+## L2 — THE FIRST EVIDENCE READING: 4,642 paired wakes, zero disagreements, and why that number means almost nothing yet (2026-09-06)
+
+Staging has run `YM_ATTENTION_SHADOW=1` since 2026-09-02. Read today, from the decision log rather than from any claim about it:
+
+| | |
+|---|---|
+| shadow rows | **4,642** over **77.6 hours** (3.2 days) |
+| paired with the wake's own timer rows | **4,642 — 100%** |
+| the shadow's pick was the only loop that ran | 4,463 |
+| the shadow's pick was among the loops that ran | 179 |
+| **the shadow picked something that did NOT run** | **0** |
+| wakes where the shadow had **two or more candidates** | **95 (2.0%)** |
+
+The pairing joins `attention_shadow.object_id` to `loop_tick.context_fingerprint`, both `cycle:<process_start>:<wake_no>`. **A correction I owe the record:** I first scanned only `trace_id` and `object_id`, found no cycle label on the timer side, and said the pairing was impossible. It is carried in `context_fingerprint`; the join is exact and total. I was wrong for one step because I searched two fields and concluded about all of them.
+
+**Zero disagreement is not yet a result.** In 98% of wakes the shadow had exactly one candidate, so its "choice" was forced. And the candidate set is narrower than the wake: three loops **acted 89 times without ever being offered** — `dmn` (72), `ask` (12), `knock` (5).
+
+**The cause is structural, and the code says so plainly**: the shadow is written *in the middle* of the wake body, after four gates (`ics`, `lease-sweep`, `resolve`, `profile-refresh`) have filled the signal set and **before** `run_engagement`, `run_patterns` and `run_dmn` run at all. Loops that act after the write point cannot be candidates — not because their wiring is missing, but because the row is written before they exist. `loops.rs` calls this "a partial view of the wake by construction… the design, not a bug", which it was for step 2a; it is now the thing standing between this shadow and evidence worth reading.
+
+### E.L2-CAND — PREREG: the shadow sees the whole wake, or its agreement is an artifact
+
+**Change.** Thread the signal set through the remaining gates and move the single permitted write to the **end** of the wake body, so every loop that could act in a wake is a candidate in that wake's row. The shadow still decides nothing; ranking a complete candidate set after the fact is exactly the evidence L2's gate asks for, and the E.PK3 purity rule is untouched.
+
+**Kill criteria — the analysis run today becomes the acceptance test.** (1) Over a fresh window on staging, **"acted but never a candidate" must be empty**; today it is `[ask, dmn, knock]`. (2) The share of wakes with two or more candidates must rise materially above 2%. (3) Pairing stays 100%: every shadow row still joins a timer row by cycle label. (4) No loop's behaviour changes — the same loops act the same number of times over a comparable window, because a shadow that alters what runs is no longer a shadow. (5) One write per wake still, and only under the switch.
+
+**Not claimed.** That agreement will stay at 100% once the questions get harder. If it drops, that is the finding L2 exists to produce, and it must be read one disagreement at a time before anything is activated.

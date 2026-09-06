@@ -8286,3 +8286,31 @@ What the live runs did exercise: the new decision path end to end on the ordinar
 **This is the second time this ledger has failed to reach the truncation regime on demand.** E.CB2-B2 recorded it in its own words: "the gate exercised the path the change IMPROVES and never the path it CREATES", after both gate legs passed 11/11 without ever truncating. The observed truncations — reading 7's T1, reading 9's T1 — both happened at a **302 s** deadline, where the budget is large enough for the model to start something it cannot finish. The regime is *large budget plus an ambitious brief*, not *small budget*. Any future attempt to witness it should raise the deadline and enlarge the brief, not clamp harder.
 
 **Consequence for how much this mattered.** The defect made a delivered build report failure, and it corrupted the recorded `status` a later reading would trust — but only on the recovered path, which these three runs suggest is uncommon. The fix is right; its frequency is bounded and now stated rather than implied.
+
+### E.USAGE1 — the mind's streamed generations were accounted as zero tokens (2026-09-06)
+
+**Discipline slip, owned first.** This slice was investigated, probed and BUILT before its preregistration was written. The rule is prereg then code, and I broke it. What follows is therefore a record, not a prediction, and it is labelled as one. The criteria below were met, but they were not committed in advance and do not carry the weight of criteria that were.
+
+**The defect, in two halves.** (1) `build_openai_body` never sent `stream_options.include_usage`, and an OpenAI-compatible server sends no usage record on a stream unless asked. (2) `openai_chat_streaming` hard-coded `prompt_tokens: 0, completion_tokens: 0`, so even a server that volunteered usage was ignored. The native Ollama path had a third, smaller version of the same thing: it read `eval_count` and discarded `prompt_eval_count`.
+
+**Preflight against the real upstream** (`192.168.4.35:11434`, `gpt-oss-backup:20b`, 2026-09-06):
+
+| request | HTTP | usage returned |
+|---|---|---|
+| blocking | 200 | `prompt 70, completion 16` |
+| stream, no option | 200 | **none** |
+| stream + `include_usage` | 200 | `prompt 70, completion 16` |
+
+So the zeros in four readings' receipts were the mind never asking, not the model never telling.
+
+**The change.** Ask on every stream, behind `YM_STREAM_USAGE=0` so a provider that rejects the field can be accommodated without a rebuild; read the usage chunk, which arrives last and carries an **empty `choices` array**; carry the native path's prompt count. The SSE loop is now `parse_openai_stream`, a function over any reader, so a recorded transcript drives it — the fixture is the real stream that upstream sent.
+
+**Results.** Three tests: the recorded transcript reports 76/40 with `stop_reason: length`; a stream with no usage record still parses and claims nothing; a streaming body asks and a blocking one does not. Mutants: never reading the usage chunk fails the transcript test; never asking fails the body test. Each dies on its own test.
+
+**Bounded, and stated rather than implied.** This does NOT improve benchmark budgets. `authoring_budget` only clamps when a provider deadline is configured, and the rate learner needs `MIN_RATE_SAMPLES = 5` samples while a benchmark leg makes three to five model calls in a fresh container — so readings will still size their clamp from `ASSUMED_TOKENS_PER_SECOND = 15` even with usage flowing. Whether that assumed rate is why the mind's authoring truncates or under-writes in readings is a separate question, filed as **E.RATE1**, and it is a better candidate for the truncation puzzle than anything tried today.
+
+**Two things found on the way, filed not fixed.** The whole `provider` module sits behind the non-default `api-llm` feature, so its tests — including E.THINKLVL1's — run only under `cargo test --features api-llm` and are silently skipped otherwise; `mind-core` does enable it, so the deployed binary has the code. And `yantrik-ml`'s integration tests (`tests/test_embedder.rs`) do not compile against the current embedder API, which blocks a plain `cargo test` for that crate.
+
+**E.USAGE1 — the deploy gate failed for the third time today on a badly chosen literal.** `include_usage` reads **0** in a release binary that provably contains the code: `YM_STREAM_USAGE` and `prompt_eval_count`, both unique to this change, each read 1. The binary keeps literals in a packed table — `…repeat_penaltythinktoolsYM_STREAM_USAGEstream_optionsfrequency_penalty…` — and a short key that is a suffix of, or shared with, another entry does not survive as a contiguous match. This is the same lesson as this morning's `/v1/messages/count_tokens` gate, now with a concrete mechanism: **gate on the longest literal unique to the change, and confirm it reads non-zero in the built binary before trusting the gate to stop a deploy.** Re-gated on `YM_STREAM_USAGE`.
+
+**And the chain itself had a defect worth recording, because it produced a confident false statement.** A `cd` into the companion repo persisted, so the mind's ledger commit ran there (`pathspec did not match`), `git rev-parse HEAD` returned the COMPANION's sha, and the chain printed "mind pushed ccba45f" — the companion's hash — then told the box to check out that tree as the mind, which failed with `unable to read tree`. The deploy went no further, so nothing was installed and staging stayed on the previous binary. Two rules from it: a multi-repo chain must name each repository explicitly on every command rather than relying on a working directory, and a "pushed X" line must read the sha back from the repository it claims to have pushed.

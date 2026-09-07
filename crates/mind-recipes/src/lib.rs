@@ -652,21 +652,12 @@ impl HorizonJob {
                     store_as,
                     on_error,
                 } => {
-                    if !matches!(
-                        tool_name.as_str(),
-                        // E.HORIZON1: the mind's own work is a read like any other. This gate is
-                        // the authority on what a durable segment may touch -- the planner's
-                        // prompt only suggests. Adding a tool to the prompt without adding it
-                        // here gets the goal REFUSED, which is the gate working.
-                        "inbox"
-                            | "github"
-                            | "web_search"
-                            | "fetch"
-                            | "recall"
-                            | "due_tasks"
-                            | "own_proposals"
-                            | "own_jobs"
-                    ) || !valid_id(store_as)
+                    // E.HORIZON1: this gate is the AUTHORITY on what a durable segment may
+                    // touch; the planner's prompt only suggests. They were two lists and nothing
+                    // connected them, so a tool named in the prompt and missing here got the goal
+                    // refused at scheduling time -- correct, and discoverable only by trying it.
+                    // One list now, and a test that the prompt is built from it.
+                    if !AUDITED_READ_TOOLS.contains(&tool_name.as_str()) || !valid_id(store_as)
                         || serde_json::to_vec(args)?.len() > 16 * 1_024
                     {
                         anyhow::bail!("horizon segments may use only audited read tools");
@@ -1158,11 +1149,16 @@ impl RecipeEngine {
     /// this reuses the proven authoring path). The planner only PROPOSES: outward `Act` steps are
     /// still harm-gated, confirmation-required, and effect-budget-capped when the recipe runs.
     /// Returns `None` if the model produced nothing parseable.
+    /// The planner's tool list, substituted from the one audited set.
+    pub(crate) fn fill_audited_tools(template: &str) -> String {
+        template.replace("AUDITED_TOOLS_HERE", &AUDITED_READ_TOOLS.join(", "))
+    }
+
     pub async fn plan(&self, goal: &str, now_ms: u64) -> Option<Vec<RecipeStep>> {
         // A raw template (literal JSON braces + `{{var}}` placeholders) with simple text tokens we
         // substitute — avoids `format!` brace-escaping entirely.
         let template = r#"Turn the GOAL into a runnable recipe: a JSON array of RecipeStep (externally-tagged JSON).
-Read tools available for Tool / WaitForCondition steps: inbox, github, web_search, fetch, recall, due_tasks, own_proposals, own_jobs.
+Read tools available for Tool / WaitForCondition steps: AUDITED_TOOLS_HERE.
 own_proposals lists the code changes this mind has proposed for the projects it watches (repo, goal, commit). own_jobs lists its own delegated work and how each ended. Use these for any goal about THIS MIND'S OWN work, rather than reaching for a tool that answers a different question.
 Step types:
 - {"Tool":{"tool_name":"web_search","args":{"query":"..."},"store_as":"hits"}}
@@ -1175,6 +1171,8 @@ Step types:
 - {"Act":{"kind":"send_email","target":"addr","summary":"subject","payload":"body"}}
 RULES: prefer read -> Think -> Notify. Reference an earlier step's result by its store_as in double-brace placeholders (see Think/Notify). Use Act ONLY if the goal clearly wants an OUTWARD action; it will require the user's confirmation. End with a Notify that reports the result. Keep it under 6 steps. Current epoch ms = NOW_MS; for any time or expiry use that number plus an offset in ms. Output ONLY the JSON array — no prose, no code fences.
 GOAL: GOAL_HERE"#;
+        // The vocabulary offered is exactly the vocabulary admitted; see AUDITED_READ_TOOLS.
+        let template = Self::fill_audited_tools(template);
         let prompt = template
             .replace("NOW_MS", &now_ms.to_string())
             .replace("GOAL_HERE", goal);
@@ -1314,6 +1312,20 @@ GOAL: GOAL_HERE"#;
 /// Keep only a linear read / reason / validate / render plan from what the planner proposed,
 /// fail-closed on every step, with at least one audited read (the door's rule, shared with the
 /// E.F2 replan branch so a revised plan is bounded exactly like a first one).
+/// Every tool a durable horizon segment may call. The audit gate and the planner's prompt are
+/// both derived from this one list, because when they were two lists they disagreed and the only
+/// symptom was a refusal at scheduling time.
+pub(crate) const AUDITED_READ_TOOLS: [&str; 8] = [
+    "inbox",
+    "github",
+    "web_search",
+    "fetch",
+    "recall",
+    "due_tasks",
+    "own_proposals",
+    "own_jobs",
+];
+
 fn bound_read_only_steps(authored: Vec<RecipeStep>) -> anyhow::Result<Vec<RecipeStep>> {
     let mut steps = Vec::new();
     let mut has_read = false;
@@ -5133,5 +5145,45 @@ mod chaining_tests {
             Some("<!doctype html><title>Made</title>"),
             "the tool got the placeholder instead of the authored document — args are not resolved"
         );
+    }
+}
+
+#[cfg(test)]
+mod audited_tool_tests {
+    use super::*;
+
+    /// The prompt and the gate must name the same tools. They were two hand-maintained lists, and
+    /// the day they disagreed the only symptom was a durable goal refused at scheduling time with
+    /// "horizon segments may use only audited read tools" -- no compile error, no test, nothing
+    /// pointing at the prompt. Now the prompt is generated from the gate's list and this pins it.
+    #[test]
+    fn every_tool_the_planner_is_offered_is_one_the_gate_admits() {
+        let filled = RecipeEngine::fill_audited_tools(
+            "Read tools available for Tool / WaitForCondition steps: AUDITED_TOOLS_HERE.",
+        );
+        let line = filled
+            .lines()
+            .find(|l| l.starts_with("Read tools available"))
+            .expect("the template offers a tool list");
+        let offered: Vec<&str> = line
+            .trim_end_matches('.')
+            .split(':')
+            .nth(1)
+            .expect("a colon then the list")
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            offered,
+            AUDITED_READ_TOOLS.to_vec(),
+            "the planner is offered tools the audit gate would refuse, or vice versa"
+        );
+        for tool in offered {
+            assert!(
+                AUDITED_READ_TOOLS.contains(&tool),
+                "{tool} is offered to the planner and refused by the gate"
+            );
+        }
     }
 }

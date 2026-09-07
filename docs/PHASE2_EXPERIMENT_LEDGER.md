@@ -8591,3 +8591,29 @@ It planned a tool call and reasoned over the result. The segment is not blind; *
 So the fix is narrower and more obviously right than what I filed: **the planner's read vocabulary should include the mind's own state.** `due_tasks` at `lib.rs:14831` is the pattern — a read against `self.memory`, returning rendered text, with an empty read treated as observed state rather than an execution failure.
 
 **Kill criteria for the build.** (1) The same goal, replanned, produces a Tool step naming a proposals reader. (2) The segment answers with the real count (13 at the time of writing) and the newest proposal's goal text. (3) An empty spool answers "none pending" and does **not** fail the run — the `due_tasks` precedent. (4) The read-only guarantee is untouched: the new tools only read, and `bound_read_only_steps` still governs. (5) A goal that names none of it plans exactly as it does today.
+
+**E.HORIZON1 — BUILT, DEPLOYED, WITNESSED. The ladder's rung-7 finding is closed.**
+
+Two reads added to the planner's vocabulary — `own_proposals` (the spool, newest first, with repo, commit and goal) and `own_jobs` (the delegation board and how each job ended) — both following the `due_tasks` precedent that an empty read is observed state, never an execution failure.
+
+**The mind refused the first attempt, and was right to.** Naming a tool in the planner's prompt is not permission: `BoundedHorizonJob`'s validation is the authority, and it declined to schedule at all — *"horizon segments may use only audited read tools."* Fail-closed, before anything was queued. The fix was to audit them, not to loosen the gate.
+
+**Then the same goal, third attempt, planned this:**
+
+```json
+step 1: Tool own_proposals args={}
+step 2: Think "Count the total number of pending proposals in {{proposals}} and identify the newest one by date/commit…"
+```
+
+**and answered this:**
+
+> **Count: 2 pending proposals.**
+> **Newest:** ContextCache @ a30aeb5 — *"Add a --stats flag to start.sh that prints a JSON summary including cache_hit_rate, total_cached_schemas, and disk_usage_bytes to stdout."*
+> It's listed first in the "newest first" ordering you provided.
+> Receipt 85ac1c48c85c
+
+Both numbers check out: staging's spool holds exactly 2 ContextCache proposals, and the newest is the one rung 6 produced. Compare this morning, same goal, same mind: *"I don't have any task or project proposal data available in this conversation… paste it here."* Nothing about the thinking changed. It was given a way to look.
+
+**The seam that caused the refusal is now closed by construction.** The prompt's tool list and the audit gate were two hand-maintained lists with nothing connecting them, and the only symptom of disagreement was a refusal at scheduling time — no compile error, no test. Both are now derived from one `AUDITED_READ_TOOLS`, and a test asserts the offered list equals the admitted list. Mutant: append a tool to the prompt that the gate refuses → the test fails by name. Full suite green.
+
+**Ladder standing: 1, 3, 4, 5, 6 pass; 7 passes now, with its finding fixed and witnessed.** Only rung 8 remains — the mind carrying one of its own proposals through to a verified diff — and it is unbuilt.

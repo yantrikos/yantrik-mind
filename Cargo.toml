@@ -40,9 +40,19 @@ uuid7 = "1"
 # Cargo.lock a future 0.18.1 could have changed the substrate silently. `=0.18.0` is the pin the
 # comment above already claimed to be (Codex's review of E.18b). Resolved artifact, recorded in E.18c:
 # yantrikdb 0.18.0, checksum 8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42.
+# MOVED 0.18.0 -> 0.21.2 (2026-09-07). The two properties this pin was CHOSEN for were checked
+# against the published crates, not the source tree, by the engine seat: (a) BundledEmbedder is
+# still `default = ["bundled-embedder"]`, byte-identical at both tags, and `src/embedder/` is
+# untouched since 0.15.0 -- it never became opt-in; its auto-attach is gated on the store's dim
+# being 64, which is what this mind opens. (b) A pack sealed at schema_version 39 still MOUNTS and
+# recalls under 0.21.2, proven by running it. And the one API this mind leans on,
+# `assert_belief_evidence`, was replayed on a store created by 0.18.0 and migrated to 52 by
+# 0.21.2: identical priors, posteriors and effective weights to six decimals, against both
+# same-version controls. `engine/recall.rs` and `base/scoring.rs` are byte-identical across the
+# span, so ranking and decay do not move either.
 # Cargo.lock is tracked for this application workspace (E.19), committing the full tested resolution;
 # the exact requirement additionally makes the engine substrate choice visible here.
-yantrikdb-core = { version = "=0.18.0", package = "yantrikdb" }
+yantrikdb-core = { version = "=0.21.2", package = "yantrikdb" }
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
 yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }

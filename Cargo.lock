@@ -4417,9 +4417,9 @@ dependencies = [
 
 [[package]]
 name = "yantrikdb"
-version = "0.18.0"
+version = "0.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ff1ffe72dc393998df748020b12134eaaa1a1fb85d653c632f28c6fb06bbb42"
+checksum = "f26238cbf6cf1bda825ed6f50493d5465fecc0cacf53ce32f370684d6cc6b007"
 dependencies = [
  "aes-gcm",
  "arc-swap",

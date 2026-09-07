@@ -8617,3 +8617,22 @@ Both numbers check out: staging's spool holds exactly 2 ContextCache proposals, 
 **The seam that caused the refusal is now closed by construction.** The prompt's tool list and the audit gate were two hand-maintained lists with nothing connecting them, and the only symptom of disagreement was a refusal at scheduling time — no compile error, no test. Both are now derived from one `AUDITED_READ_TOOLS`, and a test asserts the offered list equals the admitted list. Mutant: append a tool to the prompt that the gate refuses → the test fails by name. Full suite green.
 
 **Ladder standing: 1, 3, 4, 5, 6 pass; 7 passes now, with its finding fixed and witnessed.** Only rung 8 remains — the mind carrying one of its own proposals through to a verified diff — and it is unbuilt.
+
+## SUBSTRATE MOVED — yantrikdb `=0.18.0` → `=0.21.2` (2026-09-07), on evidence
+
+The pin was held for two named properties, and both were checked **against the published crates** by the engine seat rather than against a source tree: the bundled embedder is still on by default and its code is untouched since 0.15.0 (its auto-attach is dim-gated at 64, which is what this mind opens); a pack sealed at schema_version 39 still mounts *and recalls* under 0.21.2, proven by mounting it. And the one engine API this mind leans on, `assert_belief_evidence`, was replayed on a store created by 0.18.0 and migrated to 52 by 0.21.2 — identical priors, posteriors and effective weights to six decimals against both same-version controls. That last is the case a diff could not have settled, because a byte-identical function can still be handed different inputs after a migration.
+
+**Verified live on staging after the deploy**, not inferred:
+
+| check | result |
+|---|---|
+| build + full suite on the new engine | green, 868 in mind-conversation |
+| embedding dim still in use | **64** — the bundled embedder still attaches |
+| a belief written through the engine | `oplog` `cognitive_node_upsert`, `applied=1`, `kind:"belief"`, full proposition as label, `log_odds 0.76` with an evidence trail |
+| the four sidecars | scope + evidence_version rows written alongside, as designed |
+| engine belief nodes on the store | 572 nodes, 1,072 oplog entries |
+| service | active, 0 restarts, 0 panics |
+
+So the API this mind actually leans on works on the new substrate, confirmed on our own store rather than in a harness. Production remains on the previous pin and is Pranab's word.
+
+**One thing observed and deliberately NOT diagnosed.** Asked about its beliefs, the mind answered that its belief substrate "contains placeholder or corrupted entries where field names are stored as values (e.g. 'version' as a name, 'horizons json' as an unwinding method)". My first scan for such rows was too crude to support the claim — 77 of 572 nodes matched my heuristic, but most are `kind:"episode"` nodes legitimately labelled by their channel (`chat`), which is not junk. So: there may be a real data-quality problem in the belief store, it is **pre-existing rather than caused by the bump** (tonight's writes are well-formed), and I have not established its extent. Filed, unexamined, rather than asserted — it is the same class yantrikdb-core is building per-row provenance for, and it deserves the measurement I have not yet given it.

@@ -8574,3 +8574,20 @@ That is the same disconnection Pranab named in WorkOps, in a different organ: th
 **It also re-reads the four expired goals.** "Verify staging stayed healthy overnight" and "report the tool-chain completeness percentage" are both questions no toolless segment could have answered even if it had woken. Their expiry hid a second defect underneath it.
 
 **Filed as E.HORIZON1:** a durable segment should run through the same path an ordinary turn does — tools, memory, and the mind's own verbs — or the horizon can schedule anything and deliver nothing. Not started; it is the more valuable of the two remaining builds, ahead of rung 8.
+
+**E.HORIZON1 — CORRECTION to my own diagnosis, then the real one.**
+
+I wrote that "the durable segment runs as a bare model call with no tools and no access to the mind's own state". **That is wrong**, and I published it before looking at the plan. Reproducing the goal and reading the queued job before it fired shows the planner authored exactly this:
+
+```json
+{"Tool": {"tool_name":"due_tasks","args":{"status":"pending"},"store_as":"tasks","on_error":"Fail"}}
+{"Think":{"prompt":"From {{tasks}}, count how many are project proposals and identify the newest one by date…"}}
+```
+
+It planned a tool call and reasoned over the result. The segment is not blind; **it reached for the only thing it had.**
+
+**The real defect is the planner's vocabulary.** `RecipeEngine::plan` offers exactly six: *inbox, github, web_search, fetch, recall, due_tasks*. Not one of them can see the mind's own operational state — no proposals, no delegations, no repositories, no loops, no horizons — although the console has verbs for all of them and the spool holds thirteen proposals. Asked to count its proposals, the planner picked the nearest available tool, got a task list, and the Think step said, correctly and honestly, that it had no proposal data. **The mind did not fail to think; it was given no way to look.**
+
+So the fix is narrower and more obviously right than what I filed: **the planner's read vocabulary should include the mind's own state.** `due_tasks` at `lib.rs:14831` is the pattern — a read against `self.memory`, returning rendered text, with an empty read treated as observed state rather than an execution failure.
+
+**Kill criteria for the build.** (1) The same goal, replanned, produces a Tool step naming a proposals reader. (2) The segment answers with the real count (13 at the time of writing) and the newest proposal's goal text. (3) An empty spool answers "none pending" and does **not** fail the run — the `due_tasks` precedent. (4) The read-only guarantee is untouched: the new tools only read, and `bound_read_only_steps` still governs. (5) A goal that names none of it plans exactly as it does today.

@@ -8513,3 +8513,18 @@ store data/leads.json : {"name": "Ladder Test", "email": "ladder@example.com"}
 Built from nothing, serves, accepts a submission, persists it. No `[links]` line, correctly: the HTML is generated inside `app.py`, so the written set contains no `.html` file for that check to judge.
 
 **One harness defect of my own, found and fixed in the next script:** job ids are **variable width** — this one was `f1048`, five hex characters — and my poller matched a fixed six, so it watched an empty row for its whole window. The artifact checks read the deliverable off disk and were unaffected. Pattern widened to `[0-9a-f]{4,8}`.
+
+**E.LADDER1 — rung 5, the trap: PASS, and my first verdict on it was wrong.**
+
+The setup: a task store whose `add()` returned an integer id, with a green two-test suite, and a request to make `add()` return the full dictionary — a change that breaks `test_add_returns_an_integer_id` unless the test moves too.
+
+**My harness declared FAIL and the harness was broken.** `pytest` is not installed on staging, so the baseline never ran; `rc=1` meant "no module named pytest", not a red suite. I reported a failure that had not been measured — the same class as every guard defect recorded today, and the reason the baseline is supposed to be proven green before the trap means anything. It never was, and I printed the verdict anyway.
+
+Re-judged by driving the test functions directly, the mind passed, and by more than the letter of the task:
+
+- `add()` returns the full dict, with a type hint and a corrected docstring.
+- The test was **renamed and rewritten** — `test_add_returns_an_integer_id` → `test_add_returns_a_full_task`, asserting the new contract.
+- The **ripple was caught**: the second test called `tasks.complete(a)` where `a` had been an id and is now a dict; it became `tasks.complete(a["id"])`. Fixing only the named test would have left that one broken.
+- It added a `__main__` runner, so the file is executable without a test framework — which is what the box actually has.
+
+Both tests pass when driven. This was the rung expected to be weakest, on E.REPAIR1's measured 9-in-20 repair rate; on this instance it handled the change, the test and the second-order breakage.

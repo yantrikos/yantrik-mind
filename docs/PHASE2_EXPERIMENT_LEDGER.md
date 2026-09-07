@@ -8497,3 +8497,19 @@ Eight rungs, ordered by how many organs must chain for the task to finish. Each 
 - **Rung 6's branch has never been witnessed live.** Today's witness covered no-repo, first proposal, and silence on an unchanged repo. The moved-repo path is tested only in unit form.
 - **Rung 7 has a known-failing precedent, visible today.** `horizons` shows two durable goals **EXPIRED with `actions 0/1`** — "verify staging stayed healthy overnight" and "report the current tool-chain completeness percentage". The time budget ran out before either acted. Expect this rung to fail, and treat the failure as the finding.
 - **Rung 8 is not wired at all.** `spool_work_proposal`'s own words are "this shadow path never builds or executes proposals". Thirteen proposals have accumulated since July and nothing has ever consumed one. Closing that loop — proposal → coder → acceptance test → diff — is the next real build, and it is the first rung where the mind would change a repository of yours on its own evidence.
+
+**E.LADDER1 — rungs 1 and 3, run on staging 2026-09-07 04:09–04:25.**
+
+**Rung 1 — PASS.** `ym stock AAPL` returned "AAPL is trading at 319.97 USD, down 2.45% on the session… 391 bars", and the journal shows the tool actually called: `[agent] step 0: quote raw args {"symbols":"AAPL"}` and its measured result. The criterion was live data *and* a tool observation, because a plausible number from memory would have passed a weaker test.
+
+**Rung 3 — PASS, verified independently.** `delegate ladder3-041002` produced `app.py` + `run.sh`. The write step's own sandboxed start reported `[smoke] started 2 files under python 3.13.5: Answered(200)` before delivery. I then ran the artifact myself in a separate namespace rather than trusting that line:
+
+```
+GET /        : 200   form present: True
+POST /submit : 200
+store data/leads.json : {"name": "Ladder Test", "email": "ladder@example.com"}
+```
+
+Built from nothing, serves, accepts a submission, persists it. No `[links]` line, correctly: the HTML is generated inside `app.py`, so the written set contains no `.html` file for that check to judge.
+
+**One harness defect of my own, found and fixed in the next script:** job ids are **variable width** — this one was `f1048`, five hex characters — and my poller matched a fixed six, so it watched an empty row for its whole window. The artifact checks read the deliverable off disk and were unaffected. Pattern widened to `[0-9a-f]{4,8}`.

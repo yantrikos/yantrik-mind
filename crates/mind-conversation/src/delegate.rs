@@ -12,7 +12,7 @@
 
 use super::*;
 
-const LEDGER_KEY: &str = "delegations";
+pub(crate) const LEDGER_KEY: &str = "delegations";
 const LEDGER_CAP: usize = 50;
 /// Result stored in the ledger row. Was 1200 — enough for a board glance, but the desktop's
 /// channel view renders the WHOLE result as the agent's message, and a truncated answer in a

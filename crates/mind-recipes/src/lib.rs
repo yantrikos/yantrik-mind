@@ -1151,7 +1151,8 @@ impl RecipeEngine {
         // A raw template (literal JSON braces + `{{var}}` placeholders) with simple text tokens we
         // substitute — avoids `format!` brace-escaping entirely.
         let template = r#"Turn the GOAL into a runnable recipe: a JSON array of RecipeStep (externally-tagged JSON).
-Read tools available for Tool / WaitForCondition steps: inbox, github, web_search, fetch, recall, due_tasks.
+Read tools available for Tool / WaitForCondition steps: inbox, github, web_search, fetch, recall, due_tasks, own_proposals, own_jobs.
+own_proposals lists the code changes this mind has proposed for the projects it watches (repo, goal, commit). own_jobs lists its own delegated work and how each ended. Use these for any goal about THIS MIND'S OWN work, rather than reaching for a tool that answers a different question.
 Step types:
 - {"Tool":{"tool_name":"web_search","args":{"query":"..."},"store_as":"hits"}}
 - {"Tool":{"tool_name":"fetch","args":{"url":"https://..."},"store_as":"page"}}

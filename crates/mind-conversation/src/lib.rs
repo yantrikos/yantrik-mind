@@ -14849,6 +14849,78 @@ impl RecipeHost for MindRecipeHost {
                 }
                 Ok(due.join("\n"))
             }
+            // E.HORIZON1: the mind's own operational state, reachable BY THE PLANNER.
+            //
+            // A durable goal asked this mind to count its own pending proposals. The planner did
+            // exactly the right thing with what it had -- planned a tool call, reached for the
+            // nearest available tool (`due_tasks`), got a task list, and reported honestly that it
+            // had no proposal data. Thirteen proposals were sitting on disk. The defect was never
+            // the thinking; it was that nothing in the vocabulary could see this mind's own work.
+            // Data existing is not data reachable.
+            "own_proposals" => {
+                let dir = Path::new(PROJECT_PROPOSALS_DIR);
+                let mut rows: Vec<(std::time::SystemTime, ProjectProposal)> = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                            continue;
+                        }
+                        if let Ok(proposal) = std::fs::read_to_string(&path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|json| ProjectProposal::from_json(&json))
+                        {
+                            let when = path
+                                .metadata()
+                                .and_then(|m| m.modified())
+                                .unwrap_or(std::time::UNIX_EPOCH);
+                            rows.push((when, proposal));
+                        }
+                    }
+                }
+                // Newest first: "the newest one" is the commonest question asked of this list.
+                rows.sort_by(|a, b| b.0.cmp(&a.0));
+                if rows.is_empty() {
+                    // The due_tasks precedent: an empty read is observed state, not a failure.
+                    return Ok("0 project proposals pending".into());
+                }
+                let lines: Vec<String> = rows
+                    .iter()
+                    .take(20)
+                    .map(|(_, p)| {
+                        format!("- {} @ {} — {}", p.repo, p.base_sha, p.goal)
+                    })
+                    .collect();
+                Ok(format!(
+                    "{} project proposals pending, newest first:\n{}",
+                    rows.len(),
+                    lines.join("\n")
+                ))
+            }
+            "own_jobs" => {
+                let rows: Vec<crate::delegate::JobRow> = self
+                    .memory
+                    .profile_get(crate::delegate::LEDGER_KEY)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    return Ok("0 delegated jobs on the board".into());
+                }
+                let lines: Vec<String> = rows
+                    .iter()
+                    .rev()
+                    .take(20)
+                    .map(|r| format!("- [{}] {} - {} - {}", r.id, r.name, r.kind, r.status))
+                    .collect();
+                Ok(format!(
+                    "{} delegated jobs, newest first:\n{}",
+                    rows.len(),
+                    lines.join("\n")
+                ))
+            }
             "recall" => {
                 let query = _args
                     .get("query")

@@ -8528,3 +8528,22 @@ Re-judged by driving the test functions directly, the mind passed, and by more t
 - It added a `__main__` runner, so the file is executable without a test framework — which is what the box actually has.
 
 Both tests pass when driven. This was the rung expected to be weakest, on E.REPAIR1's measured 9-in-20 repair rate; on this instance it handled the change, the test and the second-order breakage.
+
+**E.LADDER1 — rung 6, the branch never before exercised: PASS.**
+
+The condition — a repository that has moved since the standing proposal — was **simulated** by ageing the recorded `base_sha` on the spooled proposal to `aged0000`. I will not push to Pranab's repository to manufacture a test condition; the code path is identical, because `iter_step` compares the checkout's real head against that recorded value.
+
+Five passes on the other subjects were **silent** — each had already said its no-repo note once, so the once-only rule held across the whole rotation. The sixth reached ContextCache and derived something new:
+
+| | |
+|---|---|
+| prior proposal | Add a content hash of each tool schema to the cache key so modified tool definitions produce a cache miss and trigger re-prefill |
+| **new proposal** | **Add a `--stats` flag to `start.sh` printing a JSON summary with `cache_hit_rate`, `total_cached_schemas` and `disk_usage_bytes`** |
+| check | `./start.sh --stats 2>&1 \| grep -q 'cache_hit_rate'` |
+| against it | the README already advertises a browser dashboard at :8421 that likely shows equivalent statistics, making a CLI flag redundant |
+| base_sha | `a30aeb5` — the checkout's real head, from git, not the model |
+| merge odds | 30% |
+
+Different subject matter, grounded in the same code, with its own executable check and its own honest case against. That is the iterative behaviour the slice was built for: it built past what it had already said instead of restating it.
+
+**Ladder standing: rungs 1, 3, 5 and 6 pass.** Rung 4 was witnessed during E.CODERNIM1 yesterday. Remaining: rung 7 (a durable goal across time, expected to fail — two horizon goals already sit EXPIRED with `actions 0/1`) and rung 8 (proposal → build → verify → deliver, which does not exist).

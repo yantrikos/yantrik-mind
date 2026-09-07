@@ -654,7 +654,18 @@ impl HorizonJob {
                 } => {
                     if !matches!(
                         tool_name.as_str(),
-                        "inbox" | "github" | "web_search" | "fetch" | "recall" | "due_tasks"
+                        // E.HORIZON1: the mind's own work is a read like any other. This gate is
+                        // the authority on what a durable segment may touch -- the planner's
+                        // prompt only suggests. Adding a tool to the prompt without adding it
+                        // here gets the goal REFUSED, which is the gate working.
+                        "inbox"
+                            | "github"
+                            | "web_search"
+                            | "fetch"
+                            | "recall"
+                            | "due_tasks"
+                            | "own_proposals"
+                            | "own_jobs"
                     ) || !valid_id(store_as)
                         || serde_json::to_vec(args)?.len() > 16 * 1_024
                     {

@@ -8476,3 +8476,24 @@ Then, the configuration that the loop is useless without: **`code add https://gi
 **What to expect on production over the next few days, so it is not mistaken for noise:** each watched project with no configured repository will say so **once** — ToolFormerMicro, agentweb and anandotsav, one note each as the rotation reaches them — and then stay quiet. That is the loop reporting what it cannot see, and each note names the `code add` that fixes it.
 
 **Still open, and separate:** E.PING1's root cause is untouched. The reconcile phase still writes a fresh belief for the same unresolved tension on every pass, so the twice-daily cadence itself has not changed; what has changed is what it says when it speaks. Three fixes are filed and none is taken.
+
+## E.LADDER1 — the end-to-end test ladder (2026-09-06, Pranab: "time has come to put the mind for real test… from easy to complex")
+
+Eight rungs, ordered by how many organs must chain for the task to finish. Each passes only on an **artifact**, never an impression. Rungs 1–2 belong on production because they are ordinary family use; 3–6 run on staging first; 7 runs anywhere; 8 does not exist yet.
+
+| # | Give it | Passes when | Chains |
+|---|---|---|---|
+| 1 | A question needing a live tool ("weather in Bentonville tomorrow") | the answer carries real current data **and** the journal shows the tool observed | turn → tool → reply |
+| 2 | A fact only you know, then a related question a day later | it uses the fact without being reminded | memory write → recall → turn |
+| 3 | `delegate demo: a lead-capture site on port 8123, form + JSON store` | the URL serves, the form posts, the record lands, **and** the journal shows `[smoke] Answered(200)` and `[links] 0 finding(s)` | recipe → author → write → four mechanical checks → sandboxed start → publish |
+| 4 | `delegate fix: improve the existing code in <path>: add /health returning {"ok":true}` | the route answers on disk and the board says done | router → coder (NIM) → gateway → files |
+| 5 | The same, on a task whose obvious implementation breaks an existing test | the review round catches it **before** delivery | 4 + critic + repair |
+| 6 | Commit something real to contextcache, then run passes until ContextCache comes round | it proposes something **new**, grounded in what changed — not the old proposal | E.ITER1's moved-repo branch |
+| 7 | A commitment with a deadline several days out | it prepares and surfaces a packet before the deadline | horizon → replan → packet → delivery |
+| 8 | One of its **own** proposals, to implement and verify | a diff exists, the proposal's own acceptance test passes, and it says so | notice → propose → build → verify → deliver |
+
+**What is already known about the hard rungs, so a failure is not a surprise:**
+- **Rung 5 is the weak one.** E.REPAIR1 measured the review's repair succeeding 9 times in 20 even when the defect is named for it.
+- **Rung 6's branch has never been witnessed live.** Today's witness covered no-repo, first proposal, and silence on an unchanged repo. The moved-repo path is tested only in unit form.
+- **Rung 7 has a known-failing precedent, visible today.** `horizons` shows two durable goals **EXPIRED with `actions 0/1`** — "verify staging stayed healthy overnight" and "report the current tool-chain completeness percentage". The time budget ran out before either acted. Expect this rung to fail, and treat the failure as the finding.
+- **Rung 8 is not wired at all.** `spool_work_proposal`'s own words are "this shadow path never builds or executes proposals". Thirteen proposals have accumulated since July and nothing has ever consumed one. Closing that loop — proposal → coder → acceptance test → diff — is the next real build, and it is the first rung where the mind would change a repository of yours on its own evidence.

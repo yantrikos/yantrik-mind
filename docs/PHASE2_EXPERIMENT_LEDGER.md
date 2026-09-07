@@ -8547,3 +8547,30 @@ Five passes on the other subjects were **silent** — each had already said its 
 Different subject matter, grounded in the same code, with its own executable check and its own honest case against. That is the iterative behaviour the slice was built for: it built past what it had already said instead of restating it.
 
 **Ladder standing: rungs 1, 3, 5 and 6 pass.** Rung 4 was witnessed during E.CODERNIM1 yesterday. Remaining: rung 7 (a durable goal across time, expected to fail — two horizon goals already sit EXPIRED with `actions 0/1`) and rung 8 (proposal → build → verify → deliver, which does not exist).
+
+**E.LADDER1 — rung 7: the machinery passes, the work fails, and I called it wrong twice before measuring it.**
+
+**Two corrections I owe first.** (1) I predicted this rung would fail, on the evidence of four goals sitting `EXPIRED · actions 0/1`. (2) My watcher then *reported* the failure one minute into a twenty-minute window, because its stop condition searched the whole listing for "EXPIRED" — a word that appears in the heading above the **old** goals. Third harness defect of this ladder, after the job-id width and the missing test runner. All three produced a verdict about the mind that was really a verdict about my script.
+
+**What actually happened,** from the goal's own receipts:
+
+```
+SCHEDULED     07:55:39  no-queue -> pending    receipt 02af1dba3bc11a6c
+WAKE_STARTED  08:15:55  pending  -> running    receipt 5a1064c00da2cd96
+COMPLETED     08:16:02  running  -> terminal   receipt 28bfa447ba336b0a
+Outcome: COMPLETED · actions 1 · cost 2 · replans 0
+```
+
+It waited the full twenty minutes, counting down correctly on every poll, woke on time, acted once, completed inside its cost budget, and receipted every transition. **The durable-goal organ works.**
+
+**And the answer it produced was this**, in full:
+
+> I don't have any task or project proposal data available in this conversation — no tool output, memory block, or prior context provides that information. If you have a task list, project tracker, or database you'd like me to work from, paste it here or point me to the source and I'll count and sort for you immediately.
+
+The goal was *"count the pending project proposals and name the newest one"* — a question about **its own state**, answerable by its own `proposals` verb, which lists thirteen of them. **The segment runs as a bare model call with no tools and no access to the mind's own state**, so it can only ever produce generic prose, and it spent its whole budget (cost 2/2) doing so.
+
+That is the same disconnection Pranab named in WorkOps, in a different organ: the machinery around the thinking is excellent — scheduled, budgeted, audited, receipted — and the thinking itself is handed nothing to think about.
+
+**It also re-reads the four expired goals.** "Verify staging stayed healthy overnight" and "report the tool-chain completeness percentage" are both questions no toolless segment could have answered even if it had woken. Their expiry hid a second defect underneath it.
+
+**Filed as E.HORIZON1:** a durable segment should run through the same path an ordinary turn does — tools, memory, and the mind's own verbs — or the horizon can schedule anything and deliver nothing. Not started; it is the more valuable of the two remaining builds, ahead of rung 8.

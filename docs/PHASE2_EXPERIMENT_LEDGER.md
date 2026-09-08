@@ -8831,3 +8831,45 @@ Mode changes come from `git diff --cached --raw <base>` (`:100644 100755 … M\t
 ### Scope, stated rather than implied
 
 This covers **mode changes**, which is the class that actually bit us. It does **not** cover a content change that is incidental for some other reason — a stray file, a coincidence. Naming the limit is the point: the control makes one specific way of overstating a pass impossible, and leaves the others visible rather than pretending to have closed them.
+
+## E.LANE1 — PREREG: a coder lane with one model is throttled a third of the time (2026-09-08)
+
+Five rung-8 builds tonight. **Three ended on an upstream 429**, and each time the mind reported honestly that the lane ran out — which is E.RUNG8c working, and no help at all to a mind that is supposed to build things on its own.
+
+**The limits are per-model, on a window of roughly half an hour**, measured rather than assumed:
+
+| model | 01:43Z | 02:11Z |
+|---|---|---|
+| `deepseek-ai/deepseek-v4-pro-0813` | **429** | 200 |
+| `moonshotai/kimi-k3` | 200 | **429** |
+| `minimaxai/minimax-m3` | — | 200 |
+| `openai/gpt-oss-20b` | — | 200 |
+
+They rotate. At 02:11 three of four answered. So the throttling is not a ceiling on the mind's building — it is a ceiling on *asking one model*.
+
+### The change
+
+The gateway already builds the upstream request, posts it once, and hands a 429 straight back. **Nothing has been written to the client at that point**, so stepping to the next model is safe there and nowhere else — once a stream has begun, a failover would splice two models' output into one message, and it must not be attempted.
+
+`candidates(first, fallbacks)` puts the configured model first and each fallback after it, deduped. On a retryable status the gateway rewrites `model` and posts again, at most once per candidate.
+
+Order is measured, not preferred: **kimi-k3 first**, because on the one real repo task tonight it reached a working edit in **4 tool calls / 90 seconds** against deepseek-v4-pro's **16 read-only calls / 14.5 minutes**. Calls-to-completion, not calls-before-throttle — the criterion the original burst probe got wrong.
+
+### What may and may not fail over
+
+Fails over: **404, 410** (the model is gone from the catalogue — Kimi K2.6 and Qwen3 Coder both vanished this week), **429** (throttled), **503, 529** (busy).
+
+Does **not** fail over: **400** (a malformed request is malformed everywhere), **401/403** (the key is the key), and a transport failure (the endpoint is down, not the model). Retrying those on another model turns one clear error into four confusing ones.
+
+### Kill criteria
+
+- **K9** — no failover once a byte of the response has been written. A spliced message is worse than a refusal.
+- **K10** — a failover must be visible in the journal naming both models. A lane that silently swaps models makes every later benchmark unreadable, and E.MODEL1 already cost a day to model-retirement going unnoticed.
+- **K11** — each candidate is tried at most once per request. If the loop can revisit a model, it is wrong.
+- **K12** — if failing over makes an error *less* clear than not failing over (a 400 reported as four 400s), the retryable set is too wide.
+
+### Mutants to watch fail
+
+- 400 becomes retryable → the named test fails.
+- `candidates` returns duplicates → the at-most-once test fails.
+- the configured model is not tried first → the order test fails.

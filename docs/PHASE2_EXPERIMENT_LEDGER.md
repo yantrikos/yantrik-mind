@@ -8738,3 +8738,50 @@ So my in-flight hypothesis after run 1 — *"the builder needs more wall clock"*
 **Standing after two runs.** The pipeline is correct: it staged the right commit, opened the differential gate honestly, ran both checks itself, never wrote to the shared checkout, and reported a verdict its own exit codes support. Rung 8 is **not passed**: no proposal has yet reached a verified diff. Twice the builder was stopped — once by the clock, once by the provider — and neither time by anything about the goal.
 
 Six mutants have now been watched to fail by name across E.RUNG8/b/c: the differential gate defeated, the renderer's reconciliation dropped, a timeout read as a pass, the sandbox skip ignored, the skip over-applied, and `builder_end` blinded to provider refusals.
+
+### E.RUNG8 — RUN 4 (01:43:19Z → 01:49:36Z): **VERIFIED.** The ladder is complete.
+
+The coder lane moved to `moonshotai/kimi-k3` — `deepseek-v4-pro-0813` was 429 on a long window, and Pranab's standing word is *"whichever is a better candidate and free you can choose."* Config only (`YM_CODER_MODEL`), no code change, no deploy. Nothing about the proposal, the goal, the check or the repository was touched: **K2 intact.**
+
+```
+pristine tree: exit 1  ← failed, as a check for an unmade change must
+built tree:    exit 0
+diff:          1 file(s), +24 −0
+builder:       refused by its provider — quota exhausted (429)
+
+VERDICT: VERIFIED — the check failed on the pristine tree and passes on the
+built one, and both runs were the mind's, not the builder's.
+```
+
+Four tool calls in ninety seconds: read `start.sh`, edit `start.sh`, run the check twice. The diff adds a `--stats` branch that prints `{"cache_hit_rate": …, "total_cached_schemas": …, "disk_usage_bytes": …}` and exits **before** the venv/pip block — which is why it works at all in a sandbox with no network.
+
+**The strongest evidence for the rung is accidental.** The builder was rate-limited *after* making the edit and before it could say anything: its final words are `API Error: Request rejected (429)`. **It never claimed success.** The mind determined success independently, from two exit codes the builder never touched. Rung 8's entire claim — that the verdict comes from something other than the builder's own account — was tested under the hardest condition available, a builder that gave no account at all.
+
+**K4 held for the fourth time**: checkout head, tree, `dirty=0` unmoved, 0 files touched, 0 pushes, 0 PRs, 0 panics.
+
+#### I did not take the pass on trust — two things I went looking for
+
+**1. The pristine tree failed for the WRONG REASON.** `git ls-tree a30aeb5 start.sh` → `100644`. The file is **not executable at the base commit**, so `./start.sh --stats` failed `Permission denied` (126), not "no `--stats` flag". The differential gate opened correctly and for a reason that has nothing to do with the goal.
+
+So I ran the decisive test — the pristine tree with **`chmod +x` and nothing else**:
+
+```
+exit=1   cache_hit_rate lines=0
+Creating virtual environment...
+The virtual environment was not created successfully because ensurepip is not available.
+>>> chmod alone does NOT pass. The --stats code was NECESSARY.
+```
+
+The mode change alone does not satisfy the check. **VERIFIED stands.** But the gate as built asks only *does the check fail first*, not *does it fail for a reason the goal addresses*, and this run shows the difference is real.
+
+**2. The implementation satisfies the letter of the check.** `cache_hit_rate` is computed from `$CACHE_DIR/stats_hits` and `stats_misses` — files **nothing in the codebase ever writes** (grepped: zero hits outside `start.sh`). So it always prints `0`. `total_cached_schemas` counts files in a directory, not schemas. The check asked that `cache_hit_rate` be printed; the implementation prints `"cache_hit_rate": 0`. A model-authored acceptance test was met exactly, and no further, by a model-authored implementation.
+
+#### What passing it revealed
+
+Rung 8's claim is demonstrated: **the mind can carry one of its own proposals to a diff that something other than itself certifies.** Notice → propose → build → verify → deliver, end to end, with receipts, on the mind's own initiative, and nothing committed or pushed.
+
+And the specification was too weak. **Nothing checks that a proposal's acceptance test is a meaningful test of its goal.** The differential gate proves a check discriminates *something*; it does not prove it discriminates *the goal*. That is a proposal-schema problem, not a builder problem, and it is the next honest thing — filed as **E.RUNG9**, not built tonight.
+
+**Ladder standing: rungs 1–8 all pass.** The ladder is complete.
+
+Nine mutants watched to fail by name across E.RUNG8/b/c. Workspace 1925 passed / 0 failed.

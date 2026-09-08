@@ -8950,3 +8950,43 @@ Second pass with needles taken from the survivors' own text cleared them. Final 
 ### What I take from it
 
 When a system reports a defect in itself and my detector cannot reproduce it, **look at the raw data before doubting the report**. I built three increasingly clever detectors; one `SELECT label FROM cognitive_nodes LIMIT 8` would have shown it on the first night. The mind's account of its own internals was accurate in every particular I could check — except "version as a name", which appears only inside its own hypothesis rows quoting the problem, and is the one part I could not confirm.
+
+## E.SEC5 / E.FORGET1 / E.TOMB1 — PREREG: the three causes of the safe-code incident (2026-09-08, Pranab: "go")
+
+I told Pranab the sensitivity layer "never fired" and proposed building a gate. **That was wrong, and reading the code before building it is what caught it.** `assert_belief` calls `gate_write(statement)?` on its **first line** (`mind-memory/src/lib.rs:651`). The gate is exactly where it should be.
+
+It let a household safe code through because `CREDENTIAL_PHRASES` holds fifteen entries — `password`, `passcode`, `passphrase`, `api key`, `secret key`, `access token`, `bearer`, `private key`, … — and **every one of them is digital**. Nothing in it describes physical access. A gate built to stop credentials did not recognise the most domestic credential a family has.
+
+Three separate defects, one incident. Each gets its own kill criteria because each can fail differently.
+
+### E.SEC5 — the write-gate's vocabulary has no physical world in it
+
+Add household/physical access credentials: `safe code`, `safe combination`, `door code`, `gate code`, `alarm code`, `lock code`, `keypad code`, `entry code`, `access code`, `pin code`, `combination lock`.
+
+The existing `value_follows` guard is what makes this safe to widen: a credential phrase only convicts when a plausible value sits within 48 characters (≥6 chars, containing a digit or ≥12 long). So *"we changed the door code last week"* stays conversation and *"the door code is 4471"* does not.
+
+- **K13** — every new phrase must pass a false-positive test on ordinary household speech. If widening the vocabulary refuses a sentence a family would normally say, it is too wide. The banked rule stands: *a detector that refuses ordinary life and admits credentials is not conservative in either direction.*
+- **K14** — the regression test uses the **real proposition from the incident**, not a paraphrase.
+
+### E.FORGET1 — a privacy right implemented as a ranked recall
+
+`forget_beliefs_matching` recalls semantically (`top_k=50`, five passes) and tombstones what comes back. On 46 rows containing an exact literal it forgot **43, reported "Forgot 43 belief(s)", and left 3**. An operator would reasonably read that as done.
+
+`all_beliefs()` already exists two hundred lines away and already pages the full node list — its own comment says *"NOT query_beliefs: its loader silently caps at 1,000 nodes"*, so someone has already learned this exact lesson in this exact file. yantrikdb-core confirmed from the 0.22.0 source that exhaustive listing plus per-id tombstone is the engine-correct shape, and that recall is not.
+
+- **K15** — the purge is proved by an **after-count of matching rows**, never by its own report. yantrikdb-core's words: *"your after-count is the only proof, keep it."* If the verb cannot state the residual count, it is not finished.
+- **K16** — matching stays word-boundary, so a short needle cannot purge a belief that merely contains it.
+
+### E.TOMB1 — the deletion ledger stores what it deleted
+
+`mind_belief_tombstone (proposition TEXT PRIMARY KEY, …)` keeps the **full proposition**. Forgetting 46 beliefs that contained the safe code therefore wrote **46 fresh copies of it into the deletion ledger**. The privacy mechanism propagated the secret it was erasing — the same amplification shape as the mind's own alarms, one layer down, and this one is entirely our design.
+
+Fix: key on a hash of the original (so dedup and lookup still work) and store a **redacted preview** for the ledger's readability. The ledger's value is *"what was forgotten, and why"* — a preview with credential-shaped spans masked keeps that and carries no secret.
+
+- **K17** — the ledger must stay readable. If the fix reduces `tombstones` to a list of hashes, the audit surface is destroyed and the fix is wrong.
+- **K18** — the redaction must be applied on the **write** path. Redacting only on display leaves the bytes on disk, which is the entire defect.
+- **K19** — existing rows must be migrated, or the 46 copies stay exactly where they are.
+
+### Stated plainly, because it bounds all three
+
+None of this erases anything. The oplog carries the full label per `cognitive_node_upsert` and is retained as the replication stream (92 rows, **0 encrypted**); the raw file holds 364 occurrences and the WAL 1,379. These three fixes stop the next secret entering, make the purge complete, and stop the ledger copying what it deletes. **Rotation remains the only complete answer to this one**, and that is Pranab's call.

@@ -8873,3 +8873,38 @@ Does **not** fail over: **400** (a malformed request is malformed everywhere), *
 - 400 becomes retryable → the named test fails.
 - `candidates` returns duplicates → the at-most-once test fails.
 - the configured model is not tried first → the order test fails.
+
+### E.LANE1 + E.RUNG9 — RUN 6 (02:21:20Z → 02:42:25Z, staging `0408b834`): both fired, and the control agrees with the experiment I ran by hand
+
+`kimi-k3` was throttled at launch, so the failover was exercised on its first opportunity rather than in a contrived one.
+
+```
+pristine tree: exit 1  ← failed, as a check for an unmade change must
+built tree:    exit 0
+diff:          2 file(s), +70 −0
+builder:       ran to the end of its own turn
+control:       pristine + this diff's permission bits alone still FAILS — so the content earned the pass
+
+VERDICT: VERIFIED
+```
+
+**E.LANE1.** Nineteen failovers, every one logged `moonshotai/kimi-k3 -> deepseek-ai/deepseek-v4-pro-0813 after 429`. The run that would have ended at three minutes with *"the lane ran out"* ran twenty-one minutes and finished. The builder **ran to the end of its own turn** for the first time in six attempts — 17 tool calls (14 Bash, 2 Edit, 1 Write), $0.179.
+
+**E.RUNG9, validated against ground truth.** The raw diff the control read:
+
+```
+:000000 100644 0000000 a21e2a9 A	scripts/serve/stats.py
+:100644 100755 3075d2d 6dae839 M	start.sh
+```
+
+Both cases in one run, and both handled as the tests said they would be: the **new file** is content and is correctly not treated as an incidental change (the pristine tree does not have it, so no control could apply its mode alone); the **mode flip on `start.sh`** is, so the control tree was built from the base commit with `chmod +x` and none of the content, and the check was run against it.
+
+It still failed. **The content earned the pass** — which is exactly the result I got when I ran that experiment by hand after run 4. The automation and the manual experiment agree, which is the only way I was willing to believe either.
+
+And the diff is markedly better than run 4's: a real 62-line `scripts/serve/stats.py` helper, plus eight lines in `start.sh` that document the flag and dispatch to it before the venv/pip block. The builder named the mode problem itself — *"Also set the executable bit (644 → 755) so the literal `./start.sh` invocation works."*
+
+**K4 held for the sixth time**: checkout head, tree, `dirty=0` unmoved, 0 files touched, 0 pushes, 0 PRs, 0 panics.
+
+**Standing.** Rungs 1–8 pass. The build path now: reads its own spool, stages a clone at the proposal's base commit, opens the differential gate, steps across throttled models rather than giving up, runs both checks itself, runs a control against its own pass when a permission bit could have bought it, distinguishes a builder that declined from one its provider refused, and never writes to the shared checkout. Fifteen mutants watched to fail by name tonight across E.RUNG8/b/c, E.RUNG9 and E.LANE1. Workspace 1935 passed / 0 failed.
+
+**Still open and named rather than quietly carried:** a proposal's acceptance test is still written by the same kind of model that satisfies it, and nothing checks that the check tests the *goal* — run 4's `cache_hit_rate` read files nothing writes, and this run's still reports `0.0`. The control closes one way of overstating a pass; it does not make a weak check strong.

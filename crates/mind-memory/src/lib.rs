@@ -3447,6 +3447,39 @@ fn ensure_tombstone_table(db: &YantrikDB) {
         [],
     );
     migrate_tombstones_from_v1(db);
+    reredact_tombstone_previews(db);
+}
+
+/// E.TOMB1b: re-run the redactor over stored previews and rewrite any that still carry a secret.
+///
+/// The first redactor cut at the credential phrase, which left the value in place whenever the text
+/// quoted it BEFORE naming it — twelve of forty-nine rows on staging. A fix that only applies to
+/// future writes would leave those twelve exactly where they are, so the repair runs on every open
+/// and is idempotent: a preview the redactor no longer changes is left alone.
+fn reredact_tombstone_previews(db: &YantrikDB) {
+    let conn = db.conn();
+    let rows: Vec<(String, String)> = {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT fingerprint, preview FROM mind_belief_tombstone_v2")
+        else {
+            return;
+        };
+        let Ok(mapped) = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) else {
+            return;
+        };
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (fingerprint, preview) in rows {
+        let safe = mind_types::ledger_safe(&preview);
+        if safe != preview {
+            let _ = conn.execute(
+                "UPDATE mind_belief_tombstone_v2 SET preview = ?1 WHERE fingerprint = ?2",
+                rusqlite::params![safe, fingerprint],
+            );
+        }
+    }
 }
 
 /// A stable key for a proposition that is not the proposition.

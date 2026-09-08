@@ -8684,3 +8684,30 @@ Refusals, each fail-closed and named: no configured repo · `base_sha` not in th
 ### Containment, stated rather than assumed
 
 The acceptance test is a **model-authored** shell command, and running one is the largest new capability in this change. Codex's converged decision 3 asks for an *owner-declared* verifier in a pinned, credential-free, resource-bounded sandbox; this deviates on the first word, and the deviation is named here rather than papered over. What holds instead: it runs in the existing `unshare` sandbox with an empty network namespace, the state dir masked by tmpfs, prlimit on cpu/memory/procs/file size and a wall-clock kill; it runs against a **throwaway copy** of the tree, never the workdir the diff is read from and never the shared checkout; and the copy is seeded into a *subdirectory* of the sandbox scratch, so the sandbox's own `run.sh` driver can never shadow a `run.sh` belonging to the repository. A hostile test can destroy its own copy and nothing else.
+
+### E.RUNG8 — RUN 1 (2026-09-08 00:44:23Z → 00:59:24Z, staging `a229b49e`): the pipeline ran end to end, and reported a diff that did not exist
+
+`work build ContextCache`, against the newest spooled proposal — *"Add a --stats flag to start.sh that prints a JSON summary including cache_hit_rate, total_cached_schemas, and disk_usage_bytes"*, check `./start.sh --stats 2>&1 | grep -q 'cache_hit_rate'`, base `a30aeb5`, which is exactly the checkout's head.
+
+| stage | result |
+|---|---|
+| staged the clone at the proposal's own base commit | yes, detached at `a30aeb5` |
+| pristine run | **exit 1** within the first minute — the differential gate opened, correctly |
+| build | coder ran the full 900s wall clock |
+| diff reported | **9 files, +2727** |
+| built run | exit 1 |
+| verdict printed | `UNVERIFIED` |
+
+**Every one of those 2,727 lines was the builder's own home.** `start.sh` came out byte-identical to the base commit; `git diff --cached a30aeb5 -- start.sh` is empty and the working tree's `start.sh` contains no `--stats` and no `cache_hit_rate`. The nine files were `.claude.json`, the session `.jsonl`, two tool-result caches, a backup, a `.key`, a sessions file and a shell snapshot — the Claude Code CLI's home directory, which lands *inside the workdir* because `coder.rs` sets `HOME` there on purpose so a run cannot reach the service user's real home. `git add -A` then swept the agent's notes about making a change into the change.
+
+So the verdict was right by accident and the evidence behind it was wrong. The true verdict was `NoChange`, and **`NoChange` was unreachable by construction**: any run at all left the agent's home behind, so the one outcome that says *the builder did nothing* could never be printed. That is the defect this rung exists to catch, and on its first run it caught it in my own instrument rather than in the mind.
+
+**A second harm from the same cause, and the more serious one.** That `.key` was copied into the sandbox that runs the **model-authored** acceptance test. The empty network namespace stops a credential leaving the box; it does not stop a check printing one to stdout, and stdout is the reply. Fixed in E.RUNG8b: the seed skips the agent's home at the top level, one list deriving both the git exclusion and the sandbox skip, two mutants watched to fail.
+
+**What the builder actually did, measured rather than assumed** — 16 tool calls in 14m35s, **every single one a read** (`ls`, `cat`, `grep`, `find`, `sed`), roughly 55s per turn, still orienting when the wall clock cut it off, having narrowed to where the hit-rate metrics live. Spend: **$0.087 of $5**. The wall clock bound; the money did not, by a factor of fifty-seven. Raised to 1500s, the number `mind-core`'s own comment already gives the nightly builder for improving a real codebase rather than writing a scratch script.
+
+**A third thing, filed and not acted on.** The proposal's check is `./start.sh --stats`, and `start.sh` runs `pip install` under `set -e`. The sandbox has no network **by design**, so that check cannot pass there unless `--stats` short-circuits before the venv block. The mind writes acceptance tests for an environment where the repository can start; the mind runs them in one where nothing can be installed. That tension belongs to the proposal schema, not to this run, and it is filed rather than patched — patching the check to make a run pass is kill criterion **K2**.
+
+**K4 held exactly.** Shared checkout before and after: head `a30aeb5bd3…`, tree `0ea59f48…`, `dirty=0`, **0 files modified** since the run began, no new reflog entry, no push, no PR, no journal mention of either. The build happened in a clone made for it.
+
+**Two of the four kill criteria were tested for real by this run.** K1 did not fire (the pristine run failed, as it should). K3 did not fire — the verdict came from an exit code the builder never touched, which is the one thing that worked exactly as designed.

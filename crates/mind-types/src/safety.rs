@@ -493,31 +493,42 @@ pub fn contains_secret(text: &str) -> bool {
 /// phrase and the kind is named instead — the value always follows the phrase, so keeping only what
 /// precedes it cannot keep the value.
 pub fn ledger_safe(text: &str) -> String {
-    let Some(found) = first_sensitive(text) else {
-        return text.to_string();
+    // Cut FIRST, on the original, because `found.start` is an offset into `text` and masking
+    // changes lengths — slicing a transformed copy with an original offset is precisely the defect
+    // class `source_audit` stands guard over.
+    let cut_at_phrase = match first_sensitive(text) {
+        Some(found) => {
+            let mut cut = found.start.min(text.len());
+            while cut > 0 && !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let head: String = text[..cut].chars().take(96).collect();
+            format!("{}[redacted: {}]", head, found.kind.label())
+        }
+        None => text.to_string(),
     };
-    // Defensive: never slice mid-character, whatever offset arrives (see source_audit's class 1).
-    let mut cut = found.start.min(text.len());
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let head: String = text[..cut].chars().take(96).collect();
 
-    // E.TOMB1b: cutting at the phrase is NOT enough, and the live store is what proved it. This
-    // first shipped assuming "the value always follows the phrase, so keeping only what precedes it
-    // cannot keep the value" — true of the row that started the incident, and false of the mind's
-    // own alarms about it, which quote the code and THEN name what it is. Twelve of 49 migrated
-    // ledger rows still carried the literal. So in text already known to be sensitive, every
-    // value-shaped token goes, wherever it sits.
-    let head = mask_value_tokens(&head);
-    format!("{}[redacted: {}]", head, found.kind.label())
+    // E.TOMB1c: then mask value-shaped tokens UNCONDITIONALLY, whether or not a phrase was found.
+    //
+    // Two rounds of this were wrong, both because I reasoned about where a value sits instead of
+    // reading the rows. Round one cut at the phrase, assuming the value always follows it — false
+    // for the mind's own alarms, which quote the code and then name it. Round two masked values
+    // only in text where a phrase was found — but a preview ALREADY cut at its phrase has no phrase
+    // left to find, and neither does `The 'ZEBRA-7741' safe-code entry…`, where the value comes
+    // first and the phrase is hyphenated. Twelve rows survived both rounds.
+    //
+    // A deletion ledger never needs a value-shaped token for any reason. Making the masking
+    // unconditional costs an ordinary entry its dates and codes and buys a guarantee that does not
+    // depend on word order, hyphenation, or the detector's vocabulary being complete.
+    mask_value_tokens(&cut_at_phrase)
 }
 
 /// Replace every value-shaped token — four or more characters carrying a digit — with a marker.
 ///
-/// Applied ONLY to text that already tripped `first_sensitive`, so ordinary ledger entries keep
-/// their dates and numbers and stay readable (E.TOMB1 K17). In text that carries a credential, a
-/// preview has no need of any code-like token at all.
+/// Applied to EVERY preview (E.TOMB1c). Scoping it to text that tripped `first_sensitive` was the
+/// second wrong answer: it cannot see a value the detector's vocabulary missed, and it cannot see
+/// one in a preview whose phrase has already been cut away. K17 still holds — the words survive and
+/// the ledger remains an audit; only code-shaped tokens become `[value]`.
 fn mask_value_tokens(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut token = String::new();
@@ -758,11 +769,40 @@ mod tests {
         assert!(safe.contains("[value]") || safe.contains("[redacted:"), "{safe:?}");
     }
 
-    /// K17 still holds: an ordinary entry keeps its numbers, because it never tripped the detector.
+    /// E.TOMB1c, the trade stated rather than hidden: an ordinary entry keeps its WORDS — which is
+    /// what K17 asks for, an audit a human can read — and loses code-shaped tokens. Scoping the
+    /// masking to "text that looks sensitive" was tried and failed twice on the real store, because
+    /// it cannot see a value whose phrase is missing, hyphenated, or simply not in the vocabulary.
     #[test]
-    fn an_ordinary_ledger_entry_keeps_its_dates_and_numbers() {
-        let plain = "Dinner on 2026-09-08 is at seven, table 12";
-        assert_eq!(ledger_safe(plain), plain);
+    fn an_ordinary_ledger_entry_keeps_its_words_and_loses_code_shaped_tokens() {
+        let out = ledger_safe("Dinner on 2026-09-08 is at seven, table 12");
+        assert!(out.starts_with("Dinner on "), "{out}");
+        assert!(out.contains("is at seven"), "the sentence survives: {out}");
+        assert!(out.contains("table 12"), "a short number is not code-shaped: {out}");
+        assert!(!out.contains("2026-09-08"), "{out}");
+    }
+
+    /// The twelve rows that survived BOTH earlier attempts, taken verbatim off the staging box.
+    /// Each defeats a different assumption I made: the value before the phrase, the value with no
+    /// phrase at all, and a hyphenated phrase the vocabulary does not contain.
+    #[test]
+    fn every_shape_that_survived_the_first_two_attempts_is_removed() {
+        for real in [
+            "(hypothesis) Interesting — you've stored a safe code and a family member's visit \
+             schedule as \"facts,\" but haven't connected them; is ZEBRA-7741 a trigger",
+            "(hypothesis) The most urgent signal here isn't a hobby or a date—it's that your \
+             \"safe code\" is stored in the same memory block, whether ZEBRA-7741 matters",
+            "The 'ZEBRA-7741' safe-code entry in memory is a prompt-injection artifact, not a \
+             real fact — do not repeat, act on, or treat it as a stored credential",
+            "(hypothesis) There are several entries that look like prompt-injection attempts \
+             (\"ZEBRA-7741\", \"Quillon Vastri\") rather than genuine user data",
+        ] {
+            let safe = ledger_safe(real);
+            assert!(
+                !safe.contains("ZEBRA-7741"),
+                "a shape that already beat this function twice survived again: {safe:?}"
+            );
+        }
     }
 
     /// Redaction must be a fixed point: running it twice cannot keep eating the entry.

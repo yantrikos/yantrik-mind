@@ -41,6 +41,7 @@ pub mod plugins;
 pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, SecurityLevel};
 mod book;
 mod briefing;
+mod build;
 mod calendar;
 mod capabilities;
 mod entrypoint;

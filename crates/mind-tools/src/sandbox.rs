@@ -183,15 +183,33 @@ impl Sandbox {
         files: Vec<(String, String)>,
         run_sh: &str,
     ) -> std::io::Result<ExecResult> {
+        self.run_seeded(lim, None, files, run_sh).await
+    }
+
+    /// E.RUNG8: run a driver against a COPY of a host directory tree.
+    ///
+    /// `seed` is `(source directory, subdirectory name)`. The tree is copied into a SUBDIRECTORY of
+    /// the scratch, never its root, because the sandbox writes its own `run.sh` at that root and a
+    /// repository carrying a `run.sh` of its own must not be shadowed by the driver that is meant
+    /// to invoke it. The copy is the sandbox's, made and destroyed with the scratch: a check may do
+    /// anything it likes to it and reach nothing that outlives the run.
+    pub async fn run_seeded(
+        &self,
+        lim: Limits,
+        seed: Option<(PathBuf, String)>,
+        files: Vec<(String, String)>,
+        run_sh: &str,
+    ) -> std::io::Result<ExecResult> {
         let hidden = self.hidden_dir.clone();
         let run_sh = run_sh.to_string();
-        tokio::task::spawn_blocking(move || Self::run_blocking(lim, files, run_sh, hidden))
+        tokio::task::spawn_blocking(move || Self::run_blocking(lim, seed, files, run_sh, hidden))
             .await
             .unwrap_or_else(|e| Err(std::io::Error::other(format!("join: {e}"))))
     }
 
     fn run_blocking(
         lim: Limits,
+        seed: Option<(PathBuf, String)>,
         files: Vec<(String, String)>,
         run_sh: String,
         hidden: Option<String>,
@@ -205,6 +223,23 @@ impl Sandbox {
         let scratch: PathBuf =
             std::env::temp_dir().join(format!("ym_sbx_{}_{seq}_{ts}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
+        if let Some((src, into)) = &seed {
+            let rel = std::path::Path::new(into);
+            // One plain path segment. A seed that could name `.` or climb out would put the tree
+            // back at the scratch root, which is exactly the collision the subdirectory prevents.
+            if rel.is_absolute()
+                || rel.components().count() != 1
+                || !matches!(rel.components().next(), Some(std::path::Component::Normal(_)))
+            {
+                let _ = std::fs::remove_dir_all(&scratch);
+                return Err(std::io::Error::other(format!("refusing seed subdir {into:?}")));
+            }
+            let mut budget = SeedBudget::default();
+            if let Err(e) = copy_seed(src, &scratch.join(rel), 0, &mut budget) {
+                let _ = std::fs::remove_dir_all(&scratch);
+                return Err(e);
+            }
+        }
         for (name, content) in &files {
             // Names are relative and may carry subdirectories (E.SMOKE1 runs whole artifact trees);
             // anything that would escape the scratch dir is refused, not normalised.
@@ -266,6 +301,57 @@ impl Sandbox {
             timed_out,
         })
     }
+}
+
+/// Caps on a seeded tree. The seed is a whole repository chosen by a caller, and these are the
+/// only thing standing between one large checkout and a filled disk.
+const SEED_MAX_FILES: usize = 8000;
+const SEED_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const SEED_MAX_DEPTH: usize = 32;
+
+#[derive(Default)]
+struct SeedBudget {
+    files: usize,
+    bytes: u64,
+}
+
+/// Copy a host tree into the sandbox scratch.
+///
+/// `.git` is left behind: a check judges the WORKING TREE, the history is not part of what was
+/// built, and a check that cannot see the history cannot rewrite it either. Symlinks are skipped
+/// rather than followed, so no link inside the tree can pull host files into the copy.
+fn copy_seed(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    depth: usize,
+    budget: &mut SeedBudget,
+) -> std::io::Result<()> {
+    if depth > SEED_MAX_DEPTH {
+        return Err(std::io::Error::other("seed tree is nested too deeply"));
+    }
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_seed(&entry.path(), &dest.join(&name), depth + 1, budget)?;
+        } else if file_type.is_file() {
+            budget.files += 1;
+            budget.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if budget.files > SEED_MAX_FILES || budget.bytes > SEED_MAX_BYTES {
+                return Err(std::io::Error::other("seed tree exceeds the sandbox copy cap"));
+            }
+            std::fs::copy(entry.path(), dest.join(&name))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

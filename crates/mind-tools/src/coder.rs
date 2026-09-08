@@ -327,6 +327,14 @@ impl Coder {
         cmd
     }
 
+    /// E.RUNG8: a fresh, empty run directory under this coder's scratch root, for a caller that
+    /// wants to SEED it before the round — with a repository checkout, say — rather than start
+    /// bare. `run_in` accepts it because it is a child of the root, which is the invariant that
+    /// `checked_workdir` actually enforces.
+    pub fn new_workdir(&self) -> std::io::Result<String> {
+        self.fresh_workdir()
+    }
+
     /// Run an agentic coding task. The agent works in a fresh isolated scratch dir and reports back.
     pub async fn run(&self, task: &str) -> anyhow::Result<CoderResult> {
         let wd = self.fresh_workdir()?;

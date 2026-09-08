@@ -182,6 +182,46 @@ pub fn head_sha(name: &str) -> Option<String> {
     (!sha.is_empty()).then_some(sha)
 }
 
+/// The local checkout for one repository name, if it has been synced.
+///
+/// E.RUNG8: a build reads this and clones AWAY from it. Nothing in a build ever writes here, so a
+/// builder cannot disturb what the next field scan digests.
+pub fn checkout_dir(name: &str) -> Option<PathBuf> {
+    let dir = workdir().join(name);
+    dir.join(".git").exists().then_some(dir)
+}
+
+/// E.RUNG8: a throwaway clone of an already-synced checkout, detached at one commit.
+///
+/// `--no-hardlinks` because this copy is written to and must share no object file with the source.
+/// The checkout is shallow (depth 60), so a commit that has scrolled out of it makes the detach
+/// fail — which is the refusal we want: a proposal whose base commit is unreachable cannot be
+/// built against the code it was reasoning about.
+pub fn clone_at(src: &Path, dest: &Path, sha: &str) -> anyhow::Result<()> {
+    run_git(
+        None,
+        &[
+            "clone",
+            "--no-hardlinks",
+            "--quiet",
+            src.to_string_lossy().as_ref(),
+            dest.to_string_lossy().as_ref(),
+        ],
+    )?;
+    run_git(Some(dest), &["checkout", "--detach", "--quiet", sha])?;
+    Ok(())
+}
+
+/// Everything a build changed in `dir`, measured against the commit it started from.
+///
+/// Staged, so files the builder CREATED count; and diffed against an explicit base rather than
+/// `HEAD`, so a builder that commits its own work does not thereby report an empty diff. Both the
+/// index and the directory are thrown away afterwards.
+pub fn staged_diff(dir: &Path, base_sha: &str) -> anyhow::Result<String> {
+    run_git(Some(dir), &["add", "-A"])?;
+    run_git(Some(dir), &["diff", "--cached", base_sha])
+}
+
 pub fn sync_and_digest(git_url: &str) -> anyhow::Result<String> {
     let path = sync_repo(git_url)?;
     Ok(digest(&path))

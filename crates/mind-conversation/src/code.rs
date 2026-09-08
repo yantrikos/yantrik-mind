@@ -2431,12 +2431,19 @@ impl super::ConversationEngine {
                 format!("Not in the watch set: \"{sub}\".")
             };
         }
+        // E.RUNG8: explicitly invoked, and only ever from here. The nightly scan spools proposals
+        // and does not command builds -- WorkOps emitting into a shadow spool is the whole reason
+        // the spool exists.
+        if a == "build" || a.starts_with("build ") {
+            let repo = a.strip_prefix("build").unwrap_or("").trim();
+            return self.work_build(repo).await;
+        }
         if a == "run" || a == "now" {
             return self.work_watch_run().await.unwrap_or_else(|| "🛠 WorkOps ran — no field movement worth surfacing (the research still landed in memory), or the research envelope is dry.".to_string());
         }
         let subs = self.work_subjects().await;
         format!(
-            "🛠 WORKOPS — watching your projects (nightly field-scan, belief-revising, speaks only on change):\n{}\n\n`work add <project>` · `work remove <project>` · `work run` (force a pass now).",
+            "🛠 WORKOPS — watching your projects (nightly field-scan, belief-revising, speaks only on change):\n{}\n\n`work add <project>` · `work remove <project>` · `work run` (force a pass now) · `work build [<repo>]` (carry a spooled proposal to a verified diff).",
             subs.iter().map(|x| format!("  • {x}")).collect::<Vec<_>>().join("\n")
         )
     }

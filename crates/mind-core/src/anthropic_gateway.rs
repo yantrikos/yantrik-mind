@@ -31,7 +31,67 @@ pub fn default_model() -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-pub const DEFAULT_MODEL: &str = "deepseek-ai/deepseek-v4-pro-0813";
+pub const DEFAULT_MODEL: &str = "moonshotai/kimi-k3";
+
+/// The lane's models, in the order it steps through them when one is throttled.
+///
+/// E.LANE1, measured rather than preferred. NIM's free tier throttles PER MODEL on a window of
+/// roughly half an hour, and the windows rotate: `deepseek-v4-pro` was 429 at 01:43Z and 200 at
+/// 02:11Z on 2026-09-08 while `kimi-k3` went the other way, and three of four answered at 02:11.
+/// Three of five rung-8 builds that night ended on a 429, so a lane with one model is throttled a
+/// third of the time — the ceiling is on asking ONE model, not on building.
+///
+/// `kimi-k3` leads because of what it did, not what it promised: on the one real repository task,
+/// a working edit in 4 tool calls and 90 seconds, against `deepseek-v4-pro`'s 16 read-only calls in
+/// 14.5 minutes. Calls-to-completion, which is the criterion the original burst probe got wrong.
+pub const FALLBACK_MODELS: [&str; 4] = [
+    "moonshotai/kimi-k3",
+    "deepseek-ai/deepseek-v4-pro-0813",
+    "minimaxai/minimax-m3",
+    "openai/gpt-oss-20b",
+];
+
+/// The configured model first, then every fallback that is not already it. Each model appears once
+/// (K11), so the loop cannot revisit one and cannot spin.
+pub fn candidates(first: &str, fallbacks: &[&str]) -> Vec<String> {
+    let first = first.trim();
+    let mut out: Vec<String> = Vec::new();
+    if !first.is_empty() {
+        out.push(first.to_string());
+    }
+    for model in fallbacks {
+        let model = model.trim();
+        if !model.is_empty() && !out.iter().any(|m| m == model) {
+            out.push(model.to_string());
+        }
+    }
+    out
+}
+
+/// The lane's models for this request, honouring `YM_CODER_MODELS` when it is set.
+pub fn lane_candidates() -> Vec<String> {
+    let configured = std::env::var("YM_CODER_MODELS").unwrap_or_default();
+    let listed: Vec<&str> = configured
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if listed.is_empty() {
+        candidates(&default_model(), &FALLBACK_MODELS)
+    } else {
+        candidates(&default_model(), &listed)
+    }
+}
+
+/// May a failure on THIS model be retried on the NEXT one?
+///
+/// Only when the status says something about the MODEL. A 400 is a malformed request and is
+/// malformed everywhere; 401 and 403 are about the key. Retrying those would turn one clear error
+/// into four confusing ones (K12). 404 and 410 earn a place because models keep vanishing from the
+/// catalogue — Kimi K2.6 and Qwen3 Coder both went in the same week.
+pub fn may_fail_over(code: u16) -> bool {
+    matches!(code, 404 | 410 | 429 | 503 | 529)
+}
 
 /// Providers reject `max_tokens` above the model's ceiling with a 400; the CLI asks for large
 /// values routinely. Clamped, never refused.
@@ -451,32 +511,60 @@ pub fn handle_messages(w: &mut impl Write, body: &str) {
         Ok(b) => b,
         Err(e) => return write_json(w, "400 Bad Request", &anthropic_error(400, &e)),
     };
-    let used_model = oa["model"].as_str().unwrap_or(&model).to_string();
+    let mut oa = oa;
+    let asked_model = oa["model"].as_str().unwrap_or(&model).to_string();
     let streaming = oa["stream"].as_bool() == Some(true);
     let url = format!("{}/chat/completions", upstream_base());
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(20))
         .timeout_read(std::time::Duration::from_secs(600))
         .build();
-    let resp = agent
-        .post(&url)
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .set("Accept", if streaming { "text/event-stream" } else { "application/json" })
-        .send_string(&oa.to_string());
-    let resp = match resp {
-        Ok(r) => r,
-        Err(ureq::Error::Status(code, r)) => {
-            let text = r.into_string().unwrap_or_default();
-            let text: String = text.chars().take(600).collect();
-            eprintln!("[gateway] upstream {code} for {used_model}: {}", text.replace('\n', " "));
-            let status = format!("{code} {}", match code { 401 => "Unauthorized", 403 => "Forbidden", 429 => "Too Many Requests", 400 => "Bad Request", 404 => "Not Found", _ => "Bad Gateway" });
-            return write_json(w, &status, &anthropic_error(code, &text));
+
+    // E.LANE1: step through the lane's models while THIS model is the thing that failed. The whole
+    // loop sits before the first byte reaches `w` (K9) — once a stream has begun, a failover would
+    // splice two models' output into one message, so there is no retry anywhere below this point.
+    let lane = lane_candidates();
+    let mut used_model = asked_model.clone();
+    let mut resp = None;
+    let mut last: Option<(u16, String)> = None;
+    for (i, candidate) in lane.iter().enumerate() {
+        oa["model"] = json!(candidate);
+        let attempt = agent
+            .post(&url)
+            .set("Authorization", &format!("Bearer {key}"))
+            .set("Content-Type", "application/json")
+            .set("Accept", if streaming { "text/event-stream" } else { "application/json" })
+            .send_string(&oa.to_string());
+        match attempt {
+            Ok(r) => {
+                if i > 0 {
+                    // K10: a lane that silently swaps models makes every later reading unreadable.
+                    eprintln!("[gateway] lane failover: {asked_model} -> {candidate} after {}", last.as_ref().map(|(c, _)| *c).unwrap_or(0));
+                }
+                used_model = candidate.clone();
+                resp = Some(r);
+                break;
+            }
+            Err(ureq::Error::Status(code, r)) => {
+                let text: String = r.into_string().unwrap_or_default().chars().take(600).collect();
+                eprintln!("[gateway] upstream {code} for {candidate}: {}", text.replace('\n', " "));
+                last = Some((code, text));
+                if may_fail_over(code) && i + 1 < lane.len() {
+                    continue;
+                }
+                break;
+            }
+            Err(e) => {
+                // The endpoint is down, not this model: another model on the same host will not help.
+                eprintln!("[gateway] upstream unreachable: {e}");
+                return write_json(w, "502 Bad Gateway", &anthropic_error(502, &format!("upstream unreachable: {e}")));
+            }
         }
-        Err(e) => {
-            eprintln!("[gateway] upstream unreachable: {e}");
-            return write_json(w, "502 Bad Gateway", &anthropic_error(502, &format!("upstream unreachable: {e}")));
-        }
+    }
+    let Some(resp) = resp else {
+        let (code, text) = last.unwrap_or((502, "no upstream candidate answered".to_string()));
+        let status = format!("{code} {}", match code { 401 => "Unauthorized", 403 => "Forbidden", 429 => "Too Many Requests", 400 => "Bad Request", 404 => "Not Found", _ => "Bad Gateway" });
+        return write_json(w, &status, &anthropic_error(code, &text));
     };
     if !streaming {
         let text = resp.into_string().unwrap_or_default();
@@ -636,6 +724,45 @@ mod tests {
         assert_eq!(kinds, ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]);
         assert_eq!(ev[4].1["delta"]["stop_reason"], "end_turn");
         assert_eq!(sse_frame("message_stop", &json!({"type": "message_stop"})), "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    }
+
+    /// K11: each model is tried at most once, and the configured one goes first.
+    #[test]
+    fn the_lane_tries_the_configured_model_first_and_each_model_once() {
+        let lane = candidates("moonshotai/kimi-k3", &FALLBACK_MODELS);
+        assert_eq!(lane[0], "moonshotai/kimi-k3");
+        assert_eq!(lane.len(), FALLBACK_MODELS.len(), "the leader is not repeated");
+        let mut seen = lane.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), lane.len(), "a model appears twice and the loop could revisit it");
+
+        // A model outside the fallback list still leads, and the whole list follows it.
+        let custom = candidates("vendor/private-model", &FALLBACK_MODELS);
+        assert_eq!(custom[0], "vendor/private-model");
+        assert_eq!(custom.len(), FALLBACK_MODELS.len() + 1);
+        assert!(candidates("  ", &["a", "  ", "a"]).iter().eq(["a"].iter()));
+    }
+
+    /// K12: only a status that says something about the MODEL may move the lane. A 400 is malformed
+    /// everywhere, and reporting it four times over is worse than reporting it once.
+    #[test]
+    fn only_model_shaped_failures_move_the_lane() {
+        for code in [404, 410, 429, 503, 529] {
+            assert!(may_fail_over(code), "{code} should step to the next model");
+        }
+        for code in [200, 400, 401, 403, 422, 500] {
+            assert!(!may_fail_over(code), "{code} must NOT be retried on another model");
+        }
+    }
+
+    /// The measured order, pinned. kimi-k3 reached a working edit in 4 tool calls where
+    /// deepseek-v4-pro spent 16 read-only ones, so it leads; changing that is a decision, not a tidy.
+    #[test]
+    fn the_lane_leads_with_the_model_that_finished_the_work() {
+        assert_eq!(FALLBACK_MODELS[0], "moonshotai/kimi-k3");
+        assert_eq!(DEFAULT_MODEL, FALLBACK_MODELS[0]);
+        assert!(FALLBACK_MODELS.contains(&"deepseek-ai/deepseek-v4-pro-0813"));
     }
 
     #[test]

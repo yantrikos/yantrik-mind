@@ -8711,3 +8711,30 @@ So the verdict was right by accident and the evidence behind it was wrong. The t
 **K4 held exactly.** Shared checkout before and after: head `a30aeb5bd3…`, tree `0ea59f48…`, `dirty=0`, **0 files modified** since the run began, no new reflog entry, no push, no PR, no journal mention of either. The build happened in a clone made for it.
 
 **Two of the four kill criteria were tested for real by this run.** K1 did not fire (the pristine run failed, as it should). K3 did not fire — the verdict came from an exit code the builder never touched, which is the one thing that worked exactly as designed.
+
+### E.RUNG8 — RUN 2 (01:12:15Z → 01:27:05Z, staging `a5078d67`, with E.RUNG8b in): the true verdict, and a second thing my reply was getting wrong
+
+Same proposal, same base commit, the agent-home fix in. The pipeline printed what it should have printed the first time:
+
+```
+pristine tree: exit 1  ← failed, as a check for an unmade change must
+built tree:    exit 1
+VERDICT: NO CHANGE — the builder left the tree as it found it.
+2 path(s) are excluded from this diff: the coding agent's own home…
+```
+
+**The fix is demonstrated live, not asserted.** In the workdir during the run: `.claude/` and `.claude.json` present on disk, `.git/info/exclude` holding the six anchored patterns, and `git ls-files --others --exclude-standard` returning **0** — so `git add -A` staged none of it. `NoChange`, which was unreachable an hour earlier, is now the verdict a run that changes nothing actually gets. K4 held again: checkout head, tree and `dirty=0` all unmoved, 0 files touched, no panics.
+
+**And then the sentence itself turned out to be wrong.** "The builder left the tree as it found it" reads as a builder that ran and declined. It did nothing of the sort. Its transcript: 23 assistant turns, 11 tool calls, all reads, and at **01:24:02** it had stopped reading and was three sentences into designing the change —
+
+> *"Given the ambiguity and the instruction 'change as little as possible', I'll implement `--stats` in start.sh to compute a JSON summary directly from the on-disk cache… let me step back and re-read the goal…"*
+
+— and at **01:27:05** the round ended on `API Error: Request rejected (429) · Too Many Requests`. **The lane ran out, not the builder.** Spend $0.088 of $5; the wall clock, now 1500s, was never reached.
+
+So my in-flight hypothesis after run 1 — *"the builder needs more wall clock"* — was wrong twice over. Run 1 was cut off by the clock at 900s; run 2 was cut off by a 429 with half its clock unspent. Raising the budget was the right change for run 1's evidence and did nothing for run 2's, and I would have gone on believing the first diagnosis if I had not read the transcript rather than the verdict.
+
+**E.RUNG8c, from that.** A verdict may not claim more than the builder's own ending supports. `provider_refusal` — which already detects 403/429/401/connection-refused — was simply not being read on this path. The reply now carries the builder's terminal condition as evidence in its own right (completed · cut off at the wall clock · refused by its provider), `NoChange` and `Unverified` take a qualified sentence when the builder did not finish and the plain one when it did, and the builder's own last words are shown, labelled as its own account, which is not what decides. A test pins that the qualification does **not** fire on a builder that genuinely ran and changed nothing — a caveat that fires on every case stops meaning anything.
+
+**Standing after two runs.** The pipeline is correct: it staged the right commit, opened the differential gate honestly, ran both checks itself, never wrote to the shared checkout, and reported a verdict its own exit codes support. Rung 8 is **not passed**: no proposal has yet reached a verified diff. Twice the builder was stopped — once by the clock, once by the provider — and neither time by anything about the goal.
+
+Six mutants have now been watched to fail by name across E.RUNG8/b/c: the differential gate defeated, the renderer's reconciliation dropped, a timeout read as a pass, the sandbox skip ignored, the skip over-applied, and `builder_end` blinded to provider refusals.

@@ -8785,3 +8785,49 @@ And the specification was too weak. **Nothing checks that a proposal's acceptanc
 **Ladder standing: rungs 1–8 all pass.** The ladder is complete.
 
 Nine mutants watched to fail by name across E.RUNG8/b/c. Workspace 1925 passed / 0 failed.
+
+## E.RUNG9 — PREREG: was the diff load-bearing, or did a permission bit pass the check? (2026-09-08, Pranab: "Go")
+
+Rung 8 passed, and passing it showed the specification was too weak. The differential gate proves a check discriminates *something*; run 4 proved it can discriminate the wrong thing entirely — `start.sh` is `100644` at the base commit, so the pristine check failed *Permission denied*, a fact about a permission bit and nothing about `--stats`. The verdict survived only because **I** ran a control by hand: pristine tree plus `chmod +x` and nothing else, which still failed, so the content was necessary.
+
+**The pipeline should perform the scrutiny I had to apply to it.** That is this experiment.
+
+### The design I started with, and the evidence that killed it before it was written
+
+I intended to classify the pristine failure by reading its output — *Permission denied*, *command not found*, a syntax error — and name a check "hollow" when it never reached the question. So I collected the real signatures from the real sandbox first, rather than inventing cases.
+
+**They are all identical.** For the shape of check the mind actually writes — a pipeline ending in `grep -q` — the observable is `exit=1` with **no output at all**, for every failure:
+
+| what actually went wrong | exit | output |
+|---|---|---|
+| the script is not executable | 1 | *(empty)* |
+| the command does not exist | 1 | *(empty)* |
+| the file does not exist | 1 | *(empty)* |
+| the check itself is malformed | 1 | *(empty)* |
+| it ran and honestly answered no | 1 | *(empty)* |
+
+The check's own `2>&1` redirects the error **into the pipe**, where `grep -q` consumes it and prints nothing; the exit status is grep's, never the program's. The same commands without the pipe give `exit=126` and `./start.sh: Permission denied`. `set -o pipefail` does not rescue it either — the rightmost non-zero status is still grep's.
+
+So the reason a check failed is **destroyed by the shape of the check**, and no amount of reading its output recovers it. Filed as a finding about the proposal schema in its own right: the mind writes checks that swallow the evidence of their own failure. Not patched here — rewriting the mind's acceptance test is exactly what kill criterion **K2** forbids.
+
+### What is answerable instead
+
+Not *why did pristine fail*, but *did the diff's content earn the pass* — which is the question the caveat was really about, and it is decidable from the diff itself rather than from error text.
+
+**The incidental-change control.** When a build comes back `Verified` and its diff contains a **mode change**, build a third tree: the pristine tree with the mode changes applied and **no content**. Run the same check against it.
+
+- control still fails → the content was load-bearing → `Verified` stands, and the reply says the control was run.
+- control passes → **`ModeOnly`** → a permission bit satisfied the check and the diff's content proved nothing.
+
+Mode changes come from `git diff --cached --raw <base>` (`:100644 100755 … M\tstart.sh`), so the control is derived from evidence rather than guessed at. It costs one extra sandbox run, and only on a `Verified` whose diff carries a mode change — otherwise nothing runs.
+
+### Kill criteria, fixed now
+
+- **K5** — if this needs a model to read the goal's meaning, stop. The control must be mechanical or it is a different experiment.
+- **K6** — the classifier must be built from **observed** outputs, never invented ones. (It already cost me the first design; the rule is: eighteen invented cases passed and the first real artifact failed.)
+- **K7** — the control may only ever **weaken** a claim. If any (outcome, control) pair produces `Verified` from something that was not already `Verified`, the design is wrong. This gets a test over every pair, not an argument.
+- **K8** — the control tree is built from the base commit and the diff's own mode bits. If it needs anything from the built tree, it is not a control.
+
+### Scope, stated rather than implied
+
+This covers **mode changes**, which is the class that actually bit us. It does **not** cover a content change that is incidental for some other reason — a stray file, a coincidence. Naming the limit is the point: the control makes one specific way of overstating a pass impossible, and leaves the others visible rather than pretending to have closed them.

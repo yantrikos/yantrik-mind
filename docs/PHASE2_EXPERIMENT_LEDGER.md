@@ -8990,3 +8990,43 @@ Fix: key on a hash of the original (so dedup and lookup still work) and store a 
 ### Stated plainly, because it bounds all three
 
 None of this erases anything. The oplog carries the full label per `cognitive_node_upsert` and is retained as the replication stream (92 rows, **0 encrypted**); the raw file holds 364 occurrences and the WAL 1,379. These three fixes stop the next secret entering, make the purge complete, and stop the ledger copying what it deletes. **Rotation remains the only complete answer to this one**, and that is Pranab's call.
+
+### E.SEC5 / E.FORGET1 / E.TOMB1 — SHIPPED and verified live (2026-09-08, staging `5df6897b`)
+
+| check, on the box | result |
+|---|---|
+| tombstone ledger rows | 49, **0 holding the literal** |
+| ledger still readable (K17) | yes — words survive, `[value]` where a code was |
+| v1 table dropped | yes |
+| a household access code written as a belief | **refused by memory write-gate** |
+| an ordinary sentence about the same subject | remembered |
+| purge reports the residual (K15) | `Forgot 0 … None remain.` |
+| store-wide rows holding the literal | **280 → 234** |
+| service | active, 0 panics |
+
+### The correction that mattered most
+
+I told Pranab the sensitivity layer "never fired" and proposed **building** a gate. Reading the code before writing any caught it: `assert_belief` calls `gate_write(statement)?` on its **first line**. The gate was exactly where it should be, working exactly as designed, and its vocabulary had no physical world in it.
+
+And the *value* heuristic was digital-shaped too — `value_follows` demanded six characters, right for a token and wrong for a house. `"the door code is 4471"` walked through a gate built to stop credentials. The floor is per class now, and a test pins both directions because collapsing them breaks one or the other.
+
+**Widening the gate flushed out three test fixtures** — in `mind-conversation`, `mind-core` and `mind-memory` — that stored *"The safe combination is 47-12-33"* **as a belief**, in tests about scope isolation. Each is now a private-but-not-credential fact, and one additionally asserts the credential form is refused outright, so the change is visible rather than quietly swapped.
+
+### E.TOMB1 took three attempts, and the live store caught every failure my tests did not
+
+- **Round one** cut the preview at the credential phrase, assuming *"the value always follows the phrase."* True of the row that started the incident. False of the mind's own alarms about it, which quote the code and *then* name what it is. **12 of 49 rows survived.**
+- **Round two** masked value-shaped tokens, but only in text where a phrase was found. A preview **already cut at its phrase has no phrase left to find**, so the repair pass judged those rows clean and changed nothing. **The same 12 survived.**
+- Reading the survivors off the box showed a third shape neither round could have handled: `The 'ZEBRA-7741' safe-code entry…` puts the value **first** *and* hyphenates the phrase, which the vocabulary does not contain.
+- **Round three** masks value-shaped tokens unconditionally. It depends on no assumption about word order, hyphenation, or the detector's vocabulary being complete — which is precisely why the first two failed. The four test fixtures are the real survivors, verbatim, each defeating a different assumption I had made.
+
+The trade is stated, not hidden: an ordinary ledger entry keeps its **words** — which is what K17 asks for — and loses code-shaped tokens.
+
+**Three times tonight a test built from my own idea of the data passed while the real corpus failed** (the belief census, then ledger rounds one and two). The banked rule keeps earning its place: *eighteen invented cases passed and the first real artifact failed.*
+
+### Bounded honestly
+
+234 rows still hold the literal — 92 in the `oplog` (the replication stream, retained, 0 encrypted), 46 tombstoned `cognitive_nodes`, 43 in `mind_tensions`. These three fixes stop the next secret entering, make a purge complete and truthful, and stop the ledger copying what it deletes. **They do not erase this one.** Rotation remains the only complete answer, and it is Pranab's call.
+
+### Concurrent work in the tree, noted rather than disturbed
+
+Mid-session the working tree gained uncommitted changes I did not make — `McpTool` grew `open_world` and `destructive` fields, with matching edits in `mind-governance` and `mind-types/action.rs`. Three test constructors have not been updated, so **the workspace suite is currently red on that in-flight change, not on this work**. My crates are green (`mind-types` 73, `mind-memory` 96) and every commit here used explicit pathspecs, so none of it carries someone else's files. Left untouched: the defaults for a tool that declines to say whether it is destructive are a safety decision belonging to whoever is making it.

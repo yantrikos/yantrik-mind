@@ -178,6 +178,17 @@ const CARD_CONTEXT: &[&str] = &["card", "cards", "pin", "pins", "cvv", "cvc", "i
 const SSN_CONTEXT: &[&str] = &["ssn", "social"];
 
 /// Credential words. On their own they are conversation; with a value beside them they are not.
+///
+/// E.SEC5: every entry here used to describe a DIGITAL credential — password, api key, bearer,
+/// private key — and nothing described the physical world. On 2026-08-31 a household safe code was
+/// written into this mind's belief store and the write-gate, which calls `first_sensitive` on the
+/// first line of `assert_belief` and was working exactly as designed, did not recognise it. It then
+/// sat there for a week while the mind repeatedly noticed it and quoted it, taking the literal from
+/// 2 rows to 46 of 604.
+///
+/// A family's most sensitive credential is often not an API key. `value_follows` is what makes
+/// widening this safe: a phrase only convicts when a plausible value sits within 48 characters, so
+/// "we changed the door code last week" stays conversation and "the door code is 4471" does not.
 const CREDENTIAL_PHRASES: &[&str] = &[
     "password",
     "passcode",
@@ -193,6 +204,31 @@ const CREDENTIAL_PHRASES: &[&str] = &[
     "bearer",
     "private key",
 ];
+
+/// E.SEC5: physical-access credentials, held apart from the digital list for ONE reason — their
+/// values are shaped differently.
+///
+/// `value_follows` required six characters, which is right for a token and wrong for a house: an
+/// API key is long, a door code is four digits. `"the door code is 4471"` is a credential and the
+/// six-character floor let it straight through. So these carry a shorter value floor, and only
+/// these — nothing about the digital rules changes.
+const PHYSICAL_CREDENTIAL_PHRASES: &[&str] = &[
+    "safe code",
+    "safe combination",
+    "door code",
+    "gate code",
+    "alarm code",
+    "lock code",
+    "keypad code",
+    "entry code",
+    "access code",
+    "pin code",
+    "combination lock",
+];
+
+/// A token credential's value is long. A household code is short and numeric.
+const DIGITAL_VALUE_MIN: usize = 6;
+const PHYSICAL_VALUE_MIN: usize = 4;
 
 /// Is this byte offset the start of a token (rather than the middle of a word)?
 fn at_token_start(text: &str, at: usize) -> bool {
@@ -384,14 +420,21 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
 
     // 6. Credential PHRASES — but only with a plausible assigned value beside them, so that
     //    "how do passwords work?" stays discussion.
-    for phrase in CREDENTIAL_PHRASES {
-        let mut from = 0usize;
-        while let Some(rel) = lower[from..].find(phrase) {
-            let at = from + rel;
-            if at_token_start(&lower, at) && value_follows(&text[at + phrase.len()..]) {
-                return find(SensitiveKind::CredentialPhrase, at, phrase.len());
+    for (phrases, min_value) in [
+        (CREDENTIAL_PHRASES, DIGITAL_VALUE_MIN),
+        (PHYSICAL_CREDENTIAL_PHRASES, PHYSICAL_VALUE_MIN),
+    ] {
+        for phrase in phrases {
+            let mut from = 0usize;
+            while let Some(rel) = lower[from..].find(phrase) {
+                let at = from + rel;
+                if at_token_start(&lower, at)
+                    && value_follows(&text[at + phrase.len()..], min_value)
+                {
+                    return find(SensitiveKind::CredentialPhrase, at, phrase.len());
+                }
+                from = at + phrase.len();
             }
-            from = at + phrase.len();
         }
     }
     None
@@ -400,10 +443,13 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
 /// Does a plausible assigned VALUE follow, close by?
 ///
 /// Looks at the first few tokens after a credential word, within a short window. A value is a token
-/// of at least six characters that either contains a digit or is long enough to be a secret rather
-/// than a sentence: `hunter2`, `abc123xyz`, `eyJhbGciOiJIUzI1NiJ9…` qualify; `work`, `policy`,
-/// `soon` and `requires` do not.
-fn value_follows(after: &str) -> bool {
+/// of at least `min_len` characters that either contains a digit or is long enough to be a secret
+/// rather than a sentence: `hunter2`, `abc123xyz`, `eyJhbGciOiJIUzI1NiJ9…` qualify; `work`,
+/// `policy`, `soon` and `requires` do not.
+///
+/// E.SEC5: the floor is per class. Six for a token, four for a household code — `4471` is a door
+/// code and is not long enough to be an API key, and one floor could not be right for both.
+fn value_follows(after: &str, min_len: usize) -> bool {
     const WINDOW: usize = 48;
     const MAX_TOKENS: usize = 3;
     // Truncating at a fixed byte count cuts multibyte characters in half.
@@ -419,7 +465,7 @@ fn value_follows(after: &str) -> bool {
             continue;
         }
         // A bare plural or linking word is not a value; skip a couple before giving up.
-        if tok.len() >= 6 && (tok.chars().any(|c| c.is_ascii_digit()) || tok.len() >= 12) {
+        if tok.len() >= min_len && (tok.chars().any(|c| c.is_ascii_digit()) || tok.len() >= 12) {
             return true;
         }
         seen += 1;
@@ -434,6 +480,29 @@ fn value_follows(after: &str) -> bool {
 /// every existing caller upgrades at once rather than each deciding for itself (E.SEC1).
 pub fn contains_secret(text: &str) -> bool {
     first_sensitive(text).is_some()
+}
+
+/// A form of `text` safe to keep in a ledger that OUTLIVES the row it describes.
+///
+/// E.TOMB1: `mind_belief_tombstone` stored the full proposition as its primary key, so forgetting
+/// 46 beliefs that contained a household safe code wrote 46 fresh copies of that code into the
+/// deletion ledger. The privacy mechanism propagated the secret it was erasing.
+///
+/// Text with nothing sensitive in it comes back UNCHANGED, because the ledger's whole value is that
+/// a human can read what was forgotten and why. Text carrying a credential is cut at the credential
+/// phrase and the kind is named instead — the value always follows the phrase, so keeping only what
+/// precedes it cannot keep the value.
+pub fn ledger_safe(text: &str) -> String {
+    let Some(found) = first_sensitive(text) else {
+        return text.to_string();
+    };
+    // Defensive: never slice mid-character, whatever offset arrives (see source_audit's class 1).
+    let mut cut = found.start.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head: String = text[..cut].chars().take(96).collect();
+    format!("{}[redacted: {}]", head, found.kind.label())
 }
 
 /// EVERY sensitive thing in `text`, not just the first.
@@ -574,6 +643,93 @@ impl std::str::FromStr for ProvenanceCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E.SEC5, K14: the REAL proposition from the incident, not a paraphrase of it. This exact
+    /// string was written into the belief store on 2026-08-31 and the write-gate admitted it.
+    #[test]
+    fn the_household_safe_code_that_got_through_is_now_refused() {
+        let real = "Important people in the user's life: :remember the household safe code is ZEBRA-7741";
+        assert!(
+            contains_secret(real),
+            "the write-gate must refuse the proposition it actually admitted"
+        );
+        let found = first_sensitive(real).expect("a finding");
+        assert_eq!(found.kind, SensitiveKind::CredentialPhrase);
+    }
+
+    #[test]
+    fn physical_access_credentials_are_credentials() {
+        for text in [
+            "the door code is 4471",
+            "safe combination is 12-24-36",
+            "alarm code 998812 for the back door",
+            "gate code is 5590A",
+            "our keypad code is 220044",
+            "the entry code is 77B412",
+            "pin code is 998812",
+        ] {
+            assert!(contains_secret(text), "must refuse: {text:?}");
+        }
+    }
+
+    /// E.SEC5, K13. A detector that refuses ordinary life and admits credentials is not
+    /// conservative in either direction — the banked rule, and the reason `value_follows` exists.
+    /// Widening the vocabulary must not make a family unable to talk about their own house.
+    /// The two floors exist because the VALUES differ, not because the phrases do. Collapsing them
+    /// to one number breaks one class or the other, so both directions are pinned here.
+    #[test]
+    fn the_value_floor_is_per_class_and_both_directions_matter() {
+        // A four-digit value is a door code and is NOT an api key.
+        assert!(contains_secret("the door code is 4471"));
+        assert!(!contains_secret("the api key is 4471"));
+        // A long token is a credential under either floor.
+        assert!(contains_secret("the api key is abc123xyz789"));
+        assert!(contains_secret("the door code is abc123xyz789"));
+        assert_eq!(PHYSICAL_VALUE_MIN, 4);
+        assert_eq!(DIGITAL_VALUE_MIN, 6);
+    }
+
+    /// E.TOMB1, K17 and K18 together: the ledger stays readable for the ordinary case, and the
+    /// secret never reaches it in the sensitive one.
+    #[test]
+    fn a_ledger_entry_keeps_the_ordinary_and_drops_the_secret() {
+        // K17: an ordinary forgotten belief is unchanged, so `tombstones` is still an audit.
+        let plain = "The user unwinds by: horizons json";
+        assert_eq!(ledger_safe(plain), plain);
+
+        // K18: the real incident row. The value must not survive, and the reason must.
+        let real = "Important people in the user's life: :remember the household safe code is ZEBRA-7741";
+        let safe = ledger_safe(real);
+        assert!(!safe.contains("ZEBRA-7741"), "the ledger kept the secret: {safe:?}");
+        assert!(safe.contains("[redacted:"), "{safe:?}");
+        assert!(safe.starts_with("Important people"), "context is kept: {safe:?}");
+    }
+
+    #[test]
+    fn ledger_redaction_never_panics_on_multibyte() {
+        for text in ["\u{130}password \u{65e5}\u{672c} is hunter2", "\u{4f60}\u{597d} the door code is 4471", ""] {
+            let _ = ledger_safe(text);
+        }
+    }
+
+    #[test]
+    fn ordinary_household_talk_is_still_ordinary() {
+        for text in [
+            "we changed the door code last week",
+            "I need to buy a combination lock for the shed",
+            "the alarm code keeps slipping my mind",
+            "ask the builder about the gate code before Friday",
+            "she forgot the entry code again",
+            "the safe code should be changed every year",
+            "access code requests go through reception",
+            "the keypad code needs resetting soon",
+        ] {
+            assert!(
+                !contains_secret(text),
+                "ordinary speech must stay ordinary: {text:?}"
+            );
+        }
+    }
 
     #[test]
     fn detects_secret_markers_case_insensitive() {

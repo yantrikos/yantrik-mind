@@ -2189,7 +2189,13 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(memarc.clone(), pool, "JARVIS");
 
-    let secret = "The safe combination is 47-12-33";
+    // E.SEC5: this fixture USED to be "The safe combination is 47-12-33", and the memory
+    // write-gate now refuses to store it at all — correctly, since a household access code is a
+    // credential and `assert_belief` gates on `first_sensitive`. The test is about SCOPE ISOLATION,
+    // not about credentials, so it needs a fact that is private without being a secret. That the
+    // old fixture no longer writes is itself asserted just below, so the change is visible rather
+    // than quietly swapped.
+    let secret = "Priya's therapy appointment is on Thursday afternoon";
     memarc
         .remember_as_belief_scoped(
             BeliefAssertion {
@@ -2203,6 +2209,26 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
         )
         .await
         .unwrap();
+
+    // E.SEC5, stated as a test rather than a comment: the credential this fixture used to be is
+    // now refused at the write-gate, so it can never become a belief that needs scope-protecting.
+    let refused = memarc
+        .remember_as_belief_scoped(
+            BeliefAssertion {
+                statement: "The safe combination is 47-12-33".into(),
+                polarity: 1.0,
+                weight: 2.0,
+                source_event: None,
+                provenance: "told".into(),
+            },
+            Scope::primary(),
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "a household access code must not be storable as a belief at all"
+    );
+
     memarc
         .remember_as_belief_scoped(
             BeliefAssertion {
@@ -2219,10 +2245,10 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
 
     // Agent recall tool AS A MEMBER: shared fact recallable, secret unreachable on every lane.
     let member = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
-    let args = serde_json::json!({ "query": "safe combination" });
+    let args = serde_json::json!({ "query": "therapy appointment" });
     let out = conv.run_agent_tool_as("recall", &args, &member).await;
     assert!(
-        !out.contains("47-12-33"),
+        !out.contains("Thursday afternoon"),
         "MEMBER agent-recall leaked the secret: {out}"
     );
     let args = serde_json::json!({ "query": "dinner friday" });
@@ -2232,12 +2258,12 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
         "member agent-recall must keep shared facts: {out}"
     );
     // …while the primary's own path still reaches their private fact.
-    let args = serde_json::json!({ "query": "safe combination" });
+    let args = serde_json::json!({ "query": "therapy appointment" });
     let out = conv
         .run_agent_tool_as("recall", &args, &TurnIdentity::primary())
         .await;
     assert!(
-        out.contains("47-12-33"),
+        out.contains("Thursday afternoon"),
         "primary agent-recall must reach their own private fact: {out}"
     );
 
@@ -2255,10 +2281,10 @@ async fn arch1_agent_recall_tool_and_recipe_host_are_read_isolated() {
     let miss = host
         .call_tool(
             "recall",
-            &serde_json::json!({ "query": "safe combination" }),
+            &serde_json::json!({ "query": "therapy appointment" }),
         )
         .await;
-    let leaked = miss.map(|s| s.contains("47-12-33")).unwrap_or(false);
+    let leaked = miss.map(|s| s.contains("Thursday afternoon")).unwrap_or(false);
     assert!(
         !leaked,
         "RECIPE recall leaked a private fact — egress-clean context breached"
@@ -15736,4 +15762,32 @@ async fn unparseable_python_reaches_the_write_message_and_is_absent_when_clean()
         !ok.contains("DEFECTS FOUND MECHANICALLY"),
         "a parsing file must carry no findings block: {ok}"
     );
+}
+
+/// E.FORGET1, K15. The old wording reported EFFORT ("Forgot 43 belief(s)") and an operator read it
+/// as completion — while three rows containing a household safe code were still there. A purge must
+/// state the RESIDUAL, and must not sound finished when it is not.
+#[cfg(test)]
+mod forget_report_tests {
+    use crate::ConversationEngine;
+
+    #[test]
+    fn a_complete_purge_says_none_remain() {
+        let out = ConversationEngine::forget_report(46, 0, "zebra-7741");
+        assert!(out.contains("Forgot 46"), "{out}");
+        assert!(out.contains("None remain."), "{out}");
+        assert!(!out.contains("NOT complete"), "{out}");
+    }
+
+    /// The case that actually happened.
+    #[test]
+    fn an_incomplete_purge_refuses_to_sound_finished() {
+        let out = ConversationEngine::forget_report(43, 3, "zebra-7741");
+        assert!(out.contains("3 still match"), "{out}");
+        assert!(out.contains("NOT complete"), "{out}");
+        assert!(
+            !out.contains("None remain"),
+            "an incomplete purge must never read as a finished one: {out}"
+        );
+    }
 }

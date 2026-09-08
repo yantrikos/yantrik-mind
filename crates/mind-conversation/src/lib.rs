@@ -7212,6 +7212,26 @@ impl ConversationEngine {
     /// (Home Assistant, GitHub, web, memory) — NOT authored skills — and a plugin's command exists only
     /// when that plugin is actually configured (the "hook": present plugin → live command). Anything
     /// that isn't a plugin command falls through to a full chat turn (shared live memory).
+/// How many beliefs one purge pass may examine. Large enough to be the whole store rather than a
+/// page: E.FORGET1 exists because a cap of 50 was mistaken for completeness.
+const FORGET_SCAN_LIMIT: usize = 100_000;
+
+/// What a purge says afterwards.
+///
+/// E.FORGET1: the old wording was "Forgot N belief(s)", which is a report of EFFORT. For a privacy
+/// right the operator needs the RESIDUAL — how many still match — because that is the only number
+/// that distinguishes a finished purge from one that quietly left three rows behind.
+pub(crate) fn forget_report(forgotten: usize, residual: usize, needle: &str) -> String {
+    if residual == 0 {
+        format!("Forgot {forgotten} belief(s) matching \"{needle}\". None remain.")
+    } else {
+        format!(
+            "Forgot {forgotten} belief(s) matching \"{needle}\" — but {residual} still match and \
+             could not be removed. The purge is NOT complete; do not treat this as done."
+        )
+    }
+}
+
     /// Forget every stored belief whose text contains `needle` (case-insensitive). Memory hygiene —
     /// used to purge stale/wrong facts (e.g. test-data pollution) that consolidation left behind, since
     /// the belief store is separate from the people/profile layers. Runs a few recall passes so it
@@ -7222,31 +7242,31 @@ impl ConversationEngine {
             return "Give me at least 3 characters to match (e.g. `ym forget-belief Priya`)."
                 .to_string();
         }
+        // E.FORGET1: this used to generate candidates with `recall_typed` (semantic, top_k=50,
+        // five passes). Ranked recall is the wrong instrument for a privacy right: asked to purge a
+        // household safe code that appeared in 46 beliefs, it forgot 43, LEFT 3, and reported
+        // "Forgot 43 belief(s)" — which an operator would reasonably read as done. The engine's own
+        // maintainers confirmed the correct shape is exhaustive listing plus per-id tombstone.
+        //
+        // `beliefs_matching_n` is that listing: deterministic, complete, no ranking. Candidate
+        // generation is exhaustive; `word_boundary_contains` stays as the PRECISE filter so a short
+        // needle still cannot purge a belief that merely contains it inside a longer word.
+        let ctx = mind_types::AccessContext::operator_audit();
         let mut forgotten = 0usize;
-        // A few passes: each forget shifts the ranking, so re-recall until a pass finds nothing new.
-        for _ in 0..5 {
-            let rs = self
+        for _ in 0..3 {
+            let candidates = self
                 .memory
-                .recall_typed(
-                    mind_types::RecallQuery {
-                        text: needle.clone(),
-                        top_k: 50,
-                        kind: None,
-                    },
-                    &mind_types::AccessContext::operator_audit(),
-                )
+                .beliefs_matching_n(&needle, Self::FORGET_SCAN_LIMIT, &ctx)
                 .await
                 .unwrap_or_default();
             let mut hit = false;
-            for r in rs {
-                // Word-boundary match so a short needle (a name) can't purge a belief that merely
-                // contains it as a substring (e.g. "ana" inside "banana" or a parenthetical alias).
-                if word_boundary_contains(&r.item.text.to_lowercase(), &needle) {
+            for belief in candidates {
+                if word_boundary_contains(&belief.statement.to_lowercase(), &needle) {
                     // Lifecycle: this path IS the privacy right — the tombstone must say so,
                     // forever distinguishable from a dedup or hygiene pass.
                     if self
                         .memory
-                        .forget_with_reason(&r.item.id, "user-deleted")
+                        .forget_with_reason(&belief.id, "user-deleted")
                         .await
                         .unwrap_or(false)
                     {
@@ -7259,7 +7279,18 @@ impl ConversationEngine {
                 break;
             }
         }
-        format!("Forgot {forgotten} belief(s) matching \"{needle}\".")
+
+        // K15: the after-count is the only proof. The verb's own tally says what it did; only a
+        // re-scan says what is LEFT, and that is the number an operator actually needs.
+        let residual = self
+            .memory
+            .beliefs_matching_n(&needle, Self::FORGET_SCAN_LIMIT, &ctx)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|b| word_boundary_contains(&b.statement.to_lowercase(), &needle))
+            .count();
+        Self::forget_report(forgotten, residual, &needle)
     }
 
     /// The `ym` operator console router. ARCH-2: this is an OPERATOR surface — the control server

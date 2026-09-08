@@ -949,7 +949,10 @@ mod tests {
         let pool = InferencePool::new(scripted as Arc<dyn LLMBackend>, 1);
         let conv = Arc::new(engine(&mem, pool));
 
-        let secret = "The safe combination is 47-12-33";
+        // E.SEC5: was "The safe combination is 47-12-33". The memory write-gate now refuses a
+        // household access code as a belief at all, so a test about MEMBER READ ISOLATION needs a
+        // fact that is private without being a credential. The refusal itself is asserted below.
+        let secret = "Priya's therapy appointment is on Thursday afternoon";
         mem.remember_as_belief_scoped(
             mind_types::BeliefAssertion {
                 statement: secret.into(),
@@ -987,7 +990,7 @@ mod tests {
 
         // :beliefs — filtered list; shared visible, secret absent
         match handle_line_as(
-            ":beliefs safe combination",
+            ":beliefs therapy appointment",
             &mem,
             &conv,
             member_id.clone(),
@@ -996,7 +999,7 @@ mod tests {
         .await
         {
             Outcome::Said(s) => assert!(
-                !s.contains("47-12-33"),
+                !s.contains("Thursday afternoon"),
                 "MEMBER :beliefs leaked the secret: {s}"
             ),
             _ => panic!("expected output"),
@@ -1018,7 +1021,7 @@ mod tests {
         }
         // :reflect — filtered reflection
         match handle_line_as(
-            ":reflect safe combination",
+            ":reflect therapy appointment",
             &mem,
             &conv,
             member_id.clone(),
@@ -1027,7 +1030,7 @@ mod tests {
         .await
         {
             Outcome::Said(s) => assert!(
-                !s.contains("47-12-33"),
+                !s.contains("Thursday afternoon"),
                 "MEMBER :reflect leaked the secret: {s}"
             ),
             _ => panic!("expected output"),
@@ -1051,7 +1054,7 @@ mod tests {
         // :conflicts — a secret-referencing contradiction stays invisible
         mem.remember_as_belief_scoped(
             mind_types::BeliefAssertion {
-                statement: "The safe combination is 51-09-27".into(),
+                statement: "Priya's counselling session moved to Tuesday".into(),
                 polarity: 1.0,
                 weight: 2.0,
                 source_event: None,
@@ -1063,7 +1066,7 @@ mod tests {
         .unwrap();
         mem.relate(
             secret,
-            "The safe combination is 51-09-27",
+            "Priya's counselling session moved to Tuesday",
             "contradicts",
             0.9,
         )
@@ -1071,7 +1074,7 @@ mod tests {
         .unwrap();
         match handle_line_as(":conflicts", &mem, &conv, member_id.clone(), &member_ctx).await {
             Outcome::Said(s) => assert!(
-                !s.contains("safe combination"),
+                !s.contains("counselling session"),
                 "MEMBER :conflicts leaked the secret: {s}"
             ),
             _ => panic!("expected output"),
@@ -1085,7 +1088,11 @@ mod tests {
             _ => panic!("expected output"),
         }
         // The owner console (operator ctx) retains everything.
-        match handle_line(":explain The safe combination is 47-12-33", &mem, &conv).await {
+        match handle_line(
+            ":explain Priya's therapy appointment is on Thursday afternoon",
+            &mem,
+            &conv,
+        ).await {
             Outcome::Said(s) => assert!(
                 s.contains("confidence"),
                 "operator :explain must still work: {s}"

@@ -3443,9 +3443,69 @@ fn quarantine_rid(db: &YantrikDB, rid: &str, reason: &str) -> std::result::Resul
 /// marks, so "user-deleted" stays forever distinguishable from dedup/hygiene.
 fn ensure_tombstone_table(db: &YantrikDB) {
     let _ = db.conn().execute(
-        "CREATE TABLE IF NOT EXISTS mind_belief_tombstone (proposition TEXT PRIMARY KEY, reason TEXT NOT NULL, ts_ms INTEGER NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS mind_belief_tombstone_v2 (fingerprint TEXT PRIMARY KEY, preview TEXT NOT NULL, reason TEXT NOT NULL, ts_ms INTEGER NOT NULL)",
         [],
     );
+    migrate_tombstones_from_v1(db);
+}
+
+/// A stable key for a proposition that is not the proposition.
+///
+/// E.TOMB1: the ledger needs to recognise a repeat deletion without KEEPING what was deleted.
+fn tombstone_fingerprint(proposition: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(proposition.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// E.TOMB1, K19: v1 used `proposition TEXT PRIMARY KEY`, so every forgotten belief left its full
+/// text in the deletion ledger. Purging 46 beliefs that carried a household safe code therefore
+/// wrote 46 fresh copies of that code into the very table whose job was to record its removal.
+/// Migrating is not optional — leaving v1 in place leaves those copies exactly where they are.
+fn migrate_tombstones_from_v1(db: &YantrikDB) {
+    let conn = db.conn();
+    let present = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mind_belief_tombstone'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if !present {
+        return;
+    }
+    let rows: Vec<(String, String, i64)> = {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT proposition, reason, ts_ms FROM mind_belief_tombstone")
+        else {
+            return;
+        };
+        let Ok(mapped) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        }) else {
+            return;
+        };
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (proposition, reason, ts) in rows {
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO mind_belief_tombstone_v2 (fingerprint, preview, reason, ts_ms) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                tombstone_fingerprint(&proposition),
+                mind_types::ledger_safe(&proposition),
+                reason,
+                ts
+            ],
+        );
+    }
+    // The old table IS the leak; rewriting into v2 and leaving it would fix nothing.
+    let _ = conn.execute("DROP TABLE mind_belief_tombstone", []);
 }
 
 fn record_tombstone(
@@ -3454,11 +3514,18 @@ fn record_tombstone(
     reason: &str,
 ) -> std::result::Result<(), String> {
     let ts = (now_secs() * 1000.0) as i64;
+    // E.TOMB1: the key is a fingerprint and the stored text is redacted. A deletion ledger that
+    // keeps what it deleted is a contradiction, and this one kept a household safe code 46 times.
     db.conn()
         .execute(
-            "INSERT INTO mind_belief_tombstone (proposition, reason, ts_ms) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(proposition) DO UPDATE SET reason=excluded.reason, ts_ms=excluded.ts_ms",
-            rusqlite::params![proposition, reason, ts],
+            "INSERT INTO mind_belief_tombstone_v2 (fingerprint, preview, reason, ts_ms) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(fingerprint) DO UPDATE SET reason=excluded.reason, ts_ms=excluded.ts_ms",
+            rusqlite::params![
+                tombstone_fingerprint(proposition),
+                mind_types::ledger_safe(proposition),
+                reason,
+                ts
+            ],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -3467,7 +3534,7 @@ fn record_tombstone(
 fn list_tombstones(db: &YantrikDB) -> std::result::Result<Vec<(String, String, u64)>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT proposition, reason, ts_ms FROM mind_belief_tombstone ORDER BY ts_ms DESC")
+        .prepare("SELECT preview, reason, ts_ms FROM mind_belief_tombstone_v2 ORDER BY ts_ms DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -7470,7 +7537,10 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
 
         // A secret only the primary should ever see, and a genuinely shared fact.
-        let secret = "The safe combination is 47-12-33";
+        // E.SEC5: was "The safe combination is 47-12-33"; the write-gate now refuses a household
+        // access code as a belief at all. This test is about MEMBER READ ISOLATION, so it needs a
+        // fact that is private without being a credential.
+        let secret = "Priya's therapy appointment is on Thursday afternoon";
         let shared = "Dinner on Friday is at seven";
         mem.remember_as_belief_scoped(
             BeliefAssertion {
@@ -7502,7 +7572,7 @@ mod tests {
 
         // ── Path 1: deterministic exact match ──────────────────────────────
         let m_secret = mem
-            .beliefs_matching("safe combination", &member_ctx(member.viewer().unwrap()))
+            .beliefs_matching("therapy appointment", &member_ctx(member.viewer().unwrap()))
             .await
             .unwrap();
         assert!(
@@ -7522,7 +7592,7 @@ mod tests {
         let r_secret = mem
             .recall_typed(
                 RecallQuery {
-                    text: "safe combination".into(),
+                    text: "therapy appointment".into(),
                     top_k: 10,
                     kind: None,
                 },
@@ -7539,7 +7609,7 @@ mod tests {
         assert!(owner.is_operator());
         let o_secret = mem
             .beliefs_matching(
-                "safe combination",
+                "therapy appointment",
                 &mind_types::AccessContext::operator_audit(),
             )
             .await
@@ -7549,7 +7619,7 @@ mod tests {
             "operator must retain full access"
         );
         let o_secret_scoped = mem
-            .beliefs_matching("safe combination", &member_ctx(Scope::primary()))
+            .beliefs_matching("therapy appointment", &member_ctx(Scope::primary()))
             .await
             .unwrap();
         assert!(
@@ -7572,7 +7642,9 @@ mod tests {
         );
 
         // ── Path 4: conflicts — a contradiction is visible only when BOTH sides are ──
-        let secret_b = "The safe combination is 51-09-27";
+        // E.SEC5: the contradicting fixture was a second safe combination. It has to contradict
+        // `secret`, and it has to be storable, so it is the same appointment on a different day.
+        let secret_b = "Priya's therapy appointment is on Monday morning";
         mem.remember_as_belief_scoped(
             BeliefAssertion {
                 statement: secret_b.into(),
@@ -7592,15 +7664,15 @@ mod tests {
         assert!(
             o_conflicts
                 .iter()
-                .any(|c| c.belief_a.contains("safe combination")),
+                .any(|c| c.belief_a.contains("therapy appointment")),
             "operator must see the private-belief conflict"
         );
         let m_conflicts = mem.conflicts(&member).await.unwrap();
         assert!(
             !m_conflicts
                 .iter()
-                .any(|c| c.belief_a.contains("safe combination")
-                    || c.belief_b.contains("safe combination")),
+                .any(|c| c.belief_a.contains("therapy appointment")
+                    || c.belief_b.contains("therapy appointment")),
             "MEMBER saw the primary secret via the conflicts list — isolation breached"
         );
 
@@ -7608,19 +7680,19 @@ mod tests {
         mem.store_goal("buy the anniversary surprise")
             .await
             .unwrap();
-        let m_reflect = mem.reflect("safe combination", &member).await.unwrap();
+        let m_reflect = mem.reflect("therapy appointment", &member).await.unwrap();
         assert!(
             !m_reflect
                 .beliefs
                 .iter()
-                .any(|b| b.statement.contains("safe combination")),
+                .any(|b| b.statement.contains("therapy appointment")),
             "MEMBER reflect surfaced the secret"
         );
         assert!(
             !m_reflect
                 .open_conflicts
                 .iter()
-                .any(|c| c.belief_a.contains("safe combination")),
+                .any(|c| c.belief_a.contains("therapy appointment")),
             "MEMBER reflect surfaced the secret conflict"
         );
         assert!(
@@ -7638,28 +7710,28 @@ mod tests {
             .await
             .unwrap();
         let m_ws = mem
-            .hydrate_working_set("safe combination", &member)
+            .hydrate_working_set("therapy appointment", &member)
             .await
             .unwrap();
         assert!(
             !m_ws
                 .stable_facts
                 .iter()
-                .any(|f| f.text.contains("safe combination")),
+                .any(|f| f.text.contains("therapy appointment")),
             "MEMBER working set carried the secret"
         );
         assert!(
             !m_ws
                 .uncertain_beliefs
                 .iter()
-                .any(|b| b.statement.contains("safe combination")),
+                .any(|b| b.statement.contains("therapy appointment")),
             "MEMBER working set carried the secret (uncertain lane)"
         );
         assert!(
             !m_ws
                 .active_contradictions
                 .iter()
-                .any(|c| c.belief_a.contains("safe combination")),
+                .any(|c| c.belief_a.contains("therapy appointment")),
             "MEMBER working set carried the secret conflict"
         );
         assert!(
@@ -7667,7 +7739,7 @@ mod tests {
             "tasks are primary state — a member working set must not carry them"
         );
         let o_ws = mem
-            .hydrate_working_set("safe combination", &owner)
+            .hydrate_working_set("therapy appointment", &owner)
             .await
             .unwrap();
         assert!(

@@ -49,7 +49,8 @@ pub use purpose::{
     purpose_allows, Activity, Purpose, PurposeGrant, PurposeGrantSpec, Sensitivity, Subject,
 };
 pub use safety::{
-    contains_secret, first_sensitive, sensitive_findings, sensitive_pair, ProvenanceCategory,
+    contains_secret, first_sensitive, ledger_safe, sensitive_findings, sensitive_pair,
+    ProvenanceCategory,
     SensitiveFinding, SensitiveKind, SECRET_MARKERS,
 };
 

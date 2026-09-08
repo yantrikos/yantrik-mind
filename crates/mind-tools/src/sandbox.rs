@@ -188,7 +188,7 @@ impl Sandbox {
 
     /// E.RUNG8: run a driver against a COPY of a host directory tree.
     ///
-    /// `seed` is `(source directory, subdirectory name)`. The tree is copied into a SUBDIRECTORY of
+    /// The tree is copied into a SUBDIRECTORY of
     /// the scratch, never its root, because the sandbox writes its own `run.sh` at that root and a
     /// repository carrying a `run.sh` of its own must not be shadowed by the driver that is meant
     /// to invoke it. The copy is the sandbox's, made and destroyed with the scratch: a check may do
@@ -196,7 +196,7 @@ impl Sandbox {
     pub async fn run_seeded(
         &self,
         lim: Limits,
-        seed: Option<(PathBuf, String)>,
+        seed: Option<SeedTree>,
         files: Vec<(String, String)>,
         run_sh: &str,
     ) -> std::io::Result<ExecResult> {
@@ -209,7 +209,7 @@ impl Sandbox {
 
     fn run_blocking(
         lim: Limits,
-        seed: Option<(PathBuf, String)>,
+        seed: Option<SeedTree>,
         files: Vec<(String, String)>,
         run_sh: String,
         hidden: Option<String>,
@@ -223,8 +223,8 @@ impl Sandbox {
         let scratch: PathBuf =
             std::env::temp_dir().join(format!("ym_sbx_{}_{seq}_{ts}", std::process::id()));
         std::fs::create_dir_all(&scratch)?;
-        if let Some((src, into)) = &seed {
-            let rel = std::path::Path::new(into);
+        if let Some(seed) = &seed {
+            let rel = std::path::Path::new(&seed.into);
             // One plain path segment. A seed that could name `.` or climb out would put the tree
             // back at the scratch root, which is exactly the collision the subdirectory prevents.
             if rel.is_absolute()
@@ -232,10 +232,13 @@ impl Sandbox {
                 || !matches!(rel.components().next(), Some(std::path::Component::Normal(_)))
             {
                 let _ = std::fs::remove_dir_all(&scratch);
-                return Err(std::io::Error::other(format!("refusing seed subdir {into:?}")));
+                return Err(std::io::Error::other(format!(
+                    "refusing seed subdir {:?}",
+                    seed.into
+                )));
             }
             let mut budget = SeedBudget::default();
-            if let Err(e) = copy_seed(src, &scratch.join(rel), 0, &mut budget) {
+            if let Err(e) = copy_seed(&seed.root, &scratch.join(rel), 0, &seed.skip, &mut budget) {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(e);
             }
@@ -303,6 +306,23 @@ impl Sandbox {
     }
 }
 
+/// A host tree to copy into a sandbox scratch, and the top-level entries to leave behind.
+///
+/// E.RUNG8b: `skip` exists because of a measured exposure, not a hypothetical one. The coder sets
+/// `HOME` to its own workdir on purpose, so the agent's home — session logs, tool-result caches,
+/// and a `.key` file — lands INSIDE the tree a build is measured on. Copying that into a sandbox
+/// that then runs a MODEL-AUTHORED shell command puts the agent's own credentials where that
+/// command can read them. The empty network namespace stops them leaving the box; it does not stop
+/// a check printing one to stdout, and stdout is the reply.
+#[derive(Debug, Clone)]
+pub struct SeedTree {
+    pub root: PathBuf,
+    /// The subdirectory of the scratch the tree is copied into.
+    pub into: String,
+    /// Top-level entry names never copied. `.git` is always skipped as well.
+    pub skip: Vec<String>,
+}
+
 /// Caps on a seeded tree. The seed is a whole repository chosen by a caller, and these are the
 /// only thing standing between one large checkout and a filled disk.
 const SEED_MAX_FILES: usize = 8000;
@@ -324,6 +344,7 @@ fn copy_seed(
     src: &std::path::Path,
     dest: &std::path::Path,
     depth: usize,
+    skip: &[String],
     budget: &mut SeedBudget,
 ) -> std::io::Result<()> {
     if depth > SEED_MAX_DEPTH {
@@ -336,12 +357,17 @@ fn copy_seed(
         if name == ".git" {
             continue;
         }
+        // Only at the top level: a `skip` name is about what the AGENT put beside the tree, not
+        // about a file of that name somewhere inside the repository's own source.
+        if depth == 0 && name.to_str().is_some_and(|n| skip.iter().any(|s| s == n)) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
         }
         if file_type.is_dir() {
-            copy_seed(&entry.path(), &dest.join(&name), depth + 1, budget)?;
+            copy_seed(&entry.path(), &dest.join(&name), depth + 1, skip, budget)?;
         } else if file_type.is_file() {
             budget.files += 1;
             budget.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -357,6 +383,42 @@ fn copy_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The security half of E.RUNG8b, tested on a real tree rather than asserted.
+    ///
+    /// A skipped top-level entry is not copied; the SAME name deeper in the tree is, because the
+    /// skip is about what the agent left beside the repository, not about the repository's files.
+    #[test]
+    fn a_skipped_top_level_entry_is_not_copied_but_the_same_name_deeper_is() {
+        let root = mind_types::scratch::dir("sandbox-seed-skip");
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        std::fs::create_dir_all(src.join(".claude")).unwrap();
+        std::fs::create_dir_all(src.join("app").join(".claude")).unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".claude").join("creds.key"), "SECRET").unwrap();
+        std::fs::write(src.join(".claude.json"), "{}").unwrap();
+        std::fs::write(src.join("app").join(".claude").join("kept.txt"), "mine").unwrap();
+        std::fs::write(src.join(".git").join("HEAD"), "ref: x").unwrap();
+        std::fs::write(src.join("start.sh"), "echo hi").unwrap();
+
+        let skip = vec![".claude".to_string(), ".claude.json".to_string()];
+        let mut budget = SeedBudget::default();
+        copy_seed(&src, &dest, 0, &skip, &mut budget).unwrap();
+
+        assert!(dest.join("start.sh").exists(), "the repository is copied");
+        assert!(
+            dest.join("app").join(".claude").join("kept.txt").exists(),
+            "a .claude INSIDE the source tree is the repository's own and is copied"
+        );
+        assert!(
+            !dest.join(".claude").exists(),
+            "the agent's home must not reach the sandbox"
+        );
+        assert!(!dest.join(".claude.json").exists());
+        assert!(!dest.join(".git").exists(), ".git is never copied");
+        assert_eq!(budget.files, 2, "only start.sh and the nested kept.txt");
+    }
 
     #[test]
     fn render_shows_output_and_exit() {

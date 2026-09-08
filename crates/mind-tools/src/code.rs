@@ -212,6 +212,38 @@ pub fn clone_at(src: &Path, dest: &Path, sha: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Keep named paths out of a throwaway clone's `git add -A`.
+///
+/// E.RUNG8b: the first rung-8 build reported "9 files, +2727" for a run that changed nothing at
+/// all. Every one of those files was the coding agent's own home — its session log, two tool-result
+/// caches, a backup and a key — because the coder sets `HOME` to the workdir so a run cannot touch
+/// the service user's real home. `git add -A` then swept the agent's notes about making a change
+/// into the change. This writes them into the clone's own `.git/info/exclude`, which affects only
+/// UNTRACKED files: a repository that genuinely tracks a `.claude/` still shows its own edits.
+pub fn exclude_paths(dir: &Path, patterns: &[String]) -> anyhow::Result<()> {
+    let info = dir.join(".git").join("info");
+    std::fs::create_dir_all(&info)?;
+    let body = patterns.join("\n");
+    std::fs::write(info.join("exclude"), format!("{body}\n"))?;
+    Ok(())
+}
+
+/// How many paths the clone is currently ignoring, so a reply can say what it is not showing.
+pub fn ignored_count(dir: &Path) -> usize {
+    run_git(
+        Some(dir),
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )
+    .map(|out| out.lines().filter(|l| !l.trim().is_empty()).count())
+    .unwrap_or(0)
+}
+
 /// Everything a build changed in `dir`, measured against the commit it started from.
 ///
 /// Staged, so files the builder CREATED count; and diffed against an explicit base rather than

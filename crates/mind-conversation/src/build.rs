@@ -43,6 +43,32 @@ fn check_limits() -> Limits {
     }
 }
 
+/// What the coding agent leaves in the workdir that is ITS OWN rather than the repository's.
+///
+/// E.RUNG8b, from the first real run. The coder points `HOME` at the workdir on purpose, so a run
+/// cannot reach the service user's real home — and the cost is that the agent's own state lands
+/// inside the very tree the build is measured on. Two distinct harms, both observed: a diff that
+/// was 2,727 lines of session log, tool-result cache and backups for a run that changed nothing at
+/// all, so `NoChange` could never be reported; and a `.key` file copied into a sandbox that runs a
+/// MODEL-AUTHORED shell command, where a check could read it and print it into the reply.
+///
+/// One list, two derived uses — the git exclusion and the sandbox skip. They were nearly two
+/// hand-maintained lists, which is the seam E.HORIZON1 spent a day learning not to leave open.
+const AGENT_HOME: [&str; 6] = [
+    ".claude",
+    ".claude.json",
+    ".config",
+    ".cache",
+    ".local",
+    ".npm",
+];
+
+/// The same set as gitignore patterns, anchored at the workdir root so a `.claude/` that belongs to
+/// the repository's own source is untouched.
+pub(crate) fn agent_home_patterns() -> Vec<String> {
+    AGENT_HOME.iter().map(|name| format!("/{name}")).collect()
+}
+
 /// How much of the diff the reply carries. The whole of it stays on disk in the workdir.
 const DIFF_SHOWN: usize = 2200;
 
@@ -199,6 +225,7 @@ pub(crate) fn render_build(
     diff: &str,
     check_output: &str,
     workdir: &str,
+    hidden: usize,
 ) -> String {
     let outcome = reconcile(before_exit, before_timed_out, outcome);
     let mut out = format!(
@@ -247,6 +274,13 @@ pub(crate) fn render_build(
             } else {
                 String::new()
             }
+        ));
+    }
+    if hidden > 0 {
+        out.push_str(&format!(
+            "\n{hidden} path(s) are excluded from this diff: the coding agent's own home, which \
+             lands in the workdir because the coder points HOME there. Its notes about making a \
+             change are not the change.\n"
         ));
     }
     out.push_str(
@@ -327,6 +361,10 @@ impl crate::ConversationEngine {
             Err(e) => return format!("🔨 Could not stage the checkout: {e}"),
         }
 
+        // The agent's home is about to be created INSIDE this clone (the coder sets HOME here),
+        // so the clone is told to ignore it before anything runs.
+        let _ = mind_tools::code::exclude_paths(Path::new(&workdir), &agent_home_patterns());
+
         // 1. The pristine run. Everything after this depends on it having FAILED.
         let before = match self.run_check(&sandbox, &workdir, &proposal.acceptance_test).await {
             Ok(r) => r,
@@ -342,6 +380,7 @@ impl crate::ConversationEngine {
                 "",
                 &format!("{}\n{}", before.stdout, before.stderr),
                 &workdir,
+                0,
             );
         }
 
@@ -379,6 +418,7 @@ impl crate::ConversationEngine {
             &diff,
             &format!("{}\n{}", after.stdout, after.stderr),
             &workdir,
+            mind_tools::code::ignored_count(Path::new(&workdir)),
         )
     }
 
@@ -392,7 +432,11 @@ impl crate::ConversationEngine {
         sandbox
             .run_seeded(
                 check_limits(),
-                Some((std::path::PathBuf::from(tree), SEED_DIR.to_string())),
+                Some(mind_tools::sandbox::SeedTree {
+                    root: std::path::PathBuf::from(tree),
+                    into: SEED_DIR.to_string(),
+                    skip: AGENT_HOME.iter().map(|n| n.to_string()).collect(),
+                }),
                 vec![(CHECK_FILE.to_string(), check.to_string())],
                 &format!("cd {SEED_DIR}; exec /bin/sh ../{CHECK_FILE}"),
             )
@@ -490,6 +534,7 @@ mod tests {
             "diff --git a/s.sh b/s.sh\n+++ b/s.sh\n+echo hi\n",
             "ok",
             "/scratch/run-1",
+            0,
         );
         assert!(out.contains("VERDICT: VERIFIED"));
         assert!(out.contains("pristine tree: exit 1"));
@@ -510,6 +555,7 @@ mod tests {
             "",
             "already fine",
             "/scratch/run-1",
+            0,
         );
         assert!(out.contains("it should have FAILED here"));
         assert!(out.contains("built tree:    not run"));
@@ -531,15 +577,45 @@ mod tests {
             false,
             BuildOutcome::Verified,
             Some((0, false)),
-            "diff --git a/x b/x
-+++ b/x
-+one
-",
+            "diff --git a/x b/x\n+++ b/x\n+one\n",
             "",
             "/scratch/run-1",
+            0,
         );
         assert!(out.contains("NOT A DIFFERENTIAL"), "{out}");
         assert!(!out.contains("VERDICT: VERIFIED"), "{out}");
+    }
+
+    /// One list, two uses. They were nearly two hand-maintained lists — the git exclusion and the
+    /// sandbox skip — which is exactly the seam that got a durable goal refused in E.HORIZON1.
+    #[test]
+    fn the_git_exclusion_and_the_sandbox_skip_come_from_one_list() {
+        let patterns = agent_home_patterns();
+        assert_eq!(patterns.len(), AGENT_HOME.len());
+        for (pattern, name) in patterns.iter().zip(AGENT_HOME.iter()) {
+            assert_eq!(pattern, &format!("/{name}"), "anchored at the workdir root");
+        }
+        assert!(AGENT_HOME.contains(&".claude"));
+        assert!(AGENT_HOME.contains(&".claude.json"));
+    }
+
+    /// A reply that hides part of the tree must SAY so. The first real run reported 2,727 added
+    /// lines of the agent's own session log as though they were the change it had made.
+    #[test]
+    fn a_reply_that_hides_paths_names_the_fact() {
+        let out = render_build(
+            &proposal(),
+            1,
+            false,
+            BuildOutcome::NoChange,
+            Some((1, false)),
+            "",
+            "",
+            "/scratch/run-1",
+            9,
+        );
+        assert!(out.contains("9 path(s) are excluded"), "{out}");
+        assert!(out.contains("coding agent's own home"), "{out}");
     }
 
     #[test]

@@ -8908,3 +8908,45 @@ And the diff is markedly better than run 4's: a real 62-line `scripts/serve/stat
 **Standing.** Rungs 1–8 pass. The build path now: reads its own spool, stages a clone at the proposal's base commit, opens the differential gate, steps across throttled models rather than giving up, runs both checks itself, runs a control against its own pass when a permission bit could have bought it, distinguishes a builder that declined from one its provider refused, and never writes to the shared checkout. Fifteen mutants watched to fail by name tonight across E.RUNG8/b/c, E.RUNG9 and E.LANE1. Workspace 1935 passed / 0 failed.
 
 **Still open and named rather than quietly carried:** a proposal's acceptance test is still written by the same kind of model that satisfies it, and nothing checks that the check tests the *goal* — run 4's `cache_hit_rate` read files nothing writes, and this run's still reports `0.0`. The control closes one way of overstating a pass; it does not make a weak check strong.
+
+## E.BELIEF1 — the mind was right, my three detectors were wrong, and flagging a secret multiplied it (2026-09-08)
+
+For two days I carried the mind's own report as **unexamined**: *"my belief substrate contains placeholder or corrupted entries where field names are stored as values (e.g. 'version' as a name, 'horizons json' as an unwinding method)."* I could not reproduce it, so I filed it rather than asserting it — which was right — and then failed three times to measure it, which was not.
+
+| attempt | method | result |
+|---|---|---|
+| 1 | substring heuristic over all nodes | 77/572 — **wrong**, mostly legitimate `kind:"episode"` nodes labelled by channel |
+| 2 | labels equal to the table's own column names (yantrikdb-core's step b) | **0/604** |
+| 3 | a template regex for `The user…: <answer>` | 3/524, and it **missed a row I had already read with my own eyes** |
+| 4 | printing eight raw labels | found it immediately |
+
+```
+The user's key dates: horizons
+The user unwinds by: horizons json
+The user likes keeping up with: horizons
+Important people in the user's life: :remember the household safe code is <REDACTED>
+```
+
+The mind had said *"horizons json as an unwinding method"* in those exact words. The defect is a **profile-question template whose answer slot took whatever the user typed next** — console verbs, and once a credential. Four rows, 2026-08-31 15:46, a single incident window.
+
+**yantrikdb-core's method was the right instrument and it exonerated the substrate.** `PRAGMA integrity_check` / `quick_check` / `foreign_key_check` on staging from a separate process: all clean. A writer bug, exactly as they predicted from our `Cargo.lock` (one `libsqlite3-sys` across the workspace, so their #225 foreign-library class cannot apply to our binary).
+
+### The amplification, which is the real finding
+
+The mind then **noticed the corruption, correctly, 91 times** between 09-02 and 09-04 — and **quoted the credential every time it raised the alarm**. The literal secret went from 2 rows to **46 of 604**. Flagging a secret by quoting it multiplied its exposure ~23×. `mind_belief_sensitivity` held **0 rows**, so P.SEC1 never classified it on the way in.
+
+That is E.PING1's restatement pathology (nothing closes the loop, so every pass re-notices) crossed with a sensitivity leak. The noticing was *correct reasoning* — it even advised *"please remove it from your memory and use a secure password manager instead"*, which was better advice than my measurement — and each correct noticing made the exposure worse.
+
+### The cleanup, and a defect found doing it
+
+Purged on Pranab's explicit word, through the mind's own privacy path (`forget_beliefs_matching` → `forget_with_reason(id, "user-deleted")`), never raw SQL — `mind-memory` warns in its own source that a raw tombstone *"skips the live vector tombstone, the chunk-key tombstones, cache removal, graph unlinking"*, which independently confirms yantrikdb-core's caution. `mind.db` backed up first (4.6 MB), and each needle's blast radius computed read-only **before** firing.
+
+**`forget_beliefs_matching` IS NOT EXHAUSTIVE.** It is recall-based (semantic `top_k=50`, five passes). On 46 rows containing an exact literal it forgot **43 and silently left 3**, reporting *"Forgot 43 belief(s)"* — an operator would reasonably conclude the secret was gone. I caught it only by counting the rows afterwards. For a hygiene pass that is acceptable; **for a privacy right it is not**. Filed as **E.FORGET1**: this path needs an exhaustive predicate scan, not a ranked recall.
+
+Second pass with needles taken from the survivors' own text cleared them. Final state: **0 live rows contain the literal**, 49 tombstoned of 604, each with reason `user-deleted` and a ledger line saying what and why.
+
+**Stated plainly rather than glossed:** tombstoning is not erasure. The bytes are still in the file. For an actual credential the answer is rotation, not deletion, and that is Pranab's call.
+
+### What I take from it
+
+When a system reports a defect in itself and my detector cannot reproduce it, **look at the raw data before doubting the report**. I built three increasingly clever detectors; one `SELECT label FROM cognitive_nodes LIMIT 8` would have shown it on the first night. The mind's account of its own internals was accurate in every particular I could check — except "version as a name", which appears only inside its own hypothesis rows quoting the problem, and is the one part I could not confirm.

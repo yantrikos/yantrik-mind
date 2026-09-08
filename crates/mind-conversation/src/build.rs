@@ -129,6 +129,63 @@ pub(crate) fn built_outcome(diff: &str, after_exit: i32, after_timed_out: bool) 
     BuildOutcome::Verified
 }
 
+/// How the builder's OWN run ended.
+///
+/// E.RUNG8c: run 2 came back `NO CHANGE — the builder left the tree as it found it`, which reads
+/// as a builder that ran and declined. It had in fact spent eleven minutes reading, converged on a
+/// plan, and was three sentences into designing the change when its provider answered
+/// `429 Too Many Requests` and the round ended. A verdict that cannot tell those two apart blames
+/// the builder for the lane, and the machinery to tell them apart (`provider_refusal`) already
+/// existed and simply was not being read here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BuilderEnd {
+    /// It ran to the end of its own turn.
+    Completed,
+    /// The wall clock expired while it was still working.
+    WallClock,
+    /// The provider refused it — quota, credentials, or the endpoint.
+    Refused(&'static str),
+}
+
+/// A refusal outranks a timeout: a round killed at the clock *after* a 429 was stopped by the 429.
+pub(crate) fn builder_end(summary: &str, timed_out: bool) -> BuilderEnd {
+    if let Some(reason) = mind_tools::coder::provider_refusal(summary) {
+        return BuilderEnd::Refused(reason);
+    }
+    if timed_out {
+        BuilderEnd::WallClock
+    } else {
+        BuilderEnd::Completed
+    }
+}
+
+/// The verdict sentence, which may not claim more than the builder's own ending supports.
+pub(crate) fn verdict_line(outcome: BuildOutcome, end: &BuilderEnd) -> String {
+    match (outcome, end) {
+        (BuildOutcome::NoChange, BuilderEnd::Refused(reason)) => format!(
+            "NO CHANGE, AND NOT THE BUILDER'S DOING — its provider refused it ({reason}) before it \
+             wrote anything. This says nothing about whether the goal was buildable; the lane ran \
+             out, not the builder."
+        ),
+        (BuildOutcome::NoChange, BuilderEnd::WallClock) => {
+            "NO CHANGE — the builder was still working when its wall clock expired. It did not \
+             decline the goal; it ran out of time before touching the tree."
+                .to_string()
+        }
+        (BuildOutcome::Unverified, BuilderEnd::Refused(reason)) => format!(
+            "UNVERIFIED, ON A PARTIAL BUILD — the check refuses this diff, and the builder was cut \
+             off by its provider ({reason}) rather than finishing. Read the diff as an unfinished \
+             attempt."
+        ),
+        (BuildOutcome::Unverified, BuilderEnd::WallClock) => {
+            "UNVERIFIED, ON A PARTIAL BUILD — the check refuses this diff, and the builder's wall \
+             clock expired before it finished. Read the diff as an unfinished attempt."
+                .to_string()
+        }
+        (other, _) => other.headline().to_string(),
+    }
+}
+
 /// The verdict, reconciled against the pristine run that licensed it.
 ///
 /// `differential_gate` stops the pipeline, but a stop is a CALL, and a call can be deleted. This is
@@ -226,6 +283,8 @@ pub(crate) fn render_build(
     check_output: &str,
     workdir: &str,
     hidden: usize,
+    end: &BuilderEnd,
+    builder_words: &str,
 ) -> String {
     let outcome = reconcile(before_exit, before_timed_out, outcome);
     let mut out = format!(
@@ -257,12 +316,27 @@ pub(crate) fn render_build(
             "diff:          {files} file(s), +{added} −{removed}\n"
         ));
     }
-    out.push_str(&format!("\nVERDICT: {}\n", outcome.headline()));
+    out.push_str(&format!(
+        "builder:       {}\n",
+        match end {
+            BuilderEnd::Completed => "ran to the end of its own turn".to_string(),
+            BuilderEnd::WallClock => "cut off at the wall clock, still working".to_string(),
+            BuilderEnd::Refused(reason) => format!("refused by its provider — {reason}"),
+        }
+    ));
+    out.push_str(&format!("\nVERDICT: {}\n", verdict_line(outcome, end)));
 
     let tail = check_output.trim();
     if !tail.is_empty() {
         let shown: String = tail.chars().rev().take(600).collect::<Vec<_>>().into_iter().rev().collect();
         out.push_str(&format!("\nWHAT THE CHECK SAID:\n{shown}\n"));
+    }
+    let words = builder_words.trim();
+    if !words.is_empty() {
+        let shown: String = words.chars().rev().take(500).collect::<Vec<_>>().into_iter().rev().collect();
+        out.push_str(&format!(
+            "\nWHAT THE BUILDER SAID (its own account, which is not what decides):\n{shown}\n"
+        ));
     }
     if !diff.trim().is_empty() {
         let shown: String = diff.chars().take(DIFF_SHOWN).collect();
@@ -381,15 +455,19 @@ impl crate::ConversationEngine {
                 &format!("{}\n{}", before.stdout, before.stderr),
                 &workdir,
                 0,
+                // Nothing was built, so the builder has no ending to report.
+                &BuilderEnd::Completed,
+                "",
             );
         }
 
         // 2. The build.
         let task = build_task(&proposal);
-        let built = coder.run_in(&task, workdir.clone()).await;
-        if let Err(e) = &built {
-            return format!("🔨 The builder could not run: {e}");
-        }
+        let built = match coder.run_in(&task, workdir.clone()).await {
+            Ok(r) => r,
+            Err(e) => return format!("🔨 The builder could not run: {e}"),
+        };
+        let end = builder_end(&built.summary, built.timed_out);
 
         // 3. The diff, against the commit it started from rather than HEAD.
         let diff = {
@@ -419,6 +497,8 @@ impl crate::ConversationEngine {
             &format!("{}\n{}", after.stdout, after.stderr),
             &workdir,
             mind_tools::code::ignored_count(Path::new(&workdir)),
+            &end,
+            &built.summary,
         )
     }
 
@@ -535,6 +615,8 @@ mod tests {
             "ok",
             "/scratch/run-1",
             0,
+            &BuilderEnd::Completed,
+            "",
         );
         assert!(out.contains("VERDICT: VERIFIED"));
         assert!(out.contains("pristine tree: exit 1"));
@@ -556,6 +638,8 @@ mod tests {
             "already fine",
             "/scratch/run-1",
             0,
+            &BuilderEnd::Completed,
+            "",
         );
         assert!(out.contains("it should have FAILED here"));
         assert!(out.contains("built tree:    not run"));
@@ -581,6 +665,8 @@ mod tests {
             "",
             "/scratch/run-1",
             0,
+            &BuilderEnd::Completed,
+            "",
         );
         assert!(out.contains("NOT A DIFFERENTIAL"), "{out}");
         assert!(!out.contains("VERDICT: VERIFIED"), "{out}");
@@ -613,9 +699,48 @@ mod tests {
             "",
             "/scratch/run-1",
             9,
+            &BuilderEnd::Completed,
+            "",
         );
         assert!(out.contains("9 path(s) are excluded"), "{out}");
         assert!(out.contains("coding agent's own home"), "{out}");
+    }
+
+    /// E.RUNG8c, from run 2. The builder had converged on a plan and was designing the change when
+    /// its provider answered 429. Reporting that as "the builder left the tree as it found it"
+    /// blames the builder for the lane. Mutant: stop consulting `provider_refusal` in
+    /// `builder_end` and this fails by name.
+    #[test]
+    fn a_rate_limited_builder_is_not_reported_as_one_that_declined() {
+        let end = builder_end("API Error: Request rejected (429) - Too Many Requests", false);
+        assert_eq!(end, BuilderEnd::Refused("quota exhausted (429)"));
+        let line = verdict_line(BuildOutcome::NoChange, &end);
+        assert!(line.contains("NOT THE BUILDER'S DOING"), "{line}");
+        assert!(line.contains("429"), "{line}");
+        assert!(
+            !line.contains("left the tree as it found it"),
+            "a refused builder did not choose to leave the tree alone: {line}"
+        );
+    }
+
+    /// A round killed at the clock AFTER a 429 was stopped by the 429, not by the clock.
+    #[test]
+    fn a_refusal_outranks_a_timeout() {
+        assert_eq!(
+            builder_end("usage limit reached", true),
+            BuilderEnd::Refused("quota exhausted (429)")
+        );
+        assert_eq!(builder_end("all done", true), BuilderEnd::WallClock);
+        assert_eq!(builder_end("all done", false), BuilderEnd::Completed);
+    }
+
+    /// A builder that genuinely ran and changed nothing still gets the plain sentence — the
+    /// qualification must not fire on every NoChange, or it stops meaning anything.
+    #[test]
+    fn a_completed_builder_that_changed_nothing_is_reported_plainly() {
+        let line = verdict_line(BuildOutcome::NoChange, &BuilderEnd::Completed);
+        assert!(line.contains("left the tree as it found it"), "{line}");
+        assert!(!line.contains("provider"), "{line}");
     }
 
     #[test]

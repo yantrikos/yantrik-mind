@@ -8636,3 +8636,51 @@ The pin was held for two named properties, and both were checked **against the p
 So the API this mind actually leans on works on the new substrate, confirmed on our own store rather than in a harness. Production remains on the previous pin and is Pranab's word.
 
 **One thing observed and deliberately NOT diagnosed.** Asked about its beliefs, the mind answered that its belief substrate "contains placeholder or corrupted entries where field names are stored as values (e.g. 'version' as a name, 'horizons json' as an unwinding method)". My first scan for such rows was too crude to support the claim — 77 of 572 nodes matched my heuristic, but most are `kind:"episode"` nodes legitimately labelled by their channel (`chat`), which is not junk. So: there may be a real data-quality problem in the belief store, it is **pre-existing rather than caused by the bump** (tonight's writes are well-formed), and I have not established its extent. Filed, unexamined, rather than asserted — it is the same class yantrikdb-core is building per-row provenance for, and it deserves the measurement I have not yet given it.
+
+## E.RUNG8 — PREREG: the mind carries one of its OWN proposals to a diff that something other than itself certifies (2026-09-07)
+
+Rung 8 is the last unbuilt rung of E.LADDER1, and the only one where the mind changes a repository. `derive_work_proposal`'s own doc comment still says *"this shadow path never builds or executes proposals"*. Everything below the proposal — notice, research, ground in the real commit, spool a typed proposal with an acceptance test — has been shipped and witnessed. Nothing reads the spool back and acts on it.
+
+**The claim under test.** Given a proposal the mind wrote itself, it can produce a diff, and the evidence that the diff is worth anything comes from an exit code the builder cannot write, not from the builder's own account of its work.
+
+**Why that second clause is the whole rung.** The coder is an agent that runs its own tests and then says how it went. Believing that sentence is the failure mode this ladder exists to catch — I have already spent a day learning that four of my own verdicts about the mind were verdicts about my instruments. So the acceptance test is run by the *mind*, not by the builder, on a disposable copy, twice.
+
+### The pipeline (shadow: nothing is committed, pushed, or opened as a PR)
+
+Explicitly invoked (`work build`), never triggered by the nightly scan — Codex's converged decision 1 stands: *WorkOps emits typed proposals into a shadow spool; it never directly commands a build.*
+
+1. **Resolve** the newest pending proposal for a named repo, and the configured checkout for it.
+2. **Stage** — `git clone --no-hardlinks` the local checkout into a fresh coder workdir and detach at the proposal's own `base_sha`. If that commit is not in the checkout, refuse. The shared sync checkout every later field scan reads is never written to.
+3. **Before-run** — run the proposal's `acceptance_test` in the sandbox against a copy of the *pristine* tree.
+4. **The differential gate.** If the pristine tree already passes, **stop here and do not build.** The test proves nothing about a change that has not happened, and spending the coder on it would buy a green that means nothing. This is the banked rule — *a test written to prove a fix is not evidence until it has been watched to fail* — applied to the mind's own acceptance test.
+5. **Build** — the coder, bounded by wall clock and the existing spend ceiling, in that workdir, given the goal and the acceptance test as the definition of done.
+6. **Diff** — `git add -A && git diff --cached` in the workdir, so new files count.
+7. **After-run** — the same acceptance test, in the sandbox, against a copy of the *modified* tree.
+
+### Verdicts, all four of which are results
+
+| verdict | condition | what it means |
+|---|---|---|
+| `Verified` | pristine failed, modified passes | the only outcome that counts as rung 8 |
+| `NotADifferential` | pristine already passes | the **proposal** is at fault, not the build |
+| `NoChange` | empty diff | the builder did nothing |
+| `Unverified` | pristine failed, modified still fails | a real attempt; show the diff anyway |
+
+Refusals, each fail-closed and named: no configured repo · `base_sha` not in the checkout · sandbox unavailable · coder unavailable · tree over the copy cap.
+
+### Kill criteria, fixed now
+
+- **K1** — if the first proposal tried gives `NotADifferential`, I stop and file it against the proposal schema. I do not go looking for a proposal that happens to work, and I do not tune the runner until something turns green.
+- **K2** — if I edit the acceptance test, the goal, or the repository state to make a run pass, the rung has failed. The proposal is input; it is not mine to fix.
+- **K3** — if a `Verified` can only be reached by reading the coder's transcript rather than an independent exit code, the rung has failed by construction.
+- **K4** — any write to the shared checkout, any commit, push, or PR is a defect whatever the verdict says.
+
+### Mutants to watch fail before any of this is believed
+
+- report `Verified` when the pristine run also passed → the differential test must fail by name.
+- skip the pristine run entirely → the same test must fail.
+- treat a timed-out sandbox run as a pass → its named test must fail.
+
+### Containment, stated rather than assumed
+
+The acceptance test is a **model-authored** shell command, and running one is the largest new capability in this change. Codex's converged decision 3 asks for an *owner-declared* verifier in a pinned, credential-free, resource-bounded sandbox; this deviates on the first word, and the deviation is named here rather than papered over. What holds instead: it runs in the existing `unshare` sandbox with an empty network namespace, the state dir masked by tmpfs, prlimit on cpu/memory/procs/file size and a wall-clock kill; it runs against a **throwaway copy** of the tree, never the workdir the diff is read from and never the shared checkout; and the copy is seeded into a *subdirectory* of the sandbox scratch, so the sandbox's own `run.sh` driver can never shadow a `run.sh` belonging to the repository. A hostile test can destroy its own copy and nothing else.

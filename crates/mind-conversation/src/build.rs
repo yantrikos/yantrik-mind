@@ -84,6 +84,9 @@ pub(crate) enum BuildOutcome {
     Verified,
     /// A real attempt that the check still refuses. The diff is worth reading anyway.
     Unverified,
+    /// E.RUNG9: the check passes on the built tree, and it passes just as well on the pristine tree
+    /// with only the diff's PERMISSION BITS applied. The content earned nothing.
+    ModeOnly,
 }
 
 impl BuildOutcome {
@@ -102,6 +105,11 @@ impl BuildOutcome {
             Self::Unverified => {
                 "UNVERIFIED — a real diff, and the check still refuses it. Shown anyway; a failed \
                  attempt is worth more than a hidden one."
+            }
+            Self::ModeOnly => {
+                "NOT EARNED BY THE DIFF — the check passes on the built tree, and it passes on the \
+                 pristine tree with only this diff's permission bits applied and none of its \
+                 content. A permission bit satisfied the check; the change proved nothing."
             }
         }
     }
@@ -203,6 +211,91 @@ pub(crate) fn reconcile(
     }
 }
 
+/// A permission bit the diff flipped. Not content, and capable of passing a check on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModeChange {
+    pub path: String,
+    pub executable: bool,
+}
+
+/// Mode changes read from `git diff --raw`, whose lines look like
+/// `:100644 100755 3075d2d fa4121b M\tstart.sh`.
+///
+/// Only the executable bit is judged, because it is the only one that can make a check that could
+/// not run before run now. A new file (`old mode 000000`) is content, not an incidental change:
+/// the pristine tree does not have it at all, so no control could apply its mode alone.
+pub(crate) fn mode_changes(raw: &str) -> Vec<ModeChange> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let Some(rest) = line.strip_prefix(':') else {
+            continue;
+        };
+        let Some((meta, path)) = rest.split_once('\t') else {
+            continue;
+        };
+        let mut fields = meta.split_whitespace();
+        let (Some(old_mode), Some(new_mode)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if old_mode == "000000" || new_mode == "000000" || old_mode == new_mode {
+            continue;
+        }
+        let was = old_mode.ends_with("755");
+        let now = new_mode.ends_with("755");
+        if was == now {
+            continue;
+        }
+        // A rename carries two paths; the control cannot apply half of one, so it is skipped.
+        let path = path.split('\t').next().unwrap_or(path).trim();
+        if path.is_empty() {
+            continue;
+        }
+        out.push(ModeChange {
+            path: path.to_string(),
+            executable: now,
+        });
+    }
+    out
+}
+
+/// What the incidental-change control found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Control {
+    /// The diff carries no permission change, so nothing incidental could have passed the check.
+    NotNeeded,
+    /// The control tree — pristine, plus this diff's permission bits, none of its content — still
+    /// fails the check. The content was load-bearing.
+    ContentWasLoadBearing,
+    /// The control tree passes. A permission bit did the work.
+    ModeAlone,
+    /// The control could not be built or run. It is reported as unrun, never as a pass.
+    Unrun(String),
+}
+
+/// The control run's own verdict.
+///
+/// Extracted so the timeout case is testable: buried in the async orchestration it was the one
+/// branch with no test, and reading a timed-out control as a pass would be exactly the mistake the
+/// built-tree check already has a named test against, one layer up.
+pub(crate) fn control_from(exit: i32, timed_out: bool) -> Control {
+    if !timed_out && exit == 0 {
+        Control::ModeAlone
+    } else {
+        Control::ContentWasLoadBearing
+    }
+}
+
+/// E.RUNG9's one invariant: a control may only ever WEAKEN a claim.
+///
+/// Rung 8's `VERIFIED` survived only because I ran this by hand and it failed. The pipeline runs it
+/// now, and it can take a pass away; nothing here can hand one out.
+pub(crate) fn apply_control(outcome: BuildOutcome, control: &Control) -> BuildOutcome {
+    match (outcome, control) {
+        (BuildOutcome::Verified, Control::ModeAlone) => BuildOutcome::ModeOnly,
+        (other, _) => other,
+    }
+}
+
 /// Files touched, lines added, lines removed — read off a unified diff.
 pub(crate) fn diff_shape(diff: &str) -> (usize, usize, usize) {
     let mut files = 0usize;
@@ -285,6 +378,7 @@ pub(crate) fn render_build(
     hidden: usize,
     end: &BuilderEnd,
     builder_words: &str,
+    control: &Control,
 ) -> String {
     let outcome = reconcile(before_exit, before_timed_out, outcome);
     let mut out = format!(
@@ -324,6 +418,20 @@ pub(crate) fn render_build(
             BuilderEnd::Refused(reason) => format!("refused by its provider — {reason}"),
         }
     ));
+    match control {
+        Control::NotNeeded => {}
+        Control::ContentWasLoadBearing => out.push_str(
+            "control:       pristine + this diff's permission bits alone still FAILS — so the \
+             content earned the pass\n",
+        ),
+        Control::ModeAlone => out.push_str(
+            "control:       pristine + this diff's permission bits alone PASSES — the content \
+             earned nothing\n",
+        ),
+        Control::Unrun(why) => out.push_str(&format!(
+            "control:       could not be run ({why}) — the pass is unqualified by it\n"
+        )),
+    }
     out.push_str(&format!("\nVERDICT: {}\n", verdict_line(outcome, end)));
 
     let tail = check_output.trim();
@@ -410,6 +518,7 @@ impl crate::ConversationEngine {
             return format!("🔨 \"{name}\" has no local checkout yet. `work run` syncs one.");
         };
 
+        let checkout = checkout.clone();
         let workdir = match coder.new_workdir() {
             Ok(w) => w,
             Err(e) => return format!("🔨 Could not open a build directory: {e}"),
@@ -458,6 +567,7 @@ impl crate::ConversationEngine {
                 // Nothing was built, so the builder has no ending to report.
                 &BuilderEnd::Completed,
                 "",
+                &Control::NotNeeded,
             );
         }
 
@@ -487,6 +597,13 @@ impl crate::ConversationEngine {
             Err(e) => return format!("🔨 The check on the built tree could not run: {e}"),
         };
         let outcome = built_outcome(&diff, after.exit_code, after.timed_out);
+
+        // 5. E.RUNG9: if the pass could have been bought by a permission bit, find out.
+        let control = self
+            .incidental_control(&sandbox, &checkout, &base, &workdir, &proposal.acceptance_test, outcome)
+            .await;
+        let outcome = apply_control(outcome, &control);
+
         render_build(
             &proposal,
             before.exit_code,
@@ -499,7 +616,83 @@ impl crate::ConversationEngine {
             mind_tools::code::ignored_count(Path::new(&workdir)),
             &end,
             &built.summary,
+            &control,
         )
+    }
+
+    /// Build the control tree — the base commit plus this diff's permission bits and none of its
+    /// content — and run the same check against it.
+    ///
+    /// Only for a `Verified` whose diff actually flips an executable bit; every other case returns
+    /// `NotNeeded` and costs nothing. K8: the control is built from the BASE commit, never from the
+    /// built tree, or it would not be a control.
+    async fn incidental_control(
+        &self,
+        sandbox: &mind_tools::Sandbox,
+        checkout: &std::path::Path,
+        base: &str,
+        workdir: &str,
+        check: &str,
+        outcome: BuildOutcome,
+    ) -> Control {
+        if outcome != BuildOutcome::Verified {
+            return Control::NotNeeded;
+        }
+        let raw = {
+            let (dir, sha) = (workdir.to_string(), base.to_string());
+            tokio::task::spawn_blocking(move || {
+                mind_tools::code::raw_diff(Path::new(&dir), &sha)
+            })
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default()
+        };
+        let changes = mode_changes(&raw);
+        if changes.is_empty() {
+            return Control::NotNeeded;
+        }
+
+        let dest = std::env::temp_dir().join(format!(
+            "ym_control_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let staged = {
+            let (from, to, sha, changes) = (
+                checkout.to_path_buf(),
+                dest.clone(),
+                base.to_string(),
+                changes.clone(),
+            );
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                mind_tools::code::clone_at(&from, &to, &sha)?;
+                for change in &changes {
+                    let target = to.join(&change.path);
+                    if target.exists() {
+                        mind_tools::code::set_executable(&target, change.executable)?;
+                    }
+                }
+                Ok(())
+            })
+            .await
+        };
+        let control = match staged {
+            Ok(Ok(())) => match self
+                .run_check(sandbox, &dest.to_string_lossy(), check)
+                .await
+            {
+                Ok(r) => control_from(r.exit_code, r.timed_out),
+                Err(e) => Control::Unrun(e.to_string()),
+            },
+            Ok(Err(e)) => Control::Unrun(e.to_string()),
+            Err(e) => Control::Unrun(e.to_string()),
+        };
+        let _ = std::fs::remove_dir_all(&dest);
+        control
     }
 
     /// Run one acceptance test against a copy of `tree`, network-isolated and bounded.
@@ -617,6 +810,7 @@ mod tests {
             0,
             &BuilderEnd::Completed,
             "",
+            &Control::NotNeeded,
         );
         assert!(out.contains("VERDICT: VERIFIED"));
         assert!(out.contains("pristine tree: exit 1"));
@@ -640,6 +834,7 @@ mod tests {
             0,
             &BuilderEnd::Completed,
             "",
+            &Control::NotNeeded,
         );
         assert!(out.contains("it should have FAILED here"));
         assert!(out.contains("built tree:    not run"));
@@ -667,6 +862,7 @@ mod tests {
             0,
             &BuilderEnd::Completed,
             "",
+            &Control::NotNeeded,
         );
         assert!(out.contains("NOT A DIFFERENTIAL"), "{out}");
         assert!(!out.contains("VERDICT: VERIFIED"), "{out}");
@@ -701,6 +897,7 @@ mod tests {
             9,
             &BuilderEnd::Completed,
             "",
+            &Control::NotNeeded,
         );
         assert!(out.contains("9 path(s) are excluded"), "{out}");
         assert!(out.contains("coding agent's own home"), "{out}");
@@ -741,6 +938,160 @@ mod tests {
         let line = verdict_line(BuildOutcome::NoChange, &BuilderEnd::Completed);
         assert!(line.contains("left the tree as it found it"), "{line}");
         assert!(!line.contains("provider"), "{line}");
+    }
+
+    /// The fixture is the REAL line `git diff --cached --raw a30aeb5` produced for rung 8's
+    /// verified diff, copied off the staging box. Invented cases share the misconception that
+    /// produced them; this one does not.
+    #[test]
+    fn the_real_verified_diff_from_run_4_is_read_as_a_mode_change() {
+        let raw = ":100644 100755 3075d2d fa4121b M\tstart.sh\n";
+        assert_eq!(
+            mode_changes(raw),
+            vec![ModeChange {
+                path: "start.sh".to_string(),
+                executable: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn content_only_and_new_files_are_not_incidental_changes() {
+        // Same mode either side: content, nothing incidental.
+        assert!(mode_changes(":100644 100644 aaa bbb M\tsrc/lib.rs\n").is_empty());
+        // A new file: the pristine tree does not have it, so no control can apply its mode alone.
+        assert!(mode_changes(":000000 100755 0000000 ccc A\tscripts/new.sh\n").is_empty());
+        // A deletion, likewise.
+        assert!(mode_changes(":100755 000000 ccc 0000000 D\tscripts/old.sh\n").is_empty());
+        // Junk and blank lines are silence, not panics.
+        assert!(mode_changes("not a raw line\n\n").is_empty());
+    }
+
+    #[test]
+    fn a_bit_cleared_is_a_mode_change_too() {
+        assert_eq!(
+            mode_changes(":100755 100644 aaa bbb M\trun.sh\n"),
+            vec![ModeChange {
+                path: "run.sh".to_string(),
+                executable: false,
+            }]
+        );
+    }
+
+    /// A control killed at the wall clock did not demonstrate that a permission bit passes the
+    /// check. It demonstrated nothing, and the safe reading is the one that does not take a pass
+    /// away on no evidence.
+    #[test]
+    fn a_timed_out_control_is_not_evidence_that_a_mode_bit_passed() {
+        assert_eq!(control_from(0, true), Control::ContentWasLoadBearing);
+        assert_eq!(control_from(0, false), Control::ModeAlone);
+        assert_eq!(control_from(1, false), Control::ContentWasLoadBearing);
+        assert_eq!(control_from(137, true), Control::ContentWasLoadBearing);
+    }
+
+    /// K7, as a test over EVERY pair rather than as an argument: a control may only ever weaken a
+    /// claim. Nothing it can return may hand out a `Verified` that was not already one.
+    #[test]
+    fn a_control_can_only_ever_take_a_pass_away() {
+        let outcomes = [
+            BuildOutcome::Verified,
+            BuildOutcome::Unverified,
+            BuildOutcome::NoChange,
+            BuildOutcome::NotADifferential,
+            BuildOutcome::ModeOnly,
+        ];
+        let controls = [
+            Control::NotNeeded,
+            Control::ContentWasLoadBearing,
+            Control::ModeAlone,
+            Control::Unrun("sandbox gone".into()),
+        ];
+        for outcome in outcomes {
+            for control in &controls {
+                let after = apply_control(outcome, control);
+                if after == BuildOutcome::Verified {
+                    assert_eq!(
+                        outcome,
+                        BuildOutcome::Verified,
+                        "a control turned {outcome:?} into VERIFIED via {control:?}"
+                    );
+                }
+            }
+        }
+        // And the one downgrade it exists to make.
+        assert_eq!(
+            apply_control(BuildOutcome::Verified, &Control::ModeAlone),
+            BuildOutcome::ModeOnly
+        );
+        assert_eq!(
+            apply_control(BuildOutcome::Verified, &Control::ContentWasLoadBearing),
+            BuildOutcome::Verified
+        );
+    }
+
+    /// A control that could not run is reported as unrun. Reading it as a pass would be the
+    /// timed-out-check mistake again, one layer up.
+    #[test]
+    fn a_control_that_could_not_run_never_becomes_a_pass_or_a_failure() {
+        assert_eq!(
+            apply_control(BuildOutcome::Verified, &Control::Unrun("no sandbox".into())),
+            BuildOutcome::Verified
+        );
+        let out = render_build(
+            &proposal(),
+            1,
+            false,
+            BuildOutcome::Verified,
+            Some((0, false)),
+            "diff --git a/s.sh b/s.sh\n+++ b/s.sh\n+echo hi\n",
+            "",
+            "/scratch/run-1",
+            0,
+            &BuilderEnd::Completed,
+            "",
+            &Control::Unrun("no sandbox".into()),
+        );
+        assert!(out.contains("could not be run"), "{out}");
+        assert!(out.contains("unqualified by it"), "{out}");
+    }
+
+    /// Rung 8's verdict survived only because this control was run BY HAND and failed. The reply
+    /// has to say the control ran, or the reader has to do what I did.
+    #[test]
+    fn a_verified_pass_says_whether_the_control_backed_it() {
+        let backed = render_build(
+            &proposal(),
+            1,
+            false,
+            BuildOutcome::Verified,
+            Some((0, false)),
+            "diff --git a/s.sh b/s.sh\n+++ b/s.sh\n+echo hi\n",
+            "",
+            "/scratch/run-1",
+            0,
+            &BuilderEnd::Completed,
+            "",
+            &Control::ContentWasLoadBearing,
+        );
+        assert!(backed.contains("still FAILS"), "{backed}");
+        assert!(backed.contains("VERDICT: VERIFIED"), "{backed}");
+
+        let bought = render_build(
+            &proposal(),
+            1,
+            false,
+            apply_control(BuildOutcome::Verified, &Control::ModeAlone),
+            Some((0, false)),
+            "diff --git a/s.sh b/s.sh\n+++ b/s.sh\n+echo hi\n",
+            "",
+            "/scratch/run-1",
+            0,
+            &BuilderEnd::Completed,
+            "",
+            &Control::ModeAlone,
+        );
+        assert!(bought.contains("NOT EARNED BY THE DIFF"), "{bought}");
+        assert!(!bought.contains("VERDICT: VERIFIED"), "{bought}");
     }
 
     #[test]

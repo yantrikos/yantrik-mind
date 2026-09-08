@@ -212,6 +212,34 @@ pub fn clone_at(src: &Path, dest: &Path, sha: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The staged diff in `--raw` form: one line per path, carrying the OLD and NEW file modes.
+///
+/// E.RUNG9: rung 8's first verified diff also flipped `start.sh` from `100644` to `100755`, and
+/// the acceptance test invoked it as `./start.sh`. Whether the *content* earned the pass, or a
+/// permission bit did, is decidable — but only from a form of the diff that carries the modes.
+pub fn raw_diff(dir: &Path, base_sha: &str) -> anyhow::Result<String> {
+    run_git(Some(dir), &["diff", "--cached", "--raw", base_sha])
+}
+
+/// Set or clear a file's executable bit, for building a control tree.
+pub fn set_executable(path: &Path, executable: bool) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        let mode = perms.mode();
+        // Mirror the read bits, exactly as git's own 100644 -> 100755 transition does.
+        let exec_bits = (mode & 0o444) >> 2;
+        perms.set_mode(if executable { mode | exec_bits } else { mode & !0o111 });
+        std::fs::set_permissions(path, perms)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, executable);
+        Ok(())
+    }
+}
+
 /// Keep named paths out of a throwaway clone's `git add -A`.
 ///
 /// E.RUNG8b: the first rung-8 build reported "9 files, +2727" for a run that changed nothing at

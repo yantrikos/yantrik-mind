@@ -336,6 +336,9 @@ async fn serve(
         };
         let text = turn["text"].as_str().unwrap_or_default().to_string();
         eprintln!("[harness] turn {turn_id}: {text}");
+        if let Some(place) = turn["context"].as_str().and_then(machine_place) {
+            mind_conversation::set_machine_place(Some(place));
+        }
 
         // ── Or, with no model yet, set one up ──
         if let Some(first_run) = &first_run {
@@ -392,6 +395,45 @@ async fn serve(
                 )
                 .await;
             }
+        }
+    }
+}
+
+/// Where the desktop says the computer is, from a turn's context, in words: "Bentonville,
+/// Arkansas, US (America/Chicago)". `None` when the context says nothing about a place.
+fn machine_place(context: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(context).ok()?;
+    let machine = &v["machine"];
+    let city = machine["place"]["city"].as_str().map(str::trim).filter(|c| !c.is_empty())?;
+    let mut place: Vec<&str> = vec![city];
+    for part in [&machine["place"]["region"], &machine["place"]["country"]] {
+        if let Some(p) = part.as_str().map(str::trim).filter(|p| !p.is_empty()) {
+            place.push(p);
+        }
+    }
+    let mut out = place.join(", ");
+    if let Some(tz) = machine["timezone"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+        out.push_str(&format!(" ({tz})"));
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod machine_place_tests {
+    use super::machine_place;
+
+    #[test]
+    fn the_desktop_context_becomes_a_place_in_words() {
+        let ctx = r#"{"machine":{"place":{"city":"Bentonville","region":"Arkansas","country":"US"},"timezone":"America/Chicago"}}"#;
+        assert_eq!(machine_place(ctx).as_deref(), Some("Bentonville, Arkansas, US (America/Chicago)"));
+        let partial = r#"{"machine":{"place":{"city":"Pune","region":"","country":"IN"}}}"#;
+        assert_eq!(machine_place(partial).as_deref(), Some("Pune, IN"));
+    }
+
+    #[test]
+    fn no_place_is_claimed_from_nothing() {
+        for ctx in [r#"{"machine":{}}"#, r#"{"machine":{"timezone":"UTC"}}"#, "not json", ""] {
+            assert_eq!(machine_place(ctx), None, "{ctx}");
         }
     }
 }

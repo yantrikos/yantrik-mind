@@ -4339,6 +4339,34 @@ fn spoken_clock(text: &str) -> Option<String> {
     None
 }
 
+/// Where the computer this mind is being talked to through is, when a desktop has said so.
+///
+/// Set by the desktop channel from each turn's context; nothing else sets it, so on a phone or a
+/// terminal it stays empty and nothing is claimed. Without it a fresh install asked "what is the
+/// weather like right now?" got London — the model filled the gap the prompt left.
+static MACHINE_PLACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Record where the computer is (`None` forgets it).
+pub fn set_machine_place(place: Option<String>) {
+    if let Ok(mut slot) = MACHINE_PLACE.write() {
+        *slot = place.filter(|p| !p.trim().is_empty());
+    }
+}
+
+/// The sentence the agent prompt carries about where the computer is, or nothing.
+fn machine_place_line() -> String {
+    match MACHINE_PLACE.read().ok().and_then(|p| p.clone()) {
+        Some(place) => machine_place_sentence(&place),
+        None => String::new(),
+    }
+}
+
+fn machine_place_sentence(place: &str) -> String {
+    format!(
+        " This computer is in {place}: \"here\", local weather and places nearby mean there unless the person names somewhere else."
+    )
+}
+
 /// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
 /// "now". Shown in the user's local timezone so date math + reminders line up with them.
 fn now_str() -> String {
@@ -12647,8 +12675,9 @@ Open reminders you're carrying for them:",
                 // licence to answer directly is now explicitly bounded by the class of fact.
                 "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies."
             };
+            let place = machine_place_line();
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
@@ -15533,6 +15562,14 @@ mod tests;
 mod turn_routing_regressions {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// The prompt names the place in words a model uses for "here" and local weather.
+    #[test]
+    fn the_prompt_says_where_the_computer_is() {
+        let line = machine_place_sentence("Bentonville, Arkansas, US (America/Chicago)");
+        assert!(line.starts_with(" This computer is in Bentonville, Arkansas, US"), "{line}");
+        assert!(line.contains("local weather"), "{line}");
+    }
 
     /// The word "order" is not a question about mail.
     ///

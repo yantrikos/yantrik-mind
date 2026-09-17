@@ -55,6 +55,29 @@ enum Cmd {
         text: String,
         reply: Reply<String>,
     },
+    // ── Flat memories with their full shape, for the shared memory server ──
+    //
+    // `Record` above writes to namespace "default", domain "general", type "episodic", always.
+    // That was all this mind ever needed, because it only ever wrote memories for itself. A
+    // memory server that several minds share needs the rest of the engine's record shape — a
+    // namespace so each mind's writes can be told apart, a type, an importance — and a recall
+    // that can be narrowed to a namespace. They run here, on the actor thread, because this
+    // thread owns the only engine instance: a second instance on the same file is exactly the
+    // stale-recall failure the shared server exists to prevent.
+    RecordMemory {
+        spec: MemoryWrite,
+        reply: Reply<String>,
+    },
+    RecallMemories {
+        query: String,
+        top_k: usize,
+        namespace: Option<String>,
+        reply: Reply<Vec<MemoryHit>>,
+    },
+    ForgetMemory {
+        rid: String,
+        reply: Reply<bool>,
+    },
     RememberObservation {
         text: String,
         source: String,
@@ -745,6 +768,107 @@ fn record_memory(db: &YantrikDB, spec: RecordSpec<'_>) -> std::result::Result<St
         )
         .map_err(|e| e.to_string())
     }
+}
+
+/// A flat memory to write, with the engine's full record shape.
+#[derive(Debug, Clone)]
+pub struct MemoryWrite {
+    pub text: String,
+    pub memory_type: String,
+    pub importance: f64,
+    pub namespace: String,
+    pub domain: String,
+    pub source: String,
+    /// The caller's own fields, kept with the record and returned on recall. An object or null.
+    ///
+    /// Agents use this to say what KIND of claim a memory is — an extractor's unconfirmed guess
+    /// versus something the person said — and read it back to decide whether to present it as
+    /// fact. Dropping it would turn every guess into a fact on the way back out.
+    pub metadata: serde_json::Value,
+}
+
+/// Largest metadata object a memory may carry, serialised. Metadata describes a memory; a caller
+/// storing content there would be storing it where recall cannot find it.
+pub const MAX_MEMORY_METADATA_BYTES: usize = 16 * 1024;
+
+/// A flat memory as recalled.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryHit {
+    pub rid: String,
+    pub text: String,
+    pub score: f64,
+    pub memory_type: String,
+    pub namespace: String,
+    pub domain: String,
+    pub source: String,
+    pub created_at: f64,
+    pub importance: f64,
+    /// Whatever the writer stored with it (see [`MemoryWrite::metadata`]).
+    pub metadata: serde_json::Value,
+    /// The engine's own account of why this came back.
+    pub why_retrieved: Vec<String>,
+}
+
+/// The metadata a flat memory is stored with: the caller's object, bounded, with `source` filled
+/// in when the caller did not set one. A caller's own `source` wins — for an agent it means what
+/// kind of claim this is ("extracted"), which the record's source column cannot carry.
+fn record_memory_meta(spec: &MemoryWrite) -> std::result::Result<serde_json::Value, String> {
+    let mut meta = match &spec.metadata {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(m) => m.clone(),
+        _ => return Err("memory metadata must be an object".into()),
+    };
+    meta.entry("source").or_insert_with(|| serde_json::Value::String(spec.source.clone()));
+    let meta = serde_json::Value::Object(meta);
+    let size = meta.to_string().len();
+    if size > MAX_MEMORY_METADATA_BYTES {
+        return Err(format!(
+            "memory metadata is {size} bytes; the limit is {MAX_MEMORY_METADATA_BYTES}"
+        ));
+    }
+    Ok(meta)
+}
+
+/// Semantic recall over flat memories, optionally narrowed to one namespace.
+///
+/// `recall_text` is exactly `embed` + `recall` with every filter off; this is the same call with
+/// the namespace filled in, so a mind can ask for its own memories or for everyone's. The filter
+/// runs inside the engine, before ranking and `top_k` — filtering afterwards would let another
+/// namespace's memories crowd the requested one out of the window entirely.
+fn recall_memories(
+    db: &YantrikDB,
+    query: &str,
+    top_k: usize,
+    namespace: Option<&str>,
+) -> std::result::Result<Vec<MemoryHit>, String> {
+    if !db.has_embedder() {
+        // Said, not faked: without an embedder there is no semantic recall to offer, and an
+        // empty list would read as "nothing matched" rather than "this store cannot search".
+        return Err("semantic recall needs an embedder, and this store has none".into());
+    }
+    let embedding = db.embed(query).map_err(|e| e.to_string())?;
+    let rows = db
+        .recall(
+            &embedding, top_k, None, None, false, false, Some(query), false, namespace, None,
+            None, None, None, false, None, None,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| MemoryHit {
+            rid: r.rid,
+            text: r.text,
+            score: r.score,
+            memory_type: r.memory_type,
+            namespace: r.namespace,
+            domain: r.domain,
+            source: r.source,
+            created_at: r.created_at,
+            importance: r.importance,
+            metadata: r.metadata,
+            why_retrieved: r.why_retrieved,
+        })
+        .collect())
 }
 
 /// Every banked approach, newest first — a deterministic LIKE scan, not similarity search.
@@ -4488,6 +4612,33 @@ impl MemoryHandle {
                             });
                             let _ = reply.send(r);
                         }
+                        Cmd::RecordMemory { spec, reply } => {
+                            // Through the same secret scan as every other write this mind makes — the
+                            // metadata too, since it is stored and handed back just like the text.
+                            let r = record_memory_meta(&spec).and_then(|meta| {
+                                gate_write(&spec.text)?;
+                                gate_write(&meta.to_string())?;
+                                if db.has_embedder() {
+                                    db.record_text(
+                                        &spec.text, &spec.memory_type, spec.importance, 0.0, 604_800.0,
+                                        &meta, &spec.namespace, 0.8, &spec.domain, &spec.source, None,
+                                    )
+                                } else {
+                                    db.record(
+                                        &spec.text, &spec.memory_type, spec.importance, 0.0, 604_800.0,
+                                        &meta, &zero, &spec.namespace, 0.8, &spec.domain, &spec.source, None,
+                                    )
+                                }
+                                .map_err(|e| e.to_string())
+                            });
+                            let _ = reply.send(r);
+                        }
+                        Cmd::RecallMemories { query, top_k, namespace, reply } => {
+                            let _ = reply.send(recall_memories(&db, &query, top_k, namespace.as_deref()));
+                        }
+                        Cmd::ForgetMemory { rid, reply } => {
+                            let _ = reply.send(db.forget(&rid).map_err(|e| e.to_string()));
+                        }
                         Cmd::RememberObservation { text, source, reply } => {
                             // Provenance-tagged, secret-scanned, low-certainty: an Observation, never a Belief.
                             let r = gate_write(&text).and_then(|_| {
@@ -5280,6 +5431,45 @@ impl MemoryHandle {
     pub async fn snapshot_to(&self, dest: impl Into<String>) -> Result<()> {
         let dest = dest.into();
         self.call(|reply| Cmd::SnapshotTo { dest, reply }).await
+    }
+
+    // ── Flat memories for the shared memory server ──
+
+    /// Write a flat memory with its full shape (namespace, type, importance, domain, source).
+    ///
+    /// A malformed or oversized `metadata` is `MindError::Invalid` and a secret in the text or the
+    /// metadata is the write-gate refusal — both the caller's to fix, and typed so a server can
+    /// say so instead of reporting its own failure.
+    pub async fn remember_memory(&self, spec: MemoryWrite) -> Result<String> {
+        record_memory_meta(&spec).map_err(MindError::Invalid)?;
+        self.call(|reply| Cmd::RecordMemory { spec, reply }).await
+    }
+
+    /// Recall flat memories, through the same wall and read receipts as belief recall.
+    ///
+    /// The wall is not optional here. A shared server hands memories to more than one mind, and
+    /// the whole point of routing them through this handle rather than a second engine is that
+    /// the access rules this mind enforces on beliefs apply to everything it hands out.
+    pub async fn recall_memories(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+        ctx: &mind_types::AccessContext,
+    ) -> Result<Vec<MemoryHit>> {
+        let (query_s, ns) = (query.to_string(), namespace.map(str::to_string));
+        let hits = self
+            .call(|reply| Cmd::RecallMemories { query: query_s, top_k, namespace: ns, reply })
+            .await?;
+        let (out, suppressed) = self.wall(ctx, hits, |h: &MemoryHit| h.text.as_str()).await;
+        self.receipt_read(ctx, "recall_memories", query, out.len(), suppressed);
+        Ok(out)
+    }
+
+    /// Tombstone a flat memory by record id. The row is kept; it stops being recalled.
+    pub async fn forget_memory(&self, rid: &str) -> Result<bool> {
+        let rid = rid.to_string();
+        self.call(|reply| Cmd::ForgetMemory { rid, reply }).await
     }
 
     // flat-path helpers retained from Spike A
@@ -6499,6 +6689,70 @@ pub mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn memory_write(metadata: serde_json::Value) -> MemoryWrite {
+        MemoryWrite {
+            text: "The person keeps their bike in the garage".into(),
+            memory_type: "semantic".into(),
+            importance: 0.5,
+            namespace: "hermes".into(),
+            domain: "general".into(),
+            source: "hermes".into(),
+            metadata,
+        }
+    }
+
+    /// An agent marks an extractor's guess with `source: "extracted"` so it can refuse to present
+    /// it as fact later. The record's source column must not overwrite that.
+    #[test]
+    fn a_callers_own_source_survives_and_a_missing_one_is_filled_in() {
+        let kept = record_memory_meta(&memory_write(serde_json::json!({ "source": "extracted" }))).unwrap();
+        assert_eq!(kept["source"], "extracted");
+        let filled = record_memory_meta(&memory_write(serde_json::Value::Null)).unwrap();
+        assert_eq!(filled["source"], "hermes");
+    }
+
+    #[test]
+    fn metadata_must_be_a_bounded_object() {
+        assert!(record_memory_meta(&memory_write(serde_json::json!(["not", "an", "object"]))).is_err());
+        let huge = "x".repeat(MAX_MEMORY_METADATA_BYTES);
+        assert!(record_memory_meta(&memory_write(serde_json::json!({ "note": huge }))).is_err());
+    }
+
+    #[tokio::test]
+    async fn bad_metadata_is_the_callers_error_not_the_memorys() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        let err = mem.remember_memory(memory_write(serde_json::json!("a string"))).await.unwrap_err();
+        assert!(matches!(err, MindError::Invalid(_)), "{err:?}");
+    }
+
+    /// What goes in with a memory comes back with it — the whole reason metadata is carried.
+    #[tokio::test]
+    async fn metadata_written_with_a_memory_comes_back_on_recall() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        let rid = mem
+            .remember_memory(memory_write(serde_json::json!({ "source": "extracted", "session_id": "s1" })))
+            .await
+            .unwrap();
+        let hits = mem
+            .recall_memories("where is the bike kept", 5, None, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        let hit = hits.iter().find(|h| h.rid == rid).expect("the memory is recalled");
+        assert_eq!(hit.metadata["source"], "extracted");
+        assert_eq!(hit.metadata["session_id"], "s1");
+        assert!((hit.importance - 0.5).abs() < 1e-9, "importance {}", hit.importance);
+    }
+
+    /// The secret scan covers metadata: it is stored and handed back exactly like the text.
+    #[tokio::test]
+    async fn a_secret_in_metadata_is_refused_like_a_secret_in_text() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        let leaked = serde_json::json!({ "note": "-----BEGIN RSA PRIVATE KEY-----
+MIIEvg==" });
+        let err = mem.remember_memory(memory_write(leaked)).await.unwrap_err();
+        assert!(err.is_memory_write_gate_refusal(), "{err:?}");
+    }
 
     fn route(pack_id: &str, name: &str, ns: &str, floor: f64, cap: Option<usize>) -> PackRoute {
         PackRoute {

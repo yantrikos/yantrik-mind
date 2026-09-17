@@ -198,6 +198,38 @@ async fn main() -> anyhow::Result<()> {
     // in-process model2vec embedder at this dim, so record/recall are genuinely SEMANTIC with no
     // external server. (A dim-8 DB from before this upgrade is incompatible — recreate the file.)
     let mem = MemoryHandle::spawn(&db, 64).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
+
+    // THE MACHINE'S MEMORY, SERVED FROM HERE WHILE THIS MIND OWNS IT.
+    //
+    // On Yantrik OS one memory file is shared by whichever mind is active, and only one process
+    // may hold it with a live engine: a second engine on the same file does not see the first
+    // one's writes (proven 2026-09-16). While this mind is running it IS that process, so it also
+    // serves the file over MCP — from this same handle, so an agent's `recall` and this mind's own
+    // turns read one engine. When another mind is active, this process is stopped and the
+    // standalone `yantrik-memory` binary serves the same file at the same address instead.
+    //
+    // Opt-in by address, so a mind deployed anywhere else serves nothing it was not asked to.
+    // Not fatal if it cannot bind: the likeliest reason is another owner already holding the port,
+    // and taking this mind's phone and console down would not make that better — but it is said
+    // loudly, because it means two processes may have this file open.
+    if let Ok(bind) = std::env::var("YM_MEMORY_SERVER") {
+        let bind = bind.trim().to_string();
+        if !bind.is_empty() && db != ":memory:" {
+            match mind_memory_mcp::parse_bind(&bind) {
+                Ok(addr) => {
+                    let (served, token) = (mem.clone(), mind_memory_mcp::default_token_path(&db));
+                    tokio::spawn(async move {
+                        let never = std::future::pending::<()>();
+                        if let Err(e) = mind_memory_mcp::serve_http(served, addr, &token, "yantrik-mind", never).await {
+                            eprintln!("[memory] NOT serving memory over MCP at {addr}: {e:#} -- if another memory server holds this file, two processes may now have it open");
+                        }
+                    });
+                    println!("memory: serving this mind's memory over MCP at http://{addr}/mcp");
+                }
+                Err(e) => eprintln!("[memory] YM_MEMORY_SERVER ignored: {e:#}"),
+            }
+        }
+    }
     let conv = mind_core::engine(&mem, pool);
 
     // What the desktop's mind picker will show under the name, set before any channel starts.

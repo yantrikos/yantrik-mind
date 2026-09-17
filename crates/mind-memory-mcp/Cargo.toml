@@ -1,0 +1,26 @@
+[package]
+name = "mind-memory-mcp"
+version.workspace = true
+edition.workspace = true
+description = "One MCP server that owns a machine's memory: beliefs and flat memories, for every mind"
+
+[[bin]]
+name = "yantrik-memory"
+path = "src/main.rs"
+
+[dependencies]
+mind-memory = { workspace = true }
+mind-types = { workspace = true }
+# 1.2.0 exactly: the version Yantrik OS already builds, read from source for the streamable
+# HTTP server API used below rather than assumed from a newer release's docs.
+# rmcp-macros is locked at 1.2.0 in Cargo.lock too. rmcp only asks for `^1`, so a fresh resolve
+# picks macros 1.8, which emit calls to `common::schema_for_input` — a helper rmcp 1.2.0 does not
+# have — and every #[tool] fails to compile. `cargo update` will try to move it again.
+rmcp = { version = "=1.2.0", features = ["server", "macros", "schemars", "transport-io", "transport-streamable-http-server"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { workspace = true, features = ["net", "signal", "io-std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

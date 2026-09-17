@@ -76,6 +76,7 @@ mind-observability = { path = "crates/mind-observability" }
 mind-evals = { path = "crates/mind-evals" }
 mind-governance = { path = "crates/mind-governance" }
 mind-memory = { path = "crates/mind-memory" }
+mind-memory-mcp = { path = "crates/mind-memory-mcp" }
 mind-inference = { path = "crates/mind-inference" }
 mind-perception = { path = "crates/mind-perception" }
 mind-cortex = { path = "crates/mind-cortex" }

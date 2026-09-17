@@ -1,0 +1,27 @@
+[Unit]
+# The machine's memory, when no mind owns it.
+#
+# One memory file is shared by whichever mind is active, and only one process may hold it with a
+# live engine — a second engine on the same file does not see the first one's writes. While
+# Yantrik Mind runs, it owns the file and serves this memory itself. This unit is the owner the
+# rest of the time (for example while Hermes is the active mind), at the same address with the
+# same token.
+#
+# Conflicts= is the guarantee, not a convention: starting this unit stops Yantrik Mind, and
+# starting Yantrik Mind stops this one. Not enabled by default; switching minds starts it.
+Description=Yantrik memory — the shared memory, served when no mind owns it
+Conflicts=yantrik-mind.service
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/yantrik-mind
+ExecStart=/opt/yantrik-mind/bin/yantrik-memory --db %h/.local/share/yantrik-mind/mind.db --bind 127.0.0.1:7440
+StandardInput=null
+Restart=on-failure
+RestartSec=5
+# Enough time for the engine to finish a write and close the file before the next owner opens it.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

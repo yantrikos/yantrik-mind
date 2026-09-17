@@ -28,7 +28,7 @@ MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a sk
 /// Standing rule appended after the detailed section, never gated.
 pub(crate) const NEVER_RULE: &str = "- NEVER claim you removed/changed a date unless one of these tools confirmed it — if no tool fits, say so plainly\n\
 - NEVER say a capability is missing, unwired, unavailable or 'not connected this turn' when a tool listed above covers it, and NEVER tell the user to go run a `ym` command themselves — that tool is YOURS and calling it is your job. If a listed tool fits the question, CALL IT; you may only report an inability after a call actually failed, and then say what failed\n\
-- an mcp.* integration write always pauses for the user's ok; read-only integrations run instantly";
+- an mcp.* write that reaches outside this computer pauses for the user's ok; read-only integrations and tools marked [on this computer] run at once";
 
 /// The skill meta-tools — the escape hatch of the gated catalog; never gated.
 pub(crate) const SKILL_SECTION: &str = "SKILL LIBRARY (your growing, reusable capabilities — beyond the core):\n\
@@ -70,6 +70,10 @@ const PINNED: &[&str] = &[
 
 /// How many relevance-matched (non-pinned) tool lines stay detailed.
 const TOP_K: usize = 10;
+
+/// How many [on this computer] lines are pinned. The machine's own control surface is a handful of
+/// tools; a server that marks fifty of its tools local does not get fifty lines of every prompt.
+const LOCAL_PINNED_MAX: usize = 8;
 
 /// The tool name of a catalog line ("- deals {query}: …" → "deals"), or None for headers/rules.
 pub(crate) fn tool_name_of_line(line: &str) -> Option<&str> {
@@ -163,11 +167,21 @@ pub(crate) fn gate_catalog(user_text: &str, gated_lines: &str) -> (String, Strin
     let mut detailed: Vec<&str> = Vec::new();
     let mut scored: Vec<(usize, &str, &str)> = Vec::new();
     let mut tail: Vec<&str> = Vec::new();
+    let mut local_pinned = 0usize;
     for line in gated_lines.lines().filter(|l| !l.trim().is_empty()) {
         let Some(name) = tool_name_of_line(line) else {
             continue;
         };
+        // The computer's own tools are pinned like the senses, for the same reason: they are how
+        // the mind works the machine it runs on, and a line that competes on keyword overlap
+        // loses. On the first live drive of Yantrik OS, "Write a note titled Shopping…" gave the
+        // model os_act in full and os_describe as a bare name in the tail — so it called
+        // os_describe without an app and invented action names, and its calls read as a weak
+        // model when they were a hidden manual.
         if PINNED.contains(&name) {
+            detailed.push(line);
+        } else if line.trim_end().ends_with(mind_tools::ON_THIS_COMPUTER) && local_pinned < LOCAL_PINNED_MAX {
+            local_pinned += 1;
             detailed.push(line);
         } else {
             let s = score(&q, line, name);
@@ -1667,5 +1681,27 @@ mod alias_tests {
             Some(450.0)
         );
         assert_eq!(read_num("deals", &serde_json::json!({}), "budget"), None);
+    }
+
+    /// A tool on this computer is shown in full whatever the message says; others still compete.
+    #[test]
+    fn the_computers_own_tools_are_always_shown_in_full() {
+        let src = "- deals {query}: find deals\n\
+- mcp.yantrik-os.os_describe — The current state of one app or service on this computer [on this computer]\n\
+- mcp.yantrik-os.os_act — Perform an action an app lists in os_describe [on this computer]\n\
+- mcp.other.send_invoice — Send an invoice to a customer [asks first]";
+        let (detailed, tail) = gate_catalog("Write a note titled Shopping with bread and butter.", src);
+        assert!(detailed.contains("mcp.yantrik-os.os_describe"), "{detailed}");
+        assert!(detailed.contains("mcp.yantrik-os.os_act"), "{detailed}");
+        assert!(tail.contains("mcp.other.send_invoice"), "an unrelated outward tool still competes: {tail}");
+    }
+
+    #[test]
+    fn a_server_cannot_pin_every_tool_by_calling_them_local() {
+        let src: String = (0..20)
+            .map(|i| format!("- mcp.big.tool{i} — does thing {i} [on this computer]\n"))
+            .collect();
+        let (detailed, _tail) = gate_catalog("hello", &src);
+        assert_eq!(detailed.lines().count(), LOCAL_PINNED_MAX, "{detailed}");
     }
 }

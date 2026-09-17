@@ -109,6 +109,10 @@ impl McpTool {
 
 /// Read-only if the server annotates it so; otherwise a conservative verb heuristic (when unknown,
 /// treat as mutating so it must clear the harm-gate).
+/// The mark on a catalog line for a tool that works on this computer rather than reaching past it.
+/// The agent's catalog gate keeps these lines in full every turn (see `tool_catalog::gate_catalog`).
+pub const ON_THIS_COMPUTER: &str = "[on this computer]";
+
 /// Does this tool reach past the machine it runs on?
 ///
 /// A server that says nothing is assumed to reach outward, because the cost of guessing wrong
@@ -485,23 +489,34 @@ impl McpHub {
             return String::new();
         }
         let mut s = String::from(
-            "\nCONNECTED INTEGRATIONS (MCP — call by the EXACT id; read-only run instantly, writes need the user's ok):",
+            "\nCONNECTED INTEGRATIONS (MCP — call by the EXACT id; read-only tools and tools on this computer run at once; a write that reaches outside this computer needs the user's ok):",
         );
         for t in tools.iter() {
-            let lock = if t.read_only {
-                ""
+            let tag = if !t.open_world {
+                format!(" {ON_THIS_COMPUTER}")
+            } else if t.read_only {
+                String::new()
             } else {
-                " [write — gated]"
+                // Not "[write — …]": the catalog gate ranks lines by the words they share with the
+                // request, so a tag containing "write" made every outward write tool look relevant
+                // to any message with "write" in it.
+                " [asks first]".to_string()
             };
+            // A tool on this computer is how the mind works the machine it runs on, and its
+            // description is where the server says how to call it. Cut at 100 characters,
+            // yos-mcp's os_act lost everything after "using exactly the app name, action name and
+            // argument" — including the worked example of opening an app — and the model guessed
+            // the call. Other integrations keep the short line; there can be hundreds of them.
+            let limit = if t.open_world { 100 } else { 500 };
             let desc = t
                 .description
                 .lines()
                 .next()
                 .unwrap_or("")
                 .chars()
-                .take(100)
+                .take(limit)
                 .collect::<String>();
-            s.push_str(&format!("\n- {} — {desc}{lock}", t.qualified()));
+            s.push_str(&format!("\n- {} — {desc}{tag}", t.qualified()));
         }
         s
     }

@@ -145,7 +145,7 @@ pub mod translate;
 pub use translate::{GoogleTranslate, ScriptedTranslator, Translator};
 
 pub mod mcp;
-pub use mcp::{McpHub, McpServerConfig, McpTool};
+pub use mcp::{McpHub, McpServerConfig, McpTool, ON_THIS_COMPUTER};
 
 #[async_trait]
 pub trait Fetcher: Send + Sync {

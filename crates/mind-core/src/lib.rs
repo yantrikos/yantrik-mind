@@ -11,6 +11,8 @@ use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
 pub(crate) mod delivery;
+/// The desktop channel: attaching to Yantrik OS as a harness.
+pub mod harness;
 mod loops;
 pub mod setup;
 pub mod anthropic_gateway;

@@ -1821,7 +1821,7 @@ fn frame_handle(
 /// E.G1c: the headless tick records the world shadow's unpaired sample every this-many 30 s beats.
 pub(crate) const HEADLESS_WORLD_SHADOW_EVERY: u64 = 20;
 
-pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
+pub async fn run_headless(mem: MemoryHandle, conv: ConversationEngine) -> anyhow::Result<()> {
     let devices = arch2_open_device_store();
     let conv = match &devices {
         Some(d) => conv.with_devices(d.clone()),
@@ -1842,6 +1842,9 @@ pub async fn run_headless(_mem: MemoryHandle, conv: ConversationEngine) -> anyho
         crate::web::ensure_pairing_code(d);
         crate::web::spawn_webui_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
     }
+    // The desktop. Headless is how this runs on a Yantrik OS machine, so this is the call site
+    // that matters most: the shell and the mind come up in either order and find each other.
+    crate::harness::attach_in_background(mem.clone(), conv.clone());
     for line in conv.reconcile_leases().await {
         eprintln!("{line}");
     }
@@ -1988,6 +1991,9 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
         crate::web::ensure_pairing_code(d);
         crate::web::spawn_webui_server(conv.clone(), d.clone(), tokio::runtime::Handle::current());
     }
+    // The phone and the desktop are two surfaces of one mind, not two deployments of it — the
+    // same memory, the same continuity, whichever one is in front of you.
+    crate::harness::attach_in_background(mem.clone(), conv.clone());
 
     let chat_lock: Option<i64> = std::env::var("YM_TELEGRAM_CHAT")
         .ok()

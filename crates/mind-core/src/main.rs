@@ -200,6 +200,13 @@ async fn main() -> anyhow::Result<()> {
     let mem = MemoryHandle::spawn(&db, 64).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
     let conv = mind_core::engine(&mem, pool);
 
+    // What the desktop's mind picker will show under the name, set before any channel starts.
+    //
+    // The backend alone. It first carried the database path too, and the desktop's machine rail
+    // renders this on one 160px row beside the word "Model" — so the one thing worth reading got
+    // elided away behind a filesystem path nobody asks a status line for.
+    mind_core::harness::announce(name.clone());
+
     // Tiny static web server for the agent's published dashboards (publish_page → shareable URL).
     spawn_web_server();
 
@@ -251,6 +258,11 @@ async fn main() -> anyhow::Result<()> {
     // bounded loop can reach the tool surface. Wrapped here rather than at construction because the
     // Telegram path must consume the engine to attach its device store, and builds its own Arc after.
     let conv = std::sync::Arc::new(conv);
+
+    // A terminal does not stop this being the machine's mind: if a desktop is up, it is listed
+    // there too, and a question typed into the Lens is answered from the same conversation the
+    // person at this prompt is having.
+    mind_core::harness::attach_in_background(mem.clone(), conv.clone());
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();

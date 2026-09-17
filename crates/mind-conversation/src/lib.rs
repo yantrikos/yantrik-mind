@@ -1785,7 +1785,58 @@ fn looks_like_non_answer(text: &str) -> bool {
     {
         return true;
     }
-    looks_like_greeting(t) || looks_like_command_word(t)
+    looks_like_greeting(t) || looks_like_command_word(t) || looks_like_an_instruction(t)
+}
+
+/// Is this someone telling the assistant to do something, rather than answering it?
+///
+/// `looks_like_command_word` only recognises the REPL's own command names — "weather",
+/// "news", "calc". Ordinary imperative English matched none of them, so with one profile
+/// question left pending, "Open the Notes app and append a line..." was captured as the
+/// answer to "what do you enjoy doing", written to the profile, and asserted as a belief
+/// at weight 0.9. Three instructions in a row went that way and the mind did none of them,
+/// replying "Love that — noted" each time. From outside it looked like a friendly assistant.
+///
+/// Deliberately broad: mistaking an answer for an instruction costs one unasked question,
+/// which the curiosity feature will ask again. Mistaking an instruction for an answer costs
+/// the instruction AND poisons the belief store with it.
+fn looks_like_an_instruction(t: &str) -> bool {
+    let lower = t.to_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+
+    const IMPERATIVES: [&str; 34] = [
+        "open", "close", "click", "type", "run", "use", "read", "check", "show", "tell",
+        "find", "go", "list", "append", "write", "save", "look", "take", "make", "set",
+        "start", "stop", "play", "listen", "search", "fetch", "get", "put", "add", "delete",
+        "remove", "create", "send", "navigate",
+    ];
+    if IMPERATIVES.contains(&first) {
+        return true;
+    }
+
+    // "Now click element 1", "Then read it back" — an imperative wearing a discourse marker.
+    for lead in ["now ", "then ", "next ", "also ", "please "] {
+        if let Some(rest) = lower.strip_prefix(lead) {
+            if IMPERATIVES.contains(&rest.split_whitespace().next().unwrap_or("")) {
+                return true;
+            }
+        }
+    }
+
+    // Addressing the assistant's capabilities is not describing oneself.
+    lower.contains("your tools")
+        || lower.contains("desktop tool")
+        || lower.contains("mcp tool")
+        || lower.contains("use your")
+}
+
+/// Does `text` ask for one of these tools by name, or for the mind's tools in general?
+fn names_a_tool(text: &str, tool_names: &[String]) -> bool {
+    let l = text.to_lowercase();
+    if l.contains("desktop tool") || l.contains("your tools") || l.contains("mcp tool") {
+        return true;
+    }
+    tool_names.iter().any(|n| l.contains(&n.to_lowercase()))
 }
 
 /// A bare salutation is never the answer to a pending question. Live, 2026-08-05: the user opened
@@ -3575,26 +3626,34 @@ fn photo_followup_strong(text: &str) -> bool {
 /// TEXT search matches. None when it's not a mail-lookup ask.
 fn mail_lookup_intent(text: &str) -> Option<String> {
     let l = text.trim().to_lowercase();
-    let mail_word = [
-        "mail",
-        "email",
-        "inbox",
-        "booking",
-        "reservation",
-        "confirmation",
-        "receipt",
-        "itinerary",
-        "order",
-    ]
-    .iter()
-    .any(|w| l.contains(w));
+
+    // Whole words, not substrings. `contains("order")` also fires on "border", "reorder",
+    // "recorder" and "disorder"; `contains("mail")` fires on "mailbox" harmlessly but also
+    // on "blackmail". Tokenising costs nothing and removes a whole class of false match.
+    let words: Vec<&str> = l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.iter().any(|t| *t == w);
+
+    // A mailbox has to actually be named. The nouns below are all things that ARRIVE by
+    // mail, which is why they were here — but they are also ordinary words about the world.
+    // "Click the Place order button" is not a question about mail, and reading it as one
+    // took the mind off its tools entirely for every e-commerce page it was ever shown.
+    let names_a_mailbox = ["mail", "email", "e", "inbox", "mailbox", "gmail"]
+        .iter()
+        .any(|w| has(w));
+
     let lookup_word = [
-        "search", "find", "look up", "look for", "check", "read", "what", "when", "where", "which",
-        "dates", "hotel", "details",
+        "search", "find", "check", "read", "what", "when", "where", "which", "dates", "hotel",
+        "details",
     ]
     .iter()
-    .any(|w| l.contains(w));
-    if !(mail_word && lookup_word) {
+    .any(|w| has(w))
+        || l.contains("look up")
+        || l.contains("look for");
+
+    if !(names_a_mailbox && lookup_word) {
         return None;
     }
     const STOP: [&str; 47] = [
@@ -4133,6 +4192,61 @@ const COMPOSE_SCOPE: mind_inference::PrivacyScope = mind_inference::PrivacyScope
 ///
 /// Reporting from `Drop` instead of from a call site fixes the SHAPE rather than the instance. A
 /// seventh return added later cannot forget to log, because it does not have to remember to.
+/// The part of a request that was asked for and never attempted.
+///
+/// A turn can satisfy the half of an instruction that produces an ANSWER while silently
+/// dropping the half that changes something, and the composed reply reads as if the whole
+/// thing was carried out. Asked to "see what the page says, then append the figure to the
+/// notes app, and tell me the figure", the loop read the page, reported 847 kilowatts, and
+/// never called an acting tool — the note was untouched and nothing said so. Reproduced
+/// twice, by different internal paths, so it is the loop's shape rather than one bad turn.
+///
+/// This looks for an imperative clause that would have CHANGED something, and reports it
+/// when the turn made no acting tool call at all. Deliberately narrow: it stays silent
+/// unless every call was a read, because claiming "I did not do X" about something that
+/// was done would be its own kind of lie.
+fn unattempted_side_effect(
+    user_text: &str,
+    calls: &std::collections::BTreeMap<String, usize>,
+) -> Option<String> {
+    // Verbs that leave the world different afterwards. Asking, reading and looking do not.
+    const CHANGING: [&str; 16] = [
+        "append", "write", "save", "add", "create", "set", "put", "click", "type", "press",
+        "open", "send", "run", "delete", "remove", "play",
+    ];
+    // Names that read rather than act. A call to any tool NOT matching one of these is
+    // treated as an attempt, which errs toward saying nothing.
+    const READING: [&str; 12] = [
+        "read", "text", "find", "describe", "apps", "perception", "listen", "get", "list",
+        "search", "look", "recall",
+    ];
+
+    let acted = calls.keys().any(|name| {
+        let n = name.to_lowercase();
+        !READING.iter().any(|r| n.contains(r))
+    });
+    if acted {
+        return None;
+    }
+
+    let lower = user_text.to_lowercase();
+    for clause in lower.split(|c| c == ',' || c == ';' || c == '.') {
+        let clause = clause.trim();
+        let clause = clause
+            .strip_prefix("then ")
+            .or_else(|| clause.strip_prefix("and then "))
+            .or_else(|| clause.strip_prefix("and "))
+            .or_else(|| clause.strip_prefix("now "))
+            .unwrap_or(clause);
+        let first = clause.split_whitespace().next().unwrap_or("");
+        if CHANGING.contains(&first) {
+            let words: Vec<&str> = clause.split_whitespace().take(9).collect();
+            return Some(words.join(" "));
+        }
+    }
+    None
+}
+
 struct TurnCost {
     started: std::time::Instant,
     steps: usize,
@@ -12404,6 +12518,9 @@ Open reminders you're carrying for them:",
         // loop that is mostly spinning however it interleaves.
         const MAX_TOTAL_BARREN: usize = 5;
         let mut barren_total = 0usize;
+        // At most one reminder that part of the request went untouched; after that the
+        // turn ends and says so rather than arguing with itself.
+        let mut unfinished_nudged = false;
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -12823,6 +12940,27 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // This exit used to be the only one with no journal line, so a turn ending here was
                 // indistinguishable from one still running — 17 minutes of "is it wedged?" on
                 // 2026-08-16 was this exact silence.
+                // Before this counts as the answer: was part of what was asked never attempted?
+                if let Some(clause) = unattempted_side_effect(user_text, &cost.calls) {
+                    if !unfinished_nudged {
+                        unfinished_nudged = true;
+                        eprintln!(
+                            "[agent] step {step}: answered but never attempted \"{clause}\" — asking for it"
+                        );
+                        scratch.push_str(&format!(
+                            "
+[{step}] (that answers part of it, but you have not yet {clause}. Do that now with one tool call, or say plainly that you cannot.)"
+                        ));
+                        continue;
+                    }
+                    // Asked once and still not done. Let the answer stand, but never let it read
+                    // as though the whole instruction was carried out.
+                    a = format!(
+                        "{a}
+
+(I did not {clause} — that part of what you asked has not been done.)"
+                    );
+                }
                 eprintln!(
                     "[agent] step {step}: no tool chosen — returning a direct reply ({} chars)",
                     a.len()
@@ -13720,6 +13858,22 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     }
 
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
+    /// Does this turn name something the mind can actually reach?
+    ///
+    /// The content-based interceptors above the agent router are keyword matchers, and each
+    /// one is a guess about what was meant. A guess should lose to a request that names the
+    /// thing it wants. Without this, a sentence containing "order" was read as a question
+    /// about mail even while it also said "web_click", and the mind then reported — with
+    /// total conviction, and truthfully for the lane it had been put in — that it had no
+    /// browser tools at all.
+    fn names_a_held_tool(&self, text: &str) -> bool {
+        let held: Vec<String> = match &self.mcp {
+            Some(hub) => hub.tools().iter().map(|t| t.name.clone()).collect(),
+            None => Vec::new(),
+        };
+        names_a_tool(text, &held)
+    }
+
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
                                    // E.G1b: the world model sees EVERY primary turn — before any early return (a turn
@@ -13906,7 +14060,13 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         if let Some(slot) = onboard {
             if looks_like_non_answer(user_text) {
                 // They asked for something else instead of answering — don't capture a command or a
-                // counter-question as a profile fact. The slot stays persisted; handle the turn normally.
+                // counter-question as a profile fact.
+                //
+                // The slot is also DROPPED rather than left armed. It used to persist, so the next
+                // thing said was captured instead, and the one after that, until something finally
+                // looked enough like an answer to swallow. A question ignored once has been
+                // answered in the way that matters; curiosity will ask again on its own schedule.
+                self.set_pending_slot(None).await;
             } else {
                 self.set_pending_slot(None).await; // consumed (capture may arm the next question)
                 let reply = self.capture_onboard(&slot, user_text).await;
@@ -13973,7 +14133,14 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Proactive news loop: if the user just reacted with interest to a surfaced news ping ("tell me
         // more"), dig into THAT topic with a full multi-source brief — the "show interest → I research
         // it and put it together" behavior, without them having to re-name the topic.
-        if let Some(topic) = self.interest_in_recent_news(user_text) {
+        // Every matcher from here down is a keyword guess about what was meant, and a guess
+        // must lose to a request that names the thing it wants. "write the figure to notes"
+        // reads as a drafting request, "make a chart" as a creative one, and either would take
+        // the turn away from the tools it explicitly asked for. The stateful interceptors above
+        // are NOT gated — a bare "yes" answering a pending confirmation names no tool and must
+        // still reach handle_action.
+        let names_tool = self.names_a_held_tool(user_text);
+        if let Some(topic) = self.interest_in_recent_news(user_text).filter(|_| !names_tool) {
             let brief = self.news_brief(&topic).await;
             let _ = self
                 .memory
@@ -13987,7 +14154,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // Creative studio in the flow of chat: collage / vibe-picture asks compose + caption
         // (checked BEFORE plain retrieval so they aren't swallowed by the find-a-photo path).
-        if let Some(req) = creative_request(user_text) {
+        if let Some(req) = creative_request(user_text).filter(|_| !names_tool) {
             let reply = self.photo_create(&req).await;
             let _ = self
                 .memory
@@ -14017,7 +14184,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // Photo retrieval in the flow of chat: "send/show me a photo of X" → find it in the photo
         // sources and ship the actual image to the home channel (queued; the poll loop sends it).
-        if let Some(q) = photo_request(user_text) {
+        if let Some(q) = photo_request(user_text).filter(|_| !names_tool) {
             let reply = self.photo_find_and_send(&q).await;
             let _ = self
                 .memory
@@ -14032,7 +14199,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Deterministic mail-lookup: "find/search my mail for X", "what's my booking/reservation/
         // confirmation" — the small model sometimes confabulates a search instead of running one, so
         // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
-        if let Some(mq) = mail_lookup_intent(user_text) {
+        if let Some(mq) = mail_lookup_intent(user_text).filter(|_| !self.names_a_held_tool(user_text)) {
             // ARCH-3A: this deterministic fast-path bypasses run_agent_tool_as, so it must broker its
             // own egress — otherwise a "search my mail for <credential>" would reach IMAP unmediated.
             if let Some(broker) = &self.egress {
@@ -14092,7 +14259,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // RESEARCHOPS: reviewer-2 / related-work / next-experiments as durable, citation-validated
         // research jobs. Deterministic intercept — a research ask should never be free-composed.
-        if let Some((mode, subject)) = Self::wants_researchops(user_text) {
+        if let Some((mode, subject)) = Self::wants_researchops(user_text).filter(|_| !names_tool) {
             let reply = self.research_ops_run(mode, &subject).await;
             let _ = self
                 .memory
@@ -14107,7 +14274,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // HARD-GROUNDED DRAFTING: "draft me an X plan about Y" composes STRICTLY from the complete
         // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
         // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
-        if let Some((kind, subject)) = Self::wants_draft(user_text) {
+        if let Some((kind, subject)) = Self::wants_draft(user_text).filter(|_| !names_tool) {
             let reply = self.draft_grounded(&kind, &subject, &turn_ctx).await?;
             let _ = self
                 .memory
@@ -14123,7 +14290,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // ahead of the agent loop — otherwise "save that as skill X" / "run skill X" get swallowed by
         // build_capability and only a description is stored, never the runnable code. This is the
         // memory-backed reuse loop over YantrikDB's skill store; the sandbox runs every reuse.
-        if let Some(reply) = self.handle_skills(user_text).await {
+        if let Some(reply) = self.handle_skills(user_text).await.filter(|_| !names_tool) {
             let _ = self
                 .memory
                 .append_message_scoped("user", user_text, ws.clone())
@@ -15361,3 +15528,127 @@ impl RecipeHost for MindRecipeHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod turn_routing_regressions {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// The word "order" is not a question about mail.
+    ///
+    /// This matcher used to fire on any of mail/email/inbox/booking/reservation/confirmation/
+    /// receipt/itinerary/ORDER appearing anywhere as a SUBSTRING, plus any common question
+    /// word. It sat ahead of the agent router, so "click the Place order button" was answered
+    /// from a mailbox search, and the mind then said it had no browser tools — true in the lane
+    /// it had been put in, on a session with eleven of them connected.
+    #[test]
+    fn ordinary_words_do_not_read_as_a_mail_lookup() {
+        for text in [
+            "click the Place order button and tell me what came back",
+            "read the page and tell me what order the buttons are in",
+            "check the border width",
+            "find the recorder in the list",
+            "what did the disorder affect",
+        ] {
+            assert_eq!(mail_lookup_intent(text), None, "should not be a mail lookup: {text}");
+        }
+    }
+
+    /// ...and a real one still is, or the fix would have removed the feature instead.
+    #[test]
+    fn an_actual_mail_lookup_still_matches() {
+        for text in [
+            "search my email for the Kalyani booking",
+            "check my inbox for the hotel confirmation",
+            "find the receipt in my mail",
+        ] {
+            assert!(mail_lookup_intent(text).is_some(), "should be a mail lookup: {text}");
+        }
+    }
+
+    /// An instruction is not an answer to "what do you enjoy doing?".
+    ///
+    /// With a profile question pending, three consecutive instructions were captured as hobby
+    /// answers, written to the profile and asserted as beliefs at weight 0.9, each replied to
+    /// with "Love that — noted." The mind did none of them and looked friendly throughout.
+    #[test]
+    fn an_instruction_is_not_a_profile_answer() {
+        for text in [
+            "Open the Notes app and append a line to the current note",
+            "Now click element 1",
+            "Use your desktop tools to see what is on the page",
+            "click the Place order button",
+            "then read the note back",
+        ] {
+            assert!(looks_like_non_answer(text), "should not be captured as an answer: {text}");
+        }
+    }
+
+    /// The gate is on the REQUEST naming a capability, so a bare confirmation must not trip it.
+    ///
+    /// `handle_action` — the path a "yes" takes to release a pending confirmed action — is
+    /// deliberately NOT gated on names_a_held_tool. But a gate is only safe to leave off there
+    /// if a confirmation could never match it anyway: every confirmed email, GitHub comment
+    /// and destructive MCP call is released by one of these words.
+    #[test]
+    fn a_bare_confirmation_names_no_tool() {
+        let held: Vec<String> = ["os_act", "os_describe", "web_click", "web_type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for text in ["yes", "yes please", "go ahead", "no", "confirm", "ok", "do it"] {
+            assert!(!names_a_tool(text, &held), "a confirmation must not read as naming a tool: {text}");
+        }
+        assert!(names_a_tool("use web_click on the first link", &held));
+        assert!(names_a_tool("Use your desktop tools to check", &held));
+    }
+
+    /// A genuine answer must still be captured, or the question can never be answered at all.
+    #[test]
+    fn a_real_answer_is_still_captured() {
+        for text in ["cycling and long walks", "mostly cooking these days", "photography"] {
+            assert!(!looks_like_non_answer(text), "should be captured as an answer: {text}");
+        }
+    }
+
+    /// The half of an instruction that changes something must not vanish silently.
+    #[test]
+    fn a_side_effect_clause_that_was_never_attempted_is_reported() {
+        let mut reads = BTreeMap::new();
+        reads.insert("mcp.yantrik-os.web_text".to_string(), 3usize);
+
+        let found = unattempted_side_effect(
+            "see what the current page says, then append the peak power figure to the notes app",
+            &reads,
+        );
+        assert!(found.is_some(), "reading only, with an append still asked for");
+        assert!(found.unwrap().starts_with("append"));
+    }
+
+    /// It stays quiet when an acting tool did run — claiming "I did not do X" about something
+    /// that WAS done would be its own kind of lie.
+    #[test]
+    fn nothing_is_claimed_undone_when_an_acting_tool_ran() {
+        let mut acted = BTreeMap::new();
+        acted.insert("mcp.yantrik-os.web_text".to_string(), 1usize);
+        acted.insert("mcp.yantrik-os.os_act".to_string(), 1usize);
+        assert_eq!(
+            unattempted_side_effect(
+                "see what the page says, then append the figure to the notes app",
+                &acted
+            ),
+            None
+        );
+    }
+
+    /// A request that only asks a question has nothing outstanding.
+    #[test]
+    fn a_pure_question_leaves_nothing_outstanding() {
+        let mut reads = BTreeMap::new();
+        reads.insert("mcp.yantrik-os.web_read".to_string(), 1usize);
+        assert_eq!(
+            unattempted_side_effect("what is on the current page", &reads),
+            None
+        );
+    }
+}

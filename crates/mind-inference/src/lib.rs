@@ -675,11 +675,12 @@ impl InferencePool {
             // seconds later. Found live on 2026-08-25 with permits set to 6 against a 4-slot
             // cluster, so a burst did not merely risk this — it guaranteed it.
             //
-            // Short bounded backoff: the wait is what the server asked for, and a private turn has
-            // nowhere else to go. Anything that is not a rate limit fails immediately, because
-            // retrying a real error just delays the truth.
-            let mut wait_ms = 400;
-            for attempt in 0..3 {
+            // Bounded backoff: the wait is what the server asked for, and a private turn has nowhere
+            // else to go. Anything that is not transient fails immediately, because retrying a real
+            // error just delays the truth. See `retry_wait` for how long each kind is worth waiting.
+            let mut attempt: u32 = 0;
+            let mut waited_ms: u64 = 0;
+            loop {
                 // L4-0: a leaf backend's invocation IS the attempt, counted before the call so
                 // a panic inside it is still one attempt; a chain counts its links itself.
                 if leaf {
@@ -688,25 +689,17 @@ impl InferencePool {
                 match backend.chat(&messages, &config, tools_ref) {
                     Ok(r) => return Ok(r),
                     Err(e) => {
-                        // TRANSIENT means the server is temporarily unable, not that the request is
-                        // wrong. 429 is "wait"; 502/503/504 are a gateway or a worker hiccuping.
-                        // Measured on the box: three identical completions in a row returned 200,
-                        // 200, and then 502 {"error":"backend desktop error"} — the endpoint is
-                        // flaky, not down. Retrying only the 429 left every such blip fatal, and
-                        // because a private turn fails CLOSED by design it had nowhere to fall back
-                        // to: one hiccup and the mind could not think.
                         let detail = format!("{e:#}");
-                        let transient = ["429", "502", "503", "504"].iter().any(|c| detail.contains(c));
-                        if !transient || attempt == 2 {
+                        let Some(wait_ms) = retry_wait(&detail, attempt, waited_ms) else {
                             return Err(e);
-                        }
+                        };
                         eprintln!("[infer] transient model-endpoint error — backing off {wait_ms}ms (attempt {}): {detail}", attempt + 1);
                         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                        wait_ms *= 3;
+                        waited_ms += wait_ms;
+                        attempt += 1;
                     }
                 }
             }
-            unreachable!("the loop returns on every path")
             })();
             // Captured on the SAME blocking thread the chain ran on — the only place the note is
             // visible, and the reason a task-local could not carry it.
@@ -2735,6 +2728,33 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     Some((Arc::new(chain) as Arc<dyn LLMBackend>, label))
 }
 
+/// How long to wait before retrying a failed model call, or `None` to give up.
+///
+/// TRANSIENT means the server is temporarily unable, not that the request is wrong. 502/503/504
+/// are a gateway or a worker hiccuping — measured on the box: three identical completions in a row
+/// returned 200, 200, then 502 {"error":"backend desktop error"} — so they get a short retry.
+///
+/// 429 is different: the server is FULL, and it stays full for as long as the calls ahead of this
+/// one take. This used to share the hiccup budget, three attempts and 1.6 seconds in all. Against
+/// the AIG gateway (two slots, shared with production Yantrik Mind, calls of 30 seconds and more)
+/// that gave up long before a slot could free: on 2026-09-17 a fresh Yantrik OS install answered
+/// "my own hardware is unreachable" to two tasks in a row while the gateway was only busy. So a 429
+/// waits with growing gaps for up to a minute in total — the time a slot actually takes to free.
+pub(crate) fn retry_wait(detail: &str, attempt: u32, waited_ms: u64) -> Option<u64> {
+    const BUSY_PATIENCE_MS: u64 = 60_000;
+    if detail.contains("429") {
+        if waited_ms >= BUSY_PATIENCE_MS {
+            return None;
+        }
+        let wait = (1_000u64 << attempt.min(4)).min(15_000);
+        return Some(wait.min(BUSY_PATIENCE_MS - waited_ms));
+    }
+    if ["502", "503", "504"].iter().any(|c| detail.contains(c)) && attempt < 2 {
+        return Some(400 * 3u64.pow(attempt));
+    }
+    None
+}
+
 pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     // A config-defined multi-endpoint brain pool takes precedence: it becomes the local lane (private
     // + primary) with the chosen failover / round-robin / weighted backup strategy.
@@ -3914,6 +3934,31 @@ mod privacy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full server is waited on for about a minute; a hiccup gets a short retry; a real error none.
+    #[test]
+    fn a_busy_endpoint_is_waited_on_and_a_broken_one_is_not() {
+        let busy = "Ollama API request failed: http status: 429";
+        let mut waited = 0;
+        let mut attempt = 0;
+        let mut waits = Vec::new();
+        while let Some(w) = retry_wait(busy, attempt, waited) {
+            waits.push(w);
+            waited += w;
+            attempt += 1;
+        }
+        assert_eq!(waits[..3], [1_000, 2_000, 4_000], "{waits:?}");
+        assert_eq!(waited, 60_000, "a 429 is waited on for a minute in all: {waits:?}");
+        assert!(waits.iter().all(|w| *w <= 15_000), "{waits:?}");
+
+        let hiccup = "http status: 502";
+        assert_eq!(retry_wait(hiccup, 0, 0), Some(400));
+        assert_eq!(retry_wait(hiccup, 1, 400), Some(1_200));
+        assert_eq!(retry_wait(hiccup, 2, 1_600), None);
+
+        assert_eq!(retry_wait("http status: 400 bad request", 0, 0), None);
+        assert_eq!(retry_wait("connection refused", 0, 0), None);
+    }
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 

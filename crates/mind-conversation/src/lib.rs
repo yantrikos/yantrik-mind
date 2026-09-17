@@ -11800,14 +11800,36 @@ WINDOW: all-time, latest 200
                     // handshake as native email/github writes. There is no un-gated write path.
                     Some(t) => match &self.runtime {
                         Some(runtime) => {
+                            // What this action IS comes from what the tool declares, not from a
+                            // blanket worst case. The old shape claimed Network + Medium risk +
+                            // irreversible for every integration tool, which was right when an
+                            // MCP server meant somebody else's API and wrong once one of them
+                            // is this machine's own control surface: it made "open a note on my
+                            // own desktop" indistinguishable from "post to the internet", so the
+                            // mind stopped to ask before it would move its own hand.
+                            //
+                            // A server that declines to describe a tool still gets the old
+                            // treatment — the defaults in classify_* are the cautious ones — so
+                            // this widens nothing for a server that says nothing.
+                            let capability = if t.open_world {
+                                Capability::Network
+                            } else {
+                                Capability::LocalControl
+                            };
                             let intent = ActionIntent {
                                 kind: "mcp_call".into(),
                                 target: name.to_string(), // the qualified id mcp.<server>.<tool>
                                 summary: format!("run {} via the {} integration", t.name, t.server),
                                 payload: Some(args.to_string()),
-                                capabilities: vec![Capability::Network],
-                                risk: RiskLevel::Medium,
-                                reversible: false,
+                                capabilities: vec![capability],
+                                risk: if t.destructive { RiskLevel::Medium } else { RiskLevel::Low },
+                                // Reversibility is about whether the effect can be walked back,
+                                // which is what destructiveHint answers. Where the tool reaches
+                                // is a different question and openWorldHint answers that one;
+                                // folding the two together made every outward tool irreversible
+                                // by definition, so following a link was filed beside placing an
+                                // order.
+                                reversible: !t.destructive,
                             };
                             let req = self.new_request(intent);
                             let ctx = Self::dummy_ctx(&req, "");

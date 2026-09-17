@@ -20,6 +20,16 @@ pub enum Capability {
     ReadFs,
     WriteFs,
     Network,
+    /// Ask a service on THIS machine to act, where that service applies its own permission
+    /// model to the request.
+    ///
+    /// Distinct from Network because nothing leaves the box, and distinct from WriteFs
+    /// because the mind is not choosing what gets written — it is naming an action the
+    /// service already published, and the service decides whether to honour it. The bound
+    /// on this capability is therefore not in the mind at all: it is whatever ladder the
+    /// local service enforces. Granting it is a statement that such a service is trusted
+    /// to police its own surface.
+    LocalControl,
     Exec,
     SendMessage,
     Memory,

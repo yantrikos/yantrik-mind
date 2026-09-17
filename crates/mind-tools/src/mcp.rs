@@ -92,6 +92,11 @@ pub struct McpTool {
     pub name: String, // the bare name on the server
     pub description: String,
     pub read_only: bool,
+    /// Whether the tool reaches anything beyond this machine. Unknown means yes: a tool that
+    /// declines to say where it reaches is treated as reaching everywhere.
+    pub open_world: bool,
+    /// Whether the tool can destroy something. Unknown means yes, for the same reason.
+    pub destructive: bool,
     pub input_schema: Value,
 }
 
@@ -104,6 +109,30 @@ impl McpTool {
 
 /// Read-only if the server annotates it so; otherwise a conservative verb heuristic (when unknown,
 /// treat as mutating so it must clear the harm-gate).
+/// Does this tool reach past the machine it runs on?
+///
+/// A server that says nothing is assumed to reach outward, because the cost of guessing wrong
+/// in that direction is one confirmation prompt, and the cost of guessing wrong in the other
+/// is an unreviewed action against the open world.
+fn classify_open_world(tool: &Value) -> bool {
+    tool.get("annotations")
+        .and_then(|a| a.get("openWorldHint"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
+}
+
+/// Can this tool destroy something? Read-only tools cannot by definition; otherwise the server
+/// must say so, and silence is taken as yes.
+fn classify_destructive(tool: &Value, read_only: bool) -> bool {
+    if read_only {
+        return false;
+    }
+    tool.get("annotations")
+        .and_then(|a| a.get("destructiveHint"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
+}
+
 fn classify_read_only(tool: &Value, name: &str) -> bool {
     if let Some(b) = tool
         .get("annotations")
@@ -299,11 +328,15 @@ impl Conn {
                     .to_string();
                 let input_schema = t.get("inputSchema").cloned().unwrap_or(json!({}));
                 let read_only = classify_read_only(t, &name);
+                let open_world = classify_open_world(t);
+                let destructive = classify_destructive(t, read_only);
                 McpTool {
                     server: server.clone(),
                     name,
                     description,
                     read_only,
+                    open_world,
+                    destructive,
                     input_schema,
                 }
             })
@@ -561,6 +594,8 @@ mod tests {
             name: "create_issue".into(),
             description: String::new(),
             read_only: false,
+            open_world: true,
+            destructive: true,
             input_schema: json!({}),
         };
         assert_eq!(t.qualified(), "mcp.github.create_issue");

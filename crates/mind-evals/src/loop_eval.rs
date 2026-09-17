@@ -483,6 +483,8 @@ mod tests {
                 name: "lookup".into(),
                 description: "look up colors using the novel contract".into(),
                 read_only: true,
+                open_world: true,
+                destructive: false,
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {"query_v2": {"type": "string"}},

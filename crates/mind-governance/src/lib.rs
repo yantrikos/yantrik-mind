@@ -193,11 +193,21 @@ impl HarmGate for RealHarmGate {
             }
         }
 
-        // 3. Secret exfiltration — any outward-carrying capability must not emit a secret.
-        let outward = intent
-            .capabilities
-            .iter()
-            .any(|c| matches!(c, Capability::Network | Capability::SendMessage | Capability::WriteFs));
+        // 3. Secret exfiltration — any capability that puts data somewhere it persists must
+        // not carry a secret. LocalControl counts even though nothing leaves the machine: a
+        // credential typed into a note is still a credential written down, and the mind is
+        // no better placed to un-write it there than to un-send an email. This widens what
+        // the check covers and can only turn Allow into Deny, which is the direction this
+        // gate is allowed to move.
+        let outward = intent.capabilities.iter().any(|c| {
+            matches!(
+                c,
+                Capability::Network
+                    | Capability::SendMessage
+                    | Capability::WriteFs
+                    | Capability::LocalControl
+            )
+        });
         if outward && mind_types::contains_secret(&norm) {
             return Decision::Deny { reason: "outward action appears to contain a secret/credential".into() };
         }
@@ -268,6 +278,14 @@ impl ActionRuntime for GovernedActionRuntime {
             return ActionDecision::Deny { reason: format!("capability {cap:?} is not granted to the mind") };
         }
         // 3. Risk policy: anything outward, irreversible, or non-trivial risk must be confirmed.
+        //
+        // LocalControl is deliberately not outward (see `is_outward`): an action that stays on
+        // this machine, says it is reversible and admits no risk runs without asking, which is
+        // what lets the mind open an app or write a note on its own desktop. Reaching outward
+        // still asks even when the caller calls it reversible and low-risk: a click on a web page
+        // is where "follow a link" and "place the order" look the same from here. Kept on
+        // purpose when LocalControl was adopted (2026-09-17); dropping it is a policy decision
+        // for a person, not a refactor.
         let outward = req.intent.capabilities.iter().any(is_outward);
         let risky = matches!(req.intent.risk, RiskLevel::Medium | RiskLevel::High);
         if outward || !req.intent.reversible || risky {
@@ -501,6 +519,84 @@ mod tests {
             .await;
         assert!(matches!(d, ActionDecision::RequireConfirmation { .. }));
     }
+
+    /// An action on this machine that says it is reversible and low-risk runs without asking.
+    ///
+    /// This is what lets the mind drive its own desktop: opening an app or appending to a note
+    /// is LocalControl, reversible and low-risk, and stopping for a "yes" before each one meant
+    /// a three-step task took three rounds of confirmation on the first live drive.
+    #[tokio::test]
+    async fn a_local_action_that_is_reversible_and_low_risk_just_runs() {
+        let rt = GovernedActionRuntime::new(
+            Arc::new(RealHarmGate::new()),
+            Arc::new(OkExecutor),
+            vec![Capability::LocalControl],
+        );
+        let d = rt
+            .decide(
+                &req(intent("mcp_call", "mcp.yantrik-os.os_act", "open the notes app",
+                            vec![Capability::LocalControl], RiskLevel::Low, true)),
+                &ctx(),
+            )
+            .await;
+        assert!(
+            matches!(d, ActionDecision::Execute),
+            "a reversible, low-risk action on this machine should not need confirming: {d:?}"
+        );
+    }
+
+    /// Reaching outward still asks, even when the caller says reversible and low-risk.
+    ///
+    /// If this starts failing, outward-ness has been dropped as a reason to ask — a policy
+    /// change that needs a person's decision, not a refactor.
+    #[tokio::test]
+    async fn an_outward_action_still_asks_even_when_reversible_and_low_risk() {
+        let rt = GovernedActionRuntime::new(
+            Arc::new(RealHarmGate::new()),
+            Arc::new(OkExecutor),
+            vec![Capability::Network],
+        );
+        let d = rt
+            .decide(
+                &req(intent("mcp_call", "mcp.yantrik-os.web_click", "follow a link",
+                            vec![Capability::Network], RiskLevel::Low, true)),
+                &ctx(),
+            )
+            .await;
+        assert!(
+            matches!(d, ActionDecision::RequireConfirmation { .. }),
+            "an outward action must still be confirmed: {d:?}"
+        );
+    }
+
+    /// ...and admitting risk or irreversibility asks too — which is how an undeclared tool is
+    /// classified, so a server that says nothing about itself gains nothing.
+    #[tokio::test]
+    async fn an_outward_action_that_admits_risk_or_irreversibility_still_stops() {
+        let rt = GovernedActionRuntime::new(
+            Arc::new(RealHarmGate::new()),
+            Arc::new(OkExecutor),
+            vec![Capability::Network],
+        );
+        for (risk, reversible, what) in [
+            (RiskLevel::Medium, true, "risky but reversible"),
+            (RiskLevel::Low, false, "cheap but irreversible"),
+            (RiskLevel::Medium, false, "the undeclared default"),
+        ] {
+            let d = rt
+                .decide(
+                    &req(intent("mcp_call", "mcp.somewhere.act", "do a thing",
+                                vec![Capability::Network], risk, reversible)),
+                    &ctx(),
+                )
+                .await;
+            assert!(
+                matches!(d, ActionDecision::RequireConfirmation { .. }),
+                "{what} must still be confirmed, got {d:?}"
+            );
+        }
+    }
+
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn harmful_intent_is_denied_by_runtime() {

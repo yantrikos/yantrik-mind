@@ -9030,3 +9030,30 @@ The trade is stated, not hidden: an ordinary ledger entry keeps its **words** �
 ### Concurrent work in the tree, noted rather than disturbed
 
 Mid-session the working tree gained uncommitted changes I did not make — `McpTool` grew `open_world` and `destructive` fields, with matching edits in `mind-governance` and `mind-types/action.rs`. Three test constructors have not been updated, so **the workspace suite is currently red on that in-flight change, not on this work**. My crates are green (`mind-types` 73, `mind-memory` 96) and every commit here used explicit pathspecs, so none of it carries someone else's files. Left untouched: the defaults for a tool that declines to say whether it is destructive are a safety decision belonging to whoever is making it.
+
+## SUBSTRATE MOVED — yantrikdb `=0.21.2` → `=0.23.0` (2026-09-16), so two minds can share one file
+
+**Why now.** Pranab's decision: Yantrik OS runs one mind at a time — this one or Hermes Agent — and "memory should be same", which he specified as the same file, not a shared service. The Hermes YantrikDB plugin (0.25.0) runs the Python wheel of this engine and admits `<0.24`; the schema migrates forward only (52 → 54 across this span). The first time Hermes opens a shared file, an engine pinned at 0.21.2 here is reading a store newer than itself. So this mind moves first.
+
+**Checked against the published crates, to the bar the last move set:**
+
+| check | result |
+|---|---|
+| bundled embedder still default | `default = ["bundled-embedder"]` at both tags; `src/embedder/` byte-identical; dim 64 |
+| belief and scoring code | `engine/belief.rs`, `base/scoring.rs` byte-identical |
+| recall | `engine/recall.rs` changed only to carry `event_time_min/max` into results — no ranking change |
+| `assert_belief_evidence` across the migration | store created by 0.21.2, finished by 0.23.0: log_odds, posterior, confidence and every evidence weight **byte-identical** to both same-version controls, six decimals |
+| sealed packs | `bisect-repro@0.0.1`, `mcp-spec@0.3.1`, `agent-memory-discipline@0.1.0` mount and recall |
+| the live store on the Yantrik OS machine | snapshot migrates 52 → 54, every count unchanged (13 operations, 2 belief nodes) |
+| the other engine on the same file | Python `yantrikdb==0.23.0` opens the migrated snapshot, schema 54, stats match |
+| rollback | 0.21.2 opens a schema-54 store **without rewriting the marker**; 0.23.0 reopens it cleanly afterwards |
+| full suite | **1,955 passed, 0 failed, 8 ignored**, 47 test binaries |
+
+**Not engine-related, found on the way:** the working tree's uncommitted `McpTool` change (new `open_world` / `destructive` fields) leaves two test initializers incomplete — `mind-tools/src/mcp.rs` `qualified_id_is_collision_free` and `mind-evals/src/loop_eval.rs` — so `cargo test --workspace` does not compile at all on this tree. The suite above ran with those two initializers completed in the build copy only; the working tree was not touched.
+
+**Deployed to the Yantrik OS machine only**, service stopped, schema-52 backup taken with SQLite's backup API (`~/.local/share/yantrik-mind/backups/mind.db.schema52-20260916-225812`). Live after start: schema 54, 0 restarts, attached to the desktop. Beliefs written before the migration read back with unchanged confidences (0.81, 0.68); a belief written after the migration reads back immediately. Staging and production stay on 0.21.2 — that is Pranab's call.
+
+**What the same file does NOT yet give.** Verified, not assumed:
+1. **Beliefs are invisible to Hermes.** This mind's durable knowledge is typed Belief nodes. The Hermes plugin has no belief or cognitive-node code, and the Python engine exposes no belief/cognitive-node methods at all. On the machine's store every learned fact is a belief and there are zero flat memories, so Hermes recalling from the shared file finds nothing.
+2. **Namespaces do not meet.** This mind writes flat memories to `default` (procedures to `learned-craft`); the plugin writes to `hermes:<agent_workspace>:<agent_identity>`.
+3. **Observed, pre-existing:** a fact stated once can land as two near-paraphrased beliefs ("… on this machine" and "… on this machine (Yantrik OS)"). The pre-migration pair shows the same pattern, so it predates this move.

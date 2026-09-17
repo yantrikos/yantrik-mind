@@ -4417,9 +4417,9 @@ dependencies = [
 
 [[package]]
 name = "yantrikdb"
-version = "0.21.2"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f26238cbf6cf1bda825ed6f50493d5465fecc0cacf53ce32f370684d6cc6b007"
+checksum = "d3c863ac584156094a43400fc0cda86352d74ca31d1c48602f88a4e4c0b5bb76"
 dependencies = [
  "aes-gcm",
  "arc-swap",
@@ -4429,6 +4429,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "js-sys",
+ "libc",
  "model2vec-rs",
  "parking_lot",
  "rand 0.8.6",

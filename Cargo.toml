@@ -50,9 +50,22 @@ uuid7 = "1"
 # 0.21.2: identical priors, posteriors and effective weights to six decimals, against both
 # same-version controls. `engine/recall.rs` and `base/scoring.rs` are byte-identical across the
 # span, so ranking and decay do not move either.
+# MOVED 0.21.2 -> 0.23.0 (2026-09-16), so this mind and Hermes Agent can share ONE memory file: the
+# Hermes YantrikDB plugin runs the Python wheel of the same engine and admits <0.24, and the schema
+# only migrates forward (52 -> 54 across this span), so the moment Hermes opens the shared file an
+# older engine here is reading a newer store. Checked against the published crates, same bar as the
+# last move: (a) `default = ["bundled-embedder"]` unchanged, `src/embedder/` byte-identical, dim 64;
+# (b) `engine/belief.rs` and `base/scoring.rs` byte-identical; `engine/recall.rs` changes only to
+# carry `event_time_min/max` through results -- no ranking change; (c) `assert_belief_evidence`
+# replayed on a store created by 0.21.2 and finished by 0.23.0 is byte-identical (log_odds,
+# posterior, confidence, every evidence weight, six decimals) to BOTH same-version controls;
+# (d) three sealed packs mount and recall; (e) a snapshot of the live mind.db on the Yantrik OS
+# machine migrates 52 -> 54 with every count unchanged, and Python yantrikdb 0.23.0 opens the result.
+# Rollback note: 0.21.2 opens a schema-54 store without rewriting the marker, and 0.23.0 reopens it
+# cleanly afterwards -- a binary rollback does not damage the file.
 # Cargo.lock is tracked for this application workspace (E.19), committing the full tested resolution;
 # the exact requirement additionally makes the engine substrate choice visible here.
-yantrikdb-core = { version = "=0.21.2", package = "yantrikdb" }
+yantrikdb-core = { version = "=0.23.0", package = "yantrikdb" }
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml", default-features = false }
 yantrik-os = { path = "../yantrik-companion/crates/yantrik-os" }
 yantrik-chat = { path = "../yantrik-companion/crates/yantrik-chat" }

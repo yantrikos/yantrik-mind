@@ -189,6 +189,20 @@ fn render_tool_result(r: &Value) -> String {
     }
 }
 
+/// A `tools/call` result as success or failure. `isError` is the server saying the tool ran and
+/// failed, so it is an error here too — rendered as text it read as success, and a refused action
+/// on the desktop was reported to the person as "Done — refused: …" (the first live drive of
+/// Yantrik OS, 2026-09-17). The server's words are kept as the error's message: they are what
+/// tells the mind, and the person, what to do instead.
+fn tool_outcome(r: &Value) -> anyhow::Result<String> {
+    let text = render_tool_result(r);
+    if r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false) {
+        let message = text.strip_prefix("(tool error) ").unwrap_or(&text).to_string();
+        return Err(anyhow::anyhow!(message));
+    }
+    Ok(text)
+}
+
 /// A live connection to one MCP server (owns the subprocess + its stdio). All I/O is blocking.
 struct Conn {
     name: String,
@@ -350,7 +364,7 @@ impl Conn {
             json!({"name": tool, "arguments": args}),
             timeout,
         )?;
-        Ok(render_tool_result(&r))
+        tool_outcome(&r)
     }
 
     fn shutdown(&mut self) {
@@ -528,6 +542,17 @@ impl McpHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_that_reports_an_error_has_failed() {
+        let refused = json!({"isError": true, "content": [{"type": "text", "text": "refused: cannot establish how 'os' grades 'launch'"}]});
+        let err = tool_outcome(&refused).unwrap_err().to_string();
+        assert_eq!(err, "refused: cannot establish how 'os' grades 'launch'");
+        let fine = json!({"content": [{"type": "text", "text": "opened notes"}]});
+        assert_eq!(tool_outcome(&fine).unwrap(), "opened notes");
+        let unflagged = json!({"isError": false, "content": [{"type": "text", "text": "ok"}]});
+        assert_eq!(tool_outcome(&unflagged).unwrap(), "ok");
+    }
 
     #[test]
     fn parses_mcpservers_config() {

@@ -86,6 +86,15 @@ pub fn announce(detail: String) {
     let _ = DETAIL.set(detail);
 }
 
+/// Set when this mind started without a model. The desktop channel then runs the first-run
+/// conversation (see [`crate::first_run`]) instead of passing turns to a placeholder.
+static NEEDS_SETUP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Say that there is no model yet, before any channel starts.
+pub fn announce_needs_setup() {
+    NEEDS_SETUP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Start answering the desktop, if there is one. Returns immediately.
 ///
 /// Safe to call on a machine that has never heard of Yantrik OS: it finds no socket, says so
@@ -292,6 +301,16 @@ async fn serve(
     session: &str,
     timeout: Duration,
 ) {
+    // One setup conversation per session: attaching again starts it over, which is what a person
+    // would expect after the desktop restarted.
+    let first_run = NEEDS_SETUP.load(std::sync::atomic::Ordering::Relaxed).then(|| {
+        Arc::new(std::sync::Mutex::new(crate::first_run::FirstRun::new(
+            crate::first_run::HttpOllama,
+            crate::first_run::env_path(),
+            crate::first_run::supervised(),
+        )))
+    });
+
     loop {
         let turn = match call(
             address.to_string(),
@@ -317,6 +336,12 @@ async fn serve(
         };
         let text = turn["text"].as_str().unwrap_or_default().to_string();
         eprintln!("[harness] turn {turn_id}: {text}");
+
+        // ── Or, with no model yet, set one up ──
+        if let Some(first_run) = &first_run {
+            set_up(first_run.clone(), address, session, turn_id, &text, timeout).await;
+            continue;
+        }
 
         // ── Think ──
         //
@@ -368,6 +393,58 @@ async fn serve(
                 .await;
             }
         }
+    }
+}
+
+/// One turn of the first-run conversation.
+///
+/// Parts of the reply go to the desktop as they are ready, so a slow model check is preceded by a
+/// line saying what is happening — and those calls also keep this session's presence fresh while
+/// it is not polling. When the model is saved, the turn is completed first and then the process
+/// exits for its unit to start it again with the model.
+#[cfg(unix)]
+async fn set_up(
+    first_run: Arc<std::sync::Mutex<crate::first_run::FirstRun<crate::first_run::HttpOllama>>>,
+    address: &str,
+    session: &str,
+    turn_id: u64,
+    text: &str,
+    timeout: Duration,
+) {
+    let (address, session, text) = (address.to_string(), session.to_string(), text.to_string());
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mut sent = 0usize;
+        let mut say = |part: &str| {
+            let delta = if sent == 0 { part.to_string() } else { format!("\n\n{part}") };
+            sent += 1;
+            let _ = wire::call(
+                &address,
+                CHUNK,
+                serde_json::json!({ "session": session, "turn_id": turn_id, "delta": delta }),
+                timeout,
+            );
+        };
+        let then = match first_run.lock() {
+            Ok(mut fr) => fr.respond(&text, &mut say),
+            Err(_) => {
+                say("Setup hit an internal error. Restart Yantrik Mind and try again.");
+                crate::first_run::Then::Wait
+            }
+        };
+        let _ = wire::call(
+            &address,
+            COMPLETE,
+            serde_json::json!({ "session": session, "turn_id": turn_id }),
+            timeout,
+        );
+        then
+    })
+    .await;
+
+    if let Ok(crate::first_run::Then::Restart) = outcome {
+        eprintln!("[harness] a model is configured; exiting so the service starts again with it");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::process::exit(0);
     }
 }
 

@@ -237,7 +237,17 @@ async fn main() -> anyhow::Result<()> {
     // The backend alone. It first carried the database path too, and the desktop's machine rail
     // renders this on one 160px row beside the word "Model" — so the one thing worth reading got
     // elided away behind a filesystem path nobody asks a status line for.
-    mind_core::harness::announce(name.clone());
+    //
+    // With no model configured, the backend is the scripted placeholder. On the desktop that is
+    // not an answer anyone can use, so the desktop channel becomes the first-run conversation
+    // instead, and the picker says so.
+    if name == "scripted" {
+        mind_core::harness::announce_needs_setup();
+        mind_core::harness::announce("not set up yet — say hello".to_string());
+        println!("brain: none configured — the desktop channel will ask for one (first run)");
+    } else {
+        mind_core::harness::announce(name.clone());
+    }
 
     // Tiny static web server for the agent's published dashboards (publish_page → shareable URL).
     spawn_web_server();

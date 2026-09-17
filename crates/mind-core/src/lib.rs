@@ -11,6 +11,8 @@ use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
 pub(crate) mod delivery;
+/// A mind with no model, asking for one through the desktop.
+pub mod first_run;
 /// The desktop channel: attaching to Yantrik OS as a harness.
 pub mod harness;
 mod loops;

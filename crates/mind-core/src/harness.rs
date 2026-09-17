@@ -67,6 +67,11 @@ const FAIL: &str = "harness.fail";
 #[cfg(unix)]
 const IDLE: Duration = Duration::from_millis(200);
 
+/// How often a turn still being thought about tells the desktop it is present. Well inside the
+/// desktop's 90-second presence window.
+#[cfg(unix)]
+const HEARTBEAT: Duration = Duration::from_secs(30);
+
 /// How long to wait before looking for the desktop again.
 ///
 /// Hit in two ordinary situations: this mind started before the shell did, and the shell
@@ -355,7 +360,27 @@ async fn serve(
         let answer = {
             let mem = mem.clone();
             let conv = conv.clone();
-            tokio::spawn(async move { think(&mem, &conv, &text).await }).await
+            let mut thinking = tokio::spawn(async move { think(&mem, &conv, &text).await });
+            // A turn can outlast the desktop's 90-second presence window, and this loop does not
+            // poll while it thinks: "Write a note titled Shopping…" took 93 seconds and the
+            // desktop reported "mind stopped responding" to a mind that was mid-answer. An empty
+            // chunk every 30 seconds keeps the session present without adding text.
+            let mut beat = tokio::time::interval(HEARTBEAT);
+            beat.tick().await; // the first tick is immediate
+            loop {
+                tokio::select! {
+                    done = &mut thinking => break done,
+                    _ = beat.tick() => {
+                        let _ = call(
+                            address.to_string(),
+                            CHUNK,
+                            serde_json::json!({ "session": session, "turn_id": turn_id, "delta": "" }),
+                            timeout,
+                        )
+                        .await;
+                    }
+                }
+            }
         };
 
         // ── Answer ──

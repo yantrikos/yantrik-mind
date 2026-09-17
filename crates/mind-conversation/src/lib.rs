@@ -1788,6 +1788,24 @@ fn looks_like_non_answer(text: &str) -> bool {
     looks_like_greeting(t) || looks_like_command_word(t) || looks_like_an_instruction(t)
 }
 
+/// Does a mutating MCP tool's result end the turn?
+///
+/// It used to, always: every such call either stopped for confirmation or was denied, so its result
+/// was something for the person to read, never material to work with. Once an action on this
+/// machine could simply run (LocalControl), that rule ended every desktop task at its first step.
+/// On the first drive with it, "Open the Notes app" called os_act without an app, got back "os_act
+/// needs 'app'", and the turn ended there with the error as the answer, the model never seeing
+/// the message that told it how to fix the call. A three-step note could never get past step one.
+///
+/// So only the two outcomes a person must act on end the turn: a pending confirmation ("Ready to
+/// …") and a refusal from the gate. An action that ran and reported back — done, or didn't go
+/// through — goes to the model, which can take the next step, correct the call, or say what
+/// happened.
+fn mutating_mcp_result_ends_the_turn(obs: &str) -> bool {
+    let o = obs.trim_start();
+    o.starts_with("Ready to ") || o.starts_with("(I can't run ")
+}
+
 /// Is this someone telling the assistant to do something, rather than answering it?
 ///
 /// `looks_like_command_word` only recognises the REPL's own command names — "weather",
@@ -10912,8 +10930,9 @@ WINDOW: all-time, latest 200
     ///   four near-identical `code` jobs in one live turn, 2026-08-16.
     /// - RICH SELF-CONTAINED SYNTHESIS (news brief, ticker analysis, portfolio): already cited and
     ///   balanced; a re-paraphrase drops the source links and dilutes it.
-    /// - A MUTATING MCP tool: its result is a confirmation prompt the user must see verbatim (a
-    ///   pending confirmation pauses the turn), a denial, or a done — never a working material.
+    /// - A MUTATING MCP tool that asked for confirmation or was denied: the prompt or the refusal
+    ///   is what the person must see (see `mutating_mcp_result_ends_the_turn` for why an action
+    ///   that actually ran is no longer terminal).
     /// - A DENIED NATIVE MUTATION: the gate's bounded postcondition is the answer. Giving the model
     ///   another turn after `remember` was refused is how "memory was not changed" became "noted".
     pub(crate) fn terminal_delivery(&self, tool: &str, obs: &str) -> bool {
@@ -10952,7 +10971,7 @@ WINDOW: all-time, latest 200
                 .map(|t| !t.read_only)
                 .unwrap_or(false)
         {
-            return true;
+            return mutating_mcp_result_ends_the_turn(obs);
         }
         false
     }
@@ -15562,6 +15581,22 @@ mod tests;
 mod turn_routing_regressions {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// A desktop action that ran is working material; a confirmation or a refusal ends the turn.
+    #[test]
+    fn only_a_confirmation_or_a_refusal_ends_a_turn_after_an_action() {
+        assert!(mutating_mcp_result_ends_the_turn(
+            "Ready to run os_act via the yantrik-os integration — confirm with \"yes\":
+{}"
+        ));
+        assert!(mutating_mcp_result_ends_the_turn("(I can't run mcp.yantrik-os.os_act — not granted.)"));
+        for ran in [
+            "Done — Notes — no note open",
+            "That didn't go through: execution failed: os_act needs 'app'.",
+        ] {
+            assert!(!mutating_mcp_result_ends_the_turn(ran), "{ran}");
+        }
+    }
 
     /// The prompt names the place in words a model uses for "here" and local weather.
     #[test]

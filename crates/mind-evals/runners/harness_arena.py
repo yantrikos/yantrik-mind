@@ -169,7 +169,15 @@ def reset_world(tag):
     # opened new ones, so by B5 `new` was refused ("Eight tabs are already open") for the mind that
     # ran last -- a handicap the arena created and Hermes, run first, never met. Every mind starts
     # from a fresh editor.
-    subprocess.run(["pkill", "-x", "yantrik-text-editor"], capture_output=True)
+    # By full path, not `-x`: `pkill -x` matches the kernel's process NAME, which is cut to 15
+    # characters, and "yantrik-text-editor" is 19 -- so `pkill -x yantrik-text-editor` never matched,
+    # and the editor ran with its eight tabs from 13:52 through every reading after it.
+    subprocess.run(["pkill", "-f", "/opt/yantrik/bin/yantrik-text-editor"], capture_output=True)
+    for _ in range(20):
+        if subprocess.run(["pgrep", "-f", "/opt/yantrik/bin/yantrik-text-editor"],
+                          capture_output=True).returncode != 0:
+            break
+        time.sleep(0.25)
 
 
 # ── the tasks (frozen for this reading: K21) ──────────────────────────────────────────────────

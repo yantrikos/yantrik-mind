@@ -178,6 +178,24 @@ def reset_world(tag):
                           capture_output=True).returncode != 0:
             break
         time.sleep(0.25)
+    # The editor restores unsaved drafts when it starts again ("Recovered unsaved drafts"), so a
+    # closed editor's text came back in the next mind's. Set them aside once it is closed.
+    drafts = os.path.join(HOME, ".local/state/yantrik/editor/drafts.json")
+    if os.path.exists(drafts):
+        os.replace(drafts, drafts + ".arena-previous")
+    # The shell has an editor of its own (`editor_*`), and its document outlived every mind: Reading
+    # C's mind began T6 inside Hermes's "arena-her2yz-friday.txt", left there by the mind run first.
+    # A fresh document, then back to the desktop screen -- `editor_new` switches the shell to its
+    # editor, and the arena must not leave the shell anywhere a mind did not put it.
+    # Checked while the editor screen is up: the shell reports its document only there, so a check
+    # made from the desktop screen sees no document at all and would pass a contaminated one.
+    act("shell", "editor_new")
+    ed = (describe("shell") or {}).get("editor")
+    act("shell", "show_screen", screen="desktop")
+    screen = (describe("shell") or {}).get("screen")
+    if not ed or ed.get("content") or ed.get("modified") or screen != "desktop":
+        print(f"  !! reset: shell editor {ed!r}, screen {screen!r} -- this run is contaminated",
+              flush=True)
 
 
 # ── the tasks (frozen for this reading: K21) ──────────────────────────────────────────────────

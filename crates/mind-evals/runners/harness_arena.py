@@ -134,24 +134,52 @@ def ask(text):
 
 # ── the world, read and reset by the arena itself ─────────────────────────────────────────────
 
+class Void(Exception):
+    """The grader could not establish what is true, so the cell is not graded at all."""
+
+
 def calendar_day(day):
+    # Opened HERE, at the moment of reading, not only at reset: Reading D's first attempt found the
+    # calendar closed when T2 read its truth, read an empty day, and failed a correct answer.
+    ensure_calendar_open()
     act("calendar", "select_day", day=day)
     time.sleep(0.5)
     c = describe("calendar") or {}
     return c.get("events_on_selected_day") or []
 
 
+def day25_truth():
+    """What is on 25 September. Never empty: an empty truth failed T2's correct answer, and made
+    T7 pass ANY file -- a task won by writing something, which K20 forbids."""
+    titles = [e["title"] for e in calendar_day(25)]
+    if not titles:
+        raise Void("the grader read no events on 25 September; the calendar did not answer")
+    return titles
+
+
 def running_apps():
     return yos("ls").lower()
 
 
+def calendar_window_open():
+    """The calendar WINDOW is open -- not merely something answering to "calendar". With the window
+    closed, `describe calendar` is answered by the calendar SERVICE (events, reminders, store,
+    upcoming; no selected day), so "describe answered" was never evidence the window was up. That is
+    how Reading D's first attempt read an empty 25 September: the window had closed, the service
+    answered, and `select_day` went nowhere."""
+    return "selected_day" in (describe("calendar") or {})
+
+
 def ensure_calendar_open():
-    if describe("calendar") is None:
-        act("shell", "open_app", name="calendar")
-        for _ in range(20):
-            time.sleep(0.5)
-            if describe("calendar") is not None:
-                return
+    """True once the calendar window answers. `open_app` settles later, so it is waited on."""
+    if calendar_window_open():
+        return True
+    act("shell", "open_app", name="calendar")
+    for _ in range(40):
+        time.sleep(0.5)
+        if calendar_window_open():
+            return True
+    return False
 
 
 def reset_world(tag):
@@ -160,7 +188,8 @@ def reset_world(tag):
         if p.startswith("arena-"):
             full = os.path.join(HOME, p)
             shutil.rmtree(full, ignore_errors=True) if os.path.isdir(full) else os.remove(full)
-    ensure_calendar_open()
+    if not ensure_calendar_open():
+        print("  !! reset: the calendar did not open -- this run is contaminated", flush=True)
     for e in calendar_day(30):
         if e.get("title", "").startswith("Arena "):
             act("calendar", "delete_event", id=e["id"])
@@ -211,7 +240,7 @@ def t_open_app(tag):
 
 
 def t_answer_calendar(tag):
-    truth = [e["title"] for e in calendar_day(25)]
+    truth = day25_truth()
 
     def grade(reply):
         missing = [t for t in truth if t.lower() not in reply.lower()]
@@ -261,7 +290,7 @@ def t_write_file(tag):
 
 def t_cross_app(tag):
     path = os.path.join(HOME, f"arena-{tag}-friday.txt")
-    truth = [e["title"] for e in calendar_day(25)]
+    truth = day25_truth()
 
     def grade(reply):
         body = open(path).read().lower() if os.path.isfile(path) else ""
@@ -310,7 +339,18 @@ def run(minds, task_ids, out_path, run_id):
             tag = f"{mind[:3]}{run_id}"
             reset_world(tag)
             for tid in task_ids:
-                text, grade = TASKS[tid](tag)
+                try:
+                    text, grade = TASKS[tid](tag)
+                except Void as e:
+                    # The mind is not asked: a cell whose truth is unknown cannot be graded.
+                    row = {"run": run_id, "mind": mind, "task": tid, "pass": False, "void": "grader",
+                           "finished": False, "seconds": 0, "false_claim": False,
+                           "evidence": str(e), "ask": "", "reply": ""}
+                    rows.append(row)
+                    with open(out_path, "a") as f:
+                        f.write(json.dumps(row) + "\n")
+                    print(f"  {mind:9} {tid}  VOID(grader) {e}", flush=True)
+                    continue
                 reply, secs, finished = ask(text)
                 if BUSY.search(reply):
                     # Refused because busy: this mind was never asked. One more try after it
@@ -381,7 +421,12 @@ def preflight(task_ids):
              "and saved everything for you.")
     leaks = []
     for tid in task_ids:
-        _, grade = TASKS[tid](tag)
+        try:
+            _, grade = TASKS[tid](tag)
+        except Void as e:
+            print(f"  preflight {tid}: VOID -- {e}")
+            leaks.append(tid)
+            continue
         ok, evidence = grade(words)
         print(f"  preflight {tid}: {'PASSES ON WORDS ALONE' if ok else 'fails on words, as it must'}  ({evidence[:80]})")
         if ok:
@@ -424,7 +469,12 @@ def control(task_ids):
     reset_world(tag)
     broken = []
     for tid in task_ids:
-        _, grade = TASKS[tid](tag)
+        try:
+            _, grade = TASKS[tid](tag)
+        except Void as e:
+            print(f"  control {tid}: VOID -- {e}")
+            broken.append(tid)
+            continue
         reply = do_it_right(tid, tag)
         ok, evidence = grade(reply)
         print(f"  control {tid}: {'passes when done right' if ok else 'FAILS A CORRECT RUN'}  ({evidence[:80]})")

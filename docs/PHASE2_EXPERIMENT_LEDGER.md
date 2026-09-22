@@ -9223,3 +9223,19 @@ The stuck request is not a one-off: B5's T4 was the same 300 s wait. That makes 
 - Not a prediction: a stall is rare (2 in ~35), so D may well not exercise F9. If it doesn't, F9 stands on its tests alone, and I'll say so.
 
 K23 still binds: n=1 per cell is a smoke reading.
+
+### E.ARENA1 — Reading D, attempt 1 (run `8h7`): VOID, stopped by me after Hermes's T5
+
+Hermes **failed T2 with a correct answer**: it listed all three events, with times, and said *"the Calendar is open now (I had to reopen it)"*, while the grader read `expected []`. The grader's truth for 25 September was empty.
+
+**The cause is an arena defect that was there from the start.** With the calendar *window* closed, `describe calendar` is answered by the calendar *service* (`events, reminders, store, upcoming`; no selected day). The shell documents this: "describe <name> means the window whenever it is open". The arena's `ensure_calendar_open` took "describe answered" to mean "the window is up", so `select_day` went nowhere and the selected day read empty. Readings A to C passed only because the window happened to be open when they started.
+
+**Why I stopped rather than scored it:** with an empty truth, T7's grade was `bool(body) and not missing`. Any non-empty file passed, so a task could be won by writing something, which K20 forbids. The file is deleted at reset, so the cell could not be re-graded afterwards.
+
+**The fix** (`calendar_window_open` checks for `selected_day`; truth is read with the window confirmed open at that moment; an empty truth makes the cell **void**, never graded) was verified before any mind met it:
+- With the calendar process killed, the truth read reopens the window and returns the three titles.
+- With the calendar unreadable, T2 and T7 are void.
+- `--control`, started with the window closed: 7/7 pass when done right, 0 events left.
+- `--preflight`: 7/7 fail on words alone.
+
+**My process failure, recorded as one:** I changed `reset_world` and went straight into a graded reading without re-running `--control` and `--preflight`, the exact failure my own notes record four earlier readings dying of. Reading D restarts as a fresh run; Hermes's five cells from `8h7` are not used.

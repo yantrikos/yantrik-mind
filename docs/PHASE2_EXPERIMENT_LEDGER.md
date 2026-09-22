@@ -9113,3 +9113,27 @@ So there are two readings, fixed now:
 
 - **Reading A — as shipped.** Each mind on its own configuration. The product question: which mind should a person pick today.
 - **Reading B — model held constant.** Every mind on `deepseek-v4.1-flash`. The harness question: which *harness* makes the same model do the most, the most truthfully. **"Best harness" is claimed on B, not A.** Winning A by having a better model is a configuration win, not a harness win.
+
+### E.ARENA1 — Reading A (as shipped), and two voided attempts at Reading B, recorded as they happened
+
+**Reading A, run 160, VM 520, re-scored from stored replies with the negation-aware claim check and read by hand:**
+
+| mind | model | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Hermes 0.14.0 | deepseek-v4.1-flash | ok | ok | ok | ok | ok | ok | ok | **7/7** | 0 | 11.0 s |
+| Pi 0.87.0 | deepseek-v4.1-flash | ok | ok | ok | ok | ok | — | — | 5/7 | 0 | 6.4 s |
+| OpenClaw 2026.9.1 | kimi-k3 | ok | ok | ok | ok | ok | — | — | 5/7 | 0 | 8.2 s |
+| DeepSeek | deepseek-v4.1-flash | void | void | void | ok | — | — | — | 1/4 | 0 | 119 s |
+| **Yantrik Mind** `d99d97b` | local qwen3.8:27b | ok | — | **LIE** | — | — | — | — | **1/7** | **1** | 23.8 s |
+
+Last, and **the only mind that told its owner something false**: *"An event called 'Arena min160' was added to the calendar"* — it went into the mind's private store, on the wrong date, and the desktop has no such event. The five other "lies" the running copy printed were honest failures ("The folder was **not** created") misread by a claim check that ignored negation; that check accused honest minds of lying and was fixed before this table was drawn. DeepSeek's T1–T3 are void: a run I had killed left it mid-turn, so it answered "still working on the previous request". Every task was shown reachable through standard-grade doors — Hermes passed all seven with no approval stall — so the ~120 s failures elsewhere are minds choosing the approval-gated Terminal.
+
+**Reading B, attempt 1 — VOID, and a conclusion I published that was wrong.** I switched the mind to `YM_PRIMARY_BRAIN=ollama-cloud:deepseek-v4.1-flash`, `YM_LOCAL_ROLE=fallback`, saw it score 2/7, and told Pranab *"the better model bought exactly one task; the rest is our harness."* It was not on deepseek. `chat_grounded_tools`, which every agent step calls, always requests the **private** lane, and whenever a local model is configured that lane is the local model — whatever `YM_PRIMARY_BRAIN` or `YM_LOCAL_ROLE` say. A logging proxy in front of ollama.com recorded **zero** requests from the agent's turns. The routing is deliberate and right (private context stays home); the reading was simply not what I said it was. The startup banner compounds it: *"brain: LOCAL primary + private lane active"* prints whenever a local endpoint exists, even with `YM_LOCAL_ROLE=fallback`.
+
+**Reading B, attempt 2 — VOID, and a real product finding.** With the local lane removed so the mind was cloud-only like its rivals, it **refused every turn**: *"I can't safely put this answer together right now — it draws on your private context, and my own hardware is unreachable, so composing it would mean sending that to a cloud model."* The privacy wall is doing its job. But on a Yantrik OS machine whose owner points the mind at a cloud model — the image's own README says first-run setup asks for "a model you run yourself (an OpenAI-compatible endpoint)" — this mind answers nothing at all while every rival answers. And the message is false: nothing is unreachable, there is no local hardware configured. The owner's consent already has a name, `YM_PRIVATE_PROVIDERS`; nothing asks the owner for it, and the refusal does not mention it.
+
+**Reading B3** runs with `YM_PRIVATE_PROVIDERS=ollama-cloud:deepseek-v4.1-flash` — the owner's documented, explicit trust in that model — and the proxy kept in front of ollama.com for the whole run, so "it ran on deepseek" is a request count rather than an assumption. One ungraded preflight turn first; two readings had already died on configuration.
+
+**Also found:** the arena's reset cannot see the mind's private calendar, so arena events from earlier readings sit in it and leak into later answers ("the Arena min160 date I have noted for Wed Sep 23"). With the desktop-calendar fix deployed that store is no longer on the menu; until then it is a contaminant the reading carries.
+
+**The repeats, still open.** The mind re-issues an identical call after getting its result — on the local model *and* on deepseek. A clean reconstruction of the two prompt shapes (work-log prose vs. a real transcript) produced **0/10 repeats in both**, so my first explanation — "the work log puts the user's request last" — is not supported. The cause is something in the real prompt the reconstruction left out. The proxy capture from B3 is the evidence the next step is built on.

@@ -393,6 +393,9 @@ pub struct McpHub {
     timeout: Duration,
     #[cfg(feature = "test-support")]
     scripted: Mutex<HashMap<String, VecDeque<Result<String, String>>>>,
+    /// Every call a scripted tool received, in order, with its arguments.
+    #[cfg(feature = "test-support")]
+    scripted_log: Mutex<Vec<(String, Value)>>,
 }
 
 impl Default for McpHub {
@@ -409,6 +412,8 @@ impl McpHub {
             timeout: Duration::from_secs(45),
             #[cfg(feature = "test-support")]
             scripted: Mutex::new(HashMap::new()),
+            #[cfg(feature = "test-support")]
+            scripted_log: Mutex::new(Vec::new()),
         }
     }
 
@@ -449,6 +454,12 @@ impl McpHub {
             .unwrap()
             .get(qualified)
             .map(VecDeque::len)
+    }
+
+    /// The calls scripted tools received, in order: what actually reached the "server".
+    #[cfg(feature = "test-support")]
+    pub fn scripted_calls(&self) -> Vec<(String, Value)> {
+        self.scripted_log.lock().unwrap().clone()
     }
 
     /// Connect to every configured server. Failures are logged + skipped — one broken/slow server
@@ -537,6 +548,10 @@ impl McpHub {
             .ok_or_else(|| anyhow::anyhow!("no such integration tool"))?;
         #[cfg(feature = "test-support")]
         if let Some(queue) = self.scripted.lock().unwrap().get_mut(qualified) {
+            self.scripted_log
+                .lock()
+                .unwrap()
+                .push((qualified.to_string(), args.clone()));
             return queue
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("scripted MCP responses exhausted"))?

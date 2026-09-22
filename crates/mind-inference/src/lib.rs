@@ -246,6 +246,23 @@ pub fn current_opportunity() -> Option<String> {
     OPPORTUNITY.try_with(|s| s.clone()).ok()
 }
 
+tokio::task_local! {
+    /// E.ARENA1-F9: the most any one model request made inside this task may wait.
+    static CALL_CAP: std::time::Duration;
+}
+/// Run `f` with every model request inside it capped at `cap` — the caller knows how much time
+/// the work has left, and a client's own timeout (sized for its slowest job) does not. The cap
+/// reaches the HTTP request itself, so a hung request is abandoned where it hangs and a chain
+/// still fails over to its next link.
+pub async fn with_call_cap<F: std::future::Future>(cap: std::time::Duration, f: F) -> F::Output {
+    CALL_CAP.scope(cap, f).await
+}
+/// The cap this task runs under, if any. Carried onto the blocking thread by hand, like the
+/// opportunity: task-locals do not reach `spawn_blocking`.
+pub fn current_call_cap() -> Option<std::time::Duration> {
+    CALL_CAP.try_with(|c| *c).ok()
+}
+
 /// How one logical request ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallOutcome {
@@ -657,8 +674,12 @@ impl InferencePool {
         // a Failed row with the attempts made.
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
+        let call_cap = current_call_cap();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
+            // Installed for this job only; `None` also clears whatever an earlier job on this
+            // pooled thread left behind.
+            let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
             // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
             // read afterwards can only have been written by THIS call's chain traversal.
             let _ = take_serving_link();
@@ -892,8 +913,10 @@ impl InferencePool {
         let provider_for_lane = selected_label;
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
+        let call_cap = current_call_cap();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
             let _ = take_serving_link();
             install_attempts(attempts_in);
             if !is_chain_backend(backend.as_ref()) {
@@ -5026,5 +5049,82 @@ mod lane_failure_tests {
         assert!(lane_failure("HTTP 429 Too Many Requests after 3 retries").0.contains("RATE LIMITING"));
         assert!(lane_failure("502 Bad Gateway").0.contains("FLAKY"));
         assert!(lane_failure("connection refused (os error 111)").0.contains("unreachable"));
+    }
+}
+
+/// E.ARENA1-F9: a cap set on the async task reaches the HTTP timeout on the blocking thread, on
+/// both the plain and the streaming path, and does not outlive its job on a pooled thread.
+#[cfg(test)]
+mod call_cap_tests {
+    use super::*;
+
+    /// Answers with the request timeout it would have used, in seconds.
+    struct SeesCap;
+    impl LLMBackend for SeesCap {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            let secs = yantrik_ml::call_timeout::call_timeout_for("probe-model").as_secs();
+            Ok(LLMResponse {
+                thinking: String::new(),
+                text: secs.to_string(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "sees-cap"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_cap_reaches_the_request_and_ends_with_its_job() {
+        let pool = InferencePool::new(Arc::new(SeesCap) as Arc<dyn LLMBackend>, 1);
+        let ask = || {
+            pool.chat_scoped(
+                vec![ChatMessage::user("x")],
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+            )
+        };
+        let plain = ask().await.unwrap().text;
+        assert_ne!(plain, "7", "no cap installed, so the configured timeout");
+        let capped = with_call_cap(std::time::Duration::from_secs(7), ask()).await.unwrap().text;
+        assert_eq!(capped, "7", "the task's cap did not reach the blocking thread");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let streamed = with_call_cap(
+            std::time::Duration::from_secs(7),
+            pool.chat_streaming_sink(
+                vec![ChatMessage::user("x")],
+                GenerationConfig::default(),
+                tx,
+                PrivacyScope::Public,
+            ),
+        )
+        .await
+        .unwrap()
+        .text;
+        assert_eq!(streamed, "7", "the streaming path did not carry the cap");
+        for _ in 0..4 {
+            assert_eq!(ask().await.unwrap().text, plain, "a cap outlived its job on a pooled thread");
+        }
     }
 }

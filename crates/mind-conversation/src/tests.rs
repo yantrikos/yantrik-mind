@@ -16350,3 +16350,267 @@ mod desktop_failed_action_retry_wiring {
         );
     }
 }
+
+/// E.ARENA1-F7b/F8/F9/F10 through the real agent loop. One scripted model and a scripted desktop
+/// that records every call it receives, so each test asserts what actually reached the desktop.
+#[cfg(test)]
+mod desktop_consent_and_stall_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+    // The desktop's own refusals (yos-mcp `guard_act`), as the mind receives them.
+    const NO_ANSWER: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and did not answer within 110s, so nothing was run. They were probably away from the keyboard. Tell them what you were trying to do; they can ask you to try it again.";
+    const SAID_NO: &str = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and said no. Nothing was run and nothing was changed. This is an answer, not an error: do not ask again and do not look for another route to the same effect. Say what you were going to do and leave it with them.";
+
+    enum Step {
+        Call(&'static str, serde_json::Value),
+        Fail,
+    }
+
+    /// Plays `steps` on the calls that offer tools; answers compose (no tools) with COMPOSED.
+    /// Records every prompt and the request timeout each call would have used.
+    struct Script {
+        at: AtomicUsize,
+        steps: Vec<Step>,
+        seen: Arc<StdMutex<Vec<String>>>,
+        timeouts: Arc<StdMutex<Vec<u64>>>,
+    }
+    const COMPOSED: &str = "COMPOSED FROM THE WORK LOG";
+    impl LLMBackend for Script {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            self.timeouts
+                .lock()
+                .unwrap()
+                .push(yantrik_ml::call_timeout::call_timeout_for("probe-model").as_secs());
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let step = if offered {
+                self.steps.get(self.at.fetch_add(1, Ordering::SeqCst))
+            } else {
+                None
+            };
+            let (text, tool_calls) = match step {
+                Some(Step::Fail) => anyhow::bail!("the endpoint stopped answering"),
+                Some(Step::Call(n, a)) => (
+                    String::new(),
+                    vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                ),
+                None if offered => ("done".to_string(), vec![]),
+                None => (COMPOSED.to_string(), vec![]),
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "script"
+        }
+    }
+
+    struct Run {
+        reply: String,
+        prompts: Vec<String>,
+        timeouts: Vec<u64>,
+        reached: Vec<(String, serde_json::Value)>,
+    }
+
+    async fn run(steps: Vec<Step>, describes: Vec<&str>, acts: Vec<&str>) -> Run {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let timeouts = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps,
+            seen: seen.clone(),
+            timeouts: timeouts.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        // The same scripted model serves the private lane too, so compose can run (a pool with no
+        // private lane refuses a private compose, by design: E.SEC14).
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1)
+            .with_provider("script")
+            .with_private_backend(script, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            // Read-only here as in the other desktop wiring tests: a mutating tool goes through the
+            // action runtime, which this engine does not have, and the loop logic under test sits
+            // in front of both paths.
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let script_of =
+            |v: Vec<&str>| v.into_iter().map(|s| Ok(s.to_string())).collect::<Vec<_>>();
+        hub.add_scripted_tool(tool("os_describe"), script_of(describes)).unwrap();
+        hub.add_scripted_tool(tool("os_act"), script_of(acts)).unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(hub.clone());
+        let reply = conv
+            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"));
+        let prompts = seen.lock().unwrap().clone();
+        let timeouts = timeouts.lock().unwrap().clone();
+        Run { reply, prompts, timeouts, reached: hub.scripted_calls() }
+    }
+
+    fn act(app: &str, action: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"app": app, "action": action, "args": {"text": text}})
+    }
+    fn acts_reached(r: &Run) -> Vec<serde_json::Value> {
+        r.reached
+            .iter()
+            .filter(|(t, _)| t.ends_with("os_act"))
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    /// F8, Reading C's T7: the editor was described, the shell never was. The loop reads the
+    /// shell's editor family itself and points at the twin before any card goes up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sensitive_write_looks_up_the_shell_before_any_card() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+            ],
+            vec![EDITOR, SHELL],
+            vec!["A-CARD-WENT-UP"],
+        )
+        .await;
+        let looked = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe")
+                && *a == serde_json::json!({"app": "shell", "actions": "editor_"})
+        });
+        assert!(looked, "the shell's editor family was never read: {:?}", r.reached);
+        assert!(
+            acts_reached(&r).is_empty(),
+            "a card went up before the twin was offered: {:?}",
+            r.reached
+        );
+        assert!(
+            r.prompts.iter().any(|p| p.contains("editor_save_as(path) [standard]")),
+            "the hint did not carry the family"
+        );
+    }
+
+    /// F7b: the hint promises "send this call again and it will go to the person". The repeat
+    /// guard used to refuse the re-send as a duplicate of a call that never reached the desktop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hinted_call_sent_again_reaches_the_person() {
+        let write = act("editor", "set_content", "hello");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![EDITOR, SHELL],
+            vec!["SENT-TO-THE-PERSON"],
+        )
+        .await;
+        // The loop's argument cleaner flattens a one-field `args` object before the desktop sees
+        // it, so the call is identified by app and action.
+        let reached: Vec<(String, String)> = acts_reached(&r)
+            .iter()
+            .map(|a| (a["app"].as_str().unwrap_or("").into(), a["action"].as_str().unwrap_or("").into()))
+            .collect();
+        assert_eq!(
+            reached,
+            vec![(write["app"].as_str().unwrap().to_string(), write["action"].as_str().unwrap().to_string())],
+            "the re-sent call must reach the desktop once"
+        );
+        assert!(r.prompts.iter().any(|p| p.contains("SENT-TO-THE-PERSON")));
+    }
+
+    /// F10, Reading C's T7 second card: no answer, then the same action with the trailing newline
+    /// dropped. The second card is not raised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unanswered_card_is_not_raised_again_with_other_arguments() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "a\nb\n")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "a\nb")),
+            ],
+            vec![EDITOR],
+            vec![NO_ANSWER, "A-SECOND-CARD-WENT-UP"],
+        )
+        .await;
+        assert_eq!(acts_reached(&r).len(), 1, "{:?}", r.reached);
+        assert!(r
+            .prompts
+            .iter()
+            .any(|p| p.contains("Not sent. The person was asked to allow editor.set_content")));
+    }
+
+    /// F10: a no covers the twin. The desktop says "do not look for another route to the same
+    /// effect", and F7 is exactly such a route, so it must stop at a no.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_no_is_not_routed_around_through_the_twin() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("shell", "editor_set_content", "hello")),
+            ],
+            vec![EDITOR],
+            vec![SAID_NO, "THE-TWIN-RAN-AFTER-A-NO"],
+        )
+        .await;
+        assert_eq!(acts_reached(&r).len(), 1, "the twin ran after a no: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("their no covers it")));
+    }
+
+    /// F9, Reading C's T6: the step's model call is capped by the turn's remaining time — about
+    /// half of the 135 s the loop has — not the client's 300 s; and a model that stops answering
+    /// mid-turn ends in a composed answer from the work log, not an error line.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_step_call_is_capped_and_a_mid_turn_failure_composes() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Fail,
+            ],
+            vec![EDITOR],
+            vec!["UNUSED"],
+        )
+        .await;
+        let first = *r.timeouts.first().expect("the model was called");
+        assert!((60..=67).contains(&first), "step 0 waited up to {first} s");
+        assert!(r.reply.contains(COMPOSED), "the work log was thrown away: {}", r.reply);
+        assert!(!r.reply.contains("couldn't think just now"), "{}", r.reply);
+    }
+}

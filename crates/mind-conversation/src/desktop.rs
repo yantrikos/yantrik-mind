@@ -205,19 +205,59 @@ pub(crate) fn forget_desktop_reads(done: &mut std::collections::HashSet<String>)
     done.retain(|sig| !DESKTOP_READS.iter().any(|r| sig.starts_with(&format!("{r}|"))));
 }
 
-/// What one app lists: each action's name and its permission grade.
-pub(crate) type ActionList = Vec<(String, String)>;
+/// The call that changes the desktop.
+pub(crate) const ACT: &str = "mcp.yantrik-os.os_act";
 
-/// Every `act: name(args)  [grade, …]` line in a description, as (name, grade).
+/// One action an app lists: its name, its permission grade, and its signature as the app wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Listed {
+    pub(crate) name: String,
+    pub(crate) grade: String,
+    pub(crate) sig: String,
+}
+
+/// What one app lists.
+pub(crate) type ActionList = Vec<Listed>;
+
+/// Every `act: name(args)  [grade, …]` line in a description.
 pub(crate) fn listed_actions(obs: &str) -> ActionList {
     obs.lines()
         .filter_map(|l| l.strip_prefix("  act: "))
         .filter_map(|rest| {
             let name = rest.split('(').next()?.trim();
             let grade = rest.split('[').nth(1)?.split([',', ']']).next()?.trim();
-            (!name.is_empty()).then(|| (name.to_string(), grade.to_string()))
+            let sig = rest.split('[').next()?.trim();
+            (!name.is_empty()).then(|| Listed {
+                name: name.to_string(),
+                grade: grade.to_string(),
+                sig: sig.to_string(),
+            })
         })
         .collect()
+}
+
+/// The grade `app` listed for `action` this turn, if `app` was described.
+fn grade_of<'a>(
+    described: &'a std::collections::HashMap<String, ActionList>,
+    app: &str,
+    action: &str,
+) -> Option<&'a str> {
+    described.get(app)?.iter().find(|l| l.name == action).map(|l| l.grade.as_str())
+}
+
+/// Does this grade put a card in front of the person before the action runs?
+fn asks_first(grade: &str) -> bool {
+    grade != "standard" && grade != "safe"
+}
+
+/// The `app` and `action` of a desktop action call.
+fn act_target(tool: &str, args: &serde_json::Value) -> Option<(String, String)> {
+    if tool != ACT {
+        return None;
+    }
+    let app = args.get("app")?.as_str()?;
+    let action = args.get("action")?.as_str()?;
+    Some((app.to_string(), action.to_string()))
 }
 
 /// Remember what an `os_describe` call showed, keyed by the app it described.
@@ -235,6 +275,34 @@ pub(crate) fn record_described(
     }
 }
 
+/// The app that offers other apps' actions as its own `<app>_<action>` family (`files_*`,
+/// `editor_*`).
+pub(crate) const TWIN_HOST: &str = "shell";
+
+/// E.ARENA1-F8: the one read a sensitive action needs before it may put a card in front of the
+/// person.
+///
+/// F7 pointed a sensitive action at its standard twin, but only among apps described THIS turn.
+/// Reading C, T7: the mind described the calendar and the editor, never the shell, went straight
+/// to `editor.set_content`, and sat through two unanswered cards (231.8 s) while
+/// `shell.editor_set_content` was graded standard. The loop now looks for itself: one read of the
+/// shell's `<app>_` family, before the card rather than after it. Returns the describe arguments,
+/// or `None` when there is nothing to look for.
+pub(crate) fn twin_lookup(
+    tool: &str,
+    args: &serde_json::Value,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<serde_json::Value> {
+    let (app, action) = act_target(tool, args)?;
+    if app == TWIN_HOST || described.contains_key(TWIN_HOST) {
+        return None;
+    }
+    if !asks_first(grade_of(described, &app, &action)?) {
+        return None;
+    }
+    Some(serde_json::json!({ "app": TWIN_HOST, "actions": format!("{app}_") }))
+}
+
 /// E.ARENA1-F7: a sensitive action whose SAME change is offered at a lower grade elsewhere.
 ///
 /// Reading B4 (six fixes in) lost the file tasks at the last step: the mind wrote the text with the
@@ -246,32 +314,125 @@ pub(crate) fn record_described(
 ///
 /// This does not route around a grade. It tells the model the twin exists, once; a model that means
 /// to ask the person re-issues the same call and it goes through. When the OS grades both sensitive,
-/// there is no twin and nothing changes.
+/// there is no twin and nothing changes. F8: the hint names the twin's whole family with each
+/// signature — Reading C's Hermes wrote its files with the shell's `editor_new` →
+/// `editor_set_content` → `editor_save_as`, and a model that only learns one name has to guess the
+/// rest.
 pub(crate) fn lower_grade_twin(
     tool: &str,
     args: &serde_json::Value,
     described: &std::collections::HashMap<String, ActionList>,
 ) -> Option<String> {
-    if tool != "mcp.yantrik-os.os_act" {
-        return None;
-    }
-    let app = args.get("app")?.as_str()?;
-    let action = args.get("action")?.as_str()?;
-    let grade = described.get(app)?.iter().find(|(n, _)| n == action)?.1.as_str();
-    if grade == "standard" || grade == "safe" {
+    let (app, action) = act_target(tool, args)?;
+    let grade = grade_of(described, &app, &action)?;
+    if !asks_first(grade) {
         return None;
     }
     let twin = format!("{app}_{action}");
+    let family = format!("{app}_");
     described.iter().find_map(|(other, acts)| {
-        let (name, g) = acts.iter().find(|(n, _)| *n == twin)?;
-        (g == "standard" || g == "safe").then(|| {
+        let t = acts.iter().find(|l| l.name == twin)?;
+        (!asks_first(&t.grade)).then(|| {
+            let kin: Vec<String> = acts
+                .iter()
+                .filter(|l| l.name.starts_with(&family))
+                .map(|l| format!("{} [{}]", l.sig, l.grade))
+                .collect();
             format!(
-                "({app}.{action} is graded {grade}, so it would ask the person first. `{other}` lists \
-                 `{name}` — the same change — graded {g}, which does not. Use it unless you mean to \
-                 ask; if you do, send this call again and it will go to the person.)"
+                "({app}.{action} is graded {grade}, so it would ask the person first. `{other}` offers \
+                 the same change as `{}`, graded {}, which does not ask. Its {family}* family: {}. Use \
+                 it unless you mean to ask; if you do, send this call again and it will go to the \
+                 person.)",
+                t.name,
+                t.grade,
+                kin.join(", ")
             )
         })
     })
+}
+
+/// What the person did with a card this turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    SaidNo,
+    NoAnswer,
+}
+
+/// E.ARENA1-F10: what the person did with the card, read off the desktop's own refusal. The
+/// sentences are the OS's (`yos-mcp`, `guard_act`): "…was asked to allow editor.set_content and
+/// said no…" and "…and did not answer within 110s…". A card the desktop lost track of ("…and then
+/// the desktop stopped answering") is neither — nobody knows what the person did — so it is not
+/// read as an answer.
+pub(crate) fn approval_answer(obs: &str) -> Option<(String, Answer)> {
+    let rest = obs.split("was asked to allow ").nth(1)?;
+    let (key, after) = rest.split_once(" and ")?;
+    if !key.contains('.') || key.contains(char::is_whitespace) {
+        return None;
+    }
+    let answer = if after.starts_with("said no") {
+        Answer::SaidNo
+    } else if after.starts_with("did not answer") {
+        Answer::NoAnswer
+    } else {
+        return None;
+    };
+    Some((key.to_string(), answer))
+}
+
+/// The doors that make the same change as `app.action`: itself, and its twin across the host.
+fn same_change(app: &str, action: &str) -> Vec<String> {
+    let mut keys = vec![format!("{app}.{action}")];
+    if app == TWIN_HOST {
+        if let Some((a, b)) = action.split_once('_') {
+            keys.push(format!("{a}.{b}"));
+        }
+    } else {
+        keys.push(format!("{TWIN_HOST}.{app}_{action}"));
+    }
+    keys
+}
+
+/// E.ARENA1-F10: a card the person already answered this turn, for this action or its twin.
+///
+/// Reading C, T7: `editor.set_content` raised a card, nobody answered for 110 s, and the mind
+/// asked again with the trailing newline dropped — different arguments, so no repeat guard saw it
+/// — and waited another 110 s for the same silence. The desktop's own words say what comes next:
+/// after no answer, "tell them what you were trying to do; they can ask you to try it again";
+/// after a no, "do not ask again and do not look for another route to the same effect". The loop
+/// now keeps both. A no also closes the twin, so F7 can never route around one.
+pub(crate) fn already_answered(
+    tool: &str,
+    args: &serde_json::Value,
+    answered: &std::collections::HashMap<String, Answer>,
+) -> Option<String> {
+    let (app, action) = act_target(tool, args)?;
+    let this = format!("{app}.{action}");
+    for key in same_change(&app, &action) {
+        match (answered.get(&key), key == this) {
+            (Some(Answer::SaidNo), true) => {
+                return Some(format!(
+                    "(Not sent. The person was asked to allow {this} this turn and said no. That is their \
+                     answer: do not ask again, and do not look for another way to make the same change. \
+                     Say what you were going to do and leave it with them.)"
+                ))
+            }
+            (Some(Answer::SaidNo), false) => {
+                return Some(format!(
+                    "(Not sent. The person said no to {key} this turn, and {this} makes the same change, so \
+                     their no covers it. Say what you were going to do and leave it with them.)"
+                ))
+            }
+            (Some(Answer::NoAnswer), true) => {
+                return Some(format!(
+                    "(Not sent. The person was asked to allow {this} this turn and did not answer; they are \
+                     probably away from the keyboard, and asking again would wait for the same silence. \
+                     Tell them what you were trying to do; they can ask you to try it again.)"
+                ))
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// E.ARENA1-F7: where home is on this machine. `shell.editor_save_as` gives `/home/user/notes.txt`
@@ -347,10 +508,89 @@ mod tests {
     #[test]
     fn grades_are_read_off_the_real_descriptions() {
         let editor = listed_actions(EDITOR);
-        assert!(editor.contains(&("set_content".to_string(), "sensitive".to_string())), "{editor:?}");
-        assert!(editor.contains(&("save_as".to_string(), "standard".to_string())));
+        let has = |list: &ActionList, name: &str, grade: &str| {
+            list.iter().any(|l| l.name == name && l.grade == grade)
+        };
+        assert!(has(&editor, "set_content", "sensitive"), "{editor:?}");
+        assert!(has(&editor, "save_as", "standard"));
         let shell = listed_actions(SHELL);
-        assert!(shell.contains(&("editor_set_content".to_string(), "standard".to_string())));
+        assert!(has(&shell, "editor_set_content", "standard"));
+        let sig = shell.iter().find(|l| l.name == "editor_save_as").map(|l| l.sig.as_str());
+        assert_eq!(sig, Some("editor_save_as(path)"), "the signature as the app wrote it");
+    }
+
+    /// Reading C's T7, from the real descriptions: the editor was described, the shell was not, and
+    /// the sensitive write is the moment to look.
+    #[test]
+    fn a_sensitive_action_looks_for_its_twin_only_when_the_host_is_unread() {
+        let mut d = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "editor"}), EDITOR, &mut d);
+        let act = |app: &str, action: &str| serde_json::json!({"app": app, "action": action, "args": {"text": "x"}});
+        assert_eq!(
+            twin_lookup(ACT, &act("editor", "set_content"), &d),
+            Some(serde_json::json!({"app": "shell", "actions": "editor_"}))
+        );
+        assert_eq!(twin_lookup(ACT, &act("editor", "save_as"), &d), None, "standard: no card, nothing to find");
+        assert_eq!(twin_lookup(ACT, &act("calendar", "delete_event"), &d), None, "grade unknown: not described");
+        assert_eq!(twin_lookup(DESCRIBE, &act("editor", "set_content"), &d), None, "reads raise no card");
+        record_described(&serde_json::json!({"app": "shell"}), SHELL, &mut d);
+        assert_eq!(twin_lookup(ACT, &act("editor", "set_content"), &d), None, "the shell is read already");
+    }
+
+    /// The hint carries the family with its signatures — what Hermes used — not one bare name.
+    #[test]
+    fn the_twin_hint_names_the_whole_family_with_signatures() {
+        let d = described_from_fixtures();
+        let hint = lower_grade_twin(
+            ACT,
+            &serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "x"}}),
+            &d,
+        )
+        .expect("the twin exists on the shell");
+        for sig in ["editor_new()", "editor_set_content(text)", "editor_save_as(path)"] {
+            assert!(hint.contains(sig), "{sig} missing: {hint}");
+        }
+        assert!(!hint.contains("files_new_folder"), "only the editor's family: {hint}");
+    }
+
+    /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.
+    const NO_ANSWER: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and did not answer within 110s, so nothing was run. They were probably away from the keyboard. Tell them what you were trying to do; they can ask you to try it again.";
+    const SAID_NO: &str = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and said no. Nothing was run and nothing was changed. This is an answer, not an error: do not ask again and do not look for another route to the same effect. Say what you were going to do and leave it with them.";
+    const LOST: &str = "refused: the person was shown a card asking them to allow editor.set_content, and then the desktop stopped answering: timed out. It was asked again every 2s for 110s and never replied. Nothing was run here.";
+
+    #[test]
+    fn the_persons_answer_is_read_off_the_desktops_own_refusal() {
+        assert_eq!(approval_answer(NO_ANSWER), Some(("editor.set_content".into(), Answer::NoAnswer)));
+        assert_eq!(approval_answer(SAID_NO), Some(("editor.set_content".into(), Answer::SaidNo)));
+        assert_eq!(approval_answer(LOST), None, "nobody knows what they did");
+        assert_eq!(approval_answer("Done \u{2014} editing arena.txt"), None);
+    }
+
+    /// Reading C's T7 second card, and the rule that a no covers the twin.
+    #[test]
+    fn an_answered_card_is_not_raised_again_and_a_no_covers_the_twin() {
+        let act = |app: &str, action: &str, text: &str| {
+            serde_json::json!({"app": app, "action": action, "args": {"text": text}})
+        };
+        let mut answered = std::collections::HashMap::new();
+        answered.insert("editor.set_content".to_string(), Answer::NoAnswer);
+        let again = already_answered(ACT, &act("editor", "set_content", "a\nb"), &answered)
+            .expect("different arguments, same card");
+        assert!(again.contains("did not answer"), "{again}");
+        assert_eq!(
+            already_answered(ACT, &act("shell", "editor_set_content", "a"), &answered),
+            None,
+            "no answer is not a no: the door that does not ask stays open"
+        );
+        answered.insert("editor.set_content".to_string(), Answer::SaidNo);
+        let twin = already_answered(ACT, &act("shell", "editor_set_content", "a"), &answered)
+            .expect("a no covers the same change through the other door");
+        assert!(twin.contains("their no covers it"), "{twin}");
+        let mut by_shell = std::collections::HashMap::new();
+        by_shell.insert("shell.editor_set_content".to_string(), Answer::SaidNo);
+        assert!(already_answered(ACT, &act("editor", "set_content", "a"), &by_shell).is_some());
+        assert_eq!(already_answered(ACT, &act("editor", "save_as", "a"), &answered), None);
+        assert_eq!(already_answered(DESCRIBE, &serde_json::json!({"app": "editor"}), &answered), None);
     }
 
     fn described_from_fixtures() -> std::collections::HashMap<String, ActionList> {

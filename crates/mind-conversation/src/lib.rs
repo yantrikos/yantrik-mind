@@ -4373,6 +4373,14 @@ pub fn set_machine_place(place: Option<String>) {
 }
 
 /// The sentence the agent prompt carries about where the computer is, or nothing.
+/// E.ARENA1-F9: the most one step's model call may wait — half of what the loop has left, never
+/// under a minute. Half leaves room for the fallback, or one more try, when a request hangs; the
+/// minute keeps a slow local lane's ordinary call from being cut. It scales with the budget, so a
+/// long delegated turn still allows long calls.
+fn step_call_cap(loop_left_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis((loop_left_ms / 2).max(60_000))
+}
+
 /// A twin hint is given once per exact call; this is the key it is remembered by.
 fn call_sig_for_twin(tool: &str, args: &serde_json::Value) -> String {
     format!("{tool}|{args}")
@@ -12593,6 +12601,11 @@ Open reminders you're carrying for them:",
         let mut described: std::collections::HashMap<String, desktop::ActionList> =
             std::collections::HashMap::new();
         let mut twin_hinted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F8: the host families already looked up for a twin this turn.
+        let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
+        let mut answered: std::collections::HashMap<String, desktop::Answer> =
+            std::collections::HashMap::new();
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -12773,12 +12786,29 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // PRIVATE-GROUNDED: this turn carries the speaker's private memory grounding, so it must
             // PREFER the private (owned-hardware) lane and only escalate to cloud with an audit —
             // Sol's Constitutional-Kernel first rung (was an unscoped Household call = silent leak).
-            let resp = match self
-                .inference
-                .chat_grounded_tools(messages, cfg.clone(), schemas.clone())
-                .await
+            // E.ARENA1-F9: one request may not spend the turn. Reading C, T6: one call hung 300 s
+            // (the client's own timeout, sized for a 27B lane authoring a project) inside a 180 s
+            // turn, and the fallback after it answered in one second.
+            let call_cap = step_call_cap(
+                loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
+            );
+            let resp = match mind_inference::with_call_cap(
+                call_cap,
+                self.inference
+                    .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+            )
+            .await
             {
                 Ok(r) => r,
+                // Past the first step the turn has a work log; a model that stops answering
+                // mid-turn must not throw it away.
+                Err(e) if step > 0 => {
+                    eprintln!("[agent] step {step}: the model call failed ({e:#}) — composing from the work log");
+                    scratch.push_str(
+                        "\n(the model stopped answering mid-turn — stop calling tools and answer from the log above)",
+                    );
+                    break;
+                }
                 Err(e) => return Ok(format!("(couldn't think just now: {e})")),
             };
             // Split the model's reasoning off the reply and STREAM IT. The reasoning is the most
@@ -13259,22 +13289,49 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane, &goal_id,
             );
             let tool_started = std::time::Instant::now();
-            // E.ARENA1-F7: a sensitive desktop action with a standard twin is pointed at the twin
-            // once, before it can stall the turn on a permission prompt. Sent again, it goes through.
-            let twin_note = if twin_hinted.contains(&call_sig_for_twin(&tool, &args)) {
-                None
+            // Before a desktop action can put a card in front of the person: E.ARENA1-F10, a card
+            // they already answered this turn is not raised again (and a no covers the twin);
+            // F8, a sensitive action whose host family is unread gets that one read; F7, a
+            // sensitive action with a standard twin is pointed at it once. Sent again, it goes
+            // through to the person.
+            let not_sent = if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
+                Some(note)
             } else {
-                desktop::lower_grade_twin(&tool, &args, &described)
-            };
-            let obs = match twin_note {
-                Some(note) => {
-                    twin_hinted.insert(call_sig_for_twin(&tool, &args));
-                    note
+                if let Some(look) = desktop::twin_lookup(&tool, &args, &described) {
+                    if twin_looked.insert(look.to_string()) {
+                        let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        eprintln!(
+                            "[agent] step {step}: looked for a lower-grade twin ({look}) -> {}",
+                            seen.chars().take(80).collect::<String>().replace('\n', " ")
+                        );
+                        desktop::record_described(&look, &seen, &mut described);
+                    }
                 }
+                let sig = call_sig_for_twin(&tool, &args);
+                match desktop::lower_grade_twin(&tool, &args, &described) {
+                    Some(note) if twin_hinted.insert(sig.clone()) => Some(note),
+                    _ => None,
+                }
+            };
+            let sent = not_sent.is_none();
+            let obs = match not_sent {
+                Some(note) => note,
                 None => self.run_agent_tool_as(&tool, &args, id).await,
             };
+            if !sent {
+                // Nothing reached the desktop, so nothing was done: the same call sent next must
+                // not be refused as a repeat. F7 promised "send this call again and it will go to
+                // the person", and the repeat guard was quietly breaking that promise.
+                done_calls.remove(&call_sig);
+                last_call.clear();
+            }
             if tool == desktop::DESCRIBE {
                 desktop::record_described(&args, &obs, &mut described);
+            }
+            if sent && tool == desktop::ACT {
+                if let Some((key, answer)) = desktop::approval_answer(&obs) {
+                    answered.insert(key, answer);
+                }
             }
             let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             eprintln!(

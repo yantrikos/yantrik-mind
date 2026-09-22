@@ -9137,3 +9137,34 @@ Last, and **the only mind that told its owner something false**: *"An event call
 **Also found:** the arena's reset cannot see the mind's private calendar, so arena events from earlier readings sit in it and leak into later answers ("the Arena min160 date I have noted for Wed Sep 23"). With the desktop-calendar fix deployed that store is no longer on the menu; until then it is a contaminant the reading carries.
 
 **The repeats, still open.** The mind re-issues an identical call after getting its result — on the local model *and* on deepseek. A clean reconstruction of the two prompt shapes (work-log prose vs. a real transcript) produced **0/10 repeats in both**, so my first explanation — "the work log puts the user's request last" — is not supported. The cause is something in the real prompt the reconstruction left out. The proxy capture from B3 is the evidence the next step is built on.
+
+### E.ARENA1 — the same-model readings, each fix measured by itself
+
+Every reading below is **Yantrik Mind on `deepseek-v4.1-flash`** — the model Hermes, Pi and DeepSeek run — with the owner's documented consent (`YM_PRIVATE_PROVIDERS`) and a logging proxy in front of ollama.com for the whole run, so every model call is on record. Between readings, exactly one thing changed: the mind's code.
+
+| reading | build | what changed | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B3** | `d99d97b` (shipped) | — | ok | — | LIE | LIE | — | — | — | 1/7 | 2 | 5.2 s |
+| **B′** | `dfc881d` | attach shape · one calendar · work-log condenser | ok | ok | ok | ok | — | — | — | **4/7** | **0** | 7.2 s |
+| **B″** | `7e42139` | + MCP cap no longer cuts the desktop | ok | ok | ok | ok | — | — | — | 4/7 | 0 | **5.0 s** |
+| Hermes (Reading A) | 0.14.0 | — | ok | ok | ok | ok | ok | ok | ok | 7/7 | 0 | 11.0 s |
+
+On B″'s calendar and app tasks this mind is **at or ahead of Hermes on the same model**: 3.9 s to open an app (Hermes 4.7), 3.9 s to answer the calendar (11.0), 6.2 s to add an event (6.2).
+
+**What the proxy showed, and it overturned what I believed.** Model calls return in 0.5–1 s; the model was never the slow part. B3 made the same call three times in a row on every turn — `calendar {}` ×3, `os_describe calendar` ×3 — and I had written the repeats off as a weak-model habit. On deepseek they happened anyway. A clean reconstruction of two prompt shapes produced 0/10 repeats in both, so the prompt layout was not the cause either. Reading the exact captured work log was: **every tool result was clipped to 900 characters**, and a desktop description is its state followed by its actions, so the clip always fell inside the state. The calendar's `update_event` was never shown; the model re-described to find it, got the same clipped text, and the compose step — which sees no tools — answered "I don't have a tool to edit calendar events". The repeats were the model asking for what the harness kept cutting off.
+
+**Five harness defects, each found by measurement and each fixed with a test, a real fixture and mutants watched to fail:**
+
+| fix | commit | the defect |
+|---|---|---|
+| F0 | `48c4e36` | the OS read the mind as `tools:false` — capabilities were nested where the OS does not read them |
+| F1 | `0cd3c54` | two calendars: the mind's private one shadowed the desktop's, answered "nothing for 14 days" and claimed "Added" on the wrong date |
+| F3 | `dfc881d` | the work log clipped every result to 900 chars — before any app's actions |
+| F4 | `7e42139` | the MCP boundary clipped read-only results to 6,000 chars — before the shell's first action at ~11,800; found by asking the desktop's MCP server directly, which returns them fine |
+| F5 | `abb6fb4` | the mind refused on the strength of its OWN earlier replies ("same wall as arena-minnop.txt"): its tool search never mentioned the desktop, and the unfinished-request nudge offered "or say plainly that you cannot" to a turn that had not looked |
+
+F5 is a product defect as much as a benchmark one: after a fix ships, a person once told "I can't" keeps hearing it, because the mind believes its own old words.
+
+**Configuration findings, not yet acted on:** a mind configured with a local model runs every agent step on it regardless of `YM_PRIMARY_BRAIN`; the startup banner says "LOCAL primary" even with `YM_LOCAL_ROLE=fallback`; and with only a cloud model configured the mind refuses every turn with a message claiming unreachable hardware, while nothing on a Yantrik OS machine ever asks the owner for the consent (`YM_PRIVATE_PROVIDERS`) that would let it answer.
+
+**Still n=1 per cell (K23).** These are smoke readings; the claim waits for repeats.

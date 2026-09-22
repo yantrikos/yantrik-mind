@@ -157,9 +157,40 @@ pub(crate) fn look_first_nudge(step: usize, clause: &str) -> String {
     )
 }
 
+/// The one call that shows what an app can DO: its actions.
+pub(crate) const DESCRIBE: &str = "mcp.yantrik-os.os_describe";
+
 /// Should the unfinished-request nudge send this turn to look at the desktop first?
+///
+/// "Looked" means described an app. Reading B‴ refused the file task after only `os_apps`, which
+/// lists what is open and not what anything can do — and any desktop call used to count as looking.
 pub(crate) fn must_look_first(desktop: bool, tools_called: &[&str]) -> bool {
-    desktop && !tools_called.iter().any(|t| t.starts_with("mcp.yantrik-os."))
+    desktop && !tools_called.iter().any(|t| *t == DESCRIBE)
+}
+
+/// E.ARENA1-F6: does this call change the desktop, so that what was read before it is no longer
+/// true?
+pub(crate) fn changes_the_desktop(tool: &str) -> bool {
+    tool == "mcp.yantrik-os.os_act"
+}
+
+/// Desktop READS — the calls whose answer depends on the desktop's current state.
+const DESKTOP_READS: [&str; 3] = [
+    "mcp.yantrik-os.os_describe",
+    "mcp.yantrik-os.os_apps",
+    "mcp.yantrik-os.os_perception",
+];
+
+/// E.ARENA1-F6: forget earlier desktop reads, because an action just changed what they describe.
+///
+/// The loop refuses a call identical to an earlier one and hands back the logged result instead —
+/// right for a read of something that does not change, wrong on a desktop. Reading B‴: the mind
+/// described `files`, was told "files is not running", opened it, described it again, and was handed
+/// "not running" from the log; the same with the editor after it had just opened a new tab. Actions
+/// stay remembered — repeating the same `new` must not open a second tab — only reads are forgotten.
+/// `done` holds the loop's `tool|args` call signatures.
+pub(crate) fn forget_desktop_reads(done: &mut std::collections::HashSet<String>) {
+    done.retain(|sig| !DESKTOP_READS.iter().any(|r| sig.starts_with(&format!("{r}|"))));
 }
 
 /// Where a condensed description's action list begins. Also how a second pass recognises one.
@@ -213,6 +244,28 @@ mod tests {
     const CALENDAR: &str = include_str!("../fixtures/desktop/describe_calendar.txt");
     const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
 
+    /// Reading B‴: after opening Files, a second describe of `files` was served the pre-action
+    /// "not running" from the log. An action forgets the reads it invalidated, and only those.
+    #[test]
+    fn an_action_forgets_the_reads_it_invalidated_and_nothing_else() {
+        let mut done: std::collections::HashSet<String> = [
+            r#"mcp.yantrik-os.os_describe|{"app":"files"}"#,
+            "mcp.yantrik-os.os_apps|{}",
+            r#"mcp.yantrik-os.os_act|{"app":"editor","action":"new"}"#,
+            r#"web_fetch|{"url":"x"}"#,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(changes_the_desktop("mcp.yantrik-os.os_act"));
+        assert!(!changes_the_desktop("mcp.yantrik-os.os_describe"));
+        forget_desktop_reads(&mut done);
+        assert!(!done.iter().any(|s| s.starts_with("mcp.yantrik-os.os_describe|")));
+        assert!(!done.iter().any(|s| s.starts_with("mcp.yantrik-os.os_apps|")));
+        assert!(done.iter().any(|s| s.starts_with("mcp.yantrik-os.os_act|")), "a repeated action must stay deduplicated");
+        assert!(done.contains(r#"web_fetch|{"url":"x"}"#), "nothing off the desktop is touched");
+    }
+
     /// Reading B'': the mind searched its own tools, found nothing, and said it could not. The
     /// search must say where the desktop's actions are, and keep the phrase the outcome classifier
     /// reads as an empty result.
@@ -230,6 +283,10 @@ mod tests {
     fn a_turn_that_never_looked_must_look_before_refusing() {
         assert!(must_look_first(true, &[]));
         assert!(must_look_first(true, &["discover_tools"]), "searching its own tools is not looking");
+        assert!(
+            must_look_first(true, &["mcp.yantrik-os.os_apps"]),
+            "listing what is open is not looking at what anything can do"
+        );
         assert!(!must_look_first(true, &["discover_tools", "mcp.yantrik-os.os_describe"]));
         assert!(!must_look_first(false, &[]), "no desktop, no desktop to look at");
         let n = look_first_nudge(2, "create a folder");

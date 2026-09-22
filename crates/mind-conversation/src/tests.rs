@@ -16033,3 +16033,110 @@ mod desktop_look_first_wiring {
         assert!(out.contains("this search does not cover them"), "{out}");
     }
 }
+
+/// E.ARENA1-F6 through the real agent loop: after an action on the desktop, reading the same app
+/// again must really read it. Reading B-triple-prime was handed the pre-action "files is not
+/// running" from the log after it had opened Files.
+#[cfg(test)]
+mod desktop_stale_read_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    /// Plays a fixed plan of tool calls whenever it is offered tools, and records every prompt.
+    struct Planner {
+        step: AtomicUsize,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Planner {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let plan = [
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "files"})),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "open_app", "args": {"name": "files"}})),
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "files"})),
+            ];
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match plan.get(i) {
+                Some((name, args)) => vec![yantrik_ml::ToolCall { name: name.to_string(), arguments: args.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "planner"
+        }
+    }
+
+    fn scripted(name: &str, responses: Vec<&str>) -> (mind_tools::McpTool, Vec<std::result::Result<String, String>>) {
+        (
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: name.into(),
+                description: format!("{name} on this computer"),
+                // read_only so the test double runs on the read path; the invalidation under test
+                // keys on the tool's NAME, not on how it is gated.
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            responses.into_iter().map(|r| Ok(r.to_string())).collect(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_after_an_action_really_reads_again() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let planner = Planner { step: AtomicUsize::new(0), seen: seen.clone() };
+        let pool = InferencePool::new(Arc::new(planner) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        for (tool, responses) in [
+            scripted("os_describe", vec!["files is not running", "FILES-NOW-OPEN\n  act: files_new_folder(name)  [standard]"]),
+            scripted("os_act", vec!["Done - files screen"]),
+        ] {
+            hub.add_scripted_tool(tool, responses).unwrap();
+        }
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a folder called arena-x in my home folder.", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("FILES-NOW-OPEN")),
+            "the second describe was served the pre-action answer from the log ({} prompts)",
+            prompts.len()
+        );
+    }
+}

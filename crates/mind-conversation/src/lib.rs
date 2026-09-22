@@ -13220,6 +13220,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 continue;
             }
+            // E.ARENA1-F6: an action on the desktop makes every earlier desktop read stale, so a
+            // read after it must really run rather than be served the pre-action answer.
+            if desktop::changes_the_desktop(&tool) {
+                desktop::forget_desktop_reads(&mut done_calls);
+            }
             last_call = call_sig.clone();
             done_calls.insert(call_sig);
             // What this step is about to run, with the arguments that survived the egress cleaner —

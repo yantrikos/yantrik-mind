@@ -42,6 +42,7 @@ pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, Sec
 mod book;
 mod briefing;
 mod build;
+mod desktop;
 mod calendar;
 mod capabilities;
 mod entrypoint;
@@ -11274,6 +11275,12 @@ WINDOW: all-time, latest 200
             Err(refused) => return refused,
         };
         let args = &args;
+        // E.ARENA1-F1: on a Yantrik OS machine the calendar is the desktop's. A private calendar
+        // tool called by name — every tool stays callable by name even off the menu — is answered
+        // with where the calendar is, never run against a store the person cannot see.
+        if let Some(redirect) = desktop::superseded(tool, self.desktop_attached()) {
+            return redirect;
+        }
         // Every argument is read through the ALIAS TABLE the boundary validated against
         // (`tool_catalog::read_arg`), so the dispatch and the contract cannot disagree about what a
         // call means. The hand-written `s("a")`-then-`s("b")` chains that used to live in the arms

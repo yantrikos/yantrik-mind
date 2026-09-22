@@ -15791,3 +15791,68 @@ mod forget_report_tests {
         );
     }
 }
+
+/// E.ARENA1-F1 through the REAL engine, not just the pure functions: with a Yantrik OS desktop's
+/// tools connected, the agent's menu offers one calendar and a private calendar tool called by name
+/// changes nothing. The arena caught this mind telling the desktop "Added" for an event that went
+/// into its private store on the wrong date.
+#[cfg(test)]
+mod desktop_calendar_wiring {
+    use super::*;
+
+    fn engine(with_desktop: bool) -> ConversationEngine {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        if !with_desktop {
+            return conv;
+        }
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_describe".into(),
+                description: "The current state of one app".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok("{}".into())],
+        )
+        .unwrap();
+        conv.with_mcp(Arc::new(hub))
+    }
+
+    #[test]
+    fn with_the_desktop_attached_the_menu_offers_one_calendar() {
+        let conv = engine(true);
+        assert!(conv.desktop_attached());
+        let menu = conv.catalog_source();
+        assert!(menu.contains("There is no other calendar on this machine"), "{menu}");
+        assert!(!menu.contains("calendar_add {text}"), "the private calendar is still on the menu");
+        assert!(menu.contains("forget_date"), "a person's dated entry is not a calendar event");
+    }
+
+    #[test]
+    fn without_a_desktop_the_private_calendar_stays_on_the_menu() {
+        let conv = engine(false);
+        assert!(!conv.desktop_attached());
+        assert!(conv.catalog_source().contains("calendar_add {text}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_calendar_tool_called_by_name_changes_nothing() {
+        let conv = engine(true);
+        let out = conv
+            .run_agent_tool_as(
+                "calendar_add",
+                &serde_json::json!({"text": "Arena check on 30 September 2026 at 15:00"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.contains("Nothing was read or changed"), "{out}");
+        assert!(!out.to_lowercase().contains("added"), "the private store took the event: {out}");
+    }
+}

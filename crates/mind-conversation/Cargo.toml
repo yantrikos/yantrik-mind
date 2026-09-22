@@ -25,4 +25,6 @@ chrono-tz = "0.10"
 
 [dev-dependencies]
 mind-memory = { workspace = true, features = ["fixtures"] }
+# E.ARENA1-F1: scripted MCP tools, so the desktop-calendar wiring is tested through the real engine.
+mind-tools = { workspace = true, features = ["test-support"] }
 sha2 = "0.10"

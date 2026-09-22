@@ -269,12 +269,7 @@ async fn run(mem: MemoryHandle, conv: Arc<ConversationEngine>, detail: String) {
         let attached = call(
             address.clone(),
             ATTACH,
-            serde_json::json!({
-                "id": ID,
-                "name": NAME,
-                "detail": detail,
-                "capabilities": { "streaming": false, "tools": true, "memory": true },
-            }),
+            attach_payload(&detail),
             timeout,
         )
         .await;
@@ -441,6 +436,53 @@ fn machine_place(context: &str) -> Option<String> {
         out.push_str(&format!(" ({tz})"));
     }
     Some(out)
+}
+
+/// What this mind says about itself when it attaches.
+///
+/// `tools` and `memory` sit at the TOP LEVEL because that is where the OS reads them:
+/// `yantrik_harness::protocol::Attach` is `{id, name, detail, tools, memory}`, each with
+/// `#[serde(default)]`. This used to nest them inside a `capabilities` object -- the shape the OS's
+/// own protocol doc describes, and not the shape its struct parses -- so serde filled both with
+/// `false`, and every Yantrik OS machine's mind picker advertised this mind as unable to act or
+/// remember while Hermes, OpenClaw, Pi and DeepSeek, which send them top-level, showed as fully
+/// capable. Found on the live nightly (VM 520, 2026-09-22): `"id": "mind", "tools": false`.
+pub(crate) fn attach_payload(detail: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": ID,
+        "name": NAME,
+        "detail": detail,
+        "tools": true,
+        "memory": true,
+    })
+}
+
+#[cfg(test)]
+mod attach_tests {
+    /// Reads a field the way the OS's `Attach` does: `#[serde(default)] bool` at the TOP LEVEL, so
+    /// a field that is missing -- or nested somewhere else, which is what happened -- is `false`.
+    /// Checking that the word "tools" appears somewhere in the payload would have passed the bug.
+    fn as_the_os_reads(payload: &serde_json::Value, field: &str) -> bool {
+        payload.get(field).and_then(serde_json::Value::as_bool).unwrap_or(false)
+    }
+
+    #[test]
+    fn the_os_reads_this_mind_as_able_to_act_and_remember() {
+        let payload = super::attach_payload("test");
+        assert_eq!(payload["id"], "mind");
+        assert!(payload["name"].is_string(), "the OS requires a name");
+        assert!(as_the_os_reads(&payload, "tools"), "the OS would show this mind as unable to act");
+        assert!(as_the_os_reads(&payload, "memory"), "the OS would show this mind as unable to remember");
+    }
+
+    /// The old shape, kept as the thing this test exists to refuse.
+    #[test]
+    fn a_nested_capability_is_invisible_to_the_os() {
+        let old = serde_json::json!({ "id": "mind", "name": "Yantrik Mind",
+            "capabilities": { "tools": true, "memory": true } });
+        assert!(!as_the_os_reads(&old, "tools"));
+        assert!(!as_the_os_reads(&old, "memory"));
+    }
 }
 
 #[cfg(test)]

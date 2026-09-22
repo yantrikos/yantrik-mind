@@ -15912,3 +15912,124 @@ mod desktop_mcp_bound_wiring {
         assert!(out.chars().count() <= 6000, "{} chars", out.chars().count());
     }
 }
+
+/// E.ARENA1-F5 through the real agent loop. Reading B'' failed the folder, file and
+/// calendar-to-file tasks because the model refused on the strength of its own earlier replies and
+/// the loop offered it "or say plainly that you cannot". With the desktop attached, a turn that has
+/// not looked at the desktop is sent to look first; without one, nothing changes.
+#[cfg(test)]
+mod desktop_look_first_wiring {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Refuses in plain text every time, and keeps every prompt it was shown.
+    struct Refuser(Arc<StdMutex<Vec<String>>>);
+    impl LLMBackend for Refuser {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let all: String = m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n");
+            self.0.lock().unwrap().push(all);
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: "I can't create folders — I have no tool for that.".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "refuser"
+        }
+    }
+
+    async fn prompts_for(with_desktop: bool) -> Vec<String> {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(Refuser(seen.clone())) as Arc<dyn LLMBackend>, 1);
+        let mut conv = ConversationEngine::new(memarc, pool, "YM");
+        if with_desktop {
+            let hub = mind_tools::McpHub::new();
+            hub.add_scripted_tool(
+                mind_tools::McpTool {
+                    server: "yantrik-os".into(),
+                    name: "os_describe".into(),
+                    description: "The current state of one app".into(),
+                    read_only: true,
+                    open_world: false,
+                    destructive: false,
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+                vec![Ok("{}".into())],
+            )
+            .unwrap();
+            conv = conv.with_mcp(Arc::new(hub));
+        }
+        let _ = conv
+            .agent_loop_for_eval("Create a folder called arena-x in my home folder.", &TurnIdentity::primary())
+            .await;
+        let out = seen.lock().unwrap().clone();
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_without_looking_is_sent_to_look_at_the_desktop() {
+        let prompts = prompts_for(true).await;
+        assert!(
+            prompts.iter().any(|p| p.contains("EARLIER turns is not evidence")),
+            "the loop accepted a refusal without sending it to look ({} prompts)",
+            prompts.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn without_a_desktop_nothing_changes() {
+        let prompts = prompts_for(false).await;
+        assert!(!prompts.iter().any(|p| p.contains("EARLIER turns is not evidence")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_search_names_the_desktop_while_it_is_attached() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(Refuser(seen)) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_apps".into(),
+                description: "apps".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok("{}".into())],
+        )
+        .unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let out = conv
+            .run_agent_tool_as("discover_tools", &serde_json::json!({"query": "create folder"}), &TurnIdentity::primary())
+            .await;
+        assert!(out.contains("this search does not cover them"), "{out}");
+    }
+}

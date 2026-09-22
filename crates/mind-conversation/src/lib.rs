@@ -11925,8 +11925,14 @@ WINDOW: all-time, latest 200
                         out.push_str(&hits.iter().map(|s| format!("- {} [{}]: {}", s.name, s.lang, s.summary)).collect::<Vec<_>>().join("\n"));
                     }
                 }
-                if out.is_empty() {
+                let out = if out.is_empty() {
                     "(no tool or saved skill matches — use build_capability to create one, then run_skill it)".to_string()
+                } else {
+                    out
+                };
+                // E.ARENA1-F5: this search covers the mind's own tools, not the desktop's actions.
+                if self.desktop_attached() {
+                    format!("{out}{}", desktop::DISCOVER_DESKTOP_NOTE)
                 } else {
                     out
                 }
@@ -12576,6 +12582,7 @@ Open reminders you're carrying for them:",
         // At most one reminder that part of the request went untouched; after that the
         // turn ends and says so rather than arguing with itself.
         let mut unfinished_nudged = false;
+        let mut looked_first_nudged = false;
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -12998,6 +13005,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // 2026-08-16 was this exact silence.
                 // Before this counts as the answer: was part of what was asked never attempted?
                 if let Some(clause) = unattempted_side_effect(user_text, &cost.calls) {
+                    // E.ARENA1-F5: a turn that never looked at the desktop is sent to look, not
+                    // offered the exit of saying it cannot on the strength of earlier replies.
+                    let called: Vec<&str> = cost.calls.keys().map(String::as_str).collect();
+                    if !looked_first_nudged && desktop::must_look_first(self.desktop_attached(), &called) {
+                        looked_first_nudged = true;
+                        eprintln!("[agent] step {step}: would refuse \"{clause}\" without looking at the desktop — sending it to look");
+                        scratch.push_str(&desktop::look_first_nudge(step, &clause));
+                        continue;
+                    }
                     if !unfinished_nudged {
                         unfinished_nudged = true;
                         eprintln!(

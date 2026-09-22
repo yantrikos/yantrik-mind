@@ -131,6 +131,37 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
     Some(out)
 }
 
+/// E.ARENA1-F5: what `discover_tools` adds while the desktop is attached.
+///
+/// Reading B'' (same model as Hermes, the first four fixes in) failed the folder, file and
+/// calendar-to-file tasks the same way: the mind searched `discover_tools` for "create folder" /
+/// "write file", was told "no tool or saved skill matches — use build_capability to create one",
+/// and concluded it could not. That search covers only the mind's OWN tools. The desktop's
+/// `files_new_folder` and `editor_save_as` are listed by `os_describe`, and nothing said so.
+pub(crate) const DISCOVER_DESKTOP_NOTE: &str = "\nON THIS COMPUTER the desktop's own apps do most things, and this search does not cover them: files and folders are the `shell` app (files_*), writing a file's text is the `editor` app, and the calendar and notes are apps too. mcp.yantrik-os.os_describe {app} lists each app's actions; call them with mcp.yantrik-os.os_act.";
+
+/// E.ARENA1-F5: the nudge for a turn that has not looked at the desktop at all and wants to answer.
+///
+/// The old nudge ended "Do that now with one tool call, or say plainly that you cannot." With the
+/// mind's own earlier replies in the conversation reading "I have no tool that writes files" — true
+/// only because a since-fixed clip hid the actions — the model took the exit it was offered, citing
+/// "same wall as arena-minnop.txt". Its earlier words are not evidence of what this computer can do.
+/// Before it may say it cannot, it looks.
+pub(crate) fn look_first_nudge(step: usize, clause: &str) -> String {
+    format!(
+        "\n[{step}] (you have not yet {clause}, and you have not looked at what this computer can do \
+         this turn. What you said in EARLIER turns is not evidence of that — the desktop's apps are. \
+         Call mcp.yantrik-os.os_describe on the app that would do it — `shell` for files and folders, \
+         `editor` for a file's text — and then do it with mcp.yantrik-os.os_act. Only if that app \
+         lists no action for it may you say you cannot.)"
+    )
+}
+
+/// Should the unfinished-request nudge send this turn to look at the desktop first?
+pub(crate) fn must_look_first(desktop: bool, tools_called: &[&str]) -> bool {
+    desktop && !tools_called.iter().any(|t| t.starts_with("mcp.yantrik-os."))
+}
+
 /// Where a condensed description's action list begins. Also how a second pass recognises one.
 const CONDENSED_MARK: &str = "\nACTIONS:";
 
@@ -181,6 +212,30 @@ mod tests {
 
     const CALENDAR: &str = include_str!("../fixtures/desktop/describe_calendar.txt");
     const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    /// Reading B'': the mind searched its own tools, found nothing, and said it could not. The
+    /// search must say where the desktop's actions are, and keep the phrase the outcome classifier
+    /// reads as an empty result.
+    #[test]
+    fn the_search_points_at_the_desktops_own_actions() {
+        for app in ["`shell`", "`editor`", "files_", "os_describe"] {
+            assert!(DISCOVER_DESKTOP_NOTE.contains(app), "{app}");
+        }
+        assert!(DISCOVER_DESKTOP_NOTE.contains("this search does not cover them"));
+    }
+
+    /// A turn that never looked at the desktop is sent to look before it may refuse; one that
+    /// looked keeps the old, honest exit.
+    #[test]
+    fn a_turn_that_never_looked_must_look_before_refusing() {
+        assert!(must_look_first(true, &[]));
+        assert!(must_look_first(true, &["discover_tools"]), "searching its own tools is not looking");
+        assert!(!must_look_first(true, &["discover_tools", "mcp.yantrik-os.os_describe"]));
+        assert!(!must_look_first(false, &[]), "no desktop, no desktop to look at");
+        let n = look_first_nudge(2, "create a folder");
+        assert!(n.contains("EARLIER turns is not evidence"), "{n}");
+        assert!(!n.contains("or say plainly that you cannot"), "the old exit is the defect: {n}");
+    }
 
     /// The arena's T5/T6 on the same model Hermes passes with: the 6,000-character MCP cap cut the
     /// shell before its first action. Pinned from the real description.

@@ -13340,10 +13340,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             } else {
                 300
             };
-            scratch.push_str(&format!(
-                "\n[{step}] {tool} -> {}{}",
-                obs.chars().take(head).collect::<String>(),
-                outcome.note()
+            // E.ARENA1-F3: a desktop description keeps its ACTIONS, not just its first 900 chars.
+            // Clipped, the calendar never showed `update_event` and the shell never showed
+            // `files_new_folder`, so the model re-described, re-described, and gave up saying it had
+            // no tool for the job. See `desktop::condense_description`.
+            scratch.push_str(&desktop::work_log_entry(
+                step,
+                &tool,
+                &obs,
+                outcome == crate::tool_outcome::Outcome::Ok,
+                head,
+                outcome.note(),
             ));
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model

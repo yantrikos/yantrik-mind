@@ -59,9 +59,170 @@ pub(crate) fn superseded(tool: &str, desktop: bool) -> Option<String> {
     ))
 }
 
+/// How much of an app's STATE a desktop description keeps in the work log.
+pub(crate) const DESKTOP_STATE_HEAD: usize = 900;
+/// How much room the ACTION list gets, descriptions included; signatures are never dropped.
+pub(crate) const DESKTOP_ACTIONS_BUDGET: usize = 6000;
+
+/// E.ARENA1-F3: a desktop description, condensed so its ACTIONS survive the work log.
+///
+/// Every successful tool result entered the agent's work log clipped to 900 characters. A desktop
+/// app's description is its state (JSON) followed by the list of actions it offers, so the clip always
+/// landed in the state: the calendar's `update_event` sat past character 900, and in the shell's
+/// 22.6 KB description the first action line starts at character 11,847. Captured through a proxy on
+/// the live nightly, on the same model Hermes passes with: the model described the calendar, saw no
+/// way to edit it, described it again, and again, then answered "I don't have a tool to edit calendar
+/// events". Its repeats were not a habit; it was asking for the part the harness kept cutting off.
+///
+/// So: the head of the state, then EVERY action signature, with each action's description and
+/// argument lines while `DESKTOP_ACTIONS_BUDGET` lasts. `None` when `obs` is not a description with
+/// actions, so every other tool keeps the old clip.
+pub(crate) fn condense_description(obs: &str) -> Option<String> {
+    let lines: Vec<&str> = obs.lines().collect();
+    let first_act = lines.iter().position(|l| l.starts_with("  act: "))?;
+    let state = lines[..first_act].join("\n");
+    let mut out: String = state.chars().take(DESKTOP_STATE_HEAD).collect();
+    if state.chars().count() > DESKTOP_STATE_HEAD {
+        out.push_str("\n… (state trimmed)");
+    }
+    out.push_str("\nACTIONS:");
+
+    // Signatures first, all of them: they are what the model must be able to call.
+    let signatures: Vec<&str> = lines[first_act..]
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("  act: "))
+        .collect();
+    let sig_len: usize = signatures.iter().map(|l| l.len() + 1).sum();
+    let mut room = DESKTOP_ACTIONS_BUDGET.saturating_sub(sig_len);
+
+    // Then each action WITH its detail lines while room lasts; after that, signature only.
+    let mut trimmed = false;
+    let mut i = first_act;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.starts_with("  act: ") {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && !lines[j].starts_with("  act: ") && lines[j].starts_with("   ") {
+            j += 1;
+        }
+        let detail: String = lines[i + 1..j].iter().map(|d| format!("\n{d}")).collect();
+        out.push('\n');
+        out.push_str(line);
+        if detail.len() <= room {
+            out.push_str(&detail);
+            room -= detail.len();
+        } else if !detail.is_empty() {
+            trimmed = true;
+        }
+        i = j;
+    }
+    if trimmed {
+        out.push_str("\n(some action descriptions trimmed; every action above can still be called)");
+    }
+    Some(out)
+}
+
+/// One work-log line for a tool result: a desktop description condensed so its actions survive,
+/// anything else clipped to `head` as before. The agent loop's only writer of successful results, so
+/// the condensing is tested here rather than trusted to a line inside a 1,500-line loop.
+pub(crate) fn work_log_entry(
+    step: usize,
+    tool: &str,
+    obs: &str,
+    ok: bool,
+    head: usize,
+    note: &str,
+) -> String {
+    let body = if ok && tool.starts_with("mcp.yantrik-os.") {
+        condense_description(obs)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| obs.chars().take(head).collect::<String>());
+    format!("\n[{step}] {tool} -> {body}{note}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CALENDAR: &str = include_str!("../fixtures/desktop/describe_calendar.txt");
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    /// The loop's log line for the real calendar description carries `update_event` — the action
+    /// the arena's T4 needed and the 900-character clip withheld.
+    #[test]
+    fn the_work_log_line_for_a_desktop_description_carries_its_actions() {
+        let line = work_log_entry(0, "mcp.yantrik-os.os_describe", CALENDAR, true, 900, "");
+        assert!(line.contains("update_event("), "{line}");
+        let shell = work_log_entry(1, "mcp.yantrik-os.os_describe", SHELL, true, 900, "");
+        assert!(shell.contains("files_new_folder(name)"));
+    }
+
+    /// Only desktop tools, and only successful results, are condensed; everything else keeps the
+    /// clip it always had.
+    #[test]
+    fn other_tools_and_failures_keep_the_old_clip() {
+        let other = work_log_entry(0, "web_fetch", CALENDAR, true, 900, "");
+        assert!(!other.contains("update_event"));
+        let failed = work_log_entry(0, "mcp.yantrik-os.os_describe", CALENDAR, false, 300, " (failed)");
+        assert!(!failed.contains("update_event") && failed.ends_with(" (failed)"));
+    }
+
+    /// The defect, pinned from the real description: the old 900-character clip never reaches
+    /// `update_event` or `files_new_folder`. Kept as a test so the reason for this module is
+    /// checkable, not remembered.
+    #[test]
+    fn the_old_clip_never_reached_the_actions_the_tasks_needed() {
+        let clip = |s: &str| s.chars().take(900).collect::<String>();
+        assert!(!clip(CALENDAR).contains("update_event"));
+        assert!(!clip(SHELL).contains("files_new_folder"));
+        assert!(!clip(SHELL).contains("editor_save_as"));
+    }
+
+    #[test]
+    fn every_action_signature_survives_condensing() {
+        for (name, doc) in [("calendar", CALENDAR), ("shell", SHELL)] {
+            let c = condense_description(doc).unwrap_or_else(|| panic!("{name} not recognised"));
+            for sig in doc.lines().filter(|l| l.starts_with("  act: ")) {
+                assert!(c.contains(sig), "{name}: lost {sig}");
+            }
+        }
+        let cal = condense_description(CALENDAR).unwrap();
+        assert!(cal.contains("update_event(id, date?, duration_min?, notes?, time?, title?)"));
+        let shell = condense_description(SHELL).unwrap();
+        assert!(shell.contains("files_new_folder(name)") && shell.contains("editor_save_as(path)"));
+    }
+
+    /// The point of condensing rather than raising the clip: the shell's 22.6 KB description must
+    /// come out small enough to re-send on every step.
+    #[test]
+    fn a_huge_description_comes_out_bounded() {
+        let shell = condense_description(SHELL).unwrap();
+        assert!(SHELL.len() > 20_000);
+        assert!(
+            shell.len() <= DESKTOP_STATE_HEAD * 4 + DESKTOP_ACTIONS_BUDGET + 200,
+            "condensed shell is {} bytes",
+            shell.len()
+        );
+    }
+
+    #[test]
+    fn a_small_description_keeps_its_action_details() {
+        let cal = condense_description(CALENDAR).unwrap();
+        assert!(cal.contains("Show what is on one day"), "{cal}");
+        assert!(!cal.contains("trimmed; every action"), "a 2 KB description should need no trimming");
+    }
+
+    #[test]
+    fn anything_that_is_not_a_description_is_left_to_the_old_clip() {
+        assert_eq!(condense_description("Done — notes screen, 2 windows open"), None);
+        assert_eq!(condense_description(""), None);
+    }
 
     fn tool(server: &str, name: &str) -> McpTool {
         McpTool {

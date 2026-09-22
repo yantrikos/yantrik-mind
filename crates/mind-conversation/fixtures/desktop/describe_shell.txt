@@ -1,0 +1,188 @@
+Yantrik — files screen, 3 windows open, notes not running
+revision: f4517ddb78350187
+{
+  "active_project": "",
+  "apps": [{"describe_as": "terminal", "for": "a shell: run commands", "name": "terminal", "opens": "app"}, {"for": "the web", "name": "browser", "opens": "web browser"}, {"describe_as": "shell", "for": "browse, move, rename and delete files", "name": "files", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "for": "this desktop's settings", "name": "settings", "opens": "a screen of the desktop itself"}, {"describe_as": "notes", "for": "quick markdown notes kept in the notes library, not files you name", "name": "notes", "opens": "app"}, {"describe_as": "editor", "for": "plain-text and code files, opened and saved by path", "name": "editor", "opens": "app"}, {"describe_as": "image-viewer", "for": "view pictures", "name": "image_viewer", "opens": "app"}, {"describe_as": "shell", "name": "bond", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "personality", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "memory", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "notifications", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "system", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "media", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "about", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "skills", "opens": "a screen of the desktop itself"}, {"describe_as": "email", "for": "read and send mail", "name": "email", "opens": "app"}, {"describe_as": "calendar", "for": "events and appointments", "name": "calendar", "opens": "app"}, {"describe_as": "shell", "name": "packages", "opens": "a screen of the desktop itself"}, {"describe_as": "network", "for": "this machine's connections, Wi-Fi and firewall state", "name": "network", "opens": "app"}, {"describe_as": "system-monitor", "for": "CPU, memory, disk and processes", "name": "sysmonitor", "opens": "app"}, {"describe_as": "weather", "for": "current conditions and forecast", "name": "weather", "opens": "app"}, {"describe_as": "download-manager", "for": "fetch a URL to a file, with progress", "name": "downloads", "opens": "app"}, {"describe_as": "snippets", "for": "reusable pieces of code and text", "name": "snippets", "opens": "app"}, {"describe_as": "containers", "for": "Docker or Podman containers", "name": "containers", "opens": "app"}, {"describe_as": "shell", "name": "devices", "opens": "a screen of the desktop itself"}, {"describe_as": "shell", "name": "permissions", "opens": "a screen of the desktop itself"}, {"describe_as": "documents", "for": "written documents — reports, letters, plans — saved as files in ~/Documents", "name": "documents", "opens": "app"}, {"describe_as": "presentation", "for": "slide decks", "name": "presentation", "opens": "app"}, {"describe_as": "shell", "name": "launchpad", "opens": "a screen of the desktop itself"}],
+  "battery": null,
+  "bond": "Partner-in-Crime",
+  "bond_score": 5.0,
+  "clock": "14:23",
+  "companion_online": true,
+  "companion_status": "idle",
+  "conversation": [{"role": "user", "streaming": false, "text": "Create a folder called arena-minc3e in my home folder."}, {"role": "assistant", "streaming": false, "text": "I can't do that yet — I have no tool that creates folders on your machine, so nothing was created. What I can do is tell you the exact command: `mkdir ~/arena-minc3e`.\n\nOne thing worth flagging: I have \"Arena min160\" on my books for 30 September 2026, and there's an open thread from earlier about moving an \"Arena minc3e\" event on that same day to 16:30 — the calendar still showed it at 15:00–15:30. Want me to check whether that move actually went through?"}, {"role": "user", "streaming": false, "text": "Create a text file at ~/arena-minc3e.txt containing exactly this line: hello from minc3e"}, {"role": "assistant", "streaming": false, "text": "I can't create that file — I have no tool that writes files to your home folder, so nothing was created. The `code` tool would be the closest fit, but it isn't configured on this box (it just reported \"the coder isn't configured\"), so I can't route around it either.\n\nWhat you can run yourself, exactly:\n\n```\nprintf 'hello from minc3e\\n' > ~/arena-minc3e.txt\n```\n\nThat writes the single line with a trailing newline. If you want it with no newline at all, use `printf 'hello from minc3e' > ~/arena-minc3e.txt`.\n\nTwo open threads on this same task, worth closing:\n- The folder `~/arena-minc3e` — I als… (831 characters total)"}, {"role": "user", "streaming": false, "text": "Write the titles of everything on my calendar on 25 September into a new file ~/arena-minc3e-friday.txt, one title per line."}, {"role": "assistant", "streaming": false, "text": "I can't do that — I have no tool to read your calendar for a specific date or to write files, so nothing was created. The only calendar item I can see is Wed Sep 23: \"Arena min160 on 30 September 2026,\" which isn't 25 September anyway.\n\nTwo things worth flagging:\n- The filename you gave me says \"friday,\" but 25 September 2026 is a Friday only if that's the year you mean — worth confirming which year you're after.\n- If you paste the 25 September entries here, I'll format them one title per line so you can drop them straight into the file.\n\nWant to paste them, or should I check what calendar acc… (620 characters total)"}],
+  "cpu_percent": 2,
+  "date": "Tue 22 Sep",
+  "disk": "17.9 GB / 31.3 GB",
+  "disk_percent": 57,
+  "do_not_disturb": false,
+  "editor": null,
+  "failed_launches": [],
+  "files": {"can_undo": false, "entries": [{"dir": true, "modified": "now", "name": "arena-pi160", "selected": false, "size": ""}, {"dir": true, "modified": "1d", "name": "battery-after-notes", "selected": false, "size": ""}, {"dir": true, "modified": "1d", "name": "battery-baseline-notes", "selected": false, "size": ""}, {"dir": true, "modified": "19h", "name": "battery-old-notes", "selected": false, "size": ""}, {"dir": true, "modified": "1d", "name": "bin", "selected": false, "size": ""}, {"dir": true, "modified": "12h", "name": "Documents", "selected": false, "size": ""}, {"dir": true, "modified": "2d", "name": "Downloads", "selected": false, "size": ""}, {"dir": true, "modified": "12h", "name": "film-bin", "selected": false, "size": ""}, {"dir": true, "modified": "19h", "name": "harn", "selected": false, "size": ""}, {"dir": true, "modified": "12h", "name": "inside-report", "selected": false, "size": ""}, {"dir": true, "modified": "1d", "name": "Pictures", "selected": false, "size": ""}, {"dir": true, "modified": "5d", "name": "projects", "selected": false, "size": ""}, {"dir": true, "modified": "5d", "name": "src", "selected": false, "size": ""}, {"dir": true, "modified": "17h", "name": "vendor", "selected": false, "size": ""}, {"dir": false, "modified": "12h", "name": "CLAUDE.md", "selected": false, "size": "4.6 KB"}, {"dir": false, "modified": "17h", "name": "forge.py", "selected": false, "size": "887 B"}, {"dir": false, "modified": "22m", "name": "harness_arena.py", "selected": false, "size": "15.4 KB"}], "free_space": "13.4 GiB available", "has_clipboard": false, "loading": false, "notice": "Created folder · 1 item", "operation": "Created folder · 1 item", "operation_busy": false, "operation_progress": 0.0, "path": "~", "preview_name": "", "preview_open": false, "selected": null, "selection_count": 0, "shown": 17, "tabs": 1, "total": 17, "trash": false},
+  "harnesses": [{"builtin": true, "can_answer": true, "can_install": false, "can_start": false, "detail": "", "docs": "", "id": "companion", "name": "Yantrik Companion", "need": "", "state": "attached"}, {"builtin": false, "can_answer": true, "can_install": false, "can_start": false, "detail": "deepseek-v4.1-flash · ollama.com", "docs": "", "id": "deepseek", "name": "DeepSeek", "need": "", "state": "attached"}, {"builtin": false, "can_answer": true, "can_install": false, "can_start": false, "detail": "Hermes 0.14.0 · deepseek-v4.1-flash", "docs": "", "id": "hermes", "name": "Hermes Agent", "need": "", "state": "answering"}, {"builtin": false, "can_answer": true, "can_install": false, "can_start": false, "detail": "ollama-cloud:deepseek-v4.1-flash -> ollama-cloud", "docs": "", "id": "mind", "name": "Yantrik Mind", "need": "", "state": "attached"}, {"builtin": false, "can_answer": true, "can_install": false, "can_start": false, "detail": "ollama-cloud/kimi-k3 · OpenClaw 2026.9.1", "docs": "", "id": "openclaw", "name": "OpenClaw", "need": "", "state": "attached"}, {"builtin": false, "can_answer": true, "can_install": false, "can_start": false, "detail": "ollamacloud/deepseek-v4.1-flash · pi 0.87.0", "docs": "", "id": "pi", "name": "Pi", "need": "", "state": "attached"}],
+  "incognito": false,
+  "installer": null,
+  "lens": {"chat": true, "open": true, "text": ""},
+  "memories": 2928,
+  "memory": "1.9 GB / 7.8 GB",
+  "memory_percent": 24,
+  "mind_audit_recent": [],
+  "mind_mode": {"bypass_expires_in_secs": null, "bypass_until_restart": false, "ceiling": "sensitive", "means": "It asks you before anything that could matter.", "mode": "ask", "previous": "ask", "session_rules": []},
+  "minds": [{"answering": false, "builtin": true, "detail": null, "id": "companion", "name": "Yantrik Companion", "tools": true}, {"answering": false, "builtin": false, "detail": "deepseek-v4.1-flash · ollama.com", "id": "deepseek", "name": "DeepSeek", "tools": true}, {"answering": true, "builtin": false, "detail": "Hermes 0.14.0 · deepseek-v4.1-flash", "id": "hermes", "name": "Hermes Agent", "tools": true}, {"answering": false, "builtin": false, "detail": "ollama-cloud:deepseek-v4.1-flash -> ollama-cloud", "id": "mind", "name": "Yantrik Mind", "tools": false}, {"answering": false, "builtin": false, "detail": "ollama-cloud/kimi-k3 · OpenClaw 2026.9.1", "id": "openclaw", "name": "OpenClaw", "tools": true}, {"answering": false, "builtin": false, "detail": "ollamacloud/deepseek-v4.1-flash · pi 0.87.0", "id": "pi", "name": "Pi", "tools": true}],
+  "network": {"connection": "Wired connection 1", "online": true, "type": "ethernet"},
+  "notifications": {"latest": [{"app": "Yantrik Companion", "at": "2026-09-22T19:00:42Z", "id": "85", "read": false, "title": "Nothing actionable right now as no pending items were returned by recall.", "urgency": "low"}], "service": "up", "showing": 1, "unread": 1},
+  "pending_approvals": [],
+  "pending_suggestions": 0,
+  "pinned": ["files", "browser", "terminal", "notes", "email", "calendar"],
+  "screen": "files",
+  "screen_id": 8,
+  "services": [{"id": "a11y", "note": "up", "status": "running"}, {"id": "calendar", "note": "up", "status": "running"}, {"id": "email", "note": "up", "status": "running"}, {"id": "network", "note": "up", "status": "running"}, {"id": "notes", "note": "on demand", "status": "stopped"}, {"id": "notifications", "note": "up", "status": "running"}, {"id": "perception", "note": "up", "status": "running"}, {"id": "system-monitor", "note": "up", "status": "running"}, {"id": "weather", "note": "up", "status": "running"}],
+  "settings": {"accent": "cyan", "auto_lock_secs": 300, "category": 8, "dark": true, "query": "", "save_error": false, "save_status": "Changes saved on this device", "wallpaper": "serenity"},
+  "thinking": false,
+  "tool_permission": "sensitive",
+  "vault": {"protected": false, "unlocked": false, "why": "this session signs in without a password, so there is nothing to lock the vault with"},
+  "version": "v0.1.0-289-gf529880",
+  "wifi": false,
+  "windows": [{"app": "calendar", "title": "Calendar"}, {"app": "editor", "title": "Editor"}, {"app": "terminal", "title": "Terminal"}]
+}
+  act: open_app(name)  [standard, settles later]
+       Launch an app, or focus it if it is already running
+         name: string — App id, e.g. notes, email, terminal, files
+  act: start_service(name)  [standard, settles on return]
+       Start one of the machine's services if it is not running
+         name: string — Service id, as the machine rail lists it
+  act: refresh_apps()  [standard, settles on return]
+       Rescan the installed applications
+  act: pin_app(name, pinned)  [standard, settles on return]
+       Pin an app to START, or unpin it
+         name: string — App id, e.g. notes, files, browser, chromium
+         pinned: boolean — true to pin, false to unpin
+  act: send_message(text)  [standard, settles later]
+       Ask the desktop something, as if typed into the Lens
+         text: string — What to say
+  act: open_lens(text?)  [safe, settles on return]
+       Open the ask bar (the Lens) and put the cursor in it
+         text?: string — Put this in the field, ready to edit. It is NOT submitted — use send_message to ask
+  act: use_harness(id)  [standard, settles on return]
+       Choose which mind answers when the shell is asked something
+         id: string — Harness id, as `describe shell` lists under `minds`
+  act: install_harness(id)  [sensitive, settles later]
+       Run a harness's own install command, so it can become one of this machine's minds
+         id: string — Harness id, as `describe shell` lists under `harnesses`
+  act: start_harness(id)  [sensitive, settles later]
+       Enable and start a harness's user service, so it attaches and can answer
+         id: string — Harness id, as `describe shell` lists under `harnesses`
+  act: show_screen(screen, section?)  [standard, settles on return]
+       Switch the shell to one of its screens
+         screen: string — desktop, files, settings, notifications, memory, system, permissions, bond, personality, about, packages, devices, images, editor, media
+         section?: string — For `settings`: appearance, ai, desktop, network, accounts, privacy, system, skills, harnesses
+  act: show_app(name)  [standard, settles later]
+       Bring one of this desktop's open apps to the front
+         name: string — The app, by the name you describe it by or open it by, e.g. presentation
+  act: focus_window(title)  [standard, settles later]
+       Bring an open window to the front
+         title: string — Window title, or part of one
+  act: set_do_not_disturb(on)  [standard, settles on return]
+       Hold or release notifications. Stays after a restart
+         on: boolean
+  act: lock()  [sensitive, settles on return]
+       Lock the session
+  act: check_update(channel?)  [safe, settles on return]
+       Ask the release server whether a newer build is available
+         channel?: string — Release channel: stable, beta, or nightly (default: the configured one)
+  act: set_update_channel(channel)  [sensitive, settles on return]
+       Choose which release channel this machine follows (nightly, beta or stable)
+         channel: string — nightly, beta or stable
+  act: apply_update(channel?, force?)  [dangerous, settles later]
+       Download, verify, and install the channel's latest build, then restart
+         channel?: string — Release channel to install from (default: the configured one)
+         force?: boolean — Reinstall even if the channel build matches what is installed
+  act: files_go(path)  [standard, settles later]
+       Open the Files screen at an absolute path
+         path: string — An absolute directory path, e.g. /home/user or /tmp
+  act: files_enter(name)  [standard, settles later]
+       Enter a subdirectory of the current one by name
+         name: string — A directory name shown in the current listing
+  act: files_open(name)  [standard, settles on return]
+       Open a file in the current directory (image, text, audio)
+         name: string — A file name shown in the current listing
+  act: files_up()  [standard, settles later]
+       Go up to the parent directory
+  act: files_new_folder(name)  [standard, settles later]
+       Create a folder in the current directory
+         name: string — The new folder's name
+  act: files_new_file(name)  [standard, settles later]
+       Create an empty file in the current directory
+         name: string — The new file's name
+  act: files_delete(name)  [dangerous, settles later]
+       Move a file or folder to recoverable Trash
+         name: string — The name to delete, shown in the current listing
+  act: files_select(name, extend?)  [standard, settles on return]
+       Select an entry by name; optionally extend selection
+         name: string
+         extend?: boolean
+  act: files_rename(name, new_name)  [standard, settles later]
+       Rename an entry without replacing existing files
+         name: string
+         new_name: string
+  act: files_copy()  [standard, settles on return]
+       Copy selected entries to the Files clipboard
+  act: files_cut()  [standard, settles on return]
+       Prepare selected entries to move
+  act: files_paste()  [standard, settles later]
+       Paste into this folder without replacement
+  act: files_trash_selected()  [standard, settles later]
+       Move selected entries to recoverable Trash
+  act: files_undo_trash()  [standard, settles later]
+       Restore the most recently trashed entries
+  act: files_toggle_trash()  [standard, settles later]
+       Show Trash or return to the folder
+  act: files_refresh()  [standard, settles later]
+       Reload the folder
+  act: files_cancel()  [standard, settles later]
+       Request cancellation of the active operation
+  act: files_terminal()  [standard, settles later]
+       Open a Terminal tab in this folder
+  act: request_approval(action, app, grade, args_json?, purpose?, requester?)  [safe, settles on return]
+       Ask the person at this machine to allow one action, once. Puts a card on their screen showing who is asking, what the action does, and every argument. Answer is `{request_id, status: "pending"}`; poll approval_status until it is granted or denied, then consume_approval before running the action. Asking is not being allowed: only a person pressing Allow creates a grant, and nothing on this surface can create one.
+         action: string — The action's exact name, e.g. delete_event
+         app: string — The app the action belongs to, e.g. calendar
+         grade: string — The action's permission grade as os_describe reports it: safe, standard, sensitive or dangerous
+         args_json?: string — The exact arguments, as a JSON object. The grant is bound to these — a different value later is a different action and will be refused
+         purpose?: string — The action's own published description, so the card says what it does in the app's words
+         requester?: string — What to call you on the card, e.g. hermes. It is shown as `says the caller`: nothing checks it, and it grants nothing. Beside it the card shows the program this machine worked out for itself from the socket, which is not taken from here
+  act: approval_status(request_id)  [safe, settles on return]
+       Where one approval request stands: pending, granted, denied, expired or consumed. `denied` is an answer, not a failure — do not ask again unless the person brings it up. `expired` means nobody answered in time.
+         request_id: string — The id request_approval answered with
+  act: consume_approval(action, app, request_id, args_json?)  [safe, settles on return]
+       Spend a grant. Succeeds exactly once, and only if the person granted this request and the app, action and arguments are byte-for-byte what they were shown (key order aside). Anything else is refused, and the refusal says which part differed. Call it immediately before the action, and run the action only if it succeeded.
+         action: string
+         app: string
+         request_id: string
+         args_json?: string — The same JSON object the request carried
+  act: set_mind_mode(mode)  [safe, settles on return]
+       Tighten what you may do on this desktop without being asked. Four modes, loosest first: `bypass` (nothing is asked), `auto` (only destructive actions are asked about), `ask` (anything that matters is asked about), `plan` (read only — every change is refused). You can only move DOWN this list. A request to loosen it is refused: that is the person's decision, made at the keyboard, and `plan` is the useful one to set yourself before a long piece of work you want checked first.
+         mode: string — plan, ask or auto — and only if it is tighter than the current mode
+  act: record_unasked_action(action, app, grade, args_json?, mode?, outcome?, requester?)  [safe, settles on return]
+       Write down one action that ran WITHOUT the person being asked — because the desktop is in auto or bypass mode, or because a session rule covers it. Call it straight after the action, with what actually happened. It records; it cannot authorise anything, and not calling it does not stop anything running. The person reads these in the mode menu and in ~/.local/share/yantrik/mind-audit.jsonl.
+         action: string
+         app: string
+         grade: string — The action's grade, as os_describe reports it
+         args_json?: string — The exact arguments it ran with, as a JSON object
+         mode?: string — The mode it ran under: auto, bypass, or rule
+         outcome?: string — What happened: ok, failed, or a short phrase
+         requester?: string — What to call yourself in the record. Self-declared; the log also keeps what this machine established from the socket, separately
+  act: show_mind_audit()  [safe, settles on return]
+       Put the record of actions that ran WITHOUT the person being asked on their screen — the same list as the mode chip's "See what it did without asking". It shows what is already written down; it changes nothing, allows nothing, and does not clear anything. `describe shell` carries the same entries under `mind_audit_recent` if you only want to read them.
+  act: editor_new()  [standard, settles on return]
+       Open the text editor with a fresh, empty document
+  act: editor_set_content(text)  [standard, settles on return]
+       Replace the whole document with this text
+         text: string — The full new contents of the document
+  act: editor_append(text)  [standard, settles on return]
+       Add text to the end of the document
+         text: string — Text to append
+  act: editor_save()  [standard, settles on return]
+       Save the document to the file it came from
+  act: editor_save_as(path)  [standard, settles on return]
+       Write the document to a specific path
+         path: string — An absolute file path, e.g. /home/user/notes.txt

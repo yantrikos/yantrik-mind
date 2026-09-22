@@ -78,6 +78,11 @@ pub(crate) const DESKTOP_ACTIONS_BUDGET: usize = 6000;
 /// argument lines while `DESKTOP_ACTIONS_BUDGET` lasts. `None` when `obs` is not a description with
 /// actions, so every other tool keeps the old clip.
 pub(crate) fn condense_description(obs: &str) -> Option<String> {
+    // Idempotent: the MCP boundary condenses first and the work log condenses again, and a second
+    // pass must not trim a state that is already trimmed.
+    if obs.contains(CONDENSED_MARK) {
+        return Some(obs.to_string());
+    }
     let lines: Vec<&str> = obs.lines().collect();
     let first_act = lines.iter().position(|l| l.starts_with("  act: "))?;
     let state = lines[..first_act].join("\n");
@@ -85,7 +90,7 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
     if state.chars().count() > DESKTOP_STATE_HEAD {
         out.push_str("\n… (state trimmed)");
     }
-    out.push_str("\nACTIONS:");
+    out.push_str(CONDENSED_MARK);
 
     // Signatures first, all of them: they are what the model must be able to call.
     let signatures: Vec<&str> = lines[first_act..]
@@ -126,6 +131,30 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
     Some(out)
 }
 
+/// Where a condensed description's action list begins. Also how a second pass recognises one.
+const CONDENSED_MARK: &str = "\nACTIONS:";
+
+/// The cap every read-only MCP result gets, for data from somewhere else.
+pub(crate) const MCP_OUTPUT_CAP: usize = 6000;
+
+/// E.ARENA1-F4: bound an MCP tool's output without cutting a desktop description off its actions.
+///
+/// Every read-only MCP result was clipped to 6,000 characters as untrusted third-party data. Right
+/// for somebody else's API; wrong for this machine's own control surface, whose shell description
+/// is ~18 KB with its first action near character 11,800 — so the shell reached the agent with no
+/// actions at all, and the arena's folder and file tasks failed on the same model Hermes passes
+/// with. Found by asking the desktop's MCP server directly: it returns `files_new_folder`; the mind
+/// never saw it. A tool ON THIS COMPUTER whose output is a description is condensed instead, which
+/// is itself bounded (state head + action budget); everything else keeps the cap.
+pub(crate) fn bound_mcp_output(out: &str, on_this_computer: bool) -> String {
+    if on_this_computer {
+        if let Some(condensed) = condense_description(out) {
+            return condensed;
+        }
+    }
+    out.chars().take(MCP_OUTPUT_CAP).collect()
+}
+
 /// One work-log line for a tool result: a desktop description condensed so its actions survive,
 /// anything else clipped to `head` as before. The agent loop's only writer of successful results, so
 /// the condensing is tested here rather than trusted to a line inside a 1,500-line loop.
@@ -152,6 +181,34 @@ mod tests {
 
     const CALENDAR: &str = include_str!("../fixtures/desktop/describe_calendar.txt");
     const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    /// The arena's T5/T6 on the same model Hermes passes with: the 6,000-character MCP cap cut the
+    /// shell before its first action. Pinned from the real description.
+    #[test]
+    fn the_mcp_cap_no_longer_cuts_the_desktop_off_its_actions() {
+        let capped: String = SHELL.chars().take(MCP_OUTPUT_CAP).collect();
+        assert!(!capped.contains("files_new_folder"), "the defect this test exists for");
+        let bounded = bound_mcp_output(SHELL, true);
+        assert!(bounded.contains("files_new_folder(name)") && bounded.contains("editor_save_as(path)"));
+        assert!(bounded.len() < SHELL.len() / 2, "still bounded: {} bytes", bounded.len());
+    }
+
+    /// Data from somewhere else keeps its cap, description-shaped or not.
+    #[test]
+    fn an_off_machine_tool_keeps_the_cap() {
+        let out = bound_mcp_output(SHELL, false);
+        assert_eq!(out.chars().count(), MCP_OUTPUT_CAP);
+        assert!(!out.contains("files_new_folder"));
+    }
+
+    /// The boundary condenses and the work log condenses again: the second pass is a no-op.
+    #[test]
+    fn condensing_twice_changes_nothing() {
+        for doc in [CALENDAR, SHELL] {
+            let once = condense_description(doc).unwrap();
+            assert_eq!(condense_description(&once).unwrap(), once);
+        }
+    }
 
     /// The loop's log line for the real calendar description carries `update_event` — the action
     /// the arena's T4 needed and the 900-character clip withheld.

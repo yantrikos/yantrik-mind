@@ -11957,7 +11957,8 @@ WINDOW: all-time, latest 200
                         match tokio::task::spawn_blocking(move || hub.call_blocking(&q, &a)).await {
                             // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
                             Ok(Ok(out)) => {
-                                let out: String = out.chars().take(6000).collect();
+                                // E.ARENA1-F4: this machine's own surface is condensed, not cut.
+                                let out = desktop::bound_mcp_output(&out, !t.open_world);
                                 if out.trim().is_empty() { format!("({name}: no result)") } else { out }
                             }
                             Ok(Err(e)) => format!("({name}: {e})"),

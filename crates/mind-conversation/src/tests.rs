@@ -15856,3 +15856,59 @@ mod desktop_calendar_wiring {
         assert!(!out.to_lowercase().contains("added"), "the private store took the event: {out}");
     }
 }
+
+/// E.ARENA1-F4 through the real engine: a read-only tool on this computer that returns the real
+/// ~18 KB shell description reaches the agent with its actions, where the 6,000-character MCP cap
+/// used to cut it off before the first one.
+#[cfg(test)]
+mod desktop_mcp_bound_wiring {
+    use super::*;
+
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    fn engine(open_world: bool) -> ConversationEngine {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_describe".into(),
+                description: "The current state of one app".into(),
+                read_only: true,
+                open_world,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok(SHELL.to_string())],
+        )
+        .unwrap();
+        conv.with_mcp(Arc::new(hub))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_desktops_own_description_reaches_the_agent_with_its_actions() {
+        let out = engine(false)
+            .run_agent_tool_as(
+                "mcp.yantrik-os.os_describe",
+                &serde_json::json!({"app": "shell"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.contains("files_new_folder(name)"), "the shell lost its actions: {} bytes", out.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_world_tool_is_still_capped() {
+        let out = engine(true)
+            .run_agent_tool_as(
+                "mcp.yantrik-os.os_describe",
+                &serde_json::json!({"app": "shell"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.chars().count() <= 6000, "{} chars", out.chars().count());
+    }
+}

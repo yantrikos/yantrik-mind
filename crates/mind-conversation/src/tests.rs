@@ -16245,3 +16245,108 @@ mod desktop_twin_wiring {
         );
     }
 }
+
+/// E.ARENA1-F6b through the real agent loop, with the desktop's real refusal text from Reading B5:
+/// `new` fails on a full editor, the mind closes a tab, and the retried `new` must reach the
+/// desktop rather than be handed the old refusal from the log.
+#[cfg(test)]
+mod desktop_failed_action_retry_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    struct Plan {
+        step: AtomicUsize,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Plan {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match self.calls.get(i) {
+                Some((n, a)) => vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "plan"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_action_is_retried_after_the_world_changed() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let new_tab = serde_json::json!({"app": "editor", "action": "new"});
+        let plan = Plan {
+            step: AtomicUsize::new(0),
+            calls: vec![
+                ("mcp.yantrik-os.os_act", new_tab.clone()),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "close"})),
+                ("mcp.yantrik-os.os_act", new_tab),
+            ],
+            seen: seen.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(plan) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_act".into(),
+                description: "act on this computer".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![
+                Err("execution failed: failed (exit 1) yos: editor.app.act refused: Eight tabs are already open; close one before opening another.".into()),
+                Ok("Done — Text Editor — Untitled (no file yet), 1 line, saved · tab 7 of 7".into()),
+                Ok("NEW-TAB-OPENED — tab 8 of 8".into()),
+            ],
+        )
+        .unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("NEW-TAB-OPENED")),
+            "the retried `new` was served the earlier refusal from the log ({} prompts)",
+            prompts.len()
+        );
+    }
+}

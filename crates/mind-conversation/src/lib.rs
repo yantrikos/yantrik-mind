@@ -13240,7 +13240,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 desktop::forget_desktop_reads(&mut done_calls);
             }
             last_call = call_sig.clone();
-            done_calls.insert(call_sig);
+            done_calls.insert(call_sig.clone());
             // What this step is about to run, with the arguments that survived the egress cleaner —
             // "using web_search…" does not distinguish a search for the user's own name from a
             // search for a stock ticker, and that difference is the whole reason to open the fold.
@@ -13284,6 +13284,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
             // and the five-way outcome for this loop's own rendering.
             let outcome = guards::post(self, &guard_state, &tool, &obs).await;
+            // E.ARENA1-F6b: a desktop action that failed is not "done" — it may be retried once the
+            // world has changed (the loop's ordinary repeat nudge still meets an immediate retry).
+            if desktop::retry_after_failure(&tool, outcome == crate::tool_outcome::Outcome::Ok) {
+                done_calls.remove(&call_sig);
+            }
             if outcome == crate::tool_outcome::Outcome::Denied
                 && self
                     .plugins

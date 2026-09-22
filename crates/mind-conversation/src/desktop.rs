@@ -174,6 +174,18 @@ pub(crate) fn changes_the_desktop(tool: &str) -> bool {
     tool == "mcp.yantrik-os.os_act"
 }
 
+/// E.ARENA1-F6b: may a desktop action that just FAILED be tried again later this turn?
+///
+/// F6 kept actions deduplicated so a repeated `new` could not open a second tab. Right for an action
+/// that worked; wrong for one that did not. Reading B5: `new` was refused ("Eight tabs are already
+/// open"), the mind closed a tab — exactly the right move — tried `new` again, and the loop answered
+/// "already called with these args", handing back the refusal. A failed action is not remembered as
+/// done; an immediate identical retry, with nothing changed in between, still meets the loop's
+/// ordinary repeat nudge.
+pub(crate) fn retry_after_failure(tool: &str, succeeded: bool) -> bool {
+    changes_the_desktop(tool) && !succeeded
+}
+
 /// Desktop READS — the calls whose answer depends on the desktop's current state.
 const DESKTOP_READS: [&str; 3] = [
     "mcp.yantrik-os.os_describe",
@@ -323,6 +335,14 @@ mod tests {
     const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
 
     const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+
+    #[test]
+    fn only_a_failed_desktop_action_may_be_retried() {
+        assert!(retry_after_failure("mcp.yantrik-os.os_act", false));
+        assert!(!retry_after_failure("mcp.yantrik-os.os_act", true), "a success stays deduplicated");
+        assert!(!retry_after_failure("web_fetch", false), "off the desktop nothing changes");
+        assert!(!retry_after_failure("mcp.yantrik-os.os_describe", false), "reads are handled by F6");
+    }
 
     #[test]
     fn grades_are_read_off_the_real_descriptions() {

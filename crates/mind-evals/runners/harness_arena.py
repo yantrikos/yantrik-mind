@@ -165,6 +165,11 @@ def reset_world(tag):
         if e.get("title", "").startswith("Arena "):
             act("calendar", "delete_event", id=e["id"])
     subprocess.run(["pkill", "-x", "yantrik-notes"], capture_output=True)
+    # The editor keeps its tabs for as long as it runs, and allows eight. Readings B-prime to B5 each
+    # opened new ones, so by B5 `new` was refused ("Eight tabs are already open") for the mind that
+    # ran last -- a handicap the arena created and Hermes, run first, never met. Every mind starts
+    # from a fresh editor.
+    subprocess.run(["pkill", "-x", "yantrik-text-editor"], capture_output=True)
 
 
 # ── the tasks (frozen for this reading: K21) ──────────────────────────────────────────────────

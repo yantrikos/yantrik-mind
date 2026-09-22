@@ -22,7 +22,7 @@ fn build_backend() -> (Arc<dyn LLMBackend>, String) {
     // Resilient multi-provider chain (NanoGPT → Ollama Cloud → MiniMax, in priority order) built from
     // whatever keys are present; an error OR empty reply fails over to the next. Provider endpoints
     // live in mind_inference so adding a provider is one line there. Verified live: NanoGPT
-    // (deepseek-v4-pro), Ollama Cloud (glm-4.7), MiniMax (MiniMax-M2.7).
+    // (deepseek-v4-pro), Ollama Cloud (deepseek-v4.1-flash), MiniMax (MiniMax-M2.7).
     if let Some((backend, label)) = mind_inference::default_chain_from_env() {
         return (backend, label);
     }

@@ -1582,6 +1582,21 @@ pub struct ChainBackend {
     /// call is routed here FIRST, then failover — so a small dispatch model can own the fast path while
     /// multi-step reasoning goes to the capable model. None = strategy applies to think:true too.
     reasoner: Option<usize>,
+    /// E.MODEL2: links the provider has said will never serve (404/410), by index, with its words.
+    /// Skipped for the rest of the process; a restart asks again.
+    gone: std::sync::Mutex<std::collections::HashMap<usize, String>>,
+}
+
+/// E.MODEL2: has the provider said this link will NEVER serve? A 410 is a retired model (ollama.com
+/// answers `glm-4.7` so today, and it was the compiled default of every `ollama-cloud` link); a 404
+/// is a model or route that does not exist. Transient answers -- 429, 5xx, timeouts, transport
+/// failures -- are not, because treating a bad minute as death would drop a working link.
+pub fn link_is_gone(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    d.contains("http status: 410")
+        || d.contains("http status: 404")
+        || d.contains("end of life")
+        || d.contains("has been retired")
 }
 
 impl ChainBackend {
@@ -1602,7 +1617,13 @@ impl ChainBackend {
             strategy: ChainStrategy::Failover,
             route: std::sync::atomic::AtomicUsize::new(0),
             reasoner: None,
+            gone: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Why the provider said link `i` will never serve, if it has.
+    fn gone_reason(&self, i: usize) -> Option<String> {
+        self.gone.lock().unwrap().get(&i).cloned()
     }
 
     /// Attach a local survival-tier backend (e.g. local Ollama). When all cloud links fail, this
@@ -1850,12 +1871,19 @@ impl LLMBackend for ChainBackend {
         // link is still demoted to last. Every order is a full permutation, so on error/empty we
         // failover through the rest — a backup is always in play.
         let order = self.routing_order(config.think, config.prefer_reasoner);
+        let mut skipped: Vec<String> = Vec::new();
         for i in order {
             let be = &self.links[i];
             let label = self
                 .labels
                 .get(i)
                 .map_or_else(|| be.backend_name(), String::as_str);
+            // E.MODEL2: a link the provider has retired is not asked again. Reading C's T6 failed
+            // over to `glm-4.7` and got a 410 on every such turn.
+            if let Some(why) = self.gone_reason(i) {
+                skipped.push(format!("{label} ({why})"));
+                continue;
+            }
             // Owned hardware bills time, not tokens — give it room rather than truncating a tool
             // call or an answer to save a token that costs nothing. Cloud links pass through.
             let raised = local_budget(label, config);
@@ -1892,7 +1920,17 @@ impl LLMBackend for ChainBackend {
                 }
                 Err(e) => {
                     provider_record(label, false);
-                    eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
+                    // `{e:#}`: the outer context is the same seven words for a 410, a 429 and a
+                    // refused connection; the cause underneath is what tells them apart.
+                    let detail = format!("{e:#}");
+                    if link_is_gone(&detail) {
+                        eprintln!(
+                            "[chain] {label} is GONE ({detail}) — the provider will not serve it; skipped for the rest of this run"
+                        );
+                        self.gone.lock().unwrap().insert(i, detail);
+                    } else {
+                        eprintln!("[chain] {} failed ({detail}) — failing over", be.backend_name());
+                    }
                     last_err = Some(e);
                 }
             }
@@ -1929,7 +1967,13 @@ impl LLMBackend for ChainBackend {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chain has no backends")))
+        Err(last_err.unwrap_or_else(|| {
+            if skipped.is_empty() {
+                anyhow::anyhow!("chain has no backends")
+            } else {
+                anyhow::anyhow!("every link in this chain is gone: {}", skipped.join("; "))
+            }
+        }))
     }
 
     fn chat_streaming(
@@ -2011,7 +2055,14 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
             "NANOGPT_KEY",
             "deepseek/deepseek-v4-pro-cheaper",
         ),
-        "ollama-cloud" | "ollama" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY", "glm-4.7"),
+        // E.MODEL2: was `glm-4.7`, which ollama.com retired (410) -- and which every chain with an
+        // Ollama Cloud key but no YM_OLLAMA_MODEL carried as its fallback. deepseek-v4.1-flash is
+        // live on ollama.com (2026-09-22) and is the model Yantrik OS's own harnesses run on.
+        "ollama-cloud" | "ollama" => (
+            "https://ollama.com/v1",
+            "OLLAMA_CLOUD_KEY",
+            "deepseek-v4.1-flash",
+        ),
         "minimax" => (
             "https://api.minimax.io/v1",
             "MINIMAX_API_KEY",
@@ -2569,6 +2620,17 @@ pub fn resolve_provider_base(
     }
 }
 
+/// Do two specs call the same provider's same model, once each provider's default is filled in?
+fn same_model(a: &str, b: &str) -> bool {
+    let resolve = |spec: &str| -> Option<(String, String)> {
+        let (p, m) = split_spec(spec);
+        let (_, _, default_model) = provider_catalog(p)?;
+        let canonical = |p: &str| if p == "ollama" { "ollama-cloud".to_string() } else { p.to_string() };
+        Some((canonical(p), if m.is_empty() { default_model.to_string() } else { m.to_string() }))
+    };
+    matches!((resolve(a), resolve(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The default resilient chain from whatever provider keys are present. CONFIG-DRIVEN precedence:
 /// when `YM_LOCAL_OLLAMA_URL` is set, the local model is the PRIMARY brain (owned hardware, fast, and
 /// it backs the private lane), with the cloud providers (NanoGPT → Ollama Cloud → MiniMax) as
@@ -2617,6 +2679,12 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
             Some(m) if !m.trim().is_empty() => format!("{provider}:{m}"),
             _ => provider.to_string(),
         };
+        // E.MODEL2: a fallback that calls the same provider's same model as a link already in
+        // the chain is not a fallback. With the default above, `YM_PRIMARY_BRAIN=ollama-cloud:
+        // deepseek-v4.1-flash` plus an Ollama Cloud key would otherwise ask it twice.
+        if labels.iter().any(|l| same_model(l, &spec)) {
+            continue;
+        }
         if let Some(be) = backend_from_spec(&spec) {
             links.push(be);
             labels.push(spec);
@@ -5126,5 +5194,109 @@ mod call_cap_tests {
         for _ in 0..4 {
             assert_eq!(ask().await.unwrap().text, plain, "a cap outlived its job on a pooled thread");
         }
+    }
+}
+
+/// E.MODEL2: a link the provider says is gone is asked once and then skipped; a transient failure
+/// is not death; a chain whose every link is gone says so.
+#[cfg(test)]
+mod gone_link_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Link {
+        calls: Arc<AtomicUsize>,
+        fails_with: Option<&'static str>,
+    }
+    impl LLMBackend for Link {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.fails_with {
+                // The shape a real 410 arrives in: ureq's status under the client's context line.
+                Some(status) => Err(anyhow::anyhow!("{status}").context("OpenAI-compatible API request failed")),
+                None => Ok(LLMResponse {
+                    thinking: String::new(),
+                    text: "served".into(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    tool_calls: vec![],
+                    api_tool_calls: vec![],
+                    stop_reason: "stop".into(),
+                }),
+            }
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "api"
+        }
+    }
+
+    fn link(fails_with: Option<&'static str>) -> (Arc<dyn LLMBackend>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (Arc::new(Link { calls: calls.clone(), fails_with }), calls)
+    }
+
+    fn ask(chain: &ChainBackend) -> anyhow::Result<LLMResponse> {
+        chain.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None)
+    }
+
+    #[test]
+    fn a_retired_link_is_asked_once_and_then_skipped() {
+        let (dead, dead_calls) = link(Some("http status: 410"));
+        let (live, live_calls) = link(None);
+        let chain = ChainBackend::new_labeled(vec![dead, live], vec!["ollama-cloud".into(), "backup".into()]);
+        for _ in 0..3 {
+            assert_eq!(ask(&chain).unwrap().text, "served");
+        }
+        assert_eq!(dead_calls.load(Ordering::SeqCst), 1, "a 410 was asked again");
+        assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_bad_minute_is_not_death() {
+        for status in ["http status: 429", "http status: 503", "timed out after 60 s waiting for m"] {
+            let (flaky, flaky_calls) = link(Some(status));
+            let (live, _) = link(None);
+            let chain = ChainBackend::new_labeled(vec![flaky, live], vec!["a".into(), "b".into()]);
+            ask(&chain).unwrap();
+            ask(&chain).unwrap();
+            assert_eq!(flaky_calls.load(Ordering::SeqCst), 2, "{status} was treated as gone");
+        }
+    }
+
+    #[test]
+    fn a_chain_of_gone_links_says_so() {
+        let (a, _) = link(Some("http status: 410"));
+        let (b, _) = link(Some("http status: 404"));
+        let chain = ChainBackend::new_labeled(vec![a, b], vec!["one".into(), "two".into()]);
+        assert!(ask(&chain).is_err());
+        let second = format!("{:#}", ask(&chain).unwrap_err());
+        assert!(second.contains("every link in this chain is gone"), "{second}");
+        assert!(second.contains("one") && second.contains("two"), "{second}");
+    }
+
+    #[test]
+    fn a_fallback_that_repeats_a_link_is_the_same_model() {
+        assert!(same_model("ollama-cloud:deepseek-v4.1-flash", "ollama-cloud"));
+        assert!(same_model("ollama:deepseek-v4.1-flash", "ollama-cloud:deepseek-v4.1-flash"));
+        assert!(!same_model("ollama-cloud:kimi-k3", "ollama-cloud"));
+        assert!(!same_model("minimax", "ollama-cloud"));
+        assert!(!same_model("no-such-provider", "no-such-provider"), "unknown is never the same");
     }
 }

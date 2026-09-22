@@ -9239,3 +9239,19 @@ Hermes **failed T2 with a correct answer**: it listed all three events, with tim
 - `--preflight`: 7/7 fail on words alone.
 
 **My process failure, recorded as one:** I changed `reset_world` and went straight into a graded reading without re-running `--control` and `--preflight`, the exact failure my own notes record four earlier readings dying of. Reading D restarts as a fresh run; Hermes's five cells from `8h7` are not used.
+
+## E.MODEL2 — PREREG: the live mind learns that a model is gone (2026-09-22)
+
+E.MODEL1 made the *benchmark* refuse a retired model and ended: "the live mind still does not, and that is the next thing worth building." Reading C showed why. The mind's chain on VM 520 was `ollama-cloud:deepseek-v4.1-flash -> ollama-cloud`, and the bare second link resolves to the catalog default **`glm-4.7`, which ollama.com answers with 410**. Probed today: ollama.com lists 20 live models, and `glm-4.7` is not one of them. Every chain with an Ollama Cloud key and no `YM_OLLAMA_MODEL` carries this dead link. The failover log could not say so, because it prints only the outer context ("api failed (OpenAI-compatible API request failed)"), the same seven words for a 410, a 429 and a refused connection.
+
+**The change:** (1) a chain link whose error says the provider will never serve (404, 410, "end of life") is marked gone for the process and skipped, with one log line naming it and the provider's cause; (2) the failover log prints the cause (`{e:#}`); (3) the `ollama-cloud` default becomes `deepseek-v4.1-flash`, live on ollama.com today and the model Yantrik OS's own harnesses run on; (4) a fallback link that resolves to the same provider and model as one already in the chain is not added.
+
+**Kill criteria, before the code:**
+- A 410 link must be asked **once**, then skipped.
+- A 429, a 5xx or a timeout must **not** mark a link gone: a bad minute is not death (E.MODEL1's mutation found exactly this hole).
+- A chain whose links are all gone must say so, naming them, rather than "chain has no backends".
+- The duplicate check must never merge an unknown provider.
+
+### E.MODEL2 — SHIPPED (tests and mutants; not yet driven live)
+
+All four kill criteria are tested. Mutants were each watched to fail by name: *gone never marked*, *every failure is death*, *gone links still asked*, *all-gone says nothing*, *the `ollama` alias not treated as `ollama-cloud`*. **One mutant survives, as predicted before it ran:** removing the duplicate check at its call site in `default_chain_from_env`. That function reads provider keys from the process environment, so no test reaches it without racing other tests. The rule itself (`same_model`) is tested; its one-line wiring is covered by reading only. Workspace: 2038 passed, 0 failed. Not yet deployed: VM 520 is mid-reading, and swapping the mind's build under Reading D would spoil it.

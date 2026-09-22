@@ -4180,6 +4180,18 @@ draws on your private context, and my own hardware is unreachable, so composing 
 sending that to a cloud model. Ask again in a moment, or tell me explicitly to answer without your \
 private context and I'll work from what's public.";
 
+/// What compose says when it may not use the cloud and NO lane was ever cleared for private context
+/// (E.CFG2). The constant above says "my own hardware is unreachable", which is true when a private
+/// lane exists and has failed, and false for an owner who followed first run's advice to add a
+/// cloud key: nothing is unreachable, nothing was configured. Chosen by configuration state only,
+/// and a constant for the same reason as the other: it carries nothing it declined to compose.
+const COMPOSE_NO_PRIVATE_LANE: &str =
+    "I can't put this answer together \u{2014} it draws on your private context, and the only \
+model I have is a cloud one that hasn't been cleared to see it. To clear it, add its name to \
+YM_PRIVATE_PROVIDERS in my settings file (~/.config/yantrik-mind.env) and restart me, or send me the \
+address of a model on your own hardware. Or tell me to answer without your private context and I'll \
+work from what's public.";
+
 /// Why compose is ALWAYS private (E.SEC16), stated as an invariant rather than a judgement.
 ///
 /// The first version asked whether grounding was empty. Codex rejected that and was right: the rule
@@ -13538,7 +13550,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 //
                 // The public-lane case keeps the old behaviour: an empty string falls through to
                 // the honest-line handling below, since nothing needed protecting.
-                let reply = COMPOSE_LANE_UNAVAILABLE.to_string();
+                // E.CFG2: "unreachable" only when there is something to reach.
+                let reply = if self.inference.private_lane_configured() {
+                    COMPOSE_LANE_UNAVAILABLE
+                } else {
+                    COMPOSE_NO_PRIVATE_LANE
+                }
+                .to_string();
                 let _ = self
                     .memory
                     .append_message_scoped("user", user_text, id.write_scope())

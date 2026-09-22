@@ -9295,3 +9295,22 @@ All four kill criteria are tested. Mutants were each watched to fail by name: *g
 ### E.ARENA1-F11 — SHIPPED (tests and mutants)
 
 Six mutants, each watched to fail by name: *redirect removed from the loop*, *shell never read first*, *a no not checked on the redirect*, *redirect without the desktop's word*, *redirect without the shell's listing*, *the `<app>_<action>` form dropped*. Wiring tests drive the real loop with Reading D's own refusal text.
+
+## E.CFG2 — PREREG: a cloud-only mind says what is missing instead of claiming an outage (2026-09-22)
+
+**The defect, end to end.** First run tells an owner who wants a cloud model: *"add the key to ~/.config/yantrik-mind.env — for example OLLAMA_CLOUD_KEY=… — and restart."* An owner who does exactly that gets a mind with no lane cleared for private context. Its loop escalates to the household lane with an audit line, compose (private, E.SEC16) is refused, and every tool-using turn, which is every desktop task, ends in *"my own hardware is unreachable."* That is false: nothing is unreachable, and nothing was ever configured. Reading B's attempt 2 was this exact state: every turn refused while every rival answered.
+
+**The change, messages only, by configuration state:**
+- (1) `InferencePool::private_lane_configured()` answers the gate's own question: a dedicated private backend, or the default provider on the owner's `YM_PRIVATE_PROVIDERS` allowlist.
+- (2) When compose is refused and no such lane exists, the reply is a new constant that says so and names the setting. When one exists, the old constant stands, because then "unreachable" is true.
+- (3) First run's cloud answer says that a cloud model sees private context only if it is also listed in `YM_PRIVATE_PROVIDERS`, and what happens otherwise.
+
+**Not changed, and not mine to change silently:** whether choosing a cloud model is itself consent for private context. The privacy wall is E.SEC14/E.SEC16 and Codex's shape. This only makes its refusal truthful and actionable. Raised with Pranab separately.
+
+**Kill criteria:** the new constant passes the same content-free check as the old one (no canary vocabulary, no "grounding", "work log", "recall"); the old constant is still chosen whenever a private lane exists; no path sends compose to the household lane.
+
+### E.CFG2 — SHIPPED (tests and mutants)
+
+Every kill criterion is tested through the real loop. **Cloud-only:** after one tool call the model stops answering, the turn reaches compose (F9), compose is refused, and the reply is exactly the new constant. **Private lane present but failing at compose:** the reply is exactly the old "unreachable" constant, which is true there. Four mutants, each watched to fail by name: *always the old words*, *always the new words*, *a dedicated lane not counted*, *the allowlist not counted*. The last one survived the first pass because the allowlist is read from the environment; the rule was pulled into a pure `lane_cleared`, tested with VM 520's own configuration, and the mutant then failed. Workspace: 2049 passed, 0 failed.
+
+**For Pranab, a decision rather than a defect:** an owner who configures only a cloud model gets, by design, a loop that escalates private context to that provider with an audit line, and then a compose that refuses. So the material has already gone to the cloud once, and the answer is still declined. Either the owner's choice of a cloud model is consent (clear it at first run, with an explicit question), or the loop should also refuse. The current half-way state protects nothing and costs the answer.

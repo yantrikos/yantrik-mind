@@ -272,8 +272,11 @@ fn cloud_answer(env_path: &Path) -> String {
         "A cloud model needs an API key, and I won't ask for one here: this chat is shown on the \
          desktop and can be read back by other agents on this machine, and a key must not pass \
          through it.\n\nTo use one, add the key to {} — for example NANOGPT_KEY=…, \
-         OLLAMA_CLOUD_KEY=… or MINIMAX_API_KEY=… — and restart Yantrik Mind. Or send me an Ollama \
-         address to use a model on your own hardware.",
+         OLLAMA_CLOUD_KEY=… or MINIMAX_API_KEY=… — and restart Yantrik Mind. A cloud model does not \
+         see your private context (what I remember about you) unless you also list it there, for \
+         example YM_PRIVATE_PROVIDERS=ollama-cloud:deepseek-v4.1-flash; without that, anything that \
+         needs your private context is declined rather than sent to the cloud. Or send me an \
+         Ollama address to use a model on your own hardware.",
         env_path.display()
     )
 }

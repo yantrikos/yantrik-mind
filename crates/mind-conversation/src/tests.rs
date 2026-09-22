@@ -7611,6 +7611,145 @@ fn the_compose_refusal_is_content_free_and_still_useful() {
     assert!(refusal.contains("Ask again"), "and offers a way forward");
 }
 
+/// E.CFG2 — the refusal for a mind with no lane cleared for private context is held to the same
+/// content-free standard, and names what is missing instead of an outage.
+#[test]
+fn the_no_private_lane_refusal_is_content_free_and_names_the_setting() {
+    use super::COMPOSE_NO_PRIVATE_LANE;
+    let refusal = COMPOSE_NO_PRIVATE_LANE;
+    for tell in ["ZQCANARY", "dinner", "seven", "belief", "recall", "work log", "grounding"] {
+        assert!(
+            !refusal.to_lowercase().contains(&tell.to_lowercase()),
+            "the refusal must not describe what it declined to compose: {tell:?}"
+        );
+    }
+    assert!(!refusal.contains("unreachable"), "nothing is unreachable; nothing was configured");
+    assert!(refusal.contains("YM_PRIVATE_PROVIDERS"), "it names the setting that clears a model");
+    assert!(refusal.contains("answer without your private context"), "and the public way forward");
+}
+
+/// E.CFG2, the other half: a mind WITH a private lane that fails at compose still says its own
+/// hardware is unreachable -- there, it is true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_private_lane_that_fails_at_compose_still_says_unreachable() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct HomeThenDown(AtomicUsize);
+    impl LLMBackend for HomeThenDown {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            if !offered || self.0.fetch_add(1, Ordering::SeqCst) > 0 {
+                anyhow::bail!("the home model went away");
+            }
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![yantrik_ml::ToolCall { name: "time".into(), arguments: serde_json::json!({}) }],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "home-then-down"
+        }
+    }
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let home: Arc<dyn LLMBackend> = Arc::new(HomeThenDown(AtomicUsize::new(0)));
+    let pool = InferencePool::new(Arc::clone(&home), 1)
+        .with_provider("ollama-local:home")
+        .with_private_backend(home, "ollama-local:home");
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let reply = conv
+        .agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+        .await
+        .unwrap_or_else(|e| format!("ERR {e}"));
+    assert_eq!(reply, super::COMPOSE_LANE_UNAVAILABLE, "a real outage keeps its true words");
+}
+
+/// E.CFG2 through the real loop: a mind whose only model is an uncleared cloud one gets the
+/// truthful refusal at compose, not "my own hardware is unreachable".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_only_mind_says_what_is_missing_not_that_hardware_is_down() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct OneTool(AtomicUsize);
+    impl LLMBackend for OneTool {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let first = offered && self.0.fetch_add(1, Ordering::SeqCst) == 0;
+            // After one tool call the model stops answering, so the turn must end at compose
+            // (F9), and compose must be refused for want of a private lane.
+            if offered && !first {
+                anyhow::bail!("the endpoint stopped answering");
+            }
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if first { String::new() } else { "done".into() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: if first {
+                    vec![yantrik_ml::ToolCall { name: "time".into(), arguments: serde_json::json!({}) }]
+                } else {
+                    vec![]
+                },
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "one-tool"
+        }
+    }
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    // Household-allowlisted by default (so the loop may run, with its audit line), never cleared
+    // for private context: the state first run's cloud advice produces.
+    let pool = InferencePool::new(Arc::new(OneTool(AtomicUsize::new(0))) as Arc<dyn LLMBackend>, 1)
+        .with_provider("ollama-cloud");
+    assert!(!pool.private_lane_configured(), "precondition: nothing cleared");
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let reply = conv
+        .agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+        .await
+        .unwrap_or_else(|e| format!("ERR {e}"));
+    assert_eq!(reply, super::COMPOSE_NO_PRIVATE_LANE, "the truthful refusal, exactly");
+}
+
 /// E.LOOP3 — the typed direct route must be a GRAMMAR, not a "looks simple" gate.
 ///
 /// Codex's constraint: build the bypass only where intent is structurally parseable with high

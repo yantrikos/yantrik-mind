@@ -818,6 +818,18 @@ impl InferencePool {
     /// The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
     /// which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
     /// bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
+    /// E.CFG2: is any lane cleared for private context -- a dedicated private backend, or the
+    /// default provider on the owner's `YM_PRIVATE_PROVIDERS` allowlist? The same question
+    /// `gate_scope` answers for a Private request, asked without dispatching one. When the answer is
+    /// no, a refused private request was refused by CONFIGURATION, not by an outage, and what the
+    /// person is told should say which.
+    pub fn private_lane_configured(&self) -> bool {
+        let household = std::env::var("YM_HOUSEHOLD_PROVIDERS")
+            .unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+        let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+        lane_cleared(self.private.is_some(), &self.provider, &household, &private)
+    }
+
     fn gate_scope(
         &self,
         scope: PrivacyScope,
@@ -1597,6 +1609,12 @@ pub fn link_is_gone(detail: &str) -> bool {
         || d.contains("http status: 404")
         || d.contains("end of life")
         || d.contains("has been retired")
+}
+
+/// E.CFG2's rule without the environment: a dedicated private lane, or the provider cleared for the
+/// private scope by the owner's allowlist.
+fn lane_cleared(dedicated: bool, provider: &str, household: &str, private: &str) -> bool {
+    dedicated || scope_allows(PrivacyScope::Private, provider, household, private)
 }
 
 impl ChainBackend {
@@ -5298,5 +5316,64 @@ mod gone_link_tests {
         assert!(!same_model("ollama-cloud:kimi-k3", "ollama-cloud"));
         assert!(!same_model("minimax", "ollama-cloud"));
         assert!(!same_model("no-such-provider", "no-such-provider"), "unknown is never the same");
+    }
+}
+
+/// E.CFG2: the configured-lane question, on the two shapes it can be asked about without touching
+/// the process environment.
+#[cfg(test)]
+mod private_lane_configured_tests {
+    use super::*;
+
+    struct Idle;
+    impl LLMBackend for Idle {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            anyhow::bail!("never called")
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "idle"
+        }
+    }
+
+    #[test]
+    fn a_dedicated_private_backend_is_a_configured_lane() {
+        let pool = InferencePool::new(Arc::new(Idle) as Arc<dyn LLMBackend>, 1)
+            .with_provider("ollama-cloud:deepseek-v4.1-flash")
+            .with_private_backend(Arc::new(Idle), "ollama-local:qwen");
+        assert!(pool.private_lane_configured());
+    }
+
+    /// The owner's allowlist clears a cloud provider -- VM 520's own configuration.
+    #[test]
+    fn a_cloud_provider_on_the_owners_allowlist_is_a_configured_lane() {
+        let cloud = "ollama-cloud:deepseek-v4.1-flash";
+        assert!(lane_cleared(false, cloud, DEFAULT_HOUSEHOLD, cloud));
+        assert!(!lane_cleared(false, cloud, DEFAULT_HOUSEHOLD, ""), "household is not private");
+        assert!(lane_cleared(true, cloud, DEFAULT_HOUSEHOLD, ""));
+    }
+
+    #[test]
+    fn a_cloud_provider_nobody_cleared_is_not() {
+        // A provider name no allowlist in any environment would carry.
+        let pool = InferencePool::new(Arc::new(Idle) as Arc<dyn LLMBackend>, 1)
+            .with_provider("zz-uncleared-cloud:model");
+        assert!(!pool.private_lane_configured());
     }
 }

@@ -16140,3 +16140,108 @@ mod desktop_stale_read_wiring {
         );
     }
 }
+
+/// E.ARENA1-F7 through the real agent loop, on the real editor and shell descriptions: a sensitive
+/// editor action whose standard twin the shell lists is pointed at the twin before it can stall the
+/// turn on a permission prompt.
+#[cfg(test)]
+mod desktop_twin_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    struct Plan {
+        step: AtomicUsize,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Plan {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match self.calls.get(i) {
+                Some((n, a)) => vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "plan"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sensitive_editor_write_is_pointed_at_the_shells_standard_twin() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let plan = Plan {
+            step: AtomicUsize::new(0),
+            calls: vec![
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "hello"}})),
+            ],
+            seen: seen.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(plan) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        hub.add_scripted_tool(tool("os_describe"), vec![Ok(EDITOR.to_string()), Ok(SHELL.to_string())]).unwrap();
+        hub.add_scripted_tool(tool("os_act"), vec![Ok("THE-SENSITIVE-CALL-REACHED-THE-DESKTOP".into())]).unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("`editor_set_content`") && p.contains("graded standard")),
+            "the twin was never pointed out ({} prompts)",
+            prompts.len()
+        );
+        assert!(
+            !prompts.iter().any(|p| p.contains("THE-SENSITIVE-CALL-REACHED-THE-DESKTOP")),
+            "the first sensitive call went to the desktop before the twin was offered"
+        );
+    }
+}

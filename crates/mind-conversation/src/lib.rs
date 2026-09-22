@@ -4373,6 +4373,11 @@ pub fn set_machine_place(place: Option<String>) {
 }
 
 /// The sentence the agent prompt carries about where the computer is, or nothing.
+/// A twin hint is given once per exact call; this is the key it is remembered by.
+fn call_sig_for_twin(tool: &str, args: &serde_json::Value) -> String {
+    format!("{tool}|{args}")
+}
+
 fn machine_place_line() -> String {
     match MACHINE_PLACE.read().ok().and_then(|p| p.clone()) {
         Some(place) => machine_place_sentence(&place),
@@ -12583,6 +12588,11 @@ Open reminders you're carrying for them:",
         // turn ends and says so rather than arguing with itself.
         let mut unfinished_nudged = false;
         let mut looked_first_nudged = false;
+        // E.ARENA1-F7: what each app listed this turn, and which sensitive calls were already told
+        // about a standard twin (a second identical call is the model choosing to ask the person).
+        let mut described: std::collections::HashMap<String, desktop::ActionList> =
+            std::collections::HashMap::new();
+        let mut twin_hinted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -12709,7 +12719,11 @@ Open reminders you're carrying for them:",
                 // licence to answer directly is now explicitly bounded by the class of fact.
                 "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies."
             };
-            let place = machine_place_line();
+            let place = format!(
+                "{}{}",
+                machine_place_line(),
+                desktop::home_sentence(self.desktop_attached(), std::env::var("HOME").ok().as_deref())
+            );
             let prompt = format!(
                 "Current date/time: {now}.{place}\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
@@ -13245,7 +13259,23 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane, &goal_id,
             );
             let tool_started = std::time::Instant::now();
-            let obs = self.run_agent_tool_as(&tool, &args, id).await;
+            // E.ARENA1-F7: a sensitive desktop action with a standard twin is pointed at the twin
+            // once, before it can stall the turn on a permission prompt. Sent again, it goes through.
+            let twin_note = if twin_hinted.contains(&call_sig_for_twin(&tool, &args)) {
+                None
+            } else {
+                desktop::lower_grade_twin(&tool, &args, &described)
+            };
+            let obs = match twin_note {
+                Some(note) => {
+                    twin_hinted.insert(call_sig_for_twin(&tool, &args));
+                    note
+                }
+                None => self.run_agent_tool_as(&tool, &args, id).await,
+            };
+            if tool == desktop::DESCRIBE {
+                desktop::record_described(&args, &obs, &mut described);
+            }
             let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             eprintln!(
                 "[agent] step {step}: {tool} -> {}",

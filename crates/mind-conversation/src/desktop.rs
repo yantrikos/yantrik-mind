@@ -193,6 +193,84 @@ pub(crate) fn forget_desktop_reads(done: &mut std::collections::HashSet<String>)
     done.retain(|sig| !DESKTOP_READS.iter().any(|r| sig.starts_with(&format!("{r}|"))));
 }
 
+/// What one app lists: each action's name and its permission grade.
+pub(crate) type ActionList = Vec<(String, String)>;
+
+/// Every `act: name(args)  [grade, …]` line in a description, as (name, grade).
+pub(crate) fn listed_actions(obs: &str) -> ActionList {
+    obs.lines()
+        .filter_map(|l| l.strip_prefix("  act: "))
+        .filter_map(|rest| {
+            let name = rest.split('(').next()?.trim();
+            let grade = rest.split('[').nth(1)?.split([',', ']']).next()?.trim();
+            (!name.is_empty()).then(|| (name.to_string(), grade.to_string()))
+        })
+        .collect()
+}
+
+/// Remember what an `os_describe` call showed, keyed by the app it described.
+pub(crate) fn record_described(
+    args: &serde_json::Value,
+    obs: &str,
+    described: &mut std::collections::HashMap<String, ActionList>,
+) {
+    let Some(app) = args.get("app").and_then(|a| a.as_str()) else {
+        return;
+    };
+    let acts = listed_actions(obs);
+    if !acts.is_empty() {
+        described.insert(app.to_string(), acts);
+    }
+}
+
+/// E.ARENA1-F7: a sensitive action whose SAME change is offered at a lower grade elsewhere.
+///
+/// Reading B4 (six fixes in) lost the file tasks at the last step: the mind wrote the text with the
+/// editor app's `set_content(text)` — graded **sensitive**, so the person was asked, nobody answered
+/// in an unattended run, and after 110 s the mind said honestly it had not done it. The desktop also
+/// offers `shell.editor_set_content(text)` — "replace the whole document with this text" — graded
+/// **standard**. Hermes took that door and passed in 27 s. The OS's own naming joins them: the shell
+/// exposes the editor's actions as `editor_<action>`.
+///
+/// This does not route around a grade. It tells the model the twin exists, once; a model that means
+/// to ask the person re-issues the same call and it goes through. When the OS grades both sensitive,
+/// there is no twin and nothing changes.
+pub(crate) fn lower_grade_twin(
+    tool: &str,
+    args: &serde_json::Value,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<String> {
+    if tool != "mcp.yantrik-os.os_act" {
+        return None;
+    }
+    let app = args.get("app")?.as_str()?;
+    let action = args.get("action")?.as_str()?;
+    let grade = described.get(app)?.iter().find(|(n, _)| n == action)?.1.as_str();
+    if grade == "standard" || grade == "safe" {
+        return None;
+    }
+    let twin = format!("{app}_{action}");
+    described.iter().find_map(|(other, acts)| {
+        let (name, g) = acts.iter().find(|(n, _)| *n == twin)?;
+        (g == "standard" || g == "safe").then(|| {
+            format!(
+                "({app}.{action} is graded {grade}, so it would ask the person first. `{other}` lists \
+                 `{name}` — the same change — graded {g}, which does not. Use it unless you mean to \
+                 ask; if you do, send this call again and it will go to the person.)"
+            )
+        })
+    })
+}
+
+/// E.ARENA1-F7: where home is on this machine. `shell.editor_save_as` gives `/home/user/notes.txt`
+/// as its example path, this machine's home is not `/home/user`, and the mind copied the example.
+pub(crate) fn home_sentence(desktop: bool, home: Option<&str>) -> String {
+    match (desktop, home.map(str::trim).filter(|h| !h.is_empty())) {
+        (true, Some(h)) => format!(" The person's home folder on this computer is {h} (so ~ means {h})."),
+        _ => String::new(),
+    }
+}
+
 /// Where a condensed description's action list begins. Also how a second pass recognises one.
 const CONDENSED_MARK: &str = "\nACTIONS:";
 
@@ -243,6 +321,63 @@ mod tests {
 
     const CALENDAR: &str = include_str!("../fixtures/desktop/describe_calendar.txt");
     const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+
+    #[test]
+    fn grades_are_read_off_the_real_descriptions() {
+        let editor = listed_actions(EDITOR);
+        assert!(editor.contains(&("set_content".to_string(), "sensitive".to_string())), "{editor:?}");
+        assert!(editor.contains(&("save_as".to_string(), "standard".to_string())));
+        let shell = listed_actions(SHELL);
+        assert!(shell.contains(&("editor_set_content".to_string(), "standard".to_string())));
+    }
+
+    fn described_from_fixtures() -> std::collections::HashMap<String, ActionList> {
+        let mut d = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "editor"}), EDITOR, &mut d);
+        record_described(&serde_json::json!({"app": "shell"}), SHELL, &mut d);
+        d
+    }
+
+    /// Reading B4's T6/T7, from the real descriptions: the sensitive editor door is pointed at its
+    /// standard twin on the shell.
+    #[test]
+    fn a_sensitive_action_is_pointed_at_its_standard_twin() {
+        let d = described_from_fixtures();
+        let hint = lower_grade_twin(
+            "mcp.yantrik-os.os_act",
+            &serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "x"}}),
+            &d,
+        )
+        .expect("the twin exists on the shell");
+        assert!(hint.contains("`editor_set_content`") && hint.contains("graded standard"), "{hint}");
+        assert!(hint.contains("send this call again"), "the person's door stays open: {hint}");
+    }
+
+    /// No hint where there is no lower door, where the action is already standard, or where the
+    /// app was never described this turn.
+    #[test]
+    fn no_hint_without_a_real_lower_grade_twin() {
+        let d = described_from_fixtures();
+        let act = |app: &str, action: &str| {
+            lower_grade_twin("mcp.yantrik-os.os_act", &serde_json::json!({"app": app, "action": action}), &d)
+        };
+        assert_eq!(act("editor", "discard"), None, "sensitive, but the shell offers no twin");
+        assert_eq!(act("editor", "save_as"), None, "already standard");
+        assert_eq!(act("calendar", "delete_event"), None, "not described this turn");
+        assert_eq!(
+            lower_grade_twin("mcp.yantrik-os.os_describe", &serde_json::json!({"app": "editor"}), &d),
+            None
+        );
+    }
+
+    #[test]
+    fn the_home_sentence_names_the_real_home_only_with_a_desktop() {
+        assert!(home_sentence(true, Some("/home/yantrik")).contains("/home/yantrik"));
+        assert_eq!(home_sentence(false, Some("/home/yantrik")), "");
+        assert_eq!(home_sentence(true, Some("  ")), "");
+    }
 
     /// Reading B‴: after opening Files, a second describe of `files` was served the pre-action
     /// "not running" from the log. An action forgets the reads it invalidated, and only those.

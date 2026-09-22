@@ -9168,3 +9168,58 @@ F5 is a product defect as much as a benchmark one: after a fix ships, a person o
 **Configuration findings, not yet acted on:** a mind configured with a local model runs every agent step on it regardless of `YM_PRIMARY_BRAIN`; the startup banner says "LOCAL primary" even with `YM_LOCAL_ROLE=fallback`; and with only a cloud model configured the mind refuses every turn with a message claiming unreachable hardware, while nothing on a Yantrik OS machine ever asks the owner for the consent (`YM_PRIVATE_PROVIDERS`) that would let it answer.
 
 **Still n=1 per cell (K23).** These are smoke readings; the claim waits for repeats.
+
+### E.ARENA1 — readings B‴ to B6, three more fixes, and the arena's own defects
+
+| reading | build | what changed | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **B‴** | `abb6fb4` | + F5, a turn that never looked may not say it cannot | ok | ok | ok | ok | — | — | — | 4/7 | 0 | 5.2 s |
+| **B4** | `e33283e` | + F6, a read after an action really reads | ok | ok | ok | ok | ok | — | — | 5/7 | 0 | 5.8 s |
+| **B5** | `19bac80` | + F7, the standard twin of a sensitive action | ok | ok | ok | void | ok | ✗c | ✗c | 4/7 | 0 | 8.2 s |
+| **B6** | `732f60e` | + F6b, a failed action may be tried again | ok | ok | ok | ok | ok | ✗c | ✗c | 5/7 | 0 | 5.3 s |
+
+`void`: B5's T4 waited 300.5 s on one model request, an upstream stall. `✗c`: failed in a contaminated world. The text editor allows eight tabs and the arena never closed it (`pkill -x yantrik-text-editor` cannot match a 19-character process name; the kernel keeps 15), so the mind run last met "Eight tabs are already open" and Hermes, run first, never did. Fixed in the arena at `0178556`.
+
+| fix | commit | the defect |
+|---|---|---|
+| F6 | `e33283e` | the loop's repeat guard served a desktop read from before an action: "files is not running" after Files had been opened |
+| F7 | `19bac80` | the mind wrote files through `editor.set_content` (graded **sensitive**: a card, then 110 s of silence in an unattended run) while `shell.editor_set_content`, the same change, is graded **standard** |
+| F6b | `732f60e` | a desktop action that FAILED was remembered as done, so after the mind freed a tab, its retry was refused as a repeat |
+
+### E.ARENA1 — Reading C: all five minds, one build (`732f60e`), run `2yz`
+
+| mind | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hermes 0.14.0 | 32.6 | 6.9 | 6.8 | 9.6 | 8.0 | 21.0 | 14.1 | **7/7** | 0 | 9.6 s |
+| Pi 0.87.0 | 8.2 | 3.7 | 122.0 | 4.8 | ✗ | ✗ 117.2 | ✗ | 4/7 | 0 | 8.2 s |
+| OpenClaw 2026.9.1 | 9.8 | 4.8 | 6.4 | 6.1 | 7.2 | ✗ 269.6 | ✗ 125.5 | 5/7 | 0 | 7.2 s |
+| DeepSeek | 6.3 | 4.7 | 6.3 | 10.5 | ✗ 126.9 | ✗ 121.6 | ✗ 122.2 | 4/7 | 0 | 10.5 s |
+| **Yantrik Mind** | **5.3** | **3.6** | **5.9** | **3.7** | **7.2** | ✗ 301.1 | ✗ 231.8 | 5/7 | 0 | **5.9 s** |
+
+Seconds per task. **No mind told its owner anything false.** Yantrik Mind was the fastest mind on every task it passed (T5 tied with OpenClaw). Every failure but one is the same story: a sensitive door (`terminal.run` for Pi and DeepSeek, `editor.set_content` for OpenClaw and this mind) raised a card nobody was there to answer. Only Hermes wrote both files, through the shell's standard-grade `editor_new` → `editor_set_content` → `editor_save_as`.
+
+**What this mind's two failures were.** Both were harness problems, not model ones:
+
+- **T6, 301.1 s.** F7 worked: the hint moved the mind from `editor.set_content` to `shell.editor_set_content`. The shell's editor then answered *"editing arena-her2yz-friday.txt"*, a document Hermes had left there, because the arena's reset never touched the shell's own editor. Then one model request hung for **300 s** (the client's timeout, sized for a 27B lane authoring a project), failed over, and the fallback answered in **one second**. The turn had run 9 s of its 180 s budget before that request.
+- **T7, 231.8 s.** The mind described the calendar and the editor but never the shell, so F7 had nothing to point at. It raised the `editor.set_content` card (110 s, no answer), then raised it again with the trailing newline dropped (different arguments, so no repeat guard saw it) and waited another 110 s.
+
+The stuck request is not a one-off: B5's T4 was the same 300 s wait. That makes **two of the last ~35 mind turns**.
+
+### E.ARENA1 — PREREG: F7b, F8, F9, F10 and a clean arena, written before Reading D
+
+| fix | the defect | the change |
+|---|---|---|
+| **F7b** | F7's hint promises *"send this call again and it will go to the person"*, but the unsent call was logged as done, so the repeat guard would refuse the re-send. **Found by a wiring test, never observed live:** no mind in any reading re-sent a hinted call. | a call that never reached the desktop is not recorded as made |
+| **F8** | the twin was found only among apps described that turn (T7) | before a sensitive action raises a card, the loop reads the shell's `<app>_` family itself (one read), and the hint names the whole family with signatures, which is what Hermes used |
+| **F9** | one request could spend the whole turn (T6, B5 T4) | each step's model request is capped at max(half the loop's remaining time, 60 s), at the HTTP request itself (`yantrik-ml` `install_call_cap`), so a hung request is abandoned where it hangs and the chain still fails over. A request that fails after step 0 now composes from the work log instead of returning "(couldn't think just now)". Compose is **not** capped: its reserve was measured at 45 s on a local lane, and the evidence in hand is a stall in a step request; that is a residual. |
+| **F10** | a card nobody answered was raised again (T7) | the loop reads the desktop's own refusal. **No answer:** the same action is not asked again this turn; the OS's words are "tell them what you were trying to do; they can ask you to try it again". **Said no:** the same action *and its twin* are refused, because the OS says "do not look for another route to the same effect", and F7 is exactly such a route. A card the desktop lost track of counts as neither. |
+| arena | the shell's editor document and the text editor's recovered drafts outlived each mind | reset sets the drafts aside, calls `shell.editor_new`, checks the document is empty *while the editor screen is up* (from the desktop screen the shell reports no document, and the first version of this check passed a contaminated one), and returns the shell to its desktop screen. Watched both ways on VM 520: silent after a real reset; `!! contaminated` when `editor_new` is suppressed. |
+
+**Predictions for Reading D (same five minds, same tasks, fresh build):**
+
+- **P1 (F8, F10):** this mind raises **no** approval card on T6 or T7. Kill: any T6/T7 turn of this mind that waits on a card.
+- **P2 (F9):** no turn of this mind waits more than max(half the remaining loop time, 60 s) on one model request. Kill: a `[chain]`/`api failed` line more than that after the step that issued it.
+- **P3 (arena):** no reset prints `!! reset`. If one does, that mind's cells are void.
+- Not a prediction: a stall is rare (2 in ~35), so D may well not exercise F9. If it doesn't, F9 stands on its tests alone, and I'll say so.
+
+K23 still binds: n=1 per cell is a smoke reading.

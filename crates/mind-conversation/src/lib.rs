@@ -13325,6 +13325,29 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 done_calls.remove(&call_sig);
                 last_call.clear();
             }
+            // E.ARENA1-F11: the desktop said the app does not exist, and the shell lists the action:
+            // send the same call there, once. It is graded by the OS at the shell, and a card the
+            // person already answered for it is not raised again.
+            let obs = if sent && tool == desktop::ACT && desktop::missing_app(&obs).is_some() {
+                if let Some(look) = desktop::host_family_lookup(&tool, &args, &obs, &described) {
+                    let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                    desktop::record_described(&look, &seen, &mut described);
+                }
+                match desktop::host_redirect(&tool, &args, &obs, &described) {
+                    Some(fixed) => {
+                        let from = args.get("app").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                        eprintln!("[agent] step {step}: no `{from}` app — re-addressed to {}", desktop::TWIN_HOST);
+                        let out = match desktop::already_answered(&tool, &fixed, &answered) {
+                            Some(note) => note,
+                            None => self.run_agent_tool_as(&tool, &fixed, id).await,
+                        };
+                        desktop::redirected(&from, &fixed, &out)
+                    }
+                    None => obs,
+                }
+            } else {
+                obs
+            };
             if tool == desktop::DESCRIBE {
                 desktop::record_described(&args, &obs, &mut described);
             }

@@ -351,6 +351,60 @@ pub(crate) fn lower_grade_twin(
     })
 }
 
+/// E.ARENA1-F11: the app the desktop said does not exist, read off its own refusal: "…how the OS
+/// grades it could not be read: yos: no socket for 'files'".
+pub(crate) fn missing_app(obs: &str) -> Option<String> {
+    let rest = obs.split("no socket for '").nth(1)?;
+    let app = rest.split('\'').next()?;
+    (!app.is_empty() && !app.contains(char::is_whitespace)).then(|| app.to_string())
+}
+
+/// E.ARENA1-F11: a family action sent to an app that does not exist, re-addressed to the shell.
+///
+/// Reading D, T5: the model read `files_go` in the shell's `files_` family and sent it to app
+/// `files`. The desktop answered "no socket for 'files'", and the mind, correctly finding nothing
+/// done, said so — about an action that exists, on the shell. Reactive only: this runs after the
+/// desktop has said the app does not exist, and only when the shell lists the action (as named, or
+/// as `<app>_<action>`), so a call the desktop would have accepted is never touched. The corrected
+/// call is an ordinary desktop action, graded by the OS at the shell.
+pub(crate) fn host_redirect(
+    tool: &str,
+    args: &serde_json::Value,
+    obs: &str,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<serde_json::Value> {
+    let (app, action) = act_target(tool, args)?;
+    if app == TWIN_HOST || missing_app(obs)? != app {
+        return None;
+    }
+    let host = described.get(TWIN_HOST)?;
+    let name = [action.clone(), format!("{app}_{action}")]
+        .into_iter()
+        .find(|n| host.iter().any(|l| &l.name == n))?;
+    let mut fixed = args.clone();
+    fixed["app"] = serde_json::json!(TWIN_HOST);
+    fixed["action"] = serde_json::json!(name);
+    Some(fixed)
+}
+
+/// The read F11 needs when the shell was not described this turn: its `<app>_` family.
+pub(crate) fn host_family_lookup(
+    tool: &str,
+    args: &serde_json::Value,
+    obs: &str,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<serde_json::Value> {
+    let (app, _) = act_target(tool, args)?;
+    (app != TWIN_HOST && !described.contains_key(TWIN_HOST) && missing_app(obs)? == app)
+        .then(|| serde_json::json!({ "app": TWIN_HOST, "actions": format!("{app}_") }))
+}
+
+/// What the model is told when its call was re-addressed, followed by what the shell answered.
+pub(crate) fn redirected(from_app: &str, fixed: &serde_json::Value, out: &str) -> String {
+    let action = fixed.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    format!("(there is no `{from_app}` app; `{action}` is the {TWIN_HOST}'s, so it was sent there:) {out}")
+}
+
 /// What the person did with a card this turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -551,6 +605,43 @@ mod tests {
             assert!(hint.contains(sig), "{sig} missing: {hint}");
         }
         assert!(!hint.contains("files_new_folder"), "only the editor's family: {hint}");
+    }
+
+    /// The desktop's refusal from Reading D's T5, as the mind received it.
+    const NO_FILES_APP: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: files.files_go was not run, because how the OS grades it could not be read: yos: no socket for 'files'";
+
+    #[test]
+    fn a_family_action_sent_to_a_missing_app_is_readdressed_to_the_shell() {
+        assert_eq!(missing_app(NO_FILES_APP), Some("files".to_string()));
+        assert_eq!(missing_app("Done \u{2014} files screen"), None);
+        let d = described_from_fixtures();
+        let go = serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/home/yantrik"}});
+        let fixed = host_redirect(ACT, &go, NO_FILES_APP, &d).expect("the shell lists files_go");
+        assert_eq!(fixed["app"], "shell");
+        assert_eq!(fixed["action"], "files_go");
+        assert_eq!(fixed["args"], go["args"], "the arguments are the model's own");
+        let short = serde_json::json!({"app": "files", "action": "new_folder", "args": {"name": "x"}});
+        assert_eq!(host_redirect(ACT, &short, NO_FILES_APP, &d).unwrap()["action"], "files_new_folder");
+    }
+
+    #[test]
+    fn nothing_is_readdressed_without_the_desktops_word_and_the_shells_listing() {
+        let d = described_from_fixtures();
+        let go = serde_json::json!({"app": "files", "action": "files_go"});
+        assert_eq!(host_redirect(ACT, &go, "Done \u{2014} files screen", &d), None, "accepted: untouched");
+        let nope = serde_json::json!({"app": "files", "action": "levitate"});
+        assert_eq!(host_redirect(ACT, &nope, NO_FILES_APP, &d), None, "the shell does not list it");
+        let other = serde_json::json!({"app": "photos", "action": "files_go"});
+        assert_eq!(host_redirect(ACT, &other, NO_FILES_APP, &d), None, "a different app was missing");
+        let shell = serde_json::json!({"app": "shell", "action": "files_go"});
+        assert_eq!(host_redirect(ACT, &shell, NO_FILES_APP, &d), None);
+        let unread = std::collections::HashMap::new();
+        assert_eq!(host_redirect(ACT, &go, NO_FILES_APP, &unread), None, "shell unread: look first");
+        assert_eq!(
+            host_family_lookup(ACT, &go, NO_FILES_APP, &unread),
+            Some(serde_json::json!({"app": "shell", "actions": "files_"}))
+        );
+        assert_eq!(host_family_lookup(ACT, &go, NO_FILES_APP, &d), None, "already read");
     }
 
     /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.

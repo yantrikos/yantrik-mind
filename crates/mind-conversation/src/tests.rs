@@ -16613,4 +16613,77 @@ mod desktop_consent_and_stall_wiring {
         assert!(r.reply.contains(COMPOSED), "the work log was thrown away: {}", r.reply);
         assert!(!r.reply.contains("couldn't think just now"), "{}", r.reply);
     }
+
+    /// The desktop's refusal from Reading D's T5.
+    const NO_FILES_APP: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: files.files_go was not run, because how the OS grades it could not be read: yos: no socket for 'files'";
+
+    fn reached_acts(r: &Run) -> Vec<(String, String)> {
+        acts_reached(r)
+            .iter()
+            .map(|a| (a["app"].as_str().unwrap_or("").into(), a["action"].as_str().unwrap_or("").into()))
+            .collect()
+    }
+
+    /// F11, Reading D's T5: `files_go` sent to a `files` app that does not exist. The shell is read
+    /// (it was not described this turn) and the same call goes there, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_family_action_sent_to_a_missing_app_reaches_the_shell() {
+        let r = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/home/yantrik"}}),
+            )],
+            vec![SHELL],
+            vec![NO_FILES_APP, "WENT-TO-THE-SHELL"],
+        )
+        .await;
+        assert_eq!(
+            reached_acts(&r),
+            vec![("files".into(), "files_go".into()), ("shell".into(), "files_go".into())],
+            "{:?}",
+            r.reached
+        );
+        let looked = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe") && *a == serde_json::json!({"app": "shell", "actions": "files_"})
+        });
+        assert!(looked, "the shell's files family was not read: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("there is no `files` app") && p.contains("WENT-TO-THE-SHELL")));
+    }
+
+    /// F11 kill criterion 3: a person's no to the shell action still stops the re-addressed call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_readdressed_call_still_meets_the_persons_no() {
+        let said_no_to_go = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow shell.files_go and said no. Nothing was run and nothing was changed.";
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "files_go", "args": {"path": "/a"}})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/b"}})),
+            ],
+            vec![SHELL],
+            vec![said_no_to_go, NO_FILES_APP, "RAN-AFTER-A-NO"],
+        )
+        .await;
+        assert_eq!(
+            reached_acts(&r),
+            vec![("shell".into(), "files_go".into()), ("files".into(), "files_go".into())],
+            "the re-addressed call went through after a no: {:?}",
+            r.reached
+        );
+    }
+
+    /// F11 kill criterion 1: a call the desktop accepted is never re-addressed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_call_is_left_alone() {
+        let r = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "notes", "action": "new", "args": {}}),
+            )],
+            vec![SHELL],
+            vec!["Done \u{2014} Notes, one new note", "NEVER"],
+        )
+        .await;
+        assert_eq!(reached_acts(&r), vec![("notes".into(), "new".into())]);
+    }
 }

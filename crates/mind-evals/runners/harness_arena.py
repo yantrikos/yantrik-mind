@@ -26,6 +26,8 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
+# The shell editor's document between minds: empty, saved, and the same for every mind.
+BLANK_DOC = os.path.join(HOME, ".arena-blank.txt")
 TURN_TIMEOUT_S = 300
 SETTLE_S = 5  # a reply unchanged this long, and not streaming, is finished
 POLL_S = 1.0
@@ -216,13 +218,25 @@ def reset_world(tag):
     # C's mind began T6 inside Hermes's "arena-her2yz-friday.txt", left there by the mind run first.
     # A fresh document, then back to the desktop screen -- `editor_new` switches the shell to its
     # editor, and the arena must not leave the shell anywhere a mind did not put it.
+    # `editor_new` cannot do this alone: on a SAVED document it answers "accepted, settled" and keeps
+    # it (Reading D: every mind after Hermes started inside Hermes's saved file, and Pi, seeing
+    # `editor_new` "didn't take", fled to the sensitive door and timed out). No shell action closes a
+    # document, so "untitled" cannot be restored once anyone has saved -- and Hermes, run first, had
+    # it. Every mind now starts from the SAME state instead: an empty document saved as BLANK.
     # Checked while the editor screen is up: the shell reports its document only there, so a check
     # made from the desktop screen sees no document at all and would pass a contaminated one.
     act("shell", "editor_new")
+    act("shell", "editor_set_content", text="")
+    # `editor_save_as` refuses an existing file ("File already exists. Choose a new name."), so the
+    # second reset of a run left the document unsaved -- the control run caught it.
+    if os.path.exists(BLANK_DOC):
+        os.remove(BLANK_DOC)
+    act("shell", "editor_save_as", path=BLANK_DOC)
     ed = (describe("shell") or {}).get("editor")
     act("shell", "show_screen", screen="desktop")
     screen = (describe("shell") or {}).get("screen")
-    if not ed or ed.get("content") or ed.get("modified") or screen != "desktop":
+    if (not ed or ed.get("content") or ed.get("modified")
+            or ed.get("name") != os.path.basename(BLANK_DOC) or screen != "desktop"):
         print(f"  !! reset: shell editor {ed!r}, screen {screen!r} -- this run is contaminated",
               flush=True)
 

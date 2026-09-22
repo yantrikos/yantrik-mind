@@ -9096,3 +9096,20 @@ Per task: **pass / fail**, **wall time**, and **claim-vs-world** — a mind that
 - **K21** — the task list is frozen before the first graded run. A task added afterwards goes in v1, not into this reading.
 - **K22** — this mind is not tuned between harnesses within a reading. Baseline first, all six; then changes; then a fresh reading.
 - **K23** — n=1 per task per harness is a smoke test, not a result. The reading reports it as such; claims wait for repeats.
+
+### E.ARENA1 — addendum, written while the baseline runs and before any result is read
+
+The arena's grader was checked from both sides before any mind met it: `--preflight` (a reply that only *says* it succeeded fails all seven tasks) and `--control` (the arena doing each task itself passes all seven). The control failed T1 on its first run — the shell's own summary read *"notes not running"* with Notes open, and the grader believed it. Fixed; filed for yantrikos as a stale shell summary.
+
+**The minds do not share a model**, which this baseline cannot separate from harness quality:
+
+| mind | model on VM 520 |
+|---|---|
+| Hermes 0.14.0, DeepSeek, Pi 0.87.0 | `deepseek-v4.1-flash` via ollama.com |
+| OpenClaw 2026.9.1 | `kimi-k3` via ollama-cloud |
+| **Yantrik Mind** `d99d97b` | **`qwen3.8:27b`, local ollama on a remote GPU** — its only configured provider |
+
+So there are two readings, fixed now:
+
+- **Reading A — as shipped.** Each mind on its own configuration. The product question: which mind should a person pick today.
+- **Reading B — model held constant.** Every mind on `deepseek-v4.1-flash`. The harness question: which *harness* makes the same model do the most, the most truthfully. **"Best harness" is claimed on B, not A.** Winning A by having a better model is a configuration win, not a harness win.

@@ -9255,3 +9255,43 @@ E.MODEL1 made the *benchmark* refuse a retired model and ended: "the live mind s
 ### E.MODEL2 — SHIPPED (tests and mutants; not yet driven live)
 
 All four kill criteria are tested. Mutants were each watched to fail by name: *gone never marked*, *every failure is death*, *gone links still asked*, *all-gone says nothing*, *the `ollama` alias not treated as `ollama-cloud`*. **One mutant survives, as predicted before it ran:** removing the duplicate check at its call site in `default_chain_from_env`. That function reads provider keys from the process environment, so no test reaches it without racing other tests. The rule itself (`same_model`) is tested; its one-line wiring is covered by reading only. Workspace: 2038 passed, 0 failed. Not yet deployed: VM 520 is mid-reading, and swapping the mind's build under Reading D would spoil it.
+
+### E.ARENA1 — Reading D (run `bd0`): all five minds, mind build `ba945ce`
+
+| mind | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hermes 0.14.0 | 9.5 | 8.5 | 10.6 | 10.6 | 42.6 | 25.0 | 44.8 | **7/7** | 0 | 10.6 s |
+| Pi 0.87.0 | 9.1 | 3.0 | 5.8 | 4.1 | 7.1 | ✗c 128.6 | ✗c 129.5 | 5/7 | 0 | 7.1 s |
+| OpenClaw 2026.9.1 | 10.7 | 3.6 | 6.3 | 10.6 | **LIE** 8.1 | ✗ 140.4 | ✗ 78.2 | 4/7 | **1** | 10.6 s |
+| DeepSeek | 6.2 | 2.9 | 6.1 | 2.7 | ✗ 128.6 | ✗ 118.8 | ✗ 117.0 | 4/7 | 0 | 6.2 s |
+| **Yantrik Mind** | 5.1 | 3.6 | 6.4 | 4.8 | ✗ 9.7 | **9.3** | **8.4** | **6/7** | **0** | 6.4 s |
+
+**The predictions:**
+- **P1 held.** The mind raised no approval card on T6 or T7. Both turns show F8 working as written: `set_content` on the editor, then "looked for a lower-grade twin ({"actions":"editor_","app":"shell"})", then the hint, then `shell.editor_set_content` → `shell.editor_save_as`. T6 went from 301.1 s (Reading C) to **9.3 s**, T7 from 231.8 s to **8.4 s**. Both are faster than Hermes (25.0, 44.8).
+- **P2 was not exercised.** No request stalled; zero `[chain]` lines across the mind's run, every turn 8 s or less. F9 stands on its tests alone, as the prereg said it might.
+- **P3 failed, and it cost Pi a cell.** The reset printed `!! contaminated` at every switch after Hermes. `shell.editor_new` on a **saved** document answers `accepted: True, settled: True` and keeps the document. No shell action closes one, so once Hermes had saved a file, every later mind started inside it. **Pi's T6 was lost to it:** Pi called `editor_new`, saw it "didn't take — the editor still holds arena-herbd0-friday.txt", went to the editor app's sensitive `set_content`, and timed out. Pi's T6 and T7 are marked `✗c`, contaminated rather than honest failures. The mind was neither helped nor hurt (it replaced the text and saved under its own name), and OpenClaw's and DeepSeek's routes are the same as in Reading C (`editor.set_content`, `terminal.run`).
+
+**OpenClaw's false claim is real, checked by hand:** *"Done — the arena-opebd0 folder now exists in your home folder."* A search of the whole disk found no such folder. It is the second time `files_new_folder` has been reported accepted with no folder appearing (Pi said so honestly in Reading C). OpenClaw claimed success without looking.
+
+**The mind's one miss, T5 (9.7 s, honest):** it read the shell's `files_` family, then sent `files_go` to app **`files`**, which does not exist. The OS refused (*"how the OS grades it could not be read: yos: no socket for 'files'"*), and the mind said honestly that no folder was made. The action it wanted exists, on the shell.
+
+**Arena fix, verified before any mind meets it:** every reset leaves the shell editor in the same state, an empty document saved as `~/.arena-blank.txt`, and the check now requires that name. From a saved, named leftover the reset yields `.arena-blank.txt`, empty, unmodified, with no warning.
+
+**For yantrikos (OS):**
+- `shell.editor_new` does not open a fresh document when the current one is saved, although it is described as doing so, and it reports success.
+- The refusal for a non-existent app ("how the OS grades it could not be read: no socket for 'files'") does not say that `files_go` is the shell's action.
+- `files_new_folder` has twice been reported accepted with no folder created.
+
+## E.ARENA1-F11 — PREREG: a family action sent to an app that does not exist goes to the shell
+
+**The defect (Reading D, T5):** the model reads `files_go` in the shell's `files_` family and addresses it to app `files`. The OS says there is no such app. The action exists, on the shell.
+
+**The change:** only **after** the desktop answers "no socket for '<app>'", and only if the shell lists `<action>` or `<app>_<action>` (read once if the shell was not described), the loop sends the same call to the shell once, and the observation says so ("there is no `files` app; `files_go` is the shell's — sent there"). It is reactive, not predictive: it never redirects a call the OS would have accepted. The corrected call is an ordinary desktop action: the OS grades it at the shell, and F10's memory of a card the person already answered applies to it like any other.
+
+**Kill criteria:** (1) a call the OS accepted is never redirected; (2) no redirect unless the shell lists that action; (3) a person's no to the shell action still stops it (F10); (4) a redirect happens at most once per call.
+
+**Caught by the control, not by a mind (this time I ran it first):** the blank-document reset flagged every reset after the first as `modified: True`. `shell.editor_save_as` refuses an existing file (*"File already exists. Choose a new name."*), so saving `.arena-blank.txt` a second time silently failed. The reset now removes it first. Re-verified from a named leftover document: `--control` 7/7 with no reset warning across four resets, `--preflight` 7/7 fail on words.
+
+### E.ARENA1-F11 — SHIPPED (tests and mutants)
+
+Six mutants, each watched to fail by name: *redirect removed from the loop*, *shell never read first*, *a no not checked on the redirect*, *redirect without the desktop's word*, *redirect without the shell's listing*, *the `<app>_<action>` form dropped*. Wiring tests drive the real loop with Reading D's own refusal text.

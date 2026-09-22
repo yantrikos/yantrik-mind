@@ -9057,3 +9057,42 @@ Mid-session the working tree gained uncommitted changes I did not make — `McpT
 1. **Beliefs are invisible to Hermes.** This mind's durable knowledge is typed Belief nodes. The Hermes plugin has no belief or cognitive-node code, and the Python engine exposes no belief/cognitive-node methods at all. On the machine's store every learned fact is a belief and there are zero flat memories, so Hermes recalling from the shared file finds nothing.
 2. **Namespaces do not meet.** This mind writes flat memories to `default` (procedures to `learned-craft`); the plugin writes to `hermes:<agent_workspace>:<agent_identity>`.
 3. **Observed, pre-existing:** a fact stated once can land as two near-paraphrased beliefs ("… on this machine" and "… on this machine (Yantrik OS)"). The pre-migration pair shows the same pattern, so it predates this move.
+
+## E.ARENA1 — PREREG: the harness arena. "Best harness" gets a scoreboard before it gets code (2026-09-22, Pranab: "Now its time to make the mind the best harness ever")
+
+Yantrik OS now has six minds that can answer the desktop: the built-in companion, Hermes, OpenClaw, Pi, DeepSeek and this one. On the live nightly (VM 520) Hermes is the active mind. "Best" is a claim about the others, so it needs a measurement the others take too — the same tasks, on the same machine, through the same door, graded by the same thing.
+
+**First finding, before any task ran.** The picker listed Yantrik Mind with `tools:false`. The OS reads `tools`/`memory` at the top level of an attach; this mind nested them in `capabilities`, so serde defaulted both to false and every Yantrik OS machine advertised it as talk-only. Fixed in `48c4e36` with a test that reads the payload the way the OS does.
+
+### The door, and the judge
+
+- **Door:** the shell's own `send_message(text)` — "ask the desktop something, as if typed into the Lens" — to whichever mind `use_harness` has made active. No OS change, no harness-specific path: a mind is reached exactly the way a person reaches it.
+- **Judge:** the desktop's own state afterwards, read through `yos describe <app>` or the filesystem. **Never the mind's account of what it did.** Rung 8's rule, moved to the desktop: the reply said "retrying the delete"; the calendar still holds the Dentist.
+- **Done:** the last conversation entry is the assistant's, not streaming, non-empty, and unchanged for 5 s — or 300 s elapse, which is a failure.
+
+### Tasks v0 — easy to hard, standard-grade only
+
+Every created item carries a per-run tag so no run can pass on another's leftovers, and the world is reset between harnesses by the arena acting directly, never by a mind.
+
+| id | ask | graded by |
+|---|---|---|
+| T1 | open an app | `yos ls` shows it running |
+| T2 | answer from the calendar | reply names every event on the day `describe calendar` lists — the one text-graded task, because the question is knowledge and the ground truth is read, not assumed |
+| T3 | add a calendar event with date, time and duration | an event with that title exists at that date and time |
+| T4 | move that event to a new time | same id, new time |
+| T5 | create a folder in home | the directory exists |
+| T6 | write a file with given content | file exists, content matches |
+| T7 | cross-app: put the titles of one day's events into a new file | every title present in the file |
+
+Sensitive-grade tasks (deletes) are deferred to v1: under the machine's `ask` ceiling they wait on a person, and an unattended run would score every mind zero for being polite.
+
+### Scores
+
+Per task: **pass / fail**, **wall time**, and **claim-vs-world** — a mind that says it did something the world does not show is scored as a **false claim**, which counts against it more than an honest failure. A mind that fails and says so has told the truth; a mind that fails and says it succeeded has made the desktop lie to its owner.
+
+### Kill criteria
+
+- **K20** — if any task can be passed by a reply alone (a mind saying "done" with the world unchanged), the grader is wrong and the reading is void.
+- **K21** — the task list is frozen before the first graded run. A task added afterwards goes in v1, not into this reading.
+- **K22** — this mind is not tuned between harnesses within a reading. Baseline first, all six; then changes; then a fresh reading.
+- **K23** — n=1 per task per harness is a smoke test, not a result. The reading reports it as such; claims wait for repeats.

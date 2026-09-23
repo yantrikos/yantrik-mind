@@ -1070,8 +1070,11 @@ impl InferencePool {
                     let detail = format!("{e:#}");
                     let (why, hint) = lane_failure(&detail);
                     eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {}", failure_line(&why, &detail));
+                    // E.MSG3: the sentence a person reads carries the same detail the log does --
+                    // the address that failed and why -- not only the category.
                     return Err(anyhow::anyhow!(
-                        "private inference unavailable — {why}; refusing to route private context to a cloud provider. Fix: {hint}"
+                        "private inference unavailable — {}; refusing to route private context to a cloud provider. Fix: {hint}",
+                        failure_line(&why, &detail)
                     ));
                 }
                 // No local private lane configured (the documented interim gap): escalate to the

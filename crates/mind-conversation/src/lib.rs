@@ -12824,7 +12824,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     );
                     break;
                 }
-                Err(e) => return Ok(format!("(couldn't think just now: {e})")),
+                // E.MSG3: `{e:#}`, the whole chain -- `{e}` printed only the outer context, the same
+                // words for a refused connection, a timeout and a 410 (yantrik-os #166).
+                Err(e) => return Ok(format!("(couldn't think just now: {e:#})")),
             };
             // Split the model's reasoning off the reply and STREAM IT. The reasoning is the most
             // interesting thing happening during a 30-second local-model turn and it used to be

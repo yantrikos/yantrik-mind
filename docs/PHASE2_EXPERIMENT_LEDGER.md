@@ -9370,3 +9370,15 @@ Installed with a backup (`mind-core.prev-1790177924`) and verified: installed SH
 Both are for later.
 
 **PR #58** (`os-shared-memory` → `main`, 38 commits) is open, not merged. It carries the yantrikdb `0.21.2 → 0.23.0` engine move, which is the deciding risk for production: the family box's `mind.db` would be opened by the new engine.
+
+## E.MSG3 — PREREG: a model that cannot be reached is named, with the cause (2026-09-23, asked by the yantrikos session)
+
+**What happened.** yantrik-os issue #166: on VM 520 every Mind turn answered *"(couldn't think just now: OpenAI-compatible API request failed)"*. The cause was my arena logging proxy on `127.0.0.1:7461`. It had died, and my test config still routed the Mind through it: **my leftover test infrastructure on a shared machine**, which my own cleanup list carried and I had not done. The OS session diagnosed it and, at Pranab's request, commented out the override. The message sent the diagnosis the wrong way: #166 first blamed a missing private lane. It said neither which address was called nor why the call failed. The client attaches no address, and the loop prints only the outermost error line (`{e}`), dropping the cause beneath it.
+
+**The change:** the OpenAI-compatible and Ollama clients (yantrik-ml) put the address they called into the error, **with any `user:pass@` and query string removed** (a configured URL can carry credentials, and this text reaches the chat); and the loop's failure reply prints the whole chain (`{e:#}`), so the cause (refused, timed out, 410) is in it.
+
+**Kill criteria:** a refused connection names the host and port; credentials and query strings never appear; the existing "couldn't think just now" wording stays (a test and people rely on it).
+
+### E.MSG3 — SHIPPED (tests and mutants)
+
+A refused connection now reads *"(couldn't think just now: OpenAI-compatible API request to http://127.0.0.1:7461/v1/chat/completions failed: …Connection refused…)"*, through a failing private lane and through a cleared cloud provider alike. Four mutants, each watched to fail by name, across both repos: *the loop prints only the outer context*, *a failed private lane names only the category*, *the client names no address* (tested against a real closed port), and *credentials are shown*. Workspace: 2056 passed, 0 failed.

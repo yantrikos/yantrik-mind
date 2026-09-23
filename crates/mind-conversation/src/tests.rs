@@ -16904,3 +16904,69 @@ mod desktop_consent_and_stall_wiring {
         assert!(!none.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", none.reply);
     }
 }
+
+/// E.MSG3 (yantrik-os #166): when the model cannot be reached, the reply names the address and the
+/// cause -- through a dedicated private lane that fails closed, and through a cleared cloud
+/// provider whose error comes back as-is.
+#[cfg(test)]
+mod unreachable_model_is_named {
+    use super::*;
+
+    /// Fails every call the way the OpenAI-compatible client does when nothing listens.
+    struct Refused;
+    impl LLMBackend for Refused {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            Err(anyhow::anyhow!("io: Connection refused (os error 111)")
+                .context("OpenAI-compatible API request to http://127.0.0.1:7461/v1/chat/completions failed"))
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "refused"
+        }
+    }
+
+    async fn reply_from(pool: InferencePool) -> String {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        conv.agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_lane_that_refuses_is_named() {
+        let be: Arc<dyn LLMBackend> = Arc::new(Refused);
+        let pool = InferencePool::new(Arc::clone(&be), 1)
+            .with_provider("ollama-local:home")
+            .with_private_backend(be, "ollama-local:home");
+        let reply = reply_from(pool).await;
+        assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
+        assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cloud_provider_that_refuses_is_named() {
+        let pool = InferencePool::new(Arc::new(Refused) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud");
+        let reply = reply_from(pool).await;
+        assert!(reply.contains("couldn't think just now"), "{reply}");
+        assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
+        assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
+    }
+}

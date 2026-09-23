@@ -405,6 +405,62 @@ pub(crate) fn redirected(from_app: &str, fixed: &serde_json::Value, out: &str) -
     format!("(there is no `{from_app}` app; `{action}` is the {TWIN_HOST}'s, so it was sent there:) {out}")
 }
 
+/// E.ARENA1-F12: keep the one bit "a document written this turn is still unsaved", from the
+/// desktop's own words. An editor action's result line carries `, unsaved` until a save takes:
+/// `editing "untitled", 7 words, unsaved` becomes `editing "arena-minp0x.txt", 3 words`. Set by any
+/// action whose result says so; cleared only by a SAVE whose result shows the document without it,
+/// so `editor_new` after an unsaved write does not pretend the text was kept. Reads never touch it.
+pub(crate) fn update_unsaved(tool: &str, args: &serde_json::Value, obs: &str, unsaved: &mut bool) {
+    if tool != ACT {
+        return;
+    }
+    let head = obs.lines().next().unwrap_or("");
+    let head = head.split(" accepted:").next().unwrap_or(head);
+    if !(head.contains("editing \"") || head.contains("Text Editor \u{2014}")) {
+        return;
+    }
+    if head.contains(", unsaved") {
+        *unsaved = true;
+    } else if args
+        .get("action")
+        .and_then(|a| a.as_str())
+        .is_some_and(|a| a.contains("save"))
+    {
+        *unsaved = false;
+    }
+}
+
+/// E.ARENA1-F12: said once, before a turn ends with the document unsaved.
+pub(crate) fn unsaved_nudge(step: usize) -> String {
+    format!(
+        "\n[{step}] (what you wrote is still only in the editor \u{2014} the desktop says it is unsaved. \
+         Save it now with the path the request named (the shell's editor_save_as, or the editor's \
+         save_as), or say plainly that it is not saved.)"
+    )
+}
+
+/// E.ARENA1-F12: appended, by code, when a turn ends with the document still unsaved.
+pub(crate) const UNSAVED_NOTE: &str =
+    "(What I wrote is in the editor but has not been saved to a file.)";
+
+/// E.ARENA1-F12: the repeat nudge for a desktop ACTION. The loop's own nudge was written for fetch
+/// tasks and ends "otherwise answer" -- Reading E's T7 took that exit with the save still undone.
+pub(crate) fn repeated_action_note(tool: &str, unsaved: bool) -> Option<String> {
+    if tool != ACT {
+        return None;
+    }
+    Some(if unsaved {
+        "(that action already ran; its result is above. Do not repeat it. What you wrote is still \
+         only in the editor, unsaved: the next step is to save it with the path the request named \
+         (the shell's editor_save_as, or the editor's save_as), or say plainly that it is not saved.)"
+            .to_string()
+    } else {
+        "(that action already ran; its result is above. Do not repeat it. Take the NEXT step the \
+         request still needs, or say plainly what is left undone.)"
+            .to_string()
+    })
+}
+
 /// What the person did with a card this turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
@@ -642,6 +698,39 @@ mod tests {
             Some(serde_json::json!({"app": "shell", "actions": "files_"}))
         );
         assert_eq!(host_family_lookup(ACT, &go, NO_FILES_APP, &d), None, "already read");
+    }
+
+    /// Reading E's T7, from the desktop's own result lines.
+    #[test]
+    fn the_unsaved_bit_follows_the_desktops_own_words() {
+        let act = |action: &str| serde_json::json!({"app": "shell", "action": action});
+        let mut u = false;
+        update_unsaved(ACT, &act("editor_new"), "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 0 words\naccepted: True", &mut u);
+        assert!(!u, "an empty new document is not unsaved work");
+        update_unsaved(ACT, &act("editor_set_content"), "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 7 words, unsaved\naccepted: True, settled: True", &mut u);
+        assert!(u, "the desktop said unsaved");
+        update_unsaved(ACT, &act("editor_new"), "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 0 words\naccepted: True", &mut u);
+        assert!(u, "a new document does not keep the text that was written");
+        update_unsaved(DESCRIBE, &act("x"), "Yantrik \u{2014} editing \"a.txt\", 3 words", &mut u);
+        assert!(u, "reads never touch it");
+        update_unsaved(ACT, &serde_json::json!({"app": "calendar", "action": "add_event"}), "Done \u{2014} Calendar \u{2014} September 2026", &mut u);
+        assert!(u, "an action on no document says nothing about one");
+        update_unsaved(ACT, &act("editor_save_as"), "Done \u{2014} Yantrik \u{2014} editing \"arena-minp0x.txt\", 3 words\naccepted: True, settled: True", &mut u);
+        assert!(!u, "a save that took clears it");
+        let mut e = false;
+        update_unsaved(ACT, &serde_json::json!({"app": "editor", "action": "set_content"}), "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 2 lines, unsaved", &mut e);
+        assert!(e, "the editor app's own line counts too");
+        update_unsaved(ACT, &serde_json::json!({"app": "editor", "action": "save_as"}), "Done \u{2014} Text Editor \u{2014} notes.txt, 2 lines, saved \u{b7} Recovered unsaved drafts", &mut e);
+        assert!(!e, "\"unsaved drafts\" elsewhere on the line is not this document");
+    }
+
+    #[test]
+    fn a_repeated_desktop_action_is_sent_onward_not_to_answer() {
+        let saved = repeated_action_note(ACT, false).unwrap();
+        assert!(saved.contains("NEXT step") && !saved.contains("otherwise answer"), "{saved}");
+        let unsaved = repeated_action_note(ACT, true).unwrap();
+        assert!(unsaved.contains("save it"), "{unsaved}");
+        assert_eq!(repeated_action_note(DESCRIBE, true), None, "reads keep the loop's own nudge");
     }
 
     /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.

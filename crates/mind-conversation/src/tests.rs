@@ -16825,4 +16825,82 @@ mod desktop_consent_and_stall_wiring {
         .await;
         assert_eq!(reached_acts(&r), vec![("notes".into(), "new".into())]);
     }
+
+    const NEW_DOC: &str = "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 0 words\naccepted: True, settled: True";
+    const WROTE: &str = "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 7 words, unsaved\naccepted: True, settled: True";
+    const SAVED: &str = "Done \u{2014} Yantrik \u{2014} editing \"arena-x-friday.txt\", 7 words\naccepted: True, settled: True";
+
+    /// F12, Reading E's T7: new document, write, write again, then the model answers. The repeat
+    /// is sent toward the save; the answer is asked once for the save; still unsaved, the reply
+    /// says so in the code's own words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unsaved_document_is_asked_for_then_said() {
+        let write = serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a\nb"}});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("the next step is to save it")),
+            "the repeated write was not pointed at the save"
+        );
+        assert!(
+            r.prompts.iter().any(|p| p.contains("the desktop says it is unsaved")),
+            "the answer was not asked for the save"
+        );
+        assert!(r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+    }
+
+    /// F12 at compose: the model repeats the write until the loop gives up on it (two barren
+    /// steps), so the turn ends in compose -- and the reply still says the document is unsaved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unsaved_document_is_said_even_when_compose_ends_the_turn() {
+        let write = serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a\nb"}});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE],
+        )
+        .await;
+        assert!(r.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", r.reply);
+        assert!(r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+    }
+
+    /// F12's kill criteria: a document that was saved, and a turn that wrote none, hear nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_document_or_none_hears_nothing_about_saving() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a"}})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_save_as", "args": {"path": "/home/yantrik/arena-x-friday.txt"}})),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE, SAVED],
+        )
+        .await;
+        assert!(!r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+        assert!(!r.prompts.iter().any(|p| p.contains("the desktop says it is unsaved")));
+        let none = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "calendar", "action": "add_event", "args": {"title": "x"}}),
+            )],
+            vec![SHELL],
+            vec!["Done \u{2014} Calendar \u{2014} September 2026, one thing on day 30"],
+        )
+        .await;
+        assert!(!none.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", none.reply);
+    }
 }

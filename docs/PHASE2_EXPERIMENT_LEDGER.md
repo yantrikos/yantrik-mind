@@ -9314,3 +9314,39 @@ Six mutants, each watched to fail by name: *redirect removed from the loop*, *sh
 Every kill criterion is tested through the real loop. **Cloud-only:** after one tool call the model stops answering, the turn reaches compose (F9), compose is refused, and the reply is exactly the new constant. **Private lane present but failing at compose:** the reply is exactly the old "unreachable" constant, which is true there. Four mutants, each watched to fail by name: *always the old words*, *always the new words*, *a dedicated lane not counted*, *the allowlist not counted*. The last one survived the first pass because the allowlist is read from the environment; the rule was pulled into a pure `lane_cleared`, tested with VM 520's own configuration, and the mutant then failed. Workspace: 2049 passed, 0 failed.
 
 **For Pranab, a decision rather than a defect:** an owner who configures only a cloud model gets, by design, a loop that escalates private context to that provider with an audit line, and then a compose that refuses. So the material has already gone to the cloud once, and the answer is still declined. Either the owner's choice of a cloud model is consent (clear it at first run, with an explicit question), or the loop should also refuse. The current half-way state protects nothing and costs the answer.
+
+### E.ARENA1 — Reading E (run `p0x`): mind build `7596bc5` (F11, E.MODEL2), a clean arena
+
+| mind | T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Hermes 0.14.0 | 9.2 | 7.2 | 8.4 | 8.1 | 20.0 | 26.2 | ✗h 300.4 | 6/7 | 0 | 9.2 s |
+| Pi 0.87.0 | 8.5 | 53.7 | 54.9 | 9.4 | 7.4 | ✗ 124.6 | ✗ 119.5 | 5/7 | 0 | 53.7 s |
+| OpenClaw 2026.9.1 | 11.6 | 5.8 | 5.2 | 4.7 | **LIE** 16.3 | ✗ 147.4 | ✗ 74.1 | 4/7 | **1** | 11.6 s |
+| DeepSeek | 9.7 | 4.8 | 5.2 | 2.8 | ✗ 116.2 | ✗ 114.0 | ✗ 115.5 | 4/7 | 0 | 9.7 s |
+| **Yantrik Mind** | 3.9 | 6.1 | 6.2 | 8.6 | **11.7** | **6.4** | ✗ 9.2 | **6/7** | **0** | **6.4 s** |
+
+**The reset held.** There was no `!! reset` warning anywhere in the run.
+
+- **F11 worked live.** T5's trace reads `files_go` to app `files`, then *"no `files` app — re-addressed to shell"*, then `shell.files_go`, then `files_new_folder`, and the folder exists. That is the miss from Reading D, fixed.
+- **Hermes's T7 (`✗h`):** the file is correct (`missing []`, exists), but the turn never finished within the arena's 300 s and the reply was empty. This is the same shape as the provider stalls this mind lost turns to in B5 and Reading C. It is scored a fail by the frozen rule (pass = right *and* finished).
+- **Pi's slow T2/T3 (~54 s):** not the provider. Three probes of `deepseek-v4.1-flash` on ollama.com answered in 0.42 s each during the run.
+- **OpenClaw's T5 false claim, again:** word for word the same as Reading D (*"the arena-opep0x folder now exists in your home folder"*); a disk-wide search found no such folder. Two readings running.
+- **A correction to Reading D:** on a clean desktop Pi fails T6 anyway, going straight to the sensitive `editor.set_content` (*"only the Editor's set_content or the Notes app's export can do it"*). So Reading D's contamination changed Pi's path, but I cannot claim it cost Pi the cell.
+
+**The mind's T7 (9.2 s, new failure):** `editor_new`, then `editor_new` again (repeat nudge), `editor_set_content` with the three titles, `editor_set_content` again (repeat nudge), `editor_new` again. That was two barren steps in a row, so the loop composed. It **never called `editor_save_as`**, and the reply listed the three titles without saying the file was not written. Reading D passed the same task in 8.4 s, so the model is inconsistent here. But the harness made it worse: the repeat nudge was written for fetch tasks and ends *"…otherwise answer"*, the wrong word for an action sequence with its last step undone. The unfinished-request check (F5) is silent because it fires only when **no** acting call was made.
+
+**D + E, the mind:** 12/14, zero false claims, median ~6.4 s. Hermes 13/14. K23 binds: these are smoke readings.
+
+## E.ARENA1-F12 — PREREG: an edit left unsaved is finished or said
+
+**The change:**
+- (1) The loop keeps one bit, *a document written this turn is unsaved*. The desktop's own result line for an editor action carries `, unsaved` until a save succeeds (`editing "untitled", 7 words, unsaved` becomes `editing "arena-minp0x.txt", 3 words`). It is set by an action whose result says `unsaved`, and cleared by one that does not.
+- (2) Before the turn ends with the bit set, one nudge: *the text is only in the editor; save it with the path the request named, or say plainly it is not saved.*
+- (3) If it still ends unsaved, a fixed line is appended: *(What I wrote is in the editor but has not been saved to a file.)*
+- (4) The repeat nudge for a desktop action says to take the next step or say what is left undone, not *"otherwise answer."*
+
+**Kill criteria:** a saved document never triggers either message; a turn that never wrote a document never triggers either; the appended line is added at most once; reads alone never set the bit.
+
+### E.ARENA1-F12 — SHIPPED (tests and mutants)
+
+Seven mutants, each watched to fail by name: *the bit never kept*, *no nudge before answering unsaved*, *no note on the answer path*, *no note after compose*, *any document result clears the bit*, *repeats keep the fetch-task nudge*, *any "unsaved" on the line counts* (the editor app's `saved · Recovered unsaved drafts` must not). The loop tests replay Reading E's T7 through the answer path and through the compose path, and check that a saved document and a turn that wrote none hear nothing. Workspace: 2054 passed, 0 failed.

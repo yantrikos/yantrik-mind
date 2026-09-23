@@ -12618,6 +12618,9 @@ Open reminders you're carrying for them:",
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
         let mut answered: std::collections::HashMap<String, desktop::Answer> =
             std::collections::HashMap::new();
+        // E.ARENA1-F12: a document written this turn is still unsaved (the desktop's own word).
+        let mut unsaved_doc = false;
+        let mut unsaved_nudged = false;
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -13060,6 +13063,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // indistinguishable from one still running — 17 minutes of "is it wedged?" on
                 // 2026-08-16 was this exact silence.
                 // Before this counts as the answer: was part of what was asked never attempted?
+                // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
+                if unsaved_doc {
+                    if !unsaved_nudged {
+                        unsaved_nudged = true;
+                        eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
+                        scratch.push_str(&desktop::unsaved_nudge(step));
+                        continue;
+                    }
+                    a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
+                }
                 if let Some(clause) = unattempted_side_effect(user_text, &cost.calls) {
                     // E.ARENA1-F5: a turn that never looked at the desktop is sent to look, not
                     // offered the exit of saying it cannot on the strength of earlier replies.
@@ -13251,10 +13264,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // the guard that belongs here, since it counts wasted steps rather than assuming
                 // the first one is fatal.
                 eprintln!("[agent] step {step}: repeated {tool} call — nudging it onward");
-                scratch.push_str(&format!(
+                // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
+                match desktop::repeated_action_note(&tool, unsaved_doc) {
+                    Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
+                    None => scratch.push_str(&format!(
                     "
 [{step}] {tool} -> (you just called this with these exact arguments; the result                      is directly above. Do NOT call it again. If the request named several targets,                      move to the next one you have not fetched yet; otherwise answer.)"
-                ));
+                )),
+                }
                 barren += 1;
                 if barren >= MAX_BARREN_STEPS {
                     break;
@@ -13266,10 +13283,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // second pass. Re-serve the earlier result from the log rather than paying for it twice.
             if done_calls.contains(&call_sig) {
                 eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
-                scratch.push_str(&format!(
+                match desktop::repeated_action_note(&tool, unsaved_doc) {
+                    Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
+                    None => scratch.push_str(&format!(
                     "
 [{step}] {tool} -> (already called with exactly these arguments earlier this turn;                      its result is above — do not call it again, use it or answer)"
-                ));
+                )),
+                }
                 barren += 1;
                 if barren >= MAX_BARREN_STEPS {
                     break;
@@ -13367,6 +13387,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 if let Some((key, answer)) = desktop::approval_answer(&obs) {
                     answered.insert(key, answer);
                 }
+            }
+            if sent {
+                desktop::update_unsaved(&tool, &args, &obs, &mut unsaved_doc);
             }
             let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             eprintln!(
@@ -13612,6 +13635,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
         }
         apply_denied_write_correction(&mut ans, &denied_mutations);
+        // E.ARENA1-F12: a turn that ended with its document unsaved says so, whatever compose wrote.
+        if unsaved_doc {
+            ans = format!("{ans}\n\n{}", desktop::UNSAVED_NOTE);
+        }
         let _ = self
             .memory
             .append_message_scoped("user", user_text, id.write_scope())

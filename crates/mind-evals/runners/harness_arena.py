@@ -28,6 +28,10 @@ import time
 HOME = os.path.expanduser("~")
 # The shell editor's document between minds: empty, saved, and the same for every mind.
 BLANK_DOC = os.path.join(HOME, ".arena-blank.txt")
+# Since yantrik-os #188/#191 a CLI `delete_event` raises a card for the person, so an unattended
+# reset cannot remove its own events. --keep-events leaves them (each run's titles are unique) and
+# says how many, until the OS offers a door for a requester's own events (yantrik-os #201).
+KEEP_EVENTS = False
 TURN_TIMEOUT_S = 300
 SETTLE_S = 5  # a reply unchanged this long, and not streaming, is finished
 POLL_S = 1.0
@@ -192,8 +196,13 @@ def reset_world(tag):
             shutil.rmtree(full, ignore_errors=True) if os.path.isdir(full) else os.remove(full)
     if not ensure_calendar_open():
         print("  !! reset: the calendar did not open -- this run is contaminated", flush=True)
-    for e in calendar_day(30):
-        if e.get("title", "").startswith("Arena "):
+    arena_events = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
+    if KEEP_EVENTS:
+        if arena_events:
+            print(f"  (reset: keeping {len(arena_events)} arena event(s) on 30 Sep -- deleting one now "
+                  f"asks the person; yantrik-os #201)", flush=True)
+    else:
+        for e in arena_events:
             act("calendar", "delete_event", id=e["id"])
     subprocess.run(["pkill", "-x", "yantrik-notes"], capture_output=True)
     # The editor keeps its tabs for as long as it runs, and allows eight. Readings B-prime to B5 each
@@ -496,8 +505,10 @@ def control(task_ids):
             broken.append(tid)
     reset_world(tag)
     left = [e for e in calendar_day(30) if e.get("title", "").startswith("Arena ")]
-    print(f"  cleanup: {len(left)} arena event(s) left on 30 Sep after reset" + (" -- RESET IS BROKEN" if left else ""))
-    return broken + (["reset"] if left else [])
+    broken_reset = bool(left) and not KEEP_EVENTS
+    print(f"  cleanup: {len(left)} arena event(s) left on 30 Sep after reset"
+          + (" -- RESET IS BROKEN" if broken_reset else (" (kept: --keep-events)" if left else "")))
+    return broken + (["reset"] if broken_reset else [])
 
 
 def main():
@@ -507,7 +518,11 @@ def main():
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--control", action="store_true")
     ap.add_argument("--out", default=os.path.join(HOME, ".yantrik-arena-results.jsonl"))
+    ap.add_argument("--keep-events", action="store_true",
+                    help="leave the arena's own calendar events instead of asking the person to delete them")
     a = ap.parse_args()
+    global KEEP_EVENTS
+    KEEP_EVENTS = a.keep_events
     os.environ.setdefault("XDG_RUNTIME_DIR", "/run/user/1000")
     if a.control:
         broken = control([t for t in a.tasks.split(",") if t])

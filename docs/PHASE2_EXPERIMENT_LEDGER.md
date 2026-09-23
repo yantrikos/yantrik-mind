@@ -9382,3 +9382,18 @@ Both are for later.
 ### E.MSG3 — SHIPPED (tests and mutants)
 
 A refused connection now reads *"(couldn't think just now: OpenAI-compatible API request to http://127.0.0.1:7461/v1/chat/completions failed: …Connection refused…)"*, through a failing private lane and through a cleared cloud provider alike. Four mutants, each watched to fail by name, across both repos: *the loop prints only the outer context*, *a failed private lane names only the category*, *the client names no address* (tested against a real closed port), and *credentials are shown*. Workspace: 2056 passed, 0 failed.
+
+### E.ARENA1 — verification run V1 (run `q5b`): the final build `87966f8`, mind only, **7/7, 0 false claims**
+
+Run in a window the yantrikos session gave (VM 520 quiet, no OS deploy), after `--control` 7/7 and `--preflight` 7/7 on the changed arena. **A verification of the fixes, not a scored reading:** one mind, n=1 per cell. The five-mind reading waits for a separate VM.
+
+| T1 | T2 | T3 | T4 | T5 | T6 | T7 | pass | false claims | median |
+|---|---|---|---|---|---|---|---|---|---|
+| 7.9 | 6.7 | 7.1 | 9.7 | 12.7 | 10.8 | 11.8 | **7/7** | **0** | 9.7 s |
+
+**What the traces show:**
+- **F12 fixed Reading E's T7 live.** The model wrote the titles (`unsaved`), repeated the write, which is exactly E's failure pattern, and got the desktop repeat nudge (*"…still only in the editor, unsaved: the next step is to save it"*), then called `editor_save_as` to the right path.
+- **The edge case did not fire falsely.** In T6 the model saved, then tried the same write again; the repeat guard served it from the log, so the document stayed saved and no "not saved" note was added.
+- **Honest replies:** both file replies state the path, the exact contents and the byte count. T7 also flagged the 13:00 double-booking on 25 Sep unprompted.
+
+**The arena change this needed:** `--keep-events`. Since yantrik-os #188/#191 a CLI `delete_event` asks the person, so the reset leaves the arena's own `Arena <tag>` events (titles unique per run) and says how many, until yantrik-os #201 gives a requester a door for its own events. Four such events are on VM 520's calendar now; they are to be removed when #201 lands.

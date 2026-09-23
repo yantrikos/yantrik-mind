@@ -9358,3 +9358,15 @@ Reading F started at 02:49:46 CDT. At **02:51**, `/opt/yantrik/bin/yos` and `yos
 **Void in full:** every cell after 02:51 ran against a different OS, and the mind never ran. Reading E did not overlap an update (the shell binary is dated 16:29 on 09-22, `yos`/`yos-mcp` 02:51 on 09-23) and stands.
 
 **Asked of yantrikos:** a window, or a VM of my own, for readings; and the intended way for a test harness to remove its own calendar events now that `delete_event` from the CLI asks the person.
+
+### Staging soak — `8fd459b` on 192.168.4.95 (2026-09-23), then PR #58
+
+Installed with a backup (`mind-core.prev-1790177924`) and verified: installed SHA = built SHA (`a578ce4e…`), all five new code paths present by `strings`, exactly one `mind-core`, console 200, `.prev-*` pruned to two, 8.9 GB free. Driven with three real turns on the local `qwen3.8:27b`: the weather in Pune (31 s), the time in Tokyo (40 s), a web search (1 s, direct route). All correct. Model requests took **2–3 s each**, so the F9 cap (60 s floor) never fired; no failover, no link marked gone.
+
+**Two older inefficiencies, not from this work:**
+- The local model repeats identical calls (`weather` ×3, `now` ×3); the repeat guard catches them.
+- One turn spent **21 s after compose** in post-processing.
+
+Both are for later.
+
+**PR #58** (`os-shared-memory` → `main`, 38 commits) is open, not merged. It carries the yantrikdb `0.21.2 → 0.23.0` engine move, which is the deciding risk for production: the family box's `mind.db` would be opened by the new engine.

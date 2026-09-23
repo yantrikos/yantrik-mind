@@ -9350,3 +9350,11 @@ Every kill criterion is tested through the real loop. **Cloud-only:** after one 
 ### E.ARENA1-F12 — SHIPPED (tests and mutants)
 
 Seven mutants, each watched to fail by name: *the bit never kept*, *no nudge before answering unsaved*, *no note on the answer path*, *no note after compose*, *any document result clears the bit*, *repeats keep the fetch-task nudge*, *any "unsaved" on the line counts* (the editor app's `saved · Recovered unsaved drafts` must not). The loop tests replay Reading E's T7 through the answer path and through the compose path, and check that a saved document and a turn that wrote none hear nothing. Workspace: 2054 passed, 0 failed.
+
+### E.ARENA1 — Reading F (run `r8s`, mind build `8fd459b`): VOID, the OS changed under it
+
+Reading F started at 02:49:46 CDT. At **02:51**, `/opt/yantrik/bin/yos` and `yos-mcp` were replaced, a deploy by the OS side on the same VM. The conversation also carries *"Release check: reply with exactly one word, READY."* turns, and new calendar events appeared that the arena did not make. Hermes's T1–T5 passed (4.9–8.6 s). Its T6 wrote the right file with a complete reply, then never settled within 300 s, and its T7 got no reply at all. At the switch to Pi, the reset's `yos act calendar delete_event` raised a **sensitive approval card** (requester `yos`, the arena's own process) and timed out after 60 s, and the arena crashed. The new `yos` routes CLI actions through the approval guard; the old one did not.
+
+**Void in full:** every cell after 02:51 ran against a different OS, and the mind never ran. Reading E did not overlap an update (the shell binary is dated 16:29 on 09-22, `yos`/`yos-mcp` 02:51 on 09-23) and stands.
+
+**Asked of yantrikos:** a window, or a VM of my own, for readings; and the intended way for a test harness to remove its own calendar events now that `delete_event` from the CLI asks the person.

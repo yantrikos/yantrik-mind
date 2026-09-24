@@ -39,10 +39,27 @@ POLL_S = 1.0
 
 # ── the door ──────────────────────────────────────────────────────────────────────────────────
 
+YOS_TIMED_OUT = "(yos timed out"
+
+
 def yos(*args, timeout=60):
-    """Run `yos` with argv (never a shell string -- a space in a task must not split it)."""
-    r = subprocess.run(["yos", *args], capture_output=True, text=True, timeout=timeout)
+    """Run `yos` with argv (never a shell string -- a space in a task must not split it).
+
+    A timeout is an ANSWER, not a crash: since yantrik-os #188/#191 a CLI action the desktop grades
+    above the machine's mode waits on a card for the person, and Reading F's reset died of exactly
+    that (`delete_event`, TimeoutExpired, the whole run gone). The caller sees the timeout and
+    decides what it means."""
+    try:
+        r = subprocess.run(["yos", *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return f"{YOS_TIMED_OUT} after {timeout}s: {' '.join(args[:3])} -- probably waiting on a card)"
     return (r.stdout or "") + (r.stderr or "")
+
+
+def desktop_locked():
+    """yantrik-os #312: while the lock or login screen shows, every shell action is refused and
+    `describe shell` says only `locked: true`."""
+    return bool((describe("shell") or {}).get("locked"))
 
 
 def describe(app):
@@ -364,10 +381,16 @@ def run(minds, task_ids, out_path, run_id):
     original = active_mind()
     try:
         for mind in minds:
-            act("shell", "use_harness", id=mind)
+            if desktop_locked():
+                print(f"!! the desktop is locked; {mind} not run -- someone has to sign in", flush=True)
+                continue
+            switched = act("shell", "use_harness", id=mind)
             time.sleep(1)
             if active_mind() != mind:
-                print(f"!! could not make {mind} active (active: {active_mind()}); skipping", flush=True)
+                why = ("use_harness waited on a card -- since yantrik-os #316 it is sensitive, so an "
+                       "Ask-mode desktop asks the person; run the arena with the desktop in Auto"
+                       if YOS_TIMED_OUT in switched else f"active: {active_mind()}")
+                print(f"!! could not make {mind} active ({why}); skipping", flush=True)
                 continue
             tag = f"{mind[:3]}{run_id}"
             reset_world(tag)

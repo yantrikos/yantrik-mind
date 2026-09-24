@@ -308,7 +308,8 @@ pub(crate) fn twin_lookup(
     if app == TWIN_HOST || described.contains_key(TWIN_HOST) {
         return None;
     }
-    if !asks_first(grade_of(described, &app, &action)?) {
+    let grade = grade_of(described, &app, &action)?;
+    if !asks_first(grade) || same_app_route(&app, &action, grade, described).is_some() {
         return None;
     }
     Some(serde_json::json!({ "app": TWIN_HOST, "actions": format!("{app}_") }))
@@ -338,6 +339,9 @@ pub(crate) fn lower_grade_twin(
     let grade = grade_of(described, &app, &action)?;
     if !asks_first(grade) {
         return None;
+    }
+    if let Some(route) = same_app_route(&app, &action, grade, described) {
+        return Some(route);
     }
     let twin = format!("{app}_{action}");
     let family = format!("{app}_");
@@ -470,6 +474,37 @@ pub(crate) fn repeated_action_note(tool: &str, unsaved: bool) -> Option<String> 
          request still needs, or say plainly what is left undone.)"
             .to_string()
     })
+}
+
+/// E.ARENA1-F14: a sensitive `set_content` whose own app opens a new document holding the text at a
+/// lower grade -- yantrik-os #253's `editor.new(text?)`, standard: "Open a new tab ... empty or
+/// holding the text given. Nothing is written to disk until `save_as`". A new tab replaces nothing,
+/// so writing a file needs no card: `new{text}` then `save_as{path}`. Preferred over the shell's
+/// `editor_*` twin (two calls, not three) and still there once #253 removes that twin. Read off the
+/// app's own listing: the rule needs a standard `new` whose signature takes `text`, and `save_as`.
+fn same_app_route(
+    app: &str,
+    action: &str,
+    grade: &str,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<String> {
+    if action != "set_content" {
+        return None;
+    }
+    let acts = described.get(app)?;
+    let new = acts
+        .iter()
+        .find(|l| l.name == "new" && l.sig.contains("text") && !asks_first(&l.grade))?;
+    let save = acts
+        .iter()
+        .find(|l| l.name == "save_as" && !asks_first(&l.grade))?;
+    Some(format!(
+        "({app}.{action} is graded {grade}, so it would ask the person first. `{app}` also lists \
+         `{}` graded {}, which opens a new tab already holding the text and replaces nothing, then \
+         `{}` graded {} writes it to the path. Use them unless you mean to ask; if you do, send this \
+         call again and it will go to the person.)",
+        new.sig, new.grade, save.sig, save.grade
+    ))
 }
 
 /// What the person did with a card this turn.
@@ -824,6 +859,43 @@ mod tests {
         let big = format!("Head\n{{\n  \"clock\": \"{}\"\n}}", "x".repeat(400));
         assert_eq!(kept_field(&big, "clock"), None, "a kept field stays small");
         assert_eq!(kept_field(state, "absent"), None);
+    }
+
+    const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+
+    /// yantrik-os #253's editor surface, captured on VM 520 through yos-mcp: `set_content` is
+    /// pointed at `new(text?)` then `save_as(path)`, with no shell read and no shell twin needed.
+    #[test]
+    fn set_content_is_pointed_at_new_with_text_on_the_253_editor() {
+        let mut d = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "editor"}), EDITOR_253, &mut d);
+        let write = serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "x"}});
+        let hint = lower_grade_twin(ACT, &write, &d).expect("the editor offers the route itself");
+        assert!(hint.contains("`new(text?)` graded standard") && hint.contains("`save_as(path)`"), "{hint}");
+        assert!(hint.contains("send this call again"), "the person's door stays open: {hint}");
+        assert_eq!(twin_lookup(ACT, &write, &d), None, "no shell read when the app has the route");
+        // Both the app route and the shell twin present (before #253 removes the twin): the
+        // shorter route wins.
+        record_described(&serde_json::json!({"app": "shell"}), SHELL, &mut d);
+        assert!(lower_grade_twin(ACT, &write, &d).unwrap().contains("`new(text?)`"));
+    }
+
+    /// The route is read off the listing: the pre-#253 editor, whose `new()` takes no text, still
+    /// gets the shell twin; and only `set_content` is rerouted.
+    #[test]
+    fn the_same_app_route_needs_new_with_text_and_only_serves_set_content() {
+        let d = described_from_fixtures(); // the pre-#253 editor + shell
+        let write = serde_json::json!({"app": "editor", "action": "set_content"});
+        let hint = lower_grade_twin(ACT, &write, &d).unwrap();
+        assert!(hint.contains("`editor_set_content`") && !hint.contains("`new(text?)`"), "{hint}");
+        let mut d253 = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "editor"}), EDITOR_253, &mut d253);
+        assert_eq!(same_app_route("editor", "discard", "sensitive", &d253), None);
+        // No card-free way to write the new tab to disk: no route is offered.
+        for l in d253.get_mut("editor").unwrap().iter_mut().filter(|l| l.name == "save_as") {
+            l.grade = "sensitive".into();
+        }
+        assert_eq!(same_app_route("editor", "set_content", "sensitive", &d253), None);
     }
 
     /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.

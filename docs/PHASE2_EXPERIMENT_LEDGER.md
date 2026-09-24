@@ -9416,3 +9416,14 @@ Reported by the yantrik-os-13 session. Between 21:10:50 and 21:12:31 the shell's
 Seven mutants, each watched to fail by name. One is *every message is a task request*; the positive control catches it (a question turn must still be able to get its get-to-know-you question). Workspace: 2060 passed, 0 failed.
 
 **Left in VM 520's store:** turn 4 was captured as a hobby answer and asserted as a belief at weight 0.9. I am removing it only with Pranab's word; it is his profile.
+
+## E.ARENA1-F14 — ready for yantrik-os #253: the editor's own card-free write
+
+yantrik-os #253 removes the shell's `editor_*` actions, which were the only standard-grade way to write a file's text: Hermes's route in the file tasks, and the Mind's since F7/F8. Worked out with the yantrik-os-13 session before it merged:
+- `editor.new(text?)`, **standard**, opens a new tab already holding the text.
+- `set_content` stays sensitive, and its own description names the route (*"To start a document with text, `new` with `text` does it without replacing anything"*).
+- `append`'s description says it is the whole text on a new tab.
+- A grade that changed with the tab's contents was rejected, because a mind would read one grade in describe and meet another at act time.
+- #253 stays a draft (PR #258) until the Mind handles it.
+
+**The Mind's side:** before a sensitive `set_content` can raise a card, if its own app lists a standard `new` whose signature takes `text` and a standard `save_as`, the hint points at `new{text}` → `save_as{path}`. That is two calls, and it is preferred over the shell twin's three, so it works on both sides of #253. F8's extra shell read is skipped when the app has the route. **Tested against the real #253 surface,** captured through `yos-mcp` on VM 520 (`fixtures/desktop/describe_editor_253.txt`; its state is one empty untitled tab, checked before committing). The loop test shows `set_content` never reaching the desktop and `new` reaching it. Five mutants, each watched to fail by name. The first pass found one surviving: *save_as not required* had no case, so a test was added and it then failed. Workspace: 2063 passed, 0 failed.

@@ -16908,6 +16908,35 @@ mod desktop_consent_and_stall_wiring {
         assert!(!none.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", none.reply);
     }
 
+    /// E.ARENA1-F14 through the loop, on yantrik-os #253's real editor surface: the sensitive
+    /// write is pointed at `new(text?)` with no shell read, and the model's `new{text}` reaches the
+    /// desktop -- no card was raised on the way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_content_on_the_253_editor_becomes_new_with_text() {
+        const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello")),
+            ],
+            vec![EDITOR_253],
+            vec!["Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 1 line, unsaved"],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("`new(text?)` graded standard")),
+            "the route was not offered"
+        );
+        let describes: Vec<_> = r.reached.iter().filter(|(t, _)| t.ends_with("os_describe")).collect();
+        assert_eq!(describes.len(), 1, "no shell read was needed: {:?}", r.reached);
+        assert_eq!(
+            reached_acts(&r),
+            vec![("editor".into(), "new".into())],
+            "set_content never reached the desktop; new did"
+        );
+    }
+
     /// E.ARENA1-F13, VM 520 turn 3: a reply to an INSTRUCTION ends without a get-to-know-you
     /// question; the same turn asked as a QUESTION still gets one, so the gate is the
     /// instruction and not the feature being off.

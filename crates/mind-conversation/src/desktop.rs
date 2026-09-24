@@ -884,6 +884,19 @@ mod tests {
         assert_eq!(c.matches("\"clock\": ").count(), 1, "kept once");
     }
 
+    /// The real describe shell after yantrik-os #251 (VM 520, 57dbd6f), its values redacted but
+    /// its key order and sizes kept: `agents` (~11.5k) and `catalog` (~4.5k) now sort before
+    /// `clock`, so the head cannot reach it -- the clock object is kept all the same.
+    #[test]
+    fn the_251_clock_object_survives_the_real_key_order() {
+        const SHELL_251: &str = include_str!("../fixtures/desktop/describe_shell_251.txt");
+        let head: String = SHELL_251.chars().take(DESKTOP_STATE_HEAD).collect();
+        assert!(!head.contains("\"clock\": "), "the fixture no longer puts the clock past the head");
+        let c = condense_description(SHELL_251).unwrap();
+        let kept = c.lines().find(|l| l.starts_with("  \"clock\": ")).expect("the clock was cut");
+        assert!(kept.contains("\"weekday\": \"Thursday\"") && kept.contains("\"utc_offset\": \"-05:00\""), "{kept}");
+    }
+
     #[test]
     fn only_a_top_level_field_is_kept_and_only_when_small() {
         let state = "Head\n{\n  \"a\": 1,\n  \"inner\": {\n    \"clock\": \"nested\"\n  },\n  \"clock\": \"12:00\"\n}";

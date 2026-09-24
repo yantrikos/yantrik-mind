@@ -607,6 +607,22 @@ pub(crate) fn already_answered(
     None
 }
 
+/// E.ARENA1-F16: the desktop's map, in every desktop turn's place line.
+///
+/// The live check of yantrik-os #253 (VM 520, 2026-09-23): with the shell's `editor_*` gone, the
+/// Mind was asked to create a text file, opened Files, described a `files` app that was not
+/// running, listed the apps twice and gave up -- 0/2. The note that says where a file's text is
+/// written (`DISCOVER_DESKTOP_NOTE`) was only shown when the model searched for tools, and it did
+/// not. This is that note, on every desktop turn. It names where, not how -- `os_describe editor`
+/// shows how, on whichever editor this OS has, and F7/F14 route a card-raising write.
+pub(crate) fn desktop_sentence(desktop: bool) -> String {
+    if !desktop {
+        return String::new();
+    }
+    " On this desktop a file's text is written with the `editor` app (open it with the shell's      open_app if it is not running; os_describe editor shows its actions); folders are the shell's      files_* actions; the calendar and notes are apps of their own."
+        .to_string()
+}
+
 /// E.ARENA1-F7: where home is on this machine. `shell.editor_save_as` gives `/home/user/notes.txt`
 /// as its example path, this machine's home is not `/home/user`, and the mind copied the example.
 pub(crate) fn home_sentence(desktop: bool, home: Option<&str>) -> String {
@@ -1003,6 +1019,14 @@ mod tests {
             lower_grade_twin("mcp.yantrik-os.os_describe", &serde_json::json!({"app": "editor"}), &d),
             None
         );
+    }
+
+    #[test]
+    fn the_desktop_map_is_said_only_with_a_desktop() {
+        let s = desktop_sentence(true);
+        assert!(s.contains("written with the `editor` app") && s.contains("os_describe editor"), "{s}");
+        assert!(s.contains("files_*"), "{s}");
+        assert_eq!(desktop_sentence(false), "");
     }
 
     #[test]

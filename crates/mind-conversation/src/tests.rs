@@ -16961,6 +16961,24 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(reached_acts(&r), vec![("editor".into(), "new".into())], "a card went up: {:?}", r.reached);
     }
 
+    /// E.ARENA1-F16: with the desktop attached, every step's prompt says where a file's text is
+    /// written -- the #253 live check failed because the model never learned it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_desktop_step_says_where_a_files_text_is_written() {
+        let r = run(
+            vec![Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"}))],
+            vec![SHELL],
+            vec!["UNUSED"],
+        )
+        .await;
+        let steps: Vec<_> = r.prompts.iter().filter(|p| p.contains("Work log:")).collect();
+        assert!(!steps.is_empty(), "no step prompts seen");
+        assert!(
+            steps.iter().all(|p| p.contains("written with the `editor` app")),
+            "a step prompt lacked the desktop map"
+        );
+    }
+
     /// E.ARENA1-F13, VM 520 turn 3: a reply to an INSTRUCTION ends without a get-to-know-you
     /// question; the same turn asked as a QUESTION still gets one, so the gate is the
     /// instruction and not the feature being off.

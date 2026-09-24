@@ -9439,3 +9439,15 @@ yantrik-os #253 removes the shell's `editor_*` actions, which were the only stan
 F7, F8 and F14 all start from the grade the app **listed** for the action. So a model that calls `editor.set_content` without describing the editor that turn meets none of them, and a card goes up. After #253 that is the likely path whenever a mind reaches straight for the Editor. Now, before the first action on an app not described this turn, the loop reads that app's listing itself, once per app per turn, for the loop and not the model. The existing checks then see the grade. The shell stays F8's to read on demand.
 
 **Found in passing:** F11's loop test answered *every* describe with the shell's listing, including the describe of the non-existent `files` app that F15 now makes. It now answers as the OS really does (*"no socket for 'files'"*). Three mutants, each watched to fail by name. Workspace: 2065 passed, 0 failed.
+
+### #253 live check V3 (run `c8u`, build `2464aee`, the shell's `editor_*` gone): **0/2 — the Mind never found the Editor**
+
+`--control` and `--preflight` passed with the reset's new branch. The Mind did not:
+- **T6:** it opened Files, described a `files` app that was not running, listed the apps twice, and gave up.
+- **T7:** it read the calendar, tried `code` (not configured), listed the apps twice, and stopped.
+
+It never reached `set_content`, so F14 and F15 had nothing to act on. **The gap is discovery.** "Create a text file" reads as a file-manager job, and the note that says where a file's text is written (`DISCOVER_DESKTOP_NOTE`) is shown only when the model searches for tools. #258 stays a draft.
+
+## E.ARENA1-F16 — the desktop's map in every desktop turn
+
+That note, now in every desktop step's place line: *a file's text is written with the `editor` app (open it with the shell's `open_app` if it is not running; `os_describe editor` shows its actions); folders are the shell's `files_*`; the calendar and notes are apps of their own.* It names where, not how, so it holds on either side of #253. Two mutants, each watched to fail. Workspace: 2067 passed, 0 failed. **The OS side is doing the other half, in #258:** `files_new_file`'s description points to the Editor, and the Editor's purpose line (what `os_apps` shows for a closed app) says how to create a file.

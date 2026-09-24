@@ -12814,9 +12814,10 @@ Open reminders you're carrying for them:",
                 "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies."
             };
             let place = format!(
-                "{}{}",
+                "{}{}{}",
                 machine_place_line(),
-                desktop::home_sentence(self.desktop_attached(), std::env::var("HOME").ok().as_deref())
+                desktop::home_sentence(self.desktop_attached(), std::env::var("HOME").ok().as_deref()),
+                desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
                 "Current date/time: {now}.{place}\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",

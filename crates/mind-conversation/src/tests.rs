@@ -16583,6 +16583,10 @@ mod desktop_consent_and_stall_wiring {
     }
 
     async fn run(steps: Vec<Step>, describes: Vec<&str>, acts: Vec<&str>) -> Run {
+        run_with("Create a text file at ~/x.txt containing hello", steps, describes, acts).await
+    }
+
+    async fn run_with(prompt: &str, steps: Vec<Step>, describes: Vec<&str>, acts: Vec<&str>) -> Run {
         let seen = Arc::new(StdMutex::new(Vec::new()));
         let timeouts = Arc::new(StdMutex::new(Vec::new()));
         let script = Script {
@@ -16618,7 +16622,7 @@ mod desktop_consent_and_stall_wiring {
         hub.add_scripted_tool(tool("os_act"), script_of(acts)).unwrap();
         let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(hub.clone());
         let reply = conv
-            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .agent_loop_for_eval(prompt, &TurnIdentity::primary())
             .await
             .unwrap_or_else(|e| format!("ERR {e}"));
         let prompts = seen.lock().unwrap().clone();
@@ -16902,6 +16906,22 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         assert!(!none.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", none.reply);
+    }
+
+    /// E.ARENA1-F13, VM 520 turn 3: a reply to an INSTRUCTION ends without a get-to-know-you
+    /// question; the same turn asked as a QUESTION still gets one, so the gate is the
+    /// instruction and not the feature being off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_get_to_know_you_question_after_an_instruction() {
+        let steps = || vec![
+            Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "calendar"})),
+            Step::Fail,
+        ];
+        let task = run_with("Can you please continue with the town model building", steps(), vec![EDITOR], vec!["UNUSED"]).await;
+        assert!(task.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", task.reply);
+        assert!(!task.reply.contains("Btw \u{2014}"), "a question was tacked onto a task reply: {}", task.reply);
+        let chat = run_with("what is on my calendar today?", steps(), vec![EDITOR], vec!["UNUSED"]).await;
+        assert!(chat.reply.contains("Btw \u{2014}"), "positive control: a question turn may still ask one: {}", chat.reply);
     }
 }
 

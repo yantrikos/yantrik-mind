@@ -9401,3 +9401,18 @@ Run in a window the yantrikos session gave (VM 520 quiet, no OS deploy), after `
 ### The desktop's clock was never shown to the mind (found preparing for yantrik-os #207)
 
 yantrik-os #207 turns `describe shell`'s `clock` into `{"date","weekday","time","utc_offset","zone"}` (the OS session changed the plan from a new `now` key after I asked), so minds can stop running `date` through an approval card. Checking whether the mind would see it turned up a defect that is already live: `describe shell` sorts its keys, `apps` (~3,000 characters) sorts before `clock`, and the condenser keeps the first 900 characters of state. **The clock was cut every time.** The condenser now keeps a short list of small top-level fields whole (`clock`), whatever the key order and however the value was pretty-printed. It takes the value to its matching bracket, never a nested key of the same name, and never more than 300 characters. Four mutants, each watched to fail by name. No mind reads `clock` as a string (checked), so the type change breaks nothing here. Workspace: 2058 passed, 0 failed.
+
+## E.ARENA1-F13 — a request is not a hobby, and a task reply ends without a get-to-know-you question (2026-09-23, from Pranab's own use of VM 520)
+
+Reported by the yantrik-os-13 session. Between 21:10:50 and 21:12:31 the shell's answering mind was `mind`, and Pranab typed two messages. (He saw them under the header "Hermes Agent", the shell's own bug, filed on the OS side. Nothing on my side switched the answering mind: the Mind's log shows only a re-attach after the 21:08:46 shell swap, and no arena was running.)
+
+- **Turn 3,** *"Can you please continue with the town model building"*: an honest "nothing relevant in memory" (the town model was another mind's conversation), then **"Btw — When you get some downtime, what do you actually enjoy doing?"** The get-to-know-you question was appended to a reply to a request, and left a hobby question pending.
+- **Turn 4,** *"Ok, create a small town model with people, homes, roads, cars etc etc"*: **"Love that — noted. When's your wedding anniversary?"** The pending hobby question swallowed the instruction; the log shows no agent route at all. The existing guard (a4ade4f) catches an instruction by its first word, with "now/then/next/also/please" peeled off. **"Ok,"** was not peeled. The instruction was filed as a hobby and asserted as a belief.
+
+**The fix:**
+- A broader `looks_like_a_task_request` peels any run of lead words ("ok", "okay", "alright", "so", …), recognises polite requests ("can you", "could you", "I want you to", "let's") and more working verbs ("continue", "build", "draw", …).
+- It is applied only where an answer is **never** a task: a pending hobby question, and the choice to append a get-to-know-you question. The purpose and plans questions keep the original, narrower test. **The first full-suite run caught exactly this:** the broad test refused "help me ship yantrik-mind" as the answer to "what do you want help with?". That made the test depend on which question is pending.
+
+Seven mutants, each watched to fail by name. One is *every message is a task request*; the positive control catches it (a question turn must still be able to get its get-to-know-you question). Workspace: 2060 passed, 0 failed.
+
+**Left in VM 520's store:** turn 4 was captured as a hobby answer and asserted as a belief at weight 0.9. I am removing it only with Pranab's word; it is his profile.

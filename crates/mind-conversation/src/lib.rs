@@ -1777,6 +1777,11 @@ fn args_summary(args: &serde_json::Value) -> String {
         .join(" · ")
 }
 
+/// Is `text` something other than an answer to the question pending in `slot`?
+fn is_non_answer_to(slot: &str, text: &str) -> bool {
+    looks_like_non_answer(text) || (slot.starts_with("interest:") && looks_like_a_task_request(text))
+}
+
 fn looks_like_non_answer(text: &str) -> bool {
     let t = text.trim();
     if t.ends_with('?')
@@ -1839,6 +1844,67 @@ fn looks_like_an_instruction(t: &str) -> bool {
             if IMPERATIVES.contains(&rest.split_whitespace().next().unwrap_or("")) {
                 return true;
             }
+        }
+    }
+
+    // Addressing the assistant's capabilities is not describing oneself.
+    lower.contains("your tools")
+        || lower.contains("desktop tool")
+        || lower.contains("mcp tool")
+        || lower.contains("use your")
+}
+
+/// E.ARENA1-F13: a person asking for work, however it is put -- broader than
+/// `looks_like_an_instruction`, and applied only where an answer is NEVER a task: a hobby
+/// question, and the choice to tack a get-to-know-you question onto a reply. On VM 520
+/// (2026-09-23) "Ok, create a small town model with people, homes, roads, cars" was filed as a
+/// hobby and answered "Love that — noted": it wore an "Ok," in front of its verb. Not applied to
+/// the PURPOSE question ("what do you want help with?" is answered "help me ship yantrik-mind") or
+/// to plans ("finish my thesis"), whose answers are naturally phrased as tasks.
+fn looks_like_a_task_request(t: &str) -> bool {
+    let lower = t.to_lowercase();
+
+    const IMPERATIVES: [&str; 62] = [
+        "open", "close", "click", "type", "run", "use", "read", "check", "show", "tell",
+        "find", "go", "list", "append", "write", "save", "look", "take", "make", "set",
+        "start", "stop", "play", "listen", "search", "fetch", "get", "put", "add", "delete",
+        "remove", "create", "send", "navigate",
+        // E.ARENA1-F13, from VM 520 on 2026-09-23: "continue with the town model building" and
+        // "create a small town model with people, homes, roads, cars" were a person working, and
+        // the second was filed as a hobby. Verbs a person gives work with.
+        "continue", "build", "generate", "draw", "design", "help", "edit", "move", "copy",
+        "rename", "change", "update", "fix", "install", "download", "schedule", "remind",
+        "book", "order", "translate", "summarize", "summarise", "explain", "draft", "compose",
+        "resume", "finish", "prepare",
+    ];
+    // Words a person puts in front of an instruction: "Ok, create…", "okay so now build…",
+    // "alright then open…". Peeled off, any number of them, with their punctuation.
+    const LEADS: [&str; 16] = [
+        "ok", "okay", "alright", "right", "so", "and", "hey", "yes", "yeah", "sure", "well",
+        "now", "then", "next", "also", "please",
+    ];
+    let words: Vec<String> = lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    while i < words.len() && LEADS.contains(&words[i].as_str()) {
+        i += 1;
+    }
+    let rest = &words[i..];
+    if rest.first().is_some_and(|w| IMPERATIVES.contains(&w.as_str())) {
+        return true;
+    }
+    // A request put politely is still a request: "can you continue…", "could you build…",
+    // "I want you to…", "let's make…".
+    let head = rest.iter().take(4).map(String::as_str).collect::<Vec<_>>().join(" ");
+    for ask in [
+        "can you", "could you", "would you", "will you", "can u", "pls",
+        "i want you to", "i need you to", "i'd like you to", "id like you to", "let's", "lets",
+    ] {
+        if head == ask || head.starts_with(&format!("{ask} ")) {
+            return true;
         }
     }
 
@@ -13630,8 +13696,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
         }
         // Curiosity in the flow of talk: occasionally end the reply with ONE get-to-know-you
-        // question (primary user only — the interest profile is his).
-        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+        // question (primary user only — the interest profile is his). E.ARENA1-F13: never on a
+        // reply to an INSTRUCTION. On VM 520 a refusal to "continue with the town model building"
+        // ended "Btw — what do you enjoy doing?", and that question, left pending, swallowed the
+        // next instruction as a hobby.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY)
+            && !looks_like_a_task_request(user_text)
+        {
             if let Some(q) = self.maybe_piggyback_ask().await {
                 ans.push_str(&format!("\n\nBtw — {q}"));
             }
@@ -14304,7 +14375,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             }
         }
         if let Some(slot) = onboard {
-            if looks_like_non_answer(user_text) {
+            if is_non_answer_to(&slot, user_text) {
                 // They asked for something else instead of answering — don't capture a command or a
                 // counter-question as a profile fact.
                 //
@@ -15852,6 +15923,36 @@ mod turn_routing_regressions {
         ] {
             assert!(looks_like_non_answer(text), "should not be captured as an answer: {text}");
         }
+    }
+
+    /// E.ARENA1-F13: the two messages Pranab typed on VM 520 on 2026-09-23 -- the second was
+    /// filed as a hobby and answered "Love that — noted" -- and their shapes. Real answers are
+    /// still answers.
+    #[test]
+    fn a_request_behind_ok_or_can_you_is_not_a_profile_answer() {
+        for text in [
+            "Ok, create a small town model with people, homes, roads, cars etc etc",
+            "Can you please continue with the town model building",
+            "okay so now build me a house",
+            "Alright, draw a map of the town",
+            "could you open the calendar",
+            "I want you to make a game",
+            "let's build a town",
+        ] {
+            assert!(is_non_answer_to("interest:hobbies", text), "should not be captured as a hobby: {text}");
+        }
+        for text in [
+            "Mostly hiking and reading sci-fi",
+            "I enjoy cooking for friends",
+            "Chess, and long walks",
+            "Okay-ish at painting, love music though",
+        ] {
+            assert!(!is_non_answer_to("interest:hobbies", text), "a real answer was refused: {text}");
+        }
+        // Where an answer IS a task, the broad test is not applied.
+        assert!(!is_non_answer_to("purpose", "help me ship yantrik-mind"));
+        assert!(!is_non_answer_to("purpose", "build my company"));
+        assert!(!is_non_answer_to("plans:trip:2026", "finish my thesis first"));
     }
 
     /// The gate is on the REQUEST naming a capability, so a bare confirmation must not trip it.

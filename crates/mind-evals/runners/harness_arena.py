@@ -188,6 +188,11 @@ def ensure_calendar_open():
     return False
 
 
+def shell_has_editor():
+    """Does the shell still offer its own editor (`editor_new` and family)? Gone with yantrik-os #253."""
+    return "act: editor_new(" in yos("describe", "shell")
+
+
 def reset_world(tag):
     """Remove everything a run could have made. The arena does this, never a mind."""
     for p in os.listdir(HOME):
@@ -234,6 +239,11 @@ def reset_world(tag):
     # it. Every mind now starts from the SAME state instead: an empty document saved as BLANK.
     # Checked while the editor screen is up: the shell reports its document only there, so a check
     # made from the desktop screen sees no document at all and would pass a contaminated one.
+    # yantrik-os #253 removes the shell's editor (minds write files with the Editor app's own
+    # `new{text}` -> `save_as`). Without it there is no shell document to carry between minds, and
+    # the Editor app is already closed above, with its drafts set aside.
+    if not shell_has_editor():
+        return
     act("shell", "editor_new")
     act("shell", "editor_set_content", text="")
     # `editor_save_as` refuses an existing file ("File already exists. Choose a new name."), so the

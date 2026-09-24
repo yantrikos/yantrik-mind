@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 mind-types = { workspace = true }
 mind-memory = { workspace = true }
+# Serves this mind's memory over MCP when it owns the Yantrik OS memory file (YM_MEMORY_SERVER).
+mind-memory-mcp = { workspace = true }
 mind-inference = { workspace = true }
 mind-conversation = { workspace = true }
 mind-tools = { workspace = true }

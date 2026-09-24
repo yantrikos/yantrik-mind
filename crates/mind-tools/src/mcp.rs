@@ -92,6 +92,11 @@ pub struct McpTool {
     pub name: String, // the bare name on the server
     pub description: String,
     pub read_only: bool,
+    /// Whether the tool reaches anything beyond this machine. Unknown means yes: a tool that
+    /// declines to say where it reaches is treated as reaching everywhere.
+    pub open_world: bool,
+    /// Whether the tool can destroy something. Unknown means yes, for the same reason.
+    pub destructive: bool,
     pub input_schema: Value,
 }
 
@@ -104,6 +109,34 @@ impl McpTool {
 
 /// Read-only if the server annotates it so; otherwise a conservative verb heuristic (when unknown,
 /// treat as mutating so it must clear the harm-gate).
+/// The mark on a catalog line for a tool that works on this computer rather than reaching past it.
+/// The agent's catalog gate keeps these lines in full every turn (see `tool_catalog::gate_catalog`).
+pub const ON_THIS_COMPUTER: &str = "[on this computer]";
+
+/// Does this tool reach past the machine it runs on?
+///
+/// A server that says nothing is assumed to reach outward, because the cost of guessing wrong
+/// in that direction is one confirmation prompt, and the cost of guessing wrong in the other
+/// is an unreviewed action against the open world.
+fn classify_open_world(tool: &Value) -> bool {
+    tool.get("annotations")
+        .and_then(|a| a.get("openWorldHint"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
+}
+
+/// Can this tool destroy something? Read-only tools cannot by definition; otherwise the server
+/// must say so, and silence is taken as yes.
+fn classify_destructive(tool: &Value, read_only: bool) -> bool {
+    if read_only {
+        return false;
+    }
+    tool.get("annotations")
+        .and_then(|a| a.get("destructiveHint"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
+}
+
 fn classify_read_only(tool: &Value, name: &str) -> bool {
     if let Some(b) = tool
         .get("annotations")
@@ -158,6 +191,20 @@ fn render_tool_result(r: &Value) -> String {
     } else {
         out
     }
+}
+
+/// A `tools/call` result as success or failure. `isError` is the server saying the tool ran and
+/// failed, so it is an error here too — rendered as text it read as success, and a refused action
+/// on the desktop was reported to the person as "Done — refused: …" (the first live drive of
+/// Yantrik OS, 2026-09-17). The server's words are kept as the error's message: they are what
+/// tells the mind, and the person, what to do instead.
+fn tool_outcome(r: &Value) -> anyhow::Result<String> {
+    let text = render_tool_result(r);
+    if r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false) {
+        let message = text.strip_prefix("(tool error) ").unwrap_or(&text).to_string();
+        return Err(anyhow::anyhow!(message));
+    }
+    Ok(text)
 }
 
 /// A live connection to one MCP server (owns the subprocess + its stdio). All I/O is blocking.
@@ -299,11 +346,15 @@ impl Conn {
                     .to_string();
                 let input_schema = t.get("inputSchema").cloned().unwrap_or(json!({}));
                 let read_only = classify_read_only(t, &name);
+                let open_world = classify_open_world(t);
+                let destructive = classify_destructive(t, read_only);
                 McpTool {
                     server: server.clone(),
                     name,
                     description,
                     read_only,
+                    open_world,
+                    destructive,
                     input_schema,
                 }
             })
@@ -317,7 +368,7 @@ impl Conn {
             json!({"name": tool, "arguments": args}),
             timeout,
         )?;
-        Ok(render_tool_result(&r))
+        tool_outcome(&r)
     }
 
     fn shutdown(&mut self) {
@@ -342,6 +393,9 @@ pub struct McpHub {
     timeout: Duration,
     #[cfg(feature = "test-support")]
     scripted: Mutex<HashMap<String, VecDeque<Result<String, String>>>>,
+    /// Every call a scripted tool received, in order, with its arguments.
+    #[cfg(feature = "test-support")]
+    scripted_log: Mutex<Vec<(String, Value)>>,
 }
 
 impl Default for McpHub {
@@ -358,6 +412,8 @@ impl McpHub {
             timeout: Duration::from_secs(45),
             #[cfg(feature = "test-support")]
             scripted: Mutex::new(HashMap::new()),
+            #[cfg(feature = "test-support")]
+            scripted_log: Mutex::new(Vec::new()),
         }
     }
 
@@ -400,6 +456,12 @@ impl McpHub {
             .map(VecDeque::len)
     }
 
+    /// The calls scripted tools received, in order: what actually reached the "server".
+    #[cfg(feature = "test-support")]
+    pub fn scripted_calls(&self) -> Vec<(String, Value)> {
+        self.scripted_log.lock().unwrap().clone()
+    }
+
     /// Connect to every configured server. Failures are logged + skipped — one broken/slow server
     /// never sinks the rest. Blocking: call from a background thread.
     pub fn connect_all(&self, configs: &[McpServerConfig]) {
@@ -438,23 +500,34 @@ impl McpHub {
             return String::new();
         }
         let mut s = String::from(
-            "\nCONNECTED INTEGRATIONS (MCP — call by the EXACT id; read-only run instantly, writes need the user's ok):",
+            "\nCONNECTED INTEGRATIONS (MCP — call by the EXACT id; read-only tools and tools on this computer run at once; a write that reaches outside this computer needs the user's ok):",
         );
         for t in tools.iter() {
-            let lock = if t.read_only {
-                ""
+            let tag = if !t.open_world {
+                format!(" {ON_THIS_COMPUTER}")
+            } else if t.read_only {
+                String::new()
             } else {
-                " [write — gated]"
+                // Not "[write — …]": the catalog gate ranks lines by the words they share with the
+                // request, so a tag containing "write" made every outward write tool look relevant
+                // to any message with "write" in it.
+                " [asks first]".to_string()
             };
+            // A tool on this computer is how the mind works the machine it runs on, and its
+            // description is where the server says how to call it. Cut at 100 characters,
+            // yos-mcp's os_act lost everything after "using exactly the app name, action name and
+            // argument" — including the worked example of opening an app — and the model guessed
+            // the call. Other integrations keep the short line; there can be hundreds of them.
+            let limit = if t.open_world { 100 } else { 500 };
             let desc = t
                 .description
                 .lines()
                 .next()
                 .unwrap_or("")
                 .chars()
-                .take(100)
+                .take(limit)
                 .collect::<String>();
-            s.push_str(&format!("\n- {} — {desc}{lock}", t.qualified()));
+            s.push_str(&format!("\n- {} — {desc}{tag}", t.qualified()));
         }
         s
     }
@@ -475,6 +548,10 @@ impl McpHub {
             .ok_or_else(|| anyhow::anyhow!("no such integration tool"))?;
         #[cfg(feature = "test-support")]
         if let Some(queue) = self.scripted.lock().unwrap().get_mut(qualified) {
+            self.scripted_log
+                .lock()
+                .unwrap()
+                .push((qualified.to_string(), args.clone()));
             return queue
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("scripted MCP responses exhausted"))?
@@ -495,6 +572,17 @@ impl McpHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_that_reports_an_error_has_failed() {
+        let refused = json!({"isError": true, "content": [{"type": "text", "text": "refused: cannot establish how 'os' grades 'launch'"}]});
+        let err = tool_outcome(&refused).unwrap_err().to_string();
+        assert_eq!(err, "refused: cannot establish how 'os' grades 'launch'");
+        let fine = json!({"content": [{"type": "text", "text": "opened notes"}]});
+        assert_eq!(tool_outcome(&fine).unwrap(), "opened notes");
+        let unflagged = json!({"isError": false, "content": [{"type": "text", "text": "ok"}]});
+        assert_eq!(tool_outcome(&unflagged).unwrap(), "ok");
+    }
 
     #[test]
     fn parses_mcpservers_config() {
@@ -561,6 +649,8 @@ mod tests {
             name: "create_issue".into(),
             description: String::new(),
             read_only: false,
+            open_world: true,
+            destructive: true,
             input_schema: json!({}),
         };
         assert_eq!(t.qualified(), "mcp.github.create_issue");

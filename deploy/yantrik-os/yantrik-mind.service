@@ -1,0 +1,39 @@
+[Unit]
+# Yantrik Mind on a Yantrik OS machine: a harness installed beside the OS, never part of it.
+#
+# The OS offers a socket and nothing else. It does not configure this, does not read its settings,
+# and holds no model endpoint or credential for it. The mind configures itself: its settings live
+# in its own file, and with no model in that file the desktop chat asks for one (first run).
+#
+# A user unit, so the mind runs as the person and stops with their session: there is no desktop to
+# attach to when nobody is logged in.
+Description=Yantrik Mind — the desktop's mind, attached as a harness
+After=graphical-session.target
+# One owner of the memory file at a time. See yantrik-memory.service.
+Conflicts=yantrik-memory.service
+# Not in the installer's live session, where there is nobody's mind to run yet.
+ConditionKernelCommandLine=!yantrik.install=true
+
+[Service]
+Type=simple
+# Defaults. The settings file below is read after these and overrides any of them.
+Environment=YM_DB=%h/.local/share/yantrik-mind/mind.db
+Environment=YM_ENV_PATH=%h/.config/yantrik-mind.env
+# Serve the shared memory over MCP while this mind owns the file.
+Environment=YM_MEMORY_SERVER=127.0.0.1:7440
+# The dashboards server listens on every network interface. A desktop should not, unless its
+# owner turns it on in the settings file.
+Environment=YM_WEB=off
+EnvironmentFile=-%h/.config/yantrik-mind.env
+ExecStartPre=/usr/bin/mkdir -p %h/.local/share/yantrik-mind %h/.config
+ExecStart=/opt/yantrik-mind/bin/yantrik-mind
+# stdin is not a terminal here, which is how the mind knows to run headless rather than a REPL
+# that would read EOF and exit into a restart loop.
+StandardInput=null
+# Always, not on-failure: saving a model in first run ends the process cleanly so it starts again
+# with the model.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -7611,6 +7611,145 @@ fn the_compose_refusal_is_content_free_and_still_useful() {
     assert!(refusal.contains("Ask again"), "and offers a way forward");
 }
 
+/// E.CFG2 — the refusal for a mind with no lane cleared for private context is held to the same
+/// content-free standard, and names what is missing instead of an outage.
+#[test]
+fn the_no_private_lane_refusal_is_content_free_and_names_the_setting() {
+    use super::COMPOSE_NO_PRIVATE_LANE;
+    let refusal = COMPOSE_NO_PRIVATE_LANE;
+    for tell in ["ZQCANARY", "dinner", "seven", "belief", "recall", "work log", "grounding"] {
+        assert!(
+            !refusal.to_lowercase().contains(&tell.to_lowercase()),
+            "the refusal must not describe what it declined to compose: {tell:?}"
+        );
+    }
+    assert!(!refusal.contains("unreachable"), "nothing is unreachable; nothing was configured");
+    assert!(refusal.contains("YM_PRIVATE_PROVIDERS"), "it names the setting that clears a model");
+    assert!(refusal.contains("answer without your private context"), "and the public way forward");
+}
+
+/// E.CFG2, the other half: a mind WITH a private lane that fails at compose still says its own
+/// hardware is unreachable -- there, it is true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_private_lane_that_fails_at_compose_still_says_unreachable() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct HomeThenDown(AtomicUsize);
+    impl LLMBackend for HomeThenDown {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            if !offered || self.0.fetch_add(1, Ordering::SeqCst) > 0 {
+                anyhow::bail!("the home model went away");
+            }
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![yantrik_ml::ToolCall { name: "time".into(), arguments: serde_json::json!({}) }],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "home-then-down"
+        }
+    }
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let home: Arc<dyn LLMBackend> = Arc::new(HomeThenDown(AtomicUsize::new(0)));
+    let pool = InferencePool::new(Arc::clone(&home), 1)
+        .with_provider("ollama-local:home")
+        .with_private_backend(home, "ollama-local:home");
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let reply = conv
+        .agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+        .await
+        .unwrap_or_else(|e| format!("ERR {e}"));
+    assert_eq!(reply, super::COMPOSE_LANE_UNAVAILABLE, "a real outage keeps its true words");
+}
+
+/// E.CFG2 through the real loop: a mind whose only model is an uncleared cloud one gets the
+/// truthful refusal at compose, not "my own hardware is unreachable".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cloud_only_mind_says_what_is_missing_not_that_hardware_is_down() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct OneTool(AtomicUsize);
+    impl LLMBackend for OneTool {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let first = offered && self.0.fetch_add(1, Ordering::SeqCst) == 0;
+            // After one tool call the model stops answering, so the turn must end at compose
+            // (F9), and compose must be refused for want of a private lane.
+            if offered && !first {
+                anyhow::bail!("the endpoint stopped answering");
+            }
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if first { String::new() } else { "done".into() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: if first {
+                    vec![yantrik_ml::ToolCall { name: "time".into(), arguments: serde_json::json!({}) }]
+                } else {
+                    vec![]
+                },
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "one-tool"
+        }
+    }
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    // Household-allowlisted by default (so the loop may run, with its audit line), never cleared
+    // for private context: the state first run's cloud advice produces.
+    let pool = InferencePool::new(Arc::new(OneTool(AtomicUsize::new(0))) as Arc<dyn LLMBackend>, 1)
+        .with_provider("ollama-cloud");
+    assert!(!pool.private_lane_configured(), "precondition: nothing cleared");
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let reply = conv
+        .agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+        .await
+        .unwrap_or_else(|e| format!("ERR {e}"));
+    assert_eq!(reply, super::COMPOSE_NO_PRIVATE_LANE, "the truthful refusal, exactly");
+}
+
 /// E.LOOP3 — the typed direct route must be a GRAMMAR, not a "looks simple" gate.
 ///
 /// Codex's constraint: build the bypass only where intent is structurally parseable with high
@@ -15789,5 +15928,1136 @@ mod forget_report_tests {
             !out.contains("None remain"),
             "an incomplete purge must never read as a finished one: {out}"
         );
+    }
+}
+
+/// E.ARENA1-F1 through the REAL engine, not just the pure functions: with a Yantrik OS desktop's
+/// tools connected, the agent's menu offers one calendar and a private calendar tool called by name
+/// changes nothing. The arena caught this mind telling the desktop "Added" for an event that went
+/// into its private store on the wrong date.
+#[cfg(test)]
+mod desktop_calendar_wiring {
+    use super::*;
+
+    fn engine(with_desktop: bool) -> ConversationEngine {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        if !with_desktop {
+            return conv;
+        }
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_describe".into(),
+                description: "The current state of one app".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok("{}".into())],
+        )
+        .unwrap();
+        conv.with_mcp(Arc::new(hub))
+    }
+
+    #[test]
+    fn with_the_desktop_attached_the_menu_offers_one_calendar() {
+        let conv = engine(true);
+        assert!(conv.desktop_attached());
+        let menu = conv.catalog_source();
+        assert!(menu.contains("There is no other calendar on this machine"), "{menu}");
+        assert!(!menu.contains("calendar_add {text}"), "the private calendar is still on the menu");
+        assert!(menu.contains("forget_date"), "a person's dated entry is not a calendar event");
+    }
+
+    #[test]
+    fn without_a_desktop_the_private_calendar_stays_on_the_menu() {
+        let conv = engine(false);
+        assert!(!conv.desktop_attached());
+        assert!(conv.catalog_source().contains("calendar_add {text}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_calendar_tool_called_by_name_changes_nothing() {
+        let conv = engine(true);
+        let out = conv
+            .run_agent_tool_as(
+                "calendar_add",
+                &serde_json::json!({"text": "Arena check on 30 September 2026 at 15:00"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.contains("Nothing was read or changed"), "{out}");
+        assert!(!out.to_lowercase().contains("added"), "the private store took the event: {out}");
+    }
+}
+
+/// E.ARENA1-F4 through the real engine: a read-only tool on this computer that returns the real
+/// ~18 KB shell description reaches the agent with its actions, where the 6,000-character MCP cap
+/// used to cut it off before the first one.
+#[cfg(test)]
+mod desktop_mcp_bound_wiring {
+    use super::*;
+
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    fn engine(open_world: bool) -> ConversationEngine {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_describe".into(),
+                description: "The current state of one app".into(),
+                read_only: true,
+                open_world,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok(SHELL.to_string())],
+        )
+        .unwrap();
+        conv.with_mcp(Arc::new(hub))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_desktops_own_description_reaches_the_agent_with_its_actions() {
+        let out = engine(false)
+            .run_agent_tool_as(
+                "mcp.yantrik-os.os_describe",
+                &serde_json::json!({"app": "shell"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.contains("files_new_folder(name)"), "the shell lost its actions: {} bytes", out.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_open_world_tool_is_still_capped() {
+        let out = engine(true)
+            .run_agent_tool_as(
+                "mcp.yantrik-os.os_describe",
+                &serde_json::json!({"app": "shell"}),
+                &TurnIdentity::primary(),
+            )
+            .await;
+        assert!(out.chars().count() <= 6000, "{} chars", out.chars().count());
+    }
+}
+
+/// E.ARENA1-F5 through the real agent loop. Reading B'' failed the folder, file and
+/// calendar-to-file tasks because the model refused on the strength of its own earlier replies and
+/// the loop offered it "or say plainly that you cannot". With the desktop attached, a turn that has
+/// not looked at the desktop is sent to look first; without one, nothing changes.
+#[cfg(test)]
+mod desktop_look_first_wiring {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    /// Refuses in plain text every time, and keeps every prompt it was shown.
+    struct Refuser(Arc<StdMutex<Vec<String>>>);
+    impl LLMBackend for Refuser {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let all: String = m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n");
+            self.0.lock().unwrap().push(all);
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: "I can't create folders — I have no tool for that.".into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "refuser"
+        }
+    }
+
+    async fn prompts_for(with_desktop: bool) -> Vec<String> {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(Refuser(seen.clone())) as Arc<dyn LLMBackend>, 1);
+        let mut conv = ConversationEngine::new(memarc, pool, "YM");
+        if with_desktop {
+            let hub = mind_tools::McpHub::new();
+            hub.add_scripted_tool(
+                mind_tools::McpTool {
+                    server: "yantrik-os".into(),
+                    name: "os_describe".into(),
+                    description: "The current state of one app".into(),
+                    read_only: true,
+                    open_world: false,
+                    destructive: false,
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+                vec![Ok("{}".into())],
+            )
+            .unwrap();
+            conv = conv.with_mcp(Arc::new(hub));
+        }
+        let _ = conv
+            .agent_loop_for_eval("Create a folder called arena-x in my home folder.", &TurnIdentity::primary())
+            .await;
+        let out = seen.lock().unwrap().clone();
+        out
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_without_looking_is_sent_to_look_at_the_desktop() {
+        let prompts = prompts_for(true).await;
+        assert!(
+            prompts.iter().any(|p| p.contains("EARLIER turns is not evidence")),
+            "the loop accepted a refusal without sending it to look ({} prompts)",
+            prompts.len()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn without_a_desktop_nothing_changes() {
+        let prompts = prompts_for(false).await;
+        assert!(!prompts.iter().any(|p| p.contains("EARLIER turns is not evidence")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_search_names_the_desktop_while_it_is_attached() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(Refuser(seen)) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_apps".into(),
+                description: "apps".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![Ok("{}".into())],
+        )
+        .unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let out = conv
+            .run_agent_tool_as("discover_tools", &serde_json::json!({"query": "create folder"}), &TurnIdentity::primary())
+            .await;
+        assert!(out.contains("this search does not cover them"), "{out}");
+    }
+}
+
+/// E.ARENA1-F6 through the real agent loop: after an action on the desktop, reading the same app
+/// again must really read it. Reading B-triple-prime was handed the pre-action "files is not
+/// running" from the log after it had opened Files.
+#[cfg(test)]
+mod desktop_stale_read_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    /// Plays a fixed plan of tool calls whenever it is offered tools, and records every prompt.
+    struct Planner {
+        step: AtomicUsize,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Planner {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let plan = [
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "files"})),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "open_app", "args": {"name": "files"}})),
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "files"})),
+            ];
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match plan.get(i) {
+                Some((name, args)) => vec![yantrik_ml::ToolCall { name: name.to_string(), arguments: args.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "planner"
+        }
+    }
+
+    fn scripted(name: &str, responses: Vec<&str>) -> (mind_tools::McpTool, Vec<std::result::Result<String, String>>) {
+        (
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: name.into(),
+                description: format!("{name} on this computer"),
+                // read_only so the test double runs on the read path; the invalidation under test
+                // keys on the tool's NAME, not on how it is gated.
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            responses.into_iter().map(|r| Ok(r.to_string())).collect(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_after_an_action_really_reads_again() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let planner = Planner { step: AtomicUsize::new(0), seen: seen.clone() };
+        let pool = InferencePool::new(Arc::new(planner) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        for (tool, responses) in [
+            scripted("os_describe", vec!["files is not running", "FILES-NOW-OPEN\n  act: files_new_folder(name)  [standard]"]),
+            scripted("os_act", vec!["Done - files screen"]),
+        ] {
+            hub.add_scripted_tool(tool, responses).unwrap();
+        }
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a folder called arena-x in my home folder.", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("FILES-NOW-OPEN")),
+            "the second describe was served the pre-action answer from the log ({} prompts)",
+            prompts.len()
+        );
+    }
+}
+
+/// E.ARENA1-F7 through the real agent loop, on the real editor and shell descriptions: a sensitive
+/// editor action whose standard twin the shell lists is pointed at the twin before it can stall the
+/// turn on a permission prompt.
+#[cfg(test)]
+mod desktop_twin_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+
+    struct Plan {
+        step: AtomicUsize,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Plan {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match self.calls.get(i) {
+                Some((n, a)) => vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "plan"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sensitive_editor_write_is_pointed_at_the_shells_standard_twin() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let plan = Plan {
+            step: AtomicUsize::new(0),
+            calls: vec![
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                ("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "hello"}})),
+            ],
+            seen: seen.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(plan) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        hub.add_scripted_tool(tool("os_describe"), vec![Ok(EDITOR.to_string()), Ok(SHELL.to_string())]).unwrap();
+        hub.add_scripted_tool(tool("os_act"), vec![Ok("THE-SENSITIVE-CALL-REACHED-THE-DESKTOP".into())]).unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("`editor_set_content`") && p.contains("graded standard")),
+            "the twin was never pointed out ({} prompts)",
+            prompts.len()
+        );
+        assert!(
+            !prompts.iter().any(|p| p.contains("THE-SENSITIVE-CALL-REACHED-THE-DESKTOP")),
+            "the first sensitive call went to the desktop before the twin was offered"
+        );
+    }
+}
+
+/// E.ARENA1-F6b through the real agent loop, with the desktop's real refusal text from Reading B5:
+/// `new` fails on a full editor, the mind closes a tab, and the retried `new` must reach the
+/// desktop rather than be handed the old refusal from the log.
+#[cfg(test)]
+mod desktop_failed_action_retry_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    struct Plan {
+        step: AtomicUsize,
+        calls: Vec<(&'static str, serde_json::Value)>,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for Plan {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let i = if offered { self.step.fetch_add(1, Ordering::SeqCst) } else { usize::MAX };
+            let tool_calls = match self.calls.get(i) {
+                Some((n, a)) => vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                None => vec![],
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: if tool_calls.is_empty() { "done".into() } else { String::new() },
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "plan"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_action_is_retried_after_the_world_changed() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let new_tab = serde_json::json!({"app": "editor", "action": "new"});
+        let plan = Plan {
+            step: AtomicUsize::new(0),
+            calls: vec![
+                ("mcp.yantrik-os.os_act", new_tab.clone()),
+                ("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "close"})),
+                ("mcp.yantrik-os.os_act", new_tab),
+            ],
+            seen: seen.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(plan) as Arc<dyn LLMBackend>, 1);
+        let hub = mind_tools::McpHub::new();
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_act".into(),
+                description: "act on this computer".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            vec![
+                Err("execution failed: failed (exit 1) yos: editor.app.act refused: Eight tabs are already open; close one before opening another.".into()),
+                Ok("Done — Text Editor — Untitled (no file yet), 1 line, saved · tab 7 of 7".into()),
+                Ok("NEW-TAB-OPENED — tab 8 of 8".into()),
+            ],
+        )
+        .unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(Arc::new(hub));
+        let _ = conv
+            .agent_loop_for_eval("Create a text file at ~/x.txt containing hello", &TurnIdentity::primary())
+            .await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("NEW-TAB-OPENED")),
+            "the retried `new` was served the earlier refusal from the log ({} prompts)",
+            prompts.len()
+        );
+    }
+}
+
+/// E.ARENA1-F7b/F8/F9/F10 through the real agent loop. One scripted model and a scripted desktop
+/// that records every call it receives, so each test asserts what actually reached the desktop.
+#[cfg(test)]
+mod desktop_consent_and_stall_wiring {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    const EDITOR: &str = include_str!("../fixtures/desktop/describe_editor.txt");
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell.txt");
+    // The desktop's own refusals (yos-mcp `guard_act`), as the mind receives them.
+    const NO_ANSWER: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and did not answer within 110s, so nothing was run. They were probably away from the keyboard. Tell them what you were trying to do; they can ask you to try it again.";
+    const SAID_NO: &str = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow editor.set_content and said no. Nothing was run and nothing was changed. This is an answer, not an error: do not ask again and do not look for another route to the same effect. Say what you were going to do and leave it with them.";
+
+    enum Step {
+        Call(&'static str, serde_json::Value),
+        Fail,
+    }
+
+    /// Plays `steps` on the calls that offer tools; answers compose (no tools) with COMPOSED.
+    /// Records every prompt and the request timeout each call would have used.
+    struct Script {
+        at: AtomicUsize,
+        steps: Vec<Step>,
+        seen: Arc<StdMutex<Vec<String>>>,
+        timeouts: Arc<StdMutex<Vec<u64>>>,
+    }
+    const COMPOSED: &str = "COMPOSED FROM THE WORK LOG";
+    impl LLMBackend for Script {
+        fn chat(
+            &self,
+            m: &[ChatMessage],
+            _c: &GenerationConfig,
+            tools: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            self.timeouts
+                .lock()
+                .unwrap()
+                .push(yantrik_ml::call_timeout::call_timeout_for("probe-model").as_secs());
+            let offered = tools.map(|t| !t.is_empty()).unwrap_or(false);
+            let step = if offered {
+                self.steps.get(self.at.fetch_add(1, Ordering::SeqCst))
+            } else {
+                None
+            };
+            let (text, tool_calls) = match step {
+                Some(Step::Fail) => anyhow::bail!("the endpoint stopped answering"),
+                Some(Step::Call(n, a)) => (
+                    String::new(),
+                    vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
+                ),
+                None if offered => ("done".to_string(), vec![]),
+                None => (COMPOSED.to_string(), vec![]),
+            };
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls,
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "script"
+        }
+    }
+
+    struct Run {
+        reply: String,
+        prompts: Vec<String>,
+        timeouts: Vec<u64>,
+        reached: Vec<(String, serde_json::Value)>,
+    }
+
+    async fn run(steps: Vec<Step>, describes: Vec<&str>, acts: Vec<&str>) -> Run {
+        run_with("Create a text file at ~/x.txt containing hello", steps, describes, acts).await
+    }
+
+    async fn run_with(prompt: &str, steps: Vec<Step>, describes: Vec<&str>, acts: Vec<&str>) -> Run {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let timeouts = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps,
+            seen: seen.clone(),
+            timeouts: timeouts.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        // The same scripted model serves the private lane too, so compose can run (a pool with no
+        // private lane refuses a private compose, by design: E.SEC14).
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1)
+            .with_provider("script")
+            .with_private_backend(script, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            // Read-only here as in the other desktop wiring tests: a mutating tool goes through the
+            // action runtime, which this engine does not have, and the loop logic under test sits
+            // in front of both paths.
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let script_of =
+            |v: Vec<&str>| v.into_iter().map(|s| Ok(s.to_string())).collect::<Vec<_>>();
+        hub.add_scripted_tool(tool("os_describe"), script_of(describes)).unwrap();
+        hub.add_scripted_tool(tool("os_act"), script_of(acts)).unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(hub.clone());
+        let reply = conv
+            .agent_loop_for_eval(prompt, &TurnIdentity::primary())
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"));
+        let prompts = seen.lock().unwrap().clone();
+        let timeouts = timeouts.lock().unwrap().clone();
+        Run { reply, prompts, timeouts, reached: hub.scripted_calls() }
+    }
+
+    fn act(app: &str, action: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"app": app, "action": action, "args": {"text": text}})
+    }
+    fn acts_reached(r: &Run) -> Vec<serde_json::Value> {
+        r.reached
+            .iter()
+            .filter(|(t, _)| t.ends_with("os_act"))
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    /// F8, Reading C's T7: the editor was described, the shell never was. The loop reads the
+    /// shell's editor family itself and points at the twin before any card goes up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sensitive_write_looks_up_the_shell_before_any_card() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+            ],
+            vec![EDITOR, SHELL],
+            vec!["A-CARD-WENT-UP"],
+        )
+        .await;
+        let looked = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe")
+                && *a == serde_json::json!({"app": "shell", "actions": "editor_"})
+        });
+        assert!(looked, "the shell's editor family was never read: {:?}", r.reached);
+        assert!(
+            acts_reached(&r).is_empty(),
+            "a card went up before the twin was offered: {:?}",
+            r.reached
+        );
+        assert!(
+            r.prompts.iter().any(|p| p.contains("editor_save_as(path) [standard]")),
+            "the hint did not carry the family"
+        );
+    }
+
+    /// F7b: the hint promises "send this call again and it will go to the person". The repeat
+    /// guard used to refuse the re-send as a duplicate of a call that never reached the desktop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hinted_call_sent_again_reaches_the_person() {
+        let write = act("editor", "set_content", "hello");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![EDITOR, SHELL],
+            vec!["SENT-TO-THE-PERSON"],
+        )
+        .await;
+        // The loop's argument cleaner flattens a one-field `args` object before the desktop sees
+        // it, so the call is identified by app and action.
+        let reached: Vec<(String, String)> = acts_reached(&r)
+            .iter()
+            .map(|a| (a["app"].as_str().unwrap_or("").into(), a["action"].as_str().unwrap_or("").into()))
+            .collect();
+        assert_eq!(
+            reached,
+            vec![(write["app"].as_str().unwrap().to_string(), write["action"].as_str().unwrap().to_string())],
+            "the re-sent call must reach the desktop once"
+        );
+        assert!(r.prompts.iter().any(|p| p.contains("SENT-TO-THE-PERSON")));
+    }
+
+    /// F10, Reading C's T7 second card: no answer, then the same action with the trailing newline
+    /// dropped. The second card is not raised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unanswered_card_is_not_raised_again_with_other_arguments() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "a\nb\n")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "a\nb")),
+            ],
+            vec![EDITOR],
+            vec![NO_ANSWER, "A-SECOND-CARD-WENT-UP"],
+        )
+        .await;
+        assert_eq!(acts_reached(&r).len(), 1, "{:?}", r.reached);
+        assert!(r
+            .prompts
+            .iter()
+            .any(|p| p.contains("Not sent. The person was asked to allow editor.set_content")));
+    }
+
+    /// F10: a no covers the twin. The desktop says "do not look for another route to the same
+    /// effect", and F7 is exactly such a route, so it must stop at a no.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_no_is_not_routed_around_through_the_twin() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("shell", "editor_set_content", "hello")),
+            ],
+            vec![EDITOR],
+            vec![SAID_NO, "THE-TWIN-RAN-AFTER-A-NO"],
+        )
+        .await;
+        assert_eq!(acts_reached(&r).len(), 1, "the twin ran after a no: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("their no covers it")));
+    }
+
+    /// F9, Reading C's T6: the step's model call is capped by the turn's remaining time — about
+    /// half of the 135 s the loop has — not the client's 300 s; and a model that stops answering
+    /// mid-turn ends in a composed answer from the work log, not an error line.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_step_call_is_capped_and_a_mid_turn_failure_composes() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Fail,
+            ],
+            vec![EDITOR],
+            vec!["UNUSED"],
+        )
+        .await;
+        let first = *r.timeouts.first().expect("the model was called");
+        assert!((60..=67).contains(&first), "step 0 waited up to {first} s");
+        assert!(r.reply.contains(COMPOSED), "the work log was thrown away: {}", r.reply);
+        assert!(!r.reply.contains("couldn't think just now"), "{}", r.reply);
+    }
+
+    /// The desktop's refusal from Reading D's T5.
+    const NO_FILES_APP: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: files.files_go was not run, because how the OS grades it could not be read: yos: no socket for 'files'";
+
+    fn reached_acts(r: &Run) -> Vec<(String, String)> {
+        acts_reached(r)
+            .iter()
+            .map(|a| (a["app"].as_str().unwrap_or("").into(), a["action"].as_str().unwrap_or("").into()))
+            .collect()
+    }
+
+    /// F11, Reading D's T5: `files_go` sent to a `files` app that does not exist. The shell is read
+    /// (it was not described this turn) and the same call goes there, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_family_action_sent_to_a_missing_app_reaches_the_shell() {
+        let r = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/home/yantrik"}}),
+            )],
+            // F15 reads the `files` app's grades first; the desktop answers as it really does.
+            vec!["(mcp.yantrik-os.os_describe: failed (exit 1) yos: no socket for 'files')", SHELL],
+            vec![NO_FILES_APP, "WENT-TO-THE-SHELL"],
+        )
+        .await;
+        assert_eq!(
+            reached_acts(&r),
+            vec![("files".into(), "files_go".into()), ("shell".into(), "files_go".into())],
+            "{:?}",
+            r.reached
+        );
+        let looked = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe") && *a == serde_json::json!({"app": "shell", "actions": "files_"})
+        });
+        assert!(looked, "the shell's files family was not read: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("there is no `files` app") && p.contains("WENT-TO-THE-SHELL")));
+    }
+
+    /// F11 kill criterion 3: a person's no to the shell action still stops the re-addressed call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_readdressed_call_still_meets_the_persons_no() {
+        let said_no_to_go = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow shell.files_go and said no. Nothing was run and nothing was changed.";
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "files_go", "args": {"path": "/a"}})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/b"}})),
+            ],
+            vec![SHELL],
+            vec![said_no_to_go, NO_FILES_APP, "RAN-AFTER-A-NO"],
+        )
+        .await;
+        assert_eq!(
+            reached_acts(&r),
+            vec![("shell".into(), "files_go".into()), ("files".into(), "files_go".into())],
+            "the re-addressed call went through after a no: {:?}",
+            r.reached
+        );
+    }
+
+    /// F11 kill criterion 1: a call the desktop accepted is never re-addressed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_accepted_call_is_left_alone() {
+        let r = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "notes", "action": "new", "args": {}}),
+            )],
+            vec![SHELL],
+            vec!["Done \u{2014} Notes, one new note", "NEVER"],
+        )
+        .await;
+        assert_eq!(reached_acts(&r), vec![("notes".into(), "new".into())]);
+    }
+
+    const NEW_DOC: &str = "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 0 words\naccepted: True, settled: True";
+    const WROTE: &str = "Done \u{2014} Yantrik \u{2014} editing \"untitled\", 7 words, unsaved\naccepted: True, settled: True";
+    const SAVED: &str = "Done \u{2014} Yantrik \u{2014} editing \"arena-x-friday.txt\", 7 words\naccepted: True, settled: True";
+
+    /// F12, Reading E's T7: new document, write, write again, then the model answers. The repeat
+    /// is sent toward the save; the answer is asked once for the save; still unsaved, the reply
+    /// says so in the code's own words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unsaved_document_is_asked_for_then_said() {
+        let write = serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a\nb"}});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("the next step is to save it")),
+            "the repeated write was not pointed at the save"
+        );
+        assert!(
+            r.prompts.iter().any(|p| p.contains("the desktop says it is unsaved")),
+            "the answer was not asked for the save"
+        );
+        assert!(r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+    }
+
+    /// F12 at compose: the model repeats the write until the loop gives up on it (two barren
+    /// steps), so the turn ends in compose -- and the reply still says the document is unsaved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unsaved_document_is_said_even_when_compose_ends_the_turn() {
+        let write = serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a\nb"}});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+                Step::Call("mcp.yantrik-os.os_act", write.clone()),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE],
+        )
+        .await;
+        assert!(r.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", r.reply);
+        assert!(r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+    }
+
+    /// F12's kill criteria: a document that was saved, and a turn that wrote none, hear nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_document_or_none_hears_nothing_about_saving() {
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_new"})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_set_content", "args": {"text": "a"}})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "editor_save_as", "args": {"path": "/home/yantrik/arena-x-friday.txt"}})),
+            ],
+            vec![SHELL],
+            vec![NEW_DOC, WROTE, SAVED],
+        )
+        .await;
+        assert!(!r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
+        assert!(!r.prompts.iter().any(|p| p.contains("the desktop says it is unsaved")));
+        let none = run(
+            vec![Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "calendar", "action": "add_event", "args": {"title": "x"}}),
+            )],
+            vec![SHELL],
+            vec!["Done \u{2014} Calendar \u{2014} September 2026, one thing on day 30"],
+        )
+        .await;
+        assert!(!none.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", none.reply);
+    }
+
+    /// E.ARENA1-F14 through the loop, on yantrik-os #253's real editor surface: the sensitive
+    /// write is pointed at `new(text?)` with no shell read, and the model's `new{text}` reaches the
+    /// desktop -- no card was raised on the way.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_content_on_the_253_editor_becomes_new_with_text() {
+        const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello")),
+            ],
+            vec![EDITOR_253],
+            vec!["Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 1 line, unsaved"],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("`new(text?)` graded standard")),
+            "the route was not offered"
+        );
+        let describes: Vec<_> = r.reached.iter().filter(|(t, _)| t.ends_with("os_describe")).collect();
+        assert_eq!(describes.len(), 1, "no shell read was needed: {:?}", r.reached);
+        assert_eq!(
+            reached_acts(&r),
+            vec![("editor".into(), "new".into())],
+            "set_content never reached the desktop; new did"
+        );
+    }
+
+    /// E.ARENA1-F15: the model acts on the #253 editor WITHOUT describing it. The loop reads the
+    /// editor's listing itself, sees `set_content` is sensitive, and the route is offered instead
+    /// of a card; the model's `new{text}` then reaches the desktop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undescribed_sensitive_write_still_meets_the_route() {
+        const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello")),
+            ],
+            vec![EDITOR_253],
+            vec!["Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 1 line, unsaved"],
+        )
+        .await;
+        let read_editor = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe") && *a == serde_json::json!({"app": "editor"})
+        });
+        assert!(read_editor, "the loop did not read the editor's grades: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("`new(text?)` graded standard")), "no route offered");
+        assert_eq!(reached_acts(&r), vec![("editor".into(), "new".into())], "a card went up: {:?}", r.reached);
+    }
+
+    /// E.ARENA1-F16: with the desktop attached, every step's prompt says where a file's text is
+    /// written -- the #253 live check failed because the model never learned it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_desktop_step_says_where_a_files_text_is_written() {
+        let r = run(
+            vec![Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"}))],
+            vec![SHELL],
+            vec!["UNUSED"],
+        )
+        .await;
+        let steps: Vec<_> = r.prompts.iter().filter(|p| p.contains("Work log:")).collect();
+        assert!(!steps.is_empty(), "no step prompts seen");
+        assert!(
+            steps.iter().all(|p| p.contains("written with the `editor` app")),
+            "a step prompt lacked the desktop map"
+        );
+    }
+
+    /// E.ARENA1-F13, VM 520 turn 3: a reply to an INSTRUCTION ends without a get-to-know-you
+    /// question; the same turn asked as a QUESTION still gets one, so the gate is the
+    /// instruction and not the feature being off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_get_to_know_you_question_after_an_instruction() {
+        let steps = || vec![
+            Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "calendar"})),
+            Step::Fail,
+        ];
+        let task = run_with("Can you please continue with the town model building", steps(), vec![EDITOR], vec!["UNUSED"]).await;
+        assert!(task.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", task.reply);
+        assert!(!task.reply.contains("Btw \u{2014}"), "a question was tacked onto a task reply: {}", task.reply);
+        let chat = run_with("what is on my calendar today?", steps(), vec![EDITOR], vec!["UNUSED"]).await;
+        assert!(chat.reply.contains("Btw \u{2014}"), "positive control: a question turn may still ask one: {}", chat.reply);
+    }
+}
+
+/// E.MSG3 (yantrik-os #166): when the model cannot be reached, the reply names the address and the
+/// cause -- through a dedicated private lane that fails closed, and through a cleared cloud
+/// provider whose error comes back as-is.
+#[cfg(test)]
+mod unreachable_model_is_named {
+    use super::*;
+
+    /// Fails every call the way the OpenAI-compatible client does when nothing listens.
+    struct Refused;
+    impl LLMBackend for Refused {
+        fn chat(
+            &self,
+            _m: &[ChatMessage],
+            _c: &GenerationConfig,
+            _t: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            Err(anyhow::anyhow!("io: Connection refused (os error 111)")
+                .context("OpenAI-compatible API request to http://127.0.0.1:7461/v1/chat/completions failed"))
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "refused"
+        }
+    }
+
+    async fn reply_from(pool: InferencePool) -> String {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        conv.agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_private_lane_that_refuses_is_named() {
+        let be: Arc<dyn LLMBackend> = Arc::new(Refused);
+        let pool = InferencePool::new(Arc::clone(&be), 1)
+            .with_provider("ollama-local:home")
+            .with_private_backend(be, "ollama-local:home");
+        let reply = reply_from(pool).await;
+        assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
+        assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cloud_provider_that_refuses_is_named() {
+        let pool = InferencePool::new(Arc::new(Refused) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud");
+        let reply = reply_from(pool).await;
+        assert!(reply.contains("couldn't think just now"), "{reply}");
+        assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
+        assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
     }
 }

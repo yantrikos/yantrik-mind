@@ -42,6 +42,7 @@ pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, Sec
 mod book;
 mod briefing;
 mod build;
+mod desktop;
 mod calendar;
 mod capabilities;
 mod entrypoint;
@@ -1776,6 +1777,11 @@ fn args_summary(args: &serde_json::Value) -> String {
         .join(" · ")
 }
 
+/// Is `text` something other than an answer to the question pending in `slot`?
+fn is_non_answer_to(slot: &str, text: &str) -> bool {
+    looks_like_non_answer(text) || (slot.starts_with("interest:") && looks_like_a_task_request(text))
+}
+
 fn looks_like_non_answer(text: &str) -> bool {
     let t = text.trim();
     if t.ends_with('?')
@@ -1785,7 +1791,137 @@ fn looks_like_non_answer(text: &str) -> bool {
     {
         return true;
     }
-    looks_like_greeting(t) || looks_like_command_word(t)
+    looks_like_greeting(t) || looks_like_command_word(t) || looks_like_an_instruction(t)
+}
+
+/// Does a mutating MCP tool's result end the turn?
+///
+/// It used to, always: every such call either stopped for confirmation or was denied, so its result
+/// was something for the person to read, never material to work with. Once an action on this
+/// machine could simply run (LocalControl), that rule ended every desktop task at its first step.
+/// On the first drive with it, "Open the Notes app" called os_act without an app, got back "os_act
+/// needs 'app'", and the turn ended there with the error as the answer, the model never seeing
+/// the message that told it how to fix the call. A three-step note could never get past step one.
+///
+/// So only the two outcomes a person must act on end the turn: a pending confirmation ("Ready to
+/// …") and a refusal from the gate. An action that ran and reported back — done, or didn't go
+/// through — goes to the model, which can take the next step, correct the call, or say what
+/// happened.
+fn mutating_mcp_result_ends_the_turn(obs: &str) -> bool {
+    let o = obs.trim_start();
+    o.starts_with("Ready to ") || o.starts_with("(I can't run ")
+}
+
+/// Is this someone telling the assistant to do something, rather than answering it?
+///
+/// `looks_like_command_word` only recognises the REPL's own command names — "weather",
+/// "news", "calc". Ordinary imperative English matched none of them, so with one profile
+/// question left pending, "Open the Notes app and append a line..." was captured as the
+/// answer to "what do you enjoy doing", written to the profile, and asserted as a belief
+/// at weight 0.9. Three instructions in a row went that way and the mind did none of them,
+/// replying "Love that — noted" each time. From outside it looked like a friendly assistant.
+///
+/// Deliberately broad: mistaking an answer for an instruction costs one unasked question,
+/// which the curiosity feature will ask again. Mistaking an instruction for an answer costs
+/// the instruction AND poisons the belief store with it.
+fn looks_like_an_instruction(t: &str) -> bool {
+    let lower = t.to_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+
+    const IMPERATIVES: [&str; 34] = [
+        "open", "close", "click", "type", "run", "use", "read", "check", "show", "tell",
+        "find", "go", "list", "append", "write", "save", "look", "take", "make", "set",
+        "start", "stop", "play", "listen", "search", "fetch", "get", "put", "add", "delete",
+        "remove", "create", "send", "navigate",
+    ];
+    if IMPERATIVES.contains(&first) {
+        return true;
+    }
+
+    // "Now click element 1", "Then read it back" — an imperative wearing a discourse marker.
+    for lead in ["now ", "then ", "next ", "also ", "please "] {
+        if let Some(rest) = lower.strip_prefix(lead) {
+            if IMPERATIVES.contains(&rest.split_whitespace().next().unwrap_or("")) {
+                return true;
+            }
+        }
+    }
+
+    // Addressing the assistant's capabilities is not describing oneself.
+    lower.contains("your tools")
+        || lower.contains("desktop tool")
+        || lower.contains("mcp tool")
+        || lower.contains("use your")
+}
+
+/// E.ARENA1-F13: a person asking for work, however it is put -- broader than
+/// `looks_like_an_instruction`, and applied only where an answer is NEVER a task: a hobby
+/// question, and the choice to tack a get-to-know-you question onto a reply. On VM 520
+/// (2026-09-23) "Ok, create a small town model with people, homes, roads, cars" was filed as a
+/// hobby and answered "Love that — noted": it wore an "Ok," in front of its verb. Not applied to
+/// the PURPOSE question ("what do you want help with?" is answered "help me ship yantrik-mind") or
+/// to plans ("finish my thesis"), whose answers are naturally phrased as tasks.
+fn looks_like_a_task_request(t: &str) -> bool {
+    let lower = t.to_lowercase();
+
+    const IMPERATIVES: [&str; 62] = [
+        "open", "close", "click", "type", "run", "use", "read", "check", "show", "tell",
+        "find", "go", "list", "append", "write", "save", "look", "take", "make", "set",
+        "start", "stop", "play", "listen", "search", "fetch", "get", "put", "add", "delete",
+        "remove", "create", "send", "navigate",
+        // E.ARENA1-F13, from VM 520 on 2026-09-23: "continue with the town model building" and
+        // "create a small town model with people, homes, roads, cars" were a person working, and
+        // the second was filed as a hobby. Verbs a person gives work with.
+        "continue", "build", "generate", "draw", "design", "help", "edit", "move", "copy",
+        "rename", "change", "update", "fix", "install", "download", "schedule", "remind",
+        "book", "order", "translate", "summarize", "summarise", "explain", "draft", "compose",
+        "resume", "finish", "prepare",
+    ];
+    // Words a person puts in front of an instruction: "Ok, create…", "okay so now build…",
+    // "alright then open…". Peeled off, any number of them, with their punctuation.
+    const LEADS: [&str; 16] = [
+        "ok", "okay", "alright", "right", "so", "and", "hey", "yes", "yeah", "sure", "well",
+        "now", "then", "next", "also", "please",
+    ];
+    let words: Vec<String> = lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let mut i = 0;
+    while i < words.len() && LEADS.contains(&words[i].as_str()) {
+        i += 1;
+    }
+    let rest = &words[i..];
+    if rest.first().is_some_and(|w| IMPERATIVES.contains(&w.as_str())) {
+        return true;
+    }
+    // A request put politely is still a request: "can you continue…", "could you build…",
+    // "I want you to…", "let's make…".
+    let head = rest.iter().take(4).map(String::as_str).collect::<Vec<_>>().join(" ");
+    for ask in [
+        "can you", "could you", "would you", "will you", "can u", "pls",
+        "i want you to", "i need you to", "i'd like you to", "id like you to", "let's", "lets",
+    ] {
+        if head == ask || head.starts_with(&format!("{ask} ")) {
+            return true;
+        }
+    }
+
+    // Addressing the assistant's capabilities is not describing oneself.
+    lower.contains("your tools")
+        || lower.contains("desktop tool")
+        || lower.contains("mcp tool")
+        || lower.contains("use your")
+}
+
+/// Does `text` ask for one of these tools by name, or for the mind's tools in general?
+fn names_a_tool(text: &str, tool_names: &[String]) -> bool {
+    let l = text.to_lowercase();
+    if l.contains("desktop tool") || l.contains("your tools") || l.contains("mcp tool") {
+        return true;
+    }
+    tool_names.iter().any(|n| l.contains(&n.to_lowercase()))
 }
 
 /// A bare salutation is never the answer to a pending question. Live, 2026-08-05: the user opened
@@ -3575,26 +3711,34 @@ fn photo_followup_strong(text: &str) -> bool {
 /// TEXT search matches. None when it's not a mail-lookup ask.
 fn mail_lookup_intent(text: &str) -> Option<String> {
     let l = text.trim().to_lowercase();
-    let mail_word = [
-        "mail",
-        "email",
-        "inbox",
-        "booking",
-        "reservation",
-        "confirmation",
-        "receipt",
-        "itinerary",
-        "order",
-    ]
-    .iter()
-    .any(|w| l.contains(w));
+
+    // Whole words, not substrings. `contains("order")` also fires on "border", "reorder",
+    // "recorder" and "disorder"; `contains("mail")` fires on "mailbox" harmlessly but also
+    // on "blackmail". Tokenising costs nothing and removes a whole class of false match.
+    let words: Vec<&str> = l
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.iter().any(|t| *t == w);
+
+    // A mailbox has to actually be named. The nouns below are all things that ARRIVE by
+    // mail, which is why they were here — but they are also ordinary words about the world.
+    // "Click the Place order button" is not a question about mail, and reading it as one
+    // took the mind off its tools entirely for every e-commerce page it was ever shown.
+    let names_a_mailbox = ["mail", "email", "e", "inbox", "mailbox", "gmail"]
+        .iter()
+        .any(|w| has(w));
+
     let lookup_word = [
-        "search", "find", "look up", "look for", "check", "read", "what", "when", "where", "which",
-        "dates", "hotel", "details",
+        "search", "find", "check", "read", "what", "when", "where", "which", "dates", "hotel",
+        "details",
     ]
     .iter()
-    .any(|w| l.contains(w));
-    if !(mail_word && lookup_word) {
+    .any(|w| has(w))
+        || l.contains("look up")
+        || l.contains("look for");
+
+    if !(names_a_mailbox && lookup_word) {
         return None;
     }
     const STOP: [&str; 47] = [
@@ -4102,6 +4246,18 @@ draws on your private context, and my own hardware is unreachable, so composing 
 sending that to a cloud model. Ask again in a moment, or tell me explicitly to answer without your \
 private context and I'll work from what's public.";
 
+/// What compose says when it may not use the cloud and NO lane was ever cleared for private context
+/// (E.CFG2). The constant above says "my own hardware is unreachable", which is true when a private
+/// lane exists and has failed, and false for an owner who followed first run's advice to add a
+/// cloud key: nothing is unreachable, nothing was configured. Chosen by configuration state only,
+/// and a constant for the same reason as the other: it carries nothing it declined to compose.
+const COMPOSE_NO_PRIVATE_LANE: &str =
+    "I can't put this answer together \u{2014} it draws on your private context, and the only \
+model I have is a cloud one that hasn't been cleared to see it. To clear it, add its name to \
+YM_PRIVATE_PROVIDERS in my settings file (~/.config/yantrik-mind.env) and restart me, or send me the \
+address of a model on your own hardware. Or tell me to answer without your private context and I'll \
+work from what's public.";
+
 /// Why compose is ALWAYS private (E.SEC16), stated as an invariant rather than a judgement.
 ///
 /// The first version asked whether grounding was empty. Codex rejected that and was right: the rule
@@ -4133,6 +4289,61 @@ const COMPOSE_SCOPE: mind_inference::PrivacyScope = mind_inference::PrivacyScope
 ///
 /// Reporting from `Drop` instead of from a call site fixes the SHAPE rather than the instance. A
 /// seventh return added later cannot forget to log, because it does not have to remember to.
+/// The part of a request that was asked for and never attempted.
+///
+/// A turn can satisfy the half of an instruction that produces an ANSWER while silently
+/// dropping the half that changes something, and the composed reply reads as if the whole
+/// thing was carried out. Asked to "see what the page says, then append the figure to the
+/// notes app, and tell me the figure", the loop read the page, reported 847 kilowatts, and
+/// never called an acting tool — the note was untouched and nothing said so. Reproduced
+/// twice, by different internal paths, so it is the loop's shape rather than one bad turn.
+///
+/// This looks for an imperative clause that would have CHANGED something, and reports it
+/// when the turn made no acting tool call at all. Deliberately narrow: it stays silent
+/// unless every call was a read, because claiming "I did not do X" about something that
+/// was done would be its own kind of lie.
+fn unattempted_side_effect(
+    user_text: &str,
+    calls: &std::collections::BTreeMap<String, usize>,
+) -> Option<String> {
+    // Verbs that leave the world different afterwards. Asking, reading and looking do not.
+    const CHANGING: [&str; 16] = [
+        "append", "write", "save", "add", "create", "set", "put", "click", "type", "press",
+        "open", "send", "run", "delete", "remove", "play",
+    ];
+    // Names that read rather than act. A call to any tool NOT matching one of these is
+    // treated as an attempt, which errs toward saying nothing.
+    const READING: [&str; 12] = [
+        "read", "text", "find", "describe", "apps", "perception", "listen", "get", "list",
+        "search", "look", "recall",
+    ];
+
+    let acted = calls.keys().any(|name| {
+        let n = name.to_lowercase();
+        !READING.iter().any(|r| n.contains(r))
+    });
+    if acted {
+        return None;
+    }
+
+    let lower = user_text.to_lowercase();
+    for clause in lower.split(|c| c == ',' || c == ';' || c == '.') {
+        let clause = clause.trim();
+        let clause = clause
+            .strip_prefix("then ")
+            .or_else(|| clause.strip_prefix("and then "))
+            .or_else(|| clause.strip_prefix("and "))
+            .or_else(|| clause.strip_prefix("now "))
+            .unwrap_or(clause);
+        let first = clause.split_whitespace().next().unwrap_or("");
+        if CHANGING.contains(&first) {
+            let words: Vec<&str> = clause.split_whitespace().take(9).collect();
+            return Some(words.join(" "));
+        }
+    }
+    None
+}
+
 struct TurnCost {
     started: std::time::Instant,
     steps: usize,
@@ -4223,6 +4434,47 @@ fn spoken_clock(text: &str) -> Option<String> {
         return Some(format!("{}, {}.", n.format("%A"), n.format("%-d %B %Y")));
     }
     None
+}
+
+/// Where the computer this mind is being talked to through is, when a desktop has said so.
+///
+/// Set by the desktop channel from each turn's context; nothing else sets it, so on a phone or a
+/// terminal it stays empty and nothing is claimed. Without it a fresh install asked "what is the
+/// weather like right now?" got London — the model filled the gap the prompt left.
+static MACHINE_PLACE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Record where the computer is (`None` forgets it).
+pub fn set_machine_place(place: Option<String>) {
+    if let Ok(mut slot) = MACHINE_PLACE.write() {
+        *slot = place.filter(|p| !p.trim().is_empty());
+    }
+}
+
+/// The sentence the agent prompt carries about where the computer is, or nothing.
+/// E.ARENA1-F9: the most one step's model call may wait — half of what the loop has left, never
+/// under a minute. Half leaves room for the fallback, or one more try, when a request hangs; the
+/// minute keeps a slow local lane's ordinary call from being cut. It scales with the budget, so a
+/// long delegated turn still allows long calls.
+fn step_call_cap(loop_left_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis((loop_left_ms / 2).max(60_000))
+}
+
+/// A twin hint is given once per exact call; this is the key it is remembered by.
+fn call_sig_for_twin(tool: &str, args: &serde_json::Value) -> String {
+    format!("{tool}|{args}")
+}
+
+fn machine_place_line() -> String {
+    match MACHINE_PLACE.read().ok().and_then(|p| p.clone()) {
+        Some(place) => machine_place_sentence(&place),
+        None => String::new(),
+    }
+}
+
+fn machine_place_sentence(place: &str) -> String {
+    format!(
+        " This computer is in {place}: \"here\", local weather and places nearby mean there unless the person names somewhere else."
+    )
 }
 
 /// Current date/time, human-readable — injected into the agent prompt every turn so it never guesses
@@ -10770,8 +11022,9 @@ WINDOW: all-time, latest 200
     ///   four near-identical `code` jobs in one live turn, 2026-08-16.
     /// - RICH SELF-CONTAINED SYNTHESIS (news brief, ticker analysis, portfolio): already cited and
     ///   balanced; a re-paraphrase drops the source links and dilutes it.
-    /// - A MUTATING MCP tool: its result is a confirmation prompt the user must see verbatim (a
-    ///   pending confirmation pauses the turn), a denial, or a done — never a working material.
+    /// - A MUTATING MCP tool that asked for confirmation or was denied: the prompt or the refusal
+    ///   is what the person must see (see `mutating_mcp_result_ends_the_turn` for why an action
+    ///   that actually ran is no longer terminal).
     /// - A DENIED NATIVE MUTATION: the gate's bounded postcondition is the answer. Giving the model
     ///   another turn after `remember` was refused is how "memory was not changed" became "noted".
     pub(crate) fn terminal_delivery(&self, tool: &str, obs: &str) -> bool {
@@ -10810,7 +11063,7 @@ WINDOW: all-time, latest 200
                 .map(|t| !t.read_only)
                 .unwrap_or(false)
         {
-            return true;
+            return mutating_mcp_result_ends_the_turn(obs);
         }
         false
     }
@@ -11113,6 +11366,12 @@ WINDOW: all-time, latest 200
             Err(refused) => return refused,
         };
         let args = &args;
+        // E.ARENA1-F1: on a Yantrik OS machine the calendar is the desktop's. A private calendar
+        // tool called by name — every tool stays callable by name even off the menu — is answered
+        // with where the calendar is, never run against a store the person cannot see.
+        if let Some(redirect) = desktop::superseded(tool, self.desktop_attached()) {
+            return redirect;
+        }
         // Every argument is read through the ALIAS TABLE the boundary validated against
         // (`tool_catalog::read_arg`), so the dispatch and the contract cannot disagree about what a
         // call means. The hand-written `s("a")`-then-`s("b")` chains that used to live in the arms
@@ -11757,8 +12016,14 @@ WINDOW: all-time, latest 200
                         out.push_str(&hits.iter().map(|s| format!("- {} [{}]: {}", s.name, s.lang, s.summary)).collect::<Vec<_>>().join("\n"));
                     }
                 }
-                if out.is_empty() {
+                let out = if out.is_empty() {
                     "(no tool or saved skill matches — use build_capability to create one, then run_skill it)".to_string()
+                } else {
+                    out
+                };
+                // E.ARENA1-F5: this search covers the mind's own tools, not the desktop's actions.
+                if self.desktop_attached() {
+                    format!("{out}{}", desktop::DISCOVER_DESKTOP_NOTE)
                 } else {
                     out
                 }
@@ -11789,7 +12054,8 @@ WINDOW: all-time, latest 200
                         match tokio::task::spawn_blocking(move || hub.call_blocking(&q, &a)).await {
                             // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
                             Ok(Ok(out)) => {
-                                let out: String = out.chars().take(6000).collect();
+                                // E.ARENA1-F4: this machine's own surface is condensed, not cut.
+                                let out = desktop::bound_mcp_output(&out, !t.open_world);
                                 if out.trim().is_empty() { format!("({name}: no result)") } else { out }
                             }
                             Ok(Err(e)) => format!("({name}: {e})"),
@@ -11800,14 +12066,36 @@ WINDOW: all-time, latest 200
                     // handshake as native email/github writes. There is no un-gated write path.
                     Some(t) => match &self.runtime {
                         Some(runtime) => {
+                            // What this action IS comes from what the tool declares, not from a
+                            // blanket worst case. The old shape claimed Network + Medium risk +
+                            // irreversible for every integration tool, which was right when an
+                            // MCP server meant somebody else's API and wrong once one of them
+                            // is this machine's own control surface: it made "open a note on my
+                            // own desktop" indistinguishable from "post to the internet", so the
+                            // mind stopped to ask before it would move its own hand.
+                            //
+                            // A server that declines to describe a tool still gets the old
+                            // treatment — the defaults in classify_* are the cautious ones — so
+                            // this widens nothing for a server that says nothing.
+                            let capability = if t.open_world {
+                                Capability::Network
+                            } else {
+                                Capability::LocalControl
+                            };
                             let intent = ActionIntent {
                                 kind: "mcp_call".into(),
                                 target: name.to_string(), // the qualified id mcp.<server>.<tool>
                                 summary: format!("run {} via the {} integration", t.name, t.server),
                                 payload: Some(args.to_string()),
-                                capabilities: vec![Capability::Network],
-                                risk: RiskLevel::Medium,
-                                reversible: false,
+                                capabilities: vec![capability],
+                                risk: if t.destructive { RiskLevel::Medium } else { RiskLevel::Low },
+                                // Reversibility is about whether the effect can be walked back,
+                                // which is what destructiveHint answers. Where the tool reaches
+                                // is a different question and openWorldHint answers that one;
+                                // folding the two together made every outward tool irreversible
+                                // by definition, so following a link was filed beside placing an
+                                // order.
+                                reversible: !t.destructive,
                             };
                             let req = self.new_request(intent);
                             let ctx = Self::dummy_ctx(&req, "");
@@ -12382,6 +12670,23 @@ Open reminders you're carrying for them:",
         // loop that is mostly spinning however it interleaves.
         const MAX_TOTAL_BARREN: usize = 5;
         let mut barren_total = 0usize;
+        // At most one reminder that part of the request went untouched; after that the
+        // turn ends and says so rather than arguing with itself.
+        let mut unfinished_nudged = false;
+        let mut looked_first_nudged = false;
+        // E.ARENA1-F7: what each app listed this turn, and which sensitive calls were already told
+        // about a standard twin (a second identical call is the model choosing to ask the person).
+        let mut described: std::collections::HashMap<String, desktop::ActionList> =
+            std::collections::HashMap::new();
+        let mut twin_hinted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F8: the host families already looked up for a twin this turn.
+        let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
+        let mut answered: std::collections::HashMap<String, desktop::Answer> =
+            std::collections::HashMap::new();
+        // E.ARENA1-F12: a document written this turn is still unsaved (the desktop's own word).
+        let mut unsaved_doc = false;
+        let mut unsaved_nudged = false;
         // E.LOOP1 MEASUREMENT, not a bound. Two diagnoses of the 29-step runaway were wrong, and
         // the third candidate — a per-tool retrieval budget — must not be a third guess. This
         // records what a turn ACTUALLY did so the budget can be chosen from turns rather than from
@@ -12508,8 +12813,14 @@ Open reminders you're carrying for them:",
                 // licence to answer directly is now explicitly bounded by the class of fact.
                 "Use one of the tools you have been given whenever one fits. NEVER state a current real-world fact — weather, prices, quotes, news, someone's status, what time or date it is — from your own knowledge: call the tool that provides it, or say plainly that you don't know. Reply directly only when no tool applies."
             };
+            let place = format!(
+                "{}{}{}",
+                machine_place_line(),
+                desktop::home_sentence(self.desktop_attached(), std::env::var("HOME").ok().as_deref()),
+                desktop::desktop_sentence(self.desktop_attached())
+            );
             let prompt = format!(
-                "Current date/time: {now}.\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\nRecent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
@@ -12557,13 +12868,32 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // PRIVATE-GROUNDED: this turn carries the speaker's private memory grounding, so it must
             // PREFER the private (owned-hardware) lane and only escalate to cloud with an audit —
             // Sol's Constitutional-Kernel first rung (was an unscoped Household call = silent leak).
-            let resp = match self
-                .inference
-                .chat_grounded_tools(messages, cfg.clone(), schemas.clone())
-                .await
+            // E.ARENA1-F9: one request may not spend the turn. Reading C, T6: one call hung 300 s
+            // (the client's own timeout, sized for a 27B lane authoring a project) inside a 180 s
+            // turn, and the fallback after it answered in one second.
+            let call_cap = step_call_cap(
+                loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
+            );
+            let resp = match mind_inference::with_call_cap(
+                call_cap,
+                self.inference
+                    .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+            )
+            .await
             {
                 Ok(r) => r,
-                Err(e) => return Ok(format!("(couldn't think just now: {e})")),
+                // Past the first step the turn has a work log; a model that stops answering
+                // mid-turn must not throw it away.
+                Err(e) if step > 0 => {
+                    eprintln!("[agent] step {step}: the model call failed ({e:#}) — composing from the work log");
+                    scratch.push_str(
+                        "\n(the model stopped answering mid-turn — stop calling tools and answer from the log above)",
+                    );
+                    break;
+                }
+                // E.MSG3: `{e:#}`, the whole chain -- `{e}` printed only the outer context, the same
+                // words for a refused connection, a timeout and a 410 (yantrik-os #166).
+                Err(e) => return Ok(format!("(couldn't think just now: {e:#})")),
             };
             // Split the model's reasoning off the reply and STREAM IT. The reasoning is the most
             // interesting thing happening during a 30-second local-model turn and it used to be
@@ -12801,6 +13131,46 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // This exit used to be the only one with no journal line, so a turn ending here was
                 // indistinguishable from one still running — 17 minutes of "is it wedged?" on
                 // 2026-08-16 was this exact silence.
+                // Before this counts as the answer: was part of what was asked never attempted?
+                // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
+                if unsaved_doc {
+                    if !unsaved_nudged {
+                        unsaved_nudged = true;
+                        eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
+                        scratch.push_str(&desktop::unsaved_nudge(step));
+                        continue;
+                    }
+                    a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
+                }
+                if let Some(clause) = unattempted_side_effect(user_text, &cost.calls) {
+                    // E.ARENA1-F5: a turn that never looked at the desktop is sent to look, not
+                    // offered the exit of saying it cannot on the strength of earlier replies.
+                    let called: Vec<&str> = cost.calls.keys().map(String::as_str).collect();
+                    if !looked_first_nudged && desktop::must_look_first(self.desktop_attached(), &called) {
+                        looked_first_nudged = true;
+                        eprintln!("[agent] step {step}: would refuse \"{clause}\" without looking at the desktop — sending it to look");
+                        scratch.push_str(&desktop::look_first_nudge(step, &clause));
+                        continue;
+                    }
+                    if !unfinished_nudged {
+                        unfinished_nudged = true;
+                        eprintln!(
+                            "[agent] step {step}: answered but never attempted \"{clause}\" — asking for it"
+                        );
+                        scratch.push_str(&format!(
+                            "
+[{step}] (that answers part of it, but you have not yet {clause}. Do that now with one tool call, or say plainly that you cannot.)"
+                        ));
+                        continue;
+                    }
+                    // Asked once and still not done. Let the answer stand, but never let it read
+                    // as though the whole instruction was carried out.
+                    a = format!(
+                        "{a}
+
+(I did not {clause} — that part of what you asked has not been done.)"
+                    );
+                }
                 eprintln!(
                     "[agent] step {step}: no tool chosen — returning a direct reply ({} chars)",
                     a.len()
@@ -12963,10 +13333,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // the guard that belongs here, since it counts wasted steps rather than assuming
                 // the first one is fatal.
                 eprintln!("[agent] step {step}: repeated {tool} call — nudging it onward");
-                scratch.push_str(&format!(
+                // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
+                match desktop::repeated_action_note(&tool, unsaved_doc) {
+                    Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
+                    None => scratch.push_str(&format!(
                     "
 [{step}] {tool} -> (you just called this with these exact arguments; the result                      is directly above. Do NOT call it again. If the request named several targets,                      move to the next one you have not fetched yet; otherwise answer.)"
-                ));
+                )),
+                }
                 barren += 1;
                 if barren >= MAX_BARREN_STEPS {
                     break;
@@ -12978,18 +13352,26 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // second pass. Re-serve the earlier result from the log rather than paying for it twice.
             if done_calls.contains(&call_sig) {
                 eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
-                scratch.push_str(&format!(
+                match desktop::repeated_action_note(&tool, unsaved_doc) {
+                    Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
+                    None => scratch.push_str(&format!(
                     "
 [{step}] {tool} -> (already called with exactly these arguments earlier this turn;                      its result is above — do not call it again, use it or answer)"
-                ));
+                )),
+                }
                 barren += 1;
                 if barren >= MAX_BARREN_STEPS {
                     break;
                 }
                 continue;
             }
+            // E.ARENA1-F6: an action on the desktop makes every earlier desktop read stale, so a
+            // read after it must really run rather than be served the pre-action answer.
+            if desktop::changes_the_desktop(&tool) {
+                desktop::forget_desktop_reads(&mut done_calls);
+            }
             last_call = call_sig.clone();
-            done_calls.insert(call_sig);
+            done_calls.insert(call_sig.clone());
             // What this step is about to run, with the arguments that survived the egress cleaner —
             // "using web_search…" does not distinguish a search for the user's own name from a
             // search for a stock ticker, and that difference is the whole reason to open the fold.
@@ -13008,7 +13390,84 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane, &goal_id,
             );
             let tool_started = std::time::Instant::now();
-            let obs = self.run_agent_tool_as(&tool, &args, id).await;
+            // Before a desktop action can put a card in front of the person: E.ARENA1-F10, a card
+            // they already answered this turn is not raised again (and a no covers the twin);
+            // F8, a sensitive action whose host family is unread gets that one read; F7, a
+            // sensitive action with a standard twin is pointed at it once. Sent again, it goes
+            // through to the person.
+            let not_sent = if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
+                Some(note)
+            } else {
+                // E.ARENA1-F15: an app acted on without a describe this turn has its grades read
+                // first -- for the loop, not the model -- so the checks below can see them.
+                if let Some(look) = desktop::grade_lookup(&tool, &args, &described) {
+                    if twin_looked.insert(look.to_string()) {
+                        let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        desktop::record_described(&look, &seen, &mut described);
+                    }
+                }
+                if let Some(look) = desktop::twin_lookup(&tool, &args, &described) {
+                    if twin_looked.insert(look.to_string()) {
+                        let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        eprintln!(
+                            "[agent] step {step}: looked for a lower-grade twin ({look}) -> {}",
+                            seen.chars().take(80).collect::<String>().replace('\n', " ")
+                        );
+                        desktop::record_described(&look, &seen, &mut described);
+                    }
+                }
+                let sig = call_sig_for_twin(&tool, &args);
+                match desktop::lower_grade_twin(&tool, &args, &described) {
+                    Some(note) if twin_hinted.insert(sig.clone()) => Some(note),
+                    _ => None,
+                }
+            };
+            let sent = not_sent.is_none();
+            let obs = match not_sent {
+                Some(note) => note,
+                None => self.run_agent_tool_as(&tool, &args, id).await,
+            };
+            if !sent {
+                // Nothing reached the desktop, so nothing was done: the same call sent next must
+                // not be refused as a repeat. F7 promised "send this call again and it will go to
+                // the person", and the repeat guard was quietly breaking that promise.
+                done_calls.remove(&call_sig);
+                last_call.clear();
+            }
+            // E.ARENA1-F11: the desktop said the app does not exist, and the shell lists the action:
+            // send the same call there, once. It is graded by the OS at the shell, and a card the
+            // person already answered for it is not raised again.
+            let obs = if sent && tool == desktop::ACT && desktop::missing_app(&obs).is_some() {
+                if let Some(look) = desktop::host_family_lookup(&tool, &args, &obs, &described) {
+                    let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                    desktop::record_described(&look, &seen, &mut described);
+                }
+                match desktop::host_redirect(&tool, &args, &obs, &described) {
+                    Some(fixed) => {
+                        let from = args.get("app").and_then(|a| a.as_str()).unwrap_or("").to_string();
+                        eprintln!("[agent] step {step}: no `{from}` app — re-addressed to {}", desktop::TWIN_HOST);
+                        let out = match desktop::already_answered(&tool, &fixed, &answered) {
+                            Some(note) => note,
+                            None => self.run_agent_tool_as(&tool, &fixed, id).await,
+                        };
+                        desktop::redirected(&from, &fixed, &out)
+                    }
+                    None => obs,
+                }
+            } else {
+                obs
+            };
+            if tool == desktop::DESCRIBE {
+                desktop::record_described(&args, &obs, &mut described);
+            }
+            if sent && tool == desktop::ACT {
+                if let Some((key, answer)) = desktop::approval_answer(&obs) {
+                    answered.insert(key, answer);
+                }
+            }
+            if sent {
+                desktop::update_unsaved(&tool, &args, &obs, &mut unsaved_doc);
+            }
             let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             eprintln!(
                 "[agent] step {step}: {tool} -> {}",
@@ -13017,6 +13476,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
             // and the five-way outcome for this loop's own rendering.
             let outcome = guards::post(self, &guard_state, &tool, &obs).await;
+            // E.ARENA1-F6b: a desktop action that failed is not "done" — it may be retried once the
+            // world has changed (the loop's ordinary repeat nudge still meets an immediate retry).
+            if desktop::retry_after_failure(&tool, outcome == crate::tool_outcome::Outcome::Ok) {
+                done_calls.remove(&call_sig);
+            }
             if outcome == crate::tool_outcome::Outcome::Denied
                 && self
                     .plugins
@@ -13125,10 +13589,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             } else {
                 300
             };
-            scratch.push_str(&format!(
-                "\n[{step}] {tool} -> {}{}",
-                obs.chars().take(head).collect::<String>(),
-                outcome.note()
+            // E.ARENA1-F3: a desktop description keeps its ACTIONS, not just its first 900 chars.
+            // Clipped, the calendar never showed `update_event` and the shell never showed
+            // `files_new_folder`, so the model re-described, re-described, and gave up saying it had
+            // no tool for the job. See `desktop::condense_description`.
+            scratch.push_str(&desktop::work_log_entry(
+                step,
+                &tool,
+                &obs,
+                outcome == crate::tool_outcome::Outcome::Ok,
+                head,
+                outcome.note(),
             ));
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
@@ -13179,7 +13650,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 //
                 // The public-lane case keeps the old behaviour: an empty string falls through to
                 // the honest-line handling below, since nothing needed protecting.
-                let reply = COMPOSE_LANE_UNAVAILABLE.to_string();
+                // E.CFG2: "unreachable" only when there is something to reach.
+                let reply = if self.inference.private_lane_configured() {
+                    COMPOSE_LANE_UNAVAILABLE
+                } else {
+                    COMPOSE_NO_PRIVATE_LANE
+                }
+                .to_string();
                 let _ = self
                     .memory
                     .append_message_scoped("user", user_text, id.write_scope())
@@ -13228,13 +13705,22 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
         }
         // Curiosity in the flow of talk: occasionally end the reply with ONE get-to-know-you
-        // question (primary user only — the interest profile is his).
-        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+        // question (primary user only — the interest profile is his). E.ARENA1-F13: never on a
+        // reply to an INSTRUCTION. On VM 520 a refusal to "continue with the town model building"
+        // ended "Btw — what do you enjoy doing?", and that question, left pending, swallowed the
+        // next instruction as a hobby.
+        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY)
+            && !looks_like_a_task_request(user_text)
+        {
             if let Some(q) = self.maybe_piggyback_ask().await {
                 ans.push_str(&format!("\n\nBtw — {q}"));
             }
         }
         apply_denied_write_correction(&mut ans, &denied_mutations);
+        // E.ARENA1-F12: a turn that ended with its document unsaved says so, whatever compose wrote.
+        if unsaved_doc {
+            ans = format!("{ans}\n\n{}", desktop::UNSAVED_NOTE);
+        }
         let _ = self
             .memory
             .append_message_scoped("user", user_text, id.write_scope())
@@ -13698,6 +14184,22 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     }
 
     /// A turn from a KNOWN speaker on a known channel — drives read-isolation (group-chat privacy).
+    /// Does this turn name something the mind can actually reach?
+    ///
+    /// The content-based interceptors above the agent router are keyword matchers, and each
+    /// one is a guess about what was meant. A guess should lose to a request that names the
+    /// thing it wants. Without this, a sentence containing "order" was read as a question
+    /// about mail even while it also said "web_click", and the mind then reported — with
+    /// total conviction, and truthfully for the lane it had been put in — that it had no
+    /// browser tools at all.
+    fn names_a_held_tool(&self, text: &str) -> bool {
+        let held: Vec<String> = match &self.mcp {
+            Some(hub) => hub.tools().iter().map(|t| t.name.clone()).collect(),
+            None => Vec::new(),
+        };
+        names_a_tool(text, &held)
+    }
+
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
                                    // E.G1b: the world model sees EVERY primary turn — before any early return (a turn
@@ -13882,9 +14384,15 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             }
         }
         if let Some(slot) = onboard {
-            if looks_like_non_answer(user_text) {
+            if is_non_answer_to(&slot, user_text) {
                 // They asked for something else instead of answering — don't capture a command or a
-                // counter-question as a profile fact. The slot stays persisted; handle the turn normally.
+                // counter-question as a profile fact.
+                //
+                // The slot is also DROPPED rather than left armed. It used to persist, so the next
+                // thing said was captured instead, and the one after that, until something finally
+                // looked enough like an answer to swallow. A question ignored once has been
+                // answered in the way that matters; curiosity will ask again on its own schedule.
+                self.set_pending_slot(None).await;
             } else {
                 self.set_pending_slot(None).await; // consumed (capture may arm the next question)
                 let reply = self.capture_onboard(&slot, user_text).await;
@@ -13951,7 +14459,14 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Proactive news loop: if the user just reacted with interest to a surfaced news ping ("tell me
         // more"), dig into THAT topic with a full multi-source brief — the "show interest → I research
         // it and put it together" behavior, without them having to re-name the topic.
-        if let Some(topic) = self.interest_in_recent_news(user_text) {
+        // Every matcher from here down is a keyword guess about what was meant, and a guess
+        // must lose to a request that names the thing it wants. "write the figure to notes"
+        // reads as a drafting request, "make a chart" as a creative one, and either would take
+        // the turn away from the tools it explicitly asked for. The stateful interceptors above
+        // are NOT gated — a bare "yes" answering a pending confirmation names no tool and must
+        // still reach handle_action.
+        let names_tool = self.names_a_held_tool(user_text);
+        if let Some(topic) = self.interest_in_recent_news(user_text).filter(|_| !names_tool) {
             let brief = self.news_brief(&topic).await;
             let _ = self
                 .memory
@@ -13965,7 +14480,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // Creative studio in the flow of chat: collage / vibe-picture asks compose + caption
         // (checked BEFORE plain retrieval so they aren't swallowed by the find-a-photo path).
-        if let Some(req) = creative_request(user_text) {
+        if let Some(req) = creative_request(user_text).filter(|_| !names_tool) {
             let reply = self.photo_create(&req).await;
             let _ = self
                 .memory
@@ -13995,7 +14510,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // Photo retrieval in the flow of chat: "send/show me a photo of X" → find it in the photo
         // sources and ship the actual image to the home channel (queued; the poll loop sends it).
-        if let Some(q) = photo_request(user_text) {
+        if let Some(q) = photo_request(user_text).filter(|_| !names_tool) {
             let reply = self.photo_find_and_send(&q).await;
             let _ = self
                 .memory
@@ -14010,7 +14525,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Deterministic mail-lookup: "find/search my mail for X", "what's my booking/reservation/
         // confirmation" — the small model sometimes confabulates a search instead of running one, so
         // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
-        if let Some(mq) = mail_lookup_intent(user_text) {
+        if let Some(mq) = mail_lookup_intent(user_text).filter(|_| !self.names_a_held_tool(user_text)) {
             // ARCH-3A: this deterministic fast-path bypasses run_agent_tool_as, so it must broker its
             // own egress — otherwise a "search my mail for <credential>" would reach IMAP unmediated.
             if let Some(broker) = &self.egress {
@@ -14070,7 +14585,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // RESEARCHOPS: reviewer-2 / related-work / next-experiments as durable, citation-validated
         // research jobs. Deterministic intercept — a research ask should never be free-composed.
-        if let Some((mode, subject)) = Self::wants_researchops(user_text) {
+        if let Some((mode, subject)) = Self::wants_researchops(user_text).filter(|_| !names_tool) {
             let reply = self.research_ops_run(mode, &subject).await;
             let _ = self
                 .memory
@@ -14085,7 +14600,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // HARD-GROUNDED DRAFTING: "draft me an X plan about Y" composes STRICTLY from the complete
         // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
         // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
-        if let Some((kind, subject)) = Self::wants_draft(user_text) {
+        if let Some((kind, subject)) = Self::wants_draft(user_text).filter(|_| !names_tool) {
             let reply = self.draft_grounded(&kind, &subject, &turn_ctx).await?;
             let _ = self
                 .memory
@@ -14101,7 +14616,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // ahead of the agent loop — otherwise "save that as skill X" / "run skill X" get swallowed by
         // build_capability and only a description is stored, never the runnable code. This is the
         // memory-backed reuse loop over YantrikDB's skill store; the sandbox runs every reuse.
-        if let Some(reply) = self.handle_skills(user_text).await {
+        if let Some(reply) = self.handle_skills(user_text).await.filter(|_| !names_tool) {
             let _ = self
                 .memory
                 .append_message_scoped("user", user_text, ws.clone())
@@ -15339,3 +15854,181 @@ impl RecipeHost for MindRecipeHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod turn_routing_regressions {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A desktop action that ran is working material; a confirmation or a refusal ends the turn.
+    #[test]
+    fn only_a_confirmation_or_a_refusal_ends_a_turn_after_an_action() {
+        assert!(mutating_mcp_result_ends_the_turn(
+            "Ready to run os_act via the yantrik-os integration — confirm with \"yes\":
+{}"
+        ));
+        assert!(mutating_mcp_result_ends_the_turn("(I can't run mcp.yantrik-os.os_act — not granted.)"));
+        for ran in [
+            "Done — Notes — no note open",
+            "That didn't go through: execution failed: os_act needs 'app'.",
+        ] {
+            assert!(!mutating_mcp_result_ends_the_turn(ran), "{ran}");
+        }
+    }
+
+    /// The prompt names the place in words a model uses for "here" and local weather.
+    #[test]
+    fn the_prompt_says_where_the_computer_is() {
+        let line = machine_place_sentence("Bentonville, Arkansas, US (America/Chicago)");
+        assert!(line.starts_with(" This computer is in Bentonville, Arkansas, US"), "{line}");
+        assert!(line.contains("local weather"), "{line}");
+    }
+
+    /// The word "order" is not a question about mail.
+    ///
+    /// This matcher used to fire on any of mail/email/inbox/booking/reservation/confirmation/
+    /// receipt/itinerary/ORDER appearing anywhere as a SUBSTRING, plus any common question
+    /// word. It sat ahead of the agent router, so "click the Place order button" was answered
+    /// from a mailbox search, and the mind then said it had no browser tools — true in the lane
+    /// it had been put in, on a session with eleven of them connected.
+    #[test]
+    fn ordinary_words_do_not_read_as_a_mail_lookup() {
+        for text in [
+            "click the Place order button and tell me what came back",
+            "read the page and tell me what order the buttons are in",
+            "check the border width",
+            "find the recorder in the list",
+            "what did the disorder affect",
+        ] {
+            assert_eq!(mail_lookup_intent(text), None, "should not be a mail lookup: {text}");
+        }
+    }
+
+    /// ...and a real one still is, or the fix would have removed the feature instead.
+    #[test]
+    fn an_actual_mail_lookup_still_matches() {
+        for text in [
+            "search my email for the Kalyani booking",
+            "check my inbox for the hotel confirmation",
+            "find the receipt in my mail",
+        ] {
+            assert!(mail_lookup_intent(text).is_some(), "should be a mail lookup: {text}");
+        }
+    }
+
+    /// An instruction is not an answer to "what do you enjoy doing?".
+    ///
+    /// With a profile question pending, three consecutive instructions were captured as hobby
+    /// answers, written to the profile and asserted as beliefs at weight 0.9, each replied to
+    /// with "Love that — noted." The mind did none of them and looked friendly throughout.
+    #[test]
+    fn an_instruction_is_not_a_profile_answer() {
+        for text in [
+            "Open the Notes app and append a line to the current note",
+            "Now click element 1",
+            "Use your desktop tools to see what is on the page",
+            "click the Place order button",
+            "then read the note back",
+        ] {
+            assert!(looks_like_non_answer(text), "should not be captured as an answer: {text}");
+        }
+    }
+
+    /// E.ARENA1-F13: the two messages Pranab typed on VM 520 on 2026-09-23 -- the second was
+    /// filed as a hobby and answered "Love that — noted" -- and their shapes. Real answers are
+    /// still answers.
+    #[test]
+    fn a_request_behind_ok_or_can_you_is_not_a_profile_answer() {
+        for text in [
+            "Ok, create a small town model with people, homes, roads, cars etc etc",
+            "Can you please continue with the town model building",
+            "okay so now build me a house",
+            "Alright, draw a map of the town",
+            "could you open the calendar",
+            "I want you to make a game",
+            "let's build a town",
+        ] {
+            assert!(is_non_answer_to("interest:hobbies", text), "should not be captured as a hobby: {text}");
+        }
+        for text in [
+            "Mostly hiking and reading sci-fi",
+            "I enjoy cooking for friends",
+            "Chess, and long walks",
+            "Okay-ish at painting, love music though",
+        ] {
+            assert!(!is_non_answer_to("interest:hobbies", text), "a real answer was refused: {text}");
+        }
+        // Where an answer IS a task, the broad test is not applied.
+        assert!(!is_non_answer_to("purpose", "help me ship yantrik-mind"));
+        assert!(!is_non_answer_to("purpose", "build my company"));
+        assert!(!is_non_answer_to("plans:trip:2026", "finish my thesis first"));
+    }
+
+    /// The gate is on the REQUEST naming a capability, so a bare confirmation must not trip it.
+    ///
+    /// `handle_action` — the path a "yes" takes to release a pending confirmed action — is
+    /// deliberately NOT gated on names_a_held_tool. But a gate is only safe to leave off there
+    /// if a confirmation could never match it anyway: every confirmed email, GitHub comment
+    /// and destructive MCP call is released by one of these words.
+    #[test]
+    fn a_bare_confirmation_names_no_tool() {
+        let held: Vec<String> = ["os_act", "os_describe", "web_click", "web_type"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for text in ["yes", "yes please", "go ahead", "no", "confirm", "ok", "do it"] {
+            assert!(!names_a_tool(text, &held), "a confirmation must not read as naming a tool: {text}");
+        }
+        assert!(names_a_tool("use web_click on the first link", &held));
+        assert!(names_a_tool("Use your desktop tools to check", &held));
+    }
+
+    /// A genuine answer must still be captured, or the question can never be answered at all.
+    #[test]
+    fn a_real_answer_is_still_captured() {
+        for text in ["cycling and long walks", "mostly cooking these days", "photography"] {
+            assert!(!looks_like_non_answer(text), "should be captured as an answer: {text}");
+        }
+    }
+
+    /// The half of an instruction that changes something must not vanish silently.
+    #[test]
+    fn a_side_effect_clause_that_was_never_attempted_is_reported() {
+        let mut reads = BTreeMap::new();
+        reads.insert("mcp.yantrik-os.web_text".to_string(), 3usize);
+
+        let found = unattempted_side_effect(
+            "see what the current page says, then append the peak power figure to the notes app",
+            &reads,
+        );
+        assert!(found.is_some(), "reading only, with an append still asked for");
+        assert!(found.unwrap().starts_with("append"));
+    }
+
+    /// It stays quiet when an acting tool did run — claiming "I did not do X" about something
+    /// that WAS done would be its own kind of lie.
+    #[test]
+    fn nothing_is_claimed_undone_when_an_acting_tool_ran() {
+        let mut acted = BTreeMap::new();
+        acted.insert("mcp.yantrik-os.web_text".to_string(), 1usize);
+        acted.insert("mcp.yantrik-os.os_act".to_string(), 1usize);
+        assert_eq!(
+            unattempted_side_effect(
+                "see what the page says, then append the figure to the notes app",
+                &acted
+            ),
+            None
+        );
+    }
+
+    /// A request that only asks a question has nothing outstanding.
+    #[test]
+    fn a_pure_question_leaves_nothing_outstanding() {
+        let mut reads = BTreeMap::new();
+        reads.insert("mcp.yantrik-os.web_read".to_string(), 1usize);
+        assert_eq!(
+            unattempted_side_effect("what is on the current page", &reads),
+            None
+        );
+    }
+}

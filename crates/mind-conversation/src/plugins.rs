@@ -916,6 +916,20 @@ impl PluginRegistry {
     }
 
     /// The catalog lines for the ENABLED plugins (what the agent is told it can use).
+    /// The enabled catalog with ONE plugin's entry replaced. E.ARENA1-F1: on a Yantrik OS machine the
+    /// calendar plugin's entry is swapped for one that points at the desktop's calendar, so the model
+    /// is offered one calendar rather than two. The plugin stays enabled — only what the menu says
+    /// about it changes, and only while the desktop is attached.
+    pub fn enabled_catalog_replacing(&self, id: &str, replacement: &str) -> String {
+        self.plugins
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| if p.id == id { replacement } else { p.catalog.as_str() })
+            .collect::<Vec<_>>()
+            .join("
+")
+    }
+
     pub fn enabled_catalog(&self) -> String {
         self.plugins
             .iter()

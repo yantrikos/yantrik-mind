@@ -425,7 +425,7 @@ fn default_env_scaffold() -> String {
 }
 
 /// Insert or replace `KEY=value`, preserving surrounding lines.
-fn upsert_env_line(body: &str, key: &str, value: &str) -> String {
+pub(crate) fn upsert_env_line(body: &str, key: &str, value: &str) -> String {
     let mut found = false;
     let mut out: Vec<String> = body
         .lines()
@@ -448,7 +448,7 @@ fn upsert_env_line(body: &str, key: &str, value: &str) -> String {
     s
 }
 
-fn write_env_600(path: &str, body: &str) -> anyhow::Result<()> {
+pub(crate) fn write_env_600(path: &str, body: &str) -> anyhow::Result<()> {
     std::fs::write(path, body)?;
     #[cfg(unix)]
     {

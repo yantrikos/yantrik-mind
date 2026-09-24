@@ -703,13 +703,28 @@ impl ConversationEngine {
     /// THE agent-visible tool source: every enabled capability's catalog lines, plus whatever MCP
     /// servers have connected.
     ///
+    /// Is a Yantrik OS desktop connected, with its tools on offer? (E.ARENA1-F1)
+    pub(crate) fn desktop_attached(&self) -> bool {
+        self.mcp
+            .as_ref()
+            .is_some_and(|hub| crate::desktop::desktop_attached(&hub.tools()))
+    }
+
     /// One method because there were three: the agent loop, `discover_tools`, and the prompt audit
     /// each composed this by hand, and each had to remember to include the hand-written household
     /// blob. Three copies of "what tools exist" is three chances to disagree — and they did, since
     /// the audit's copy was the one nobody updated. Now the registry is the single source and this is
     /// its single reader.
     pub(crate) fn catalog_source(&self) -> String {
-        let plugins = self.plugins.lock().unwrap().enabled_catalog();
+        // E.ARENA1-F1: with the desktop attached, its calendar is the only calendar on the menu.
+        let plugins = if self.desktop_attached() {
+            self.plugins
+                .lock()
+                .unwrap()
+                .enabled_catalog_replacing(crate::desktop::CALENDAR_PLUGIN, crate::desktop::CALENDAR_ON_DESKTOP)
+        } else {
+            self.plugins.lock().unwrap().enabled_catalog()
+        };
         match self.mcp.as_ref().map(|h| h.catalog()).unwrap_or_default() {
             m if m.trim().is_empty() => plugins,
             m => format!("{plugins}\n{m}"),

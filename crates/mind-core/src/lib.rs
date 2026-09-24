@@ -11,6 +11,10 @@ use mind_memory::MemoryHandle;
 use mind_types::{BeliefAssertion, MemoryFacade, RecallQuery, TensionKind};
 
 pub(crate) mod delivery;
+/// A mind with no model, asking for one through the desktop.
+pub mod first_run;
+/// The desktop channel: attaching to Yantrik OS as a harness.
+pub mod harness;
 mod loops;
 pub mod setup;
 pub mod anthropic_gateway;
@@ -725,6 +729,11 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     if let Some(hub) = &mcp_hub {
         executor = executor.with_mcp_hub(hub.clone());
         granted.push(mind_types::Capability::Network);
+        // A server can also expose tools that never leave this machine — the OS's own control
+        // surface is the case that matters. Those are LocalControl, not Network, and the
+        // distinction is what lets the mind move its own hand without asking permission for
+        // every gesture while anything reaching outward still stops to ask.
+        granted.push(mind_types::Capability::LocalControl);
     }
     // The HOME HAND — granted only when BOTH the HA connection and an explicit entity allowlist
     // exist. No allowlist, no hand: the writer isn't even constructed, and the executor would

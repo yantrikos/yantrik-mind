@@ -1,0 +1,70 @@
+Text Editor — Untitled (no file yet), 1 line, saved
+revision: ba6bfcf287387fce
+{
+  "active_tab": 0,
+  "busy": false,
+  "bytes": 0,
+  "characters": 0,
+  "content": "",
+  "cursor_column": 1,
+  "cursor_line": 1,
+  "dialog": 0,
+  "dialog_is": "",
+  "find_count": 0,
+  "find_query": "",
+  "language": "Plain text",
+  "lines": 1,
+  "modified": false,
+  "notice": "",
+  "path": null,
+  "recovery": "Draft recovery ready",
+  "replacement": "",
+  "tabs": [{"modified": false, "name": "Untitled", "path": null}],
+  "title": "Untitled"
+}
+  act: new(text?)  [standard, settles on return]
+       Open a new tab and make it the active one, empty or holding the text given. Nothing is written to disk until `save_as` gives it a path; up to eight tabs can be open.
+         text?: string — What the new tab holds, up to 1 MiB and 20,000 lines of UTF-8 with no control characters. Leave it out for an empty tab.
+  act: open(path)  [standard, settles on return]
+       Open the UTF-8 text file at this path in a tab and make it active; a file already open is brought forward instead of opened twice. The file is not changed.
+         path: string — Absolute path to the file, or one starting `~/`. Up to 1 MiB of UTF-8 text; a binary or larger file is refused and nothing is opened.
+  act: save()  [standard, settles on return]
+       Write the active tab back to the file it was opened from and check the bytes on disk. A tab with no file is refused — give `save_as` a path. When the editor is asking about unsaved changes, this is the answer that writes the tab and closes it.
+  act: save_as(path)  [standard, settles on return]
+       Write the active tab to this path and keep the tab on it from now on. It refuses rather than overwrite a file that already exists.
+         path: string — Absolute path of the file to write, or one starting `~/`. Its folder must exist and nothing may already be at that path.
+  act: show()  [standard, settles on return]
+       Bring the Editor window to the front. Nothing in any tab is read or changed.
+  act: close()  [standard, settles on return]
+       Close the active tab. A tab with unsaved changes is not closed: the window asks, and `save`, `discard` or `cancel` answers it. The last tab closed leaves an empty one.
+  act: cancel()  [standard, settles on return]
+       Dismiss whichever dialog is open and leave every tab exactly as it was. Nothing is closed, saved or discarded.
+  act: discard()  [sensitive, settles on return]
+       Throw away the unsaved changes in the tab the window is asking about and close it. The text that was never saved is gone and cannot be recovered.
+  act: find(text)  [standard, settles on return]
+       Search the active tab for this text, open the find bar, and select the first match. It reads the document and changes nothing in it.
+         text: string — The text to look for, matched literally. Case is ignored unless the find bar's match-case box is ticked; an empty query clears the matches.
+  act: find-next()  [standard, settles on return]
+       Move the selection to the next match of the current `find` query, wrapping round at the end of the document. Nothing is changed.
+  act: find-prev()  [standard, settles on return]
+       Move the selection to the previous match of the current `find` query, wrapping round at the start of the document. Nothing is changed.
+  act: replace_text(text)  [standard, settles on return]
+       Set the text that `replace` and `replace-all` will put in place of a match. By itself it changes nothing in the document.
+         text: string — What each match becomes. An empty string is allowed and deletes the match instead.
+  act: replace()  [standard, settles on return]
+       Replace the one match the selection is on with the `replace_text` text. The tab is changed in the window; nothing is written until `save`.
+  act: replace-all()  [standard, settles on return]
+       Replace every match of the current `find` query in the active tab at once. The tab is changed in the window; nothing is written until `save`.
+  act: set_content(text)  [sensitive, settles on return]
+       Replace everything in the active tab with this text. The file on disk is untouched until `save`; whatever was in the tab and unsaved is gone. To start a document with text, `new` with `text` does it without replacing anything.
+         text: string — The tab's entire new text, up to 1 MiB and 20,000 lines of UTF-8 with no control characters. An empty string empties the tab.
+  act: append(text)  [standard, settles on return]
+       Add this text to the end of the active tab; on a new, empty tab it is the whole text. Nothing already in the tab is changed, and the file on disk is untouched until `save`.
+         text: string — The text to add, exactly as given: start it with a newline to begin a new line. The whole tab has to stay within 1 MiB and 20,000 lines.
+  act: undo()  [standard, settles on return]
+       Take back the last change to the active tab, including a whole-tab `set_content` or `replace-all`. Up to 64 steps are kept per tab and none of it touches the file.
+  act: redo()  [standard, settles on return]
+       Put back the change `undo` took off the active tab. Editing the tab in any other way discards what redo was holding.
+  act: select_tab(index)  [standard, settles on return]
+       Make one of the open tabs the active one, by its position in `describe.tabs`. Nothing is saved, closed or changed.
+         index: number — Which tab, counting from 0 in the order `describe.tabs` lists them; `describe.active_tab` is the one in front now.

@@ -22,7 +22,7 @@ fn build_backend() -> (Arc<dyn LLMBackend>, String) {
     // Resilient multi-provider chain (NanoGPT → Ollama Cloud → MiniMax, in priority order) built from
     // whatever keys are present; an error OR empty reply fails over to the next. Provider endpoints
     // live in mind_inference so adding a provider is one line there. Verified live: NanoGPT
-    // (deepseek-v4-pro), Ollama Cloud (glm-4.7), MiniMax (MiniMax-M2.7).
+    // (deepseek-v4-pro), Ollama Cloud (deepseek-v4.1-flash), MiniMax (MiniMax-M2.7).
     if let Some((backend, label)) = mind_inference::default_chain_from_env() {
         return (backend, label);
     }
@@ -198,7 +198,56 @@ async fn main() -> anyhow::Result<()> {
     // in-process model2vec embedder at this dim, so record/recall are genuinely SEMANTIC with no
     // external server. (A dim-8 DB from before this upgrade is incompatible — recreate the file.)
     let mem = MemoryHandle::spawn(&db, 64).map_err(|e| anyhow::anyhow!("memory init: {e:?}"))?;
+
+    // THE MACHINE'S MEMORY, SERVED FROM HERE WHILE THIS MIND OWNS IT.
+    //
+    // On Yantrik OS one memory file is shared by whichever mind is active, and only one process
+    // may hold it with a live engine: a second engine on the same file does not see the first
+    // one's writes (proven 2026-09-16). While this mind is running it IS that process, so it also
+    // serves the file over MCP — from this same handle, so an agent's `recall` and this mind's own
+    // turns read one engine. When another mind is active, this process is stopped and the
+    // standalone `yantrik-memory` binary serves the same file at the same address instead.
+    //
+    // Opt-in by address, so a mind deployed anywhere else serves nothing it was not asked to.
+    // Not fatal if it cannot bind: the likeliest reason is another owner already holding the port,
+    // and taking this mind's phone and console down would not make that better — but it is said
+    // loudly, because it means two processes may have this file open.
+    if let Ok(bind) = std::env::var("YM_MEMORY_SERVER") {
+        let bind = bind.trim().to_string();
+        if !bind.is_empty() && db != ":memory:" {
+            match mind_memory_mcp::parse_bind(&bind) {
+                Ok(addr) => {
+                    let (served, token) = (mem.clone(), mind_memory_mcp::default_token_path(&db));
+                    tokio::spawn(async move {
+                        let never = std::future::pending::<()>();
+                        if let Err(e) = mind_memory_mcp::serve_http(served, addr, &token, "yantrik-mind", never).await {
+                            eprintln!("[memory] NOT serving memory over MCP at {addr}: {e:#} -- if another memory server holds this file, two processes may now have it open");
+                        }
+                    });
+                    println!("memory: serving this mind's memory over MCP at http://{addr}/mcp");
+                }
+                Err(e) => eprintln!("[memory] YM_MEMORY_SERVER ignored: {e:#}"),
+            }
+        }
+    }
     let conv = mind_core::engine(&mem, pool);
+
+    // What the desktop's mind picker will show under the name, set before any channel starts.
+    //
+    // The backend alone. It first carried the database path too, and the desktop's machine rail
+    // renders this on one 160px row beside the word "Model" — so the one thing worth reading got
+    // elided away behind a filesystem path nobody asks a status line for.
+    //
+    // With no model configured, the backend is the scripted placeholder. On the desktop that is
+    // not an answer anyone can use, so the desktop channel becomes the first-run conversation
+    // instead, and the picker says so.
+    if name == "scripted" {
+        mind_core::harness::announce_needs_setup();
+        mind_core::harness::announce("not set up yet — say hello".to_string());
+        println!("brain: none configured — the desktop channel will ask for one (first run)");
+    } else {
+        mind_core::harness::announce(name.clone());
+    }
 
     // Tiny static web server for the agent's published dashboards (publish_page → shareable URL).
     spawn_web_server();
@@ -251,6 +300,11 @@ async fn main() -> anyhow::Result<()> {
     // bounded loop can reach the tool surface. Wrapped here rather than at construction because the
     // Telegram path must consume the engine to attach its device store, and builds its own Arc after.
     let conv = std::sync::Arc::new(conv);
+
+    // A terminal does not stop this being the machine's mind: if a desktop is up, it is listed
+    // there too, and a question typed into the Lens is answered from the same conversation the
+    // person at this prompt is having.
+    mind_core::harness::attach_in_background(mem.clone(), conv.clone());
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();

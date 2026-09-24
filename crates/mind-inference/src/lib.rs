@@ -246,6 +246,23 @@ pub fn current_opportunity() -> Option<String> {
     OPPORTUNITY.try_with(|s| s.clone()).ok()
 }
 
+tokio::task_local! {
+    /// E.ARENA1-F9: the most any one model request made inside this task may wait.
+    static CALL_CAP: std::time::Duration;
+}
+/// Run `f` with every model request inside it capped at `cap` — the caller knows how much time
+/// the work has left, and a client's own timeout (sized for its slowest job) does not. The cap
+/// reaches the HTTP request itself, so a hung request is abandoned where it hangs and a chain
+/// still fails over to its next link.
+pub async fn with_call_cap<F: std::future::Future>(cap: std::time::Duration, f: F) -> F::Output {
+    CALL_CAP.scope(cap, f).await
+}
+/// The cap this task runs under, if any. Carried onto the blocking thread by hand, like the
+/// opportunity: task-locals do not reach `spawn_blocking`.
+pub fn current_call_cap() -> Option<std::time::Duration> {
+    CALL_CAP.try_with(|c| *c).ok()
+}
+
 /// How one logical request ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallOutcome {
@@ -657,8 +674,12 @@ impl InferencePool {
         // a Failed row with the attempts made.
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
+        let call_cap = current_call_cap();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
+            // Installed for this job only; `None` also clears whatever an earlier job on this
+            // pooled thread left behind.
+            let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
             // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
             // read afterwards can only have been written by THIS call's chain traversal.
             let _ = take_serving_link();
@@ -675,11 +696,12 @@ impl InferencePool {
             // seconds later. Found live on 2026-08-25 with permits set to 6 against a 4-slot
             // cluster, so a burst did not merely risk this — it guaranteed it.
             //
-            // Short bounded backoff: the wait is what the server asked for, and a private turn has
-            // nowhere else to go. Anything that is not a rate limit fails immediately, because
-            // retrying a real error just delays the truth.
-            let mut wait_ms = 400;
-            for attempt in 0..3 {
+            // Bounded backoff: the wait is what the server asked for, and a private turn has nowhere
+            // else to go. Anything that is not transient fails immediately, because retrying a real
+            // error just delays the truth. See `retry_wait` for how long each kind is worth waiting.
+            let mut attempt: u32 = 0;
+            let mut waited_ms: u64 = 0;
+            loop {
                 // L4-0: a leaf backend's invocation IS the attempt, counted before the call so
                 // a panic inside it is still one attempt; a chain counts its links itself.
                 if leaf {
@@ -688,25 +710,17 @@ impl InferencePool {
                 match backend.chat(&messages, &config, tools_ref) {
                     Ok(r) => return Ok(r),
                     Err(e) => {
-                        // TRANSIENT means the server is temporarily unable, not that the request is
-                        // wrong. 429 is "wait"; 502/503/504 are a gateway or a worker hiccuping.
-                        // Measured on the box: three identical completions in a row returned 200,
-                        // 200, and then 502 {"error":"backend desktop error"} — the endpoint is
-                        // flaky, not down. Retrying only the 429 left every such blip fatal, and
-                        // because a private turn fails CLOSED by design it had nowhere to fall back
-                        // to: one hiccup and the mind could not think.
                         let detail = format!("{e:#}");
-                        let transient = ["429", "502", "503", "504"].iter().any(|c| detail.contains(c));
-                        if !transient || attempt == 2 {
+                        let Some(wait_ms) = retry_wait(&detail, attempt, waited_ms) else {
                             return Err(e);
-                        }
+                        };
                         eprintln!("[infer] transient model-endpoint error — backing off {wait_ms}ms (attempt {}): {detail}", attempt + 1);
                         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-                        wait_ms *= 3;
+                        waited_ms += wait_ms;
+                        attempt += 1;
                     }
                 }
             }
-            unreachable!("the loop returns on every path")
             })();
             // Captured on the SAME blocking thread the chain ran on — the only place the note is
             // visible, and the reason a task-local could not carry it.
@@ -804,6 +818,18 @@ impl InferencePool {
     /// The explicit local-only lane is SANCTIONED BY CONSTRUCTION (built from the owned endpoint),
     /// which is stronger evidence than the env CSV ("a declaration, not evidence" — sol #5), so it
     /// bypasses the CSV allowlist; the CSV still gates the label-based (non-explicit) paths.
+    /// E.CFG2: is any lane cleared for private context -- a dedicated private backend, or the
+    /// default provider on the owner's `YM_PRIVATE_PROVIDERS` allowlist? The same question
+    /// `gate_scope` answers for a Private request, asked without dispatching one. When the answer is
+    /// no, a refused private request was refused by CONFIGURATION, not by an outage, and what the
+    /// person is told should say which.
+    pub fn private_lane_configured(&self) -> bool {
+        let household = std::env::var("YM_HOUSEHOLD_PROVIDERS")
+            .unwrap_or_else(|_| DEFAULT_HOUSEHOLD.to_string());
+        let private = std::env::var("YM_PRIVATE_PROVIDERS").unwrap_or_default();
+        lane_cleared(self.private.is_some(), &self.provider, &household, &private)
+    }
+
     fn gate_scope(
         &self,
         scope: PrivacyScope,
@@ -899,8 +925,10 @@ impl InferencePool {
         let provider_for_lane = selected_label;
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
+        let call_cap = current_call_cap();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
             let _ = take_serving_link();
             install_attempts(attempts_in);
             if !is_chain_backend(backend.as_ref()) {
@@ -1042,8 +1070,11 @@ impl InferencePool {
                     let detail = format!("{e:#}");
                     let (why, hint) = lane_failure(&detail);
                     eprintln!("[privacy] private lane FAILED — failing CLOSED (refusing cloud escalation of private context): {}", failure_line(&why, &detail));
+                    // E.MSG3: the sentence a person reads carries the same detail the log does --
+                    // the address that failed and why -- not only the category.
                     return Err(anyhow::anyhow!(
-                        "private inference unavailable — {why}; refusing to route private context to a cloud provider. Fix: {hint}"
+                        "private inference unavailable — {}; refusing to route private context to a cloud provider. Fix: {hint}",
+                        failure_line(&why, &detail)
                     ));
                 }
                 // No local private lane configured (the documented interim gap): escalate to the
@@ -1566,6 +1597,27 @@ pub struct ChainBackend {
     /// call is routed here FIRST, then failover — so a small dispatch model can own the fast path while
     /// multi-step reasoning goes to the capable model. None = strategy applies to think:true too.
     reasoner: Option<usize>,
+    /// E.MODEL2: links the provider has said will never serve (404/410), by index, with its words.
+    /// Skipped for the rest of the process; a restart asks again.
+    gone: std::sync::Mutex<std::collections::HashMap<usize, String>>,
+}
+
+/// E.MODEL2: has the provider said this link will NEVER serve? A 410 is a retired model (ollama.com
+/// answers `glm-4.7` so today, and it was the compiled default of every `ollama-cloud` link); a 404
+/// is a model or route that does not exist. Transient answers -- 429, 5xx, timeouts, transport
+/// failures -- are not, because treating a bad minute as death would drop a working link.
+pub fn link_is_gone(detail: &str) -> bool {
+    let d = detail.to_ascii_lowercase();
+    d.contains("http status: 410")
+        || d.contains("http status: 404")
+        || d.contains("end of life")
+        || d.contains("has been retired")
+}
+
+/// E.CFG2's rule without the environment: a dedicated private lane, or the provider cleared for the
+/// private scope by the owner's allowlist.
+fn lane_cleared(dedicated: bool, provider: &str, household: &str, private: &str) -> bool {
+    dedicated || scope_allows(PrivacyScope::Private, provider, household, private)
 }
 
 impl ChainBackend {
@@ -1586,7 +1638,13 @@ impl ChainBackend {
             strategy: ChainStrategy::Failover,
             route: std::sync::atomic::AtomicUsize::new(0),
             reasoner: None,
+            gone: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Why the provider said link `i` will never serve, if it has.
+    fn gone_reason(&self, i: usize) -> Option<String> {
+        self.gone.lock().unwrap().get(&i).cloned()
     }
 
     /// Attach a local survival-tier backend (e.g. local Ollama). When all cloud links fail, this
@@ -1834,12 +1892,19 @@ impl LLMBackend for ChainBackend {
         // link is still demoted to last. Every order is a full permutation, so on error/empty we
         // failover through the rest — a backup is always in play.
         let order = self.routing_order(config.think, config.prefer_reasoner);
+        let mut skipped: Vec<String> = Vec::new();
         for i in order {
             let be = &self.links[i];
             let label = self
                 .labels
                 .get(i)
                 .map_or_else(|| be.backend_name(), String::as_str);
+            // E.MODEL2: a link the provider has retired is not asked again. Reading C's T6 failed
+            // over to `glm-4.7` and got a 410 on every such turn.
+            if let Some(why) = self.gone_reason(i) {
+                skipped.push(format!("{label} ({why})"));
+                continue;
+            }
             // Owned hardware bills time, not tokens — give it room rather than truncating a tool
             // call or an answer to save a token that costs nothing. Cloud links pass through.
             let raised = local_budget(label, config);
@@ -1876,7 +1941,17 @@ impl LLMBackend for ChainBackend {
                 }
                 Err(e) => {
                     provider_record(label, false);
-                    eprintln!("[chain] {} failed ({e}) — failing over", be.backend_name());
+                    // `{e:#}`: the outer context is the same seven words for a 410, a 429 and a
+                    // refused connection; the cause underneath is what tells them apart.
+                    let detail = format!("{e:#}");
+                    if link_is_gone(&detail) {
+                        eprintln!(
+                            "[chain] {label} is GONE ({detail}) — the provider will not serve it; skipped for the rest of this run"
+                        );
+                        self.gone.lock().unwrap().insert(i, detail);
+                    } else {
+                        eprintln!("[chain] {} failed ({detail}) — failing over", be.backend_name());
+                    }
                     last_err = Some(e);
                 }
             }
@@ -1913,7 +1988,13 @@ impl LLMBackend for ChainBackend {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("chain has no backends")))
+        Err(last_err.unwrap_or_else(|| {
+            if skipped.is_empty() {
+                anyhow::anyhow!("chain has no backends")
+            } else {
+                anyhow::anyhow!("every link in this chain is gone: {}", skipped.join("; "))
+            }
+        }))
     }
 
     fn chat_streaming(
@@ -1995,7 +2076,14 @@ pub fn provider_catalog(provider: &str) -> Option<(&'static str, &'static str, &
             "NANOGPT_KEY",
             "deepseek/deepseek-v4-pro-cheaper",
         ),
-        "ollama-cloud" | "ollama" => ("https://ollama.com/v1", "OLLAMA_CLOUD_KEY", "glm-4.7"),
+        // E.MODEL2: was `glm-4.7`, which ollama.com retired (410) -- and which every chain with an
+        // Ollama Cloud key but no YM_OLLAMA_MODEL carried as its fallback. deepseek-v4.1-flash is
+        // live on ollama.com (2026-09-22) and is the model Yantrik OS's own harnesses run on.
+        "ollama-cloud" | "ollama" => (
+            "https://ollama.com/v1",
+            "OLLAMA_CLOUD_KEY",
+            "deepseek-v4.1-flash",
+        ),
         "minimax" => (
             "https://api.minimax.io/v1",
             "MINIMAX_API_KEY",
@@ -2553,6 +2641,17 @@ pub fn resolve_provider_base(
     }
 }
 
+/// Do two specs call the same provider's same model, once each provider's default is filled in?
+fn same_model(a: &str, b: &str) -> bool {
+    let resolve = |spec: &str| -> Option<(String, String)> {
+        let (p, m) = split_spec(spec);
+        let (_, _, default_model) = provider_catalog(p)?;
+        let canonical = |p: &str| if p == "ollama" { "ollama-cloud".to_string() } else { p.to_string() };
+        Some((canonical(p), if m.is_empty() { default_model.to_string() } else { m.to_string() }))
+    };
+    matches!((resolve(a), resolve(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The default resilient chain from whatever provider keys are present. CONFIG-DRIVEN precedence:
 /// when `YM_LOCAL_OLLAMA_URL` is set, the local model is the PRIMARY brain (owned hardware, fast, and
 /// it backs the private lane), with the cloud providers (NanoGPT → Ollama Cloud → MiniMax) as
@@ -2601,6 +2700,12 @@ pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
             Some(m) if !m.trim().is_empty() => format!("{provider}:{m}"),
             _ => provider.to_string(),
         };
+        // E.MODEL2: a fallback that calls the same provider's same model as a link already in
+        // the chain is not a fallback. With the default above, `YM_PRIMARY_BRAIN=ollama-cloud:
+        // deepseek-v4.1-flash` plus an Ollama Cloud key would otherwise ask it twice.
+        if labels.iter().any(|l| same_model(l, &spec)) {
+            continue;
+        }
         if let Some(be) = backend_from_spec(&spec) {
             links.push(be);
             labels.push(spec);
@@ -2733,6 +2838,33 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
         chain = chain.with_reasoner(idx);
     }
     Some((Arc::new(chain) as Arc<dyn LLMBackend>, label))
+}
+
+/// How long to wait before retrying a failed model call, or `None` to give up.
+///
+/// TRANSIENT means the server is temporarily unable, not that the request is wrong. 502/503/504
+/// are a gateway or a worker hiccuping — measured on the box: three identical completions in a row
+/// returned 200, 200, then 502 {"error":"backend desktop error"} — so they get a short retry.
+///
+/// 429 is different: the server is FULL, and it stays full for as long as the calls ahead of this
+/// one take. This used to share the hiccup budget, three attempts and 1.6 seconds in all. Against
+/// the AIG gateway (two slots, shared with production Yantrik Mind, calls of 30 seconds and more)
+/// that gave up long before a slot could free: on 2026-09-17 a fresh Yantrik OS install answered
+/// "my own hardware is unreachable" to two tasks in a row while the gateway was only busy. So a 429
+/// waits with growing gaps for up to a minute in total — the time a slot actually takes to free.
+pub(crate) fn retry_wait(detail: &str, attempt: u32, waited_ms: u64) -> Option<u64> {
+    const BUSY_PATIENCE_MS: u64 = 60_000;
+    if detail.contains("429") {
+        if waited_ms >= BUSY_PATIENCE_MS {
+            return None;
+        }
+        let wait = (1_000u64 << attempt.min(4)).min(15_000);
+        return Some(wait.min(BUSY_PATIENCE_MS - waited_ms));
+    }
+    if ["502", "503", "504"].iter().any(|c| detail.contains(c)) && attempt < 2 {
+        return Some(400 * 3u64.pow(attempt));
+    }
+    None
 }
 
 pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
@@ -3914,6 +4046,31 @@ mod privacy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full server is waited on for about a minute; a hiccup gets a short retry; a real error none.
+    #[test]
+    fn a_busy_endpoint_is_waited_on_and_a_broken_one_is_not() {
+        let busy = "Ollama API request failed: http status: 429";
+        let mut waited = 0;
+        let mut attempt = 0;
+        let mut waits = Vec::new();
+        while let Some(w) = retry_wait(busy, attempt, waited) {
+            waits.push(w);
+            waited += w;
+            attempt += 1;
+        }
+        assert_eq!(waits[..3], [1_000, 2_000, 4_000], "{waits:?}");
+        assert_eq!(waited, 60_000, "a 429 is waited on for a minute in all: {waits:?}");
+        assert!(waits.iter().all(|w| *w <= 15_000), "{waits:?}");
+
+        let hiccup = "http status: 502";
+        assert_eq!(retry_wait(hiccup, 0, 0), Some(400));
+        assert_eq!(retry_wait(hiccup, 1, 400), Some(1_200));
+        assert_eq!(retry_wait(hiccup, 2, 1_600), None);
+
+        assert_eq!(retry_wait("http status: 400 bad request", 0, 0), None);
+        assert_eq!(retry_wait("connection refused", 0, 0), None);
+    }
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -4981,5 +5138,245 @@ mod lane_failure_tests {
         assert!(lane_failure("HTTP 429 Too Many Requests after 3 retries").0.contains("RATE LIMITING"));
         assert!(lane_failure("502 Bad Gateway").0.contains("FLAKY"));
         assert!(lane_failure("connection refused (os error 111)").0.contains("unreachable"));
+    }
+}
+
+/// E.ARENA1-F9: a cap set on the async task reaches the HTTP timeout on the blocking thread, on
+/// both the plain and the streaming path, and does not outlive its job on a pooled thread.
+#[cfg(test)]
+mod call_cap_tests {
+    use super::*;
+
+    /// Answers with the request timeout it would have used, in seconds.
+    struct SeesCap;
+    impl LLMBackend for SeesCap {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            let secs = yantrik_ml::call_timeout::call_timeout_for("probe-model").as_secs();
+            Ok(LLMResponse {
+                thinking: String::new(),
+                text: secs.to_string(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "sees-cap"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_cap_reaches_the_request_and_ends_with_its_job() {
+        let pool = InferencePool::new(Arc::new(SeesCap) as Arc<dyn LLMBackend>, 1);
+        let ask = || {
+            pool.chat_scoped(
+                vec![ChatMessage::user("x")],
+                GenerationConfig::default(),
+                PrivacyScope::Public,
+            )
+        };
+        let plain = ask().await.unwrap().text;
+        assert_ne!(plain, "7", "no cap installed, so the configured timeout");
+        let capped = with_call_cap(std::time::Duration::from_secs(7), ask()).await.unwrap().text;
+        assert_eq!(capped, "7", "the task's cap did not reach the blocking thread");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let streamed = with_call_cap(
+            std::time::Duration::from_secs(7),
+            pool.chat_streaming_sink(
+                vec![ChatMessage::user("x")],
+                GenerationConfig::default(),
+                tx,
+                PrivacyScope::Public,
+            ),
+        )
+        .await
+        .unwrap()
+        .text;
+        assert_eq!(streamed, "7", "the streaming path did not carry the cap");
+        for _ in 0..4 {
+            assert_eq!(ask().await.unwrap().text, plain, "a cap outlived its job on a pooled thread");
+        }
+    }
+}
+
+/// E.MODEL2: a link the provider says is gone is asked once and then skipped; a transient failure
+/// is not death; a chain whose every link is gone says so.
+#[cfg(test)]
+mod gone_link_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Link {
+        calls: Arc<AtomicUsize>,
+        fails_with: Option<&'static str>,
+    }
+    impl LLMBackend for Link {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.fails_with {
+                // The shape a real 410 arrives in: ureq's status under the client's context line.
+                Some(status) => Err(anyhow::anyhow!("{status}").context("OpenAI-compatible API request failed")),
+                None => Ok(LLMResponse {
+                    thinking: String::new(),
+                    text: "served".into(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    tool_calls: vec![],
+                    api_tool_calls: vec![],
+                    stop_reason: "stop".into(),
+                }),
+            }
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "api"
+        }
+    }
+
+    fn link(fails_with: Option<&'static str>) -> (Arc<dyn LLMBackend>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        (Arc::new(Link { calls: calls.clone(), fails_with }), calls)
+    }
+
+    fn ask(chain: &ChainBackend) -> anyhow::Result<LLMResponse> {
+        chain.chat(&[ChatMessage::user("hi")], &GenerationConfig::default(), None)
+    }
+
+    #[test]
+    fn a_retired_link_is_asked_once_and_then_skipped() {
+        let (dead, dead_calls) = link(Some("http status: 410"));
+        let (live, live_calls) = link(None);
+        let chain = ChainBackend::new_labeled(vec![dead, live], vec!["ollama-cloud".into(), "backup".into()]);
+        for _ in 0..3 {
+            assert_eq!(ask(&chain).unwrap().text, "served");
+        }
+        assert_eq!(dead_calls.load(Ordering::SeqCst), 1, "a 410 was asked again");
+        assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_bad_minute_is_not_death() {
+        for status in ["http status: 429", "http status: 503", "timed out after 60 s waiting for m"] {
+            let (flaky, flaky_calls) = link(Some(status));
+            let (live, _) = link(None);
+            let chain = ChainBackend::new_labeled(vec![flaky, live], vec!["a".into(), "b".into()]);
+            ask(&chain).unwrap();
+            ask(&chain).unwrap();
+            assert_eq!(flaky_calls.load(Ordering::SeqCst), 2, "{status} was treated as gone");
+        }
+    }
+
+    #[test]
+    fn a_chain_of_gone_links_says_so() {
+        let (a, _) = link(Some("http status: 410"));
+        let (b, _) = link(Some("http status: 404"));
+        let chain = ChainBackend::new_labeled(vec![a, b], vec!["one".into(), "two".into()]);
+        assert!(ask(&chain).is_err());
+        let second = format!("{:#}", ask(&chain).unwrap_err());
+        assert!(second.contains("every link in this chain is gone"), "{second}");
+        assert!(second.contains("one") && second.contains("two"), "{second}");
+    }
+
+    #[test]
+    fn a_fallback_that_repeats_a_link_is_the_same_model() {
+        assert!(same_model("ollama-cloud:deepseek-v4.1-flash", "ollama-cloud"));
+        assert!(same_model("ollama:deepseek-v4.1-flash", "ollama-cloud:deepseek-v4.1-flash"));
+        assert!(!same_model("ollama-cloud:kimi-k3", "ollama-cloud"));
+        assert!(!same_model("minimax", "ollama-cloud"));
+        assert!(!same_model("no-such-provider", "no-such-provider"), "unknown is never the same");
+    }
+}
+
+/// E.CFG2: the configured-lane question, on the two shapes it can be asked about without touching
+/// the process environment.
+#[cfg(test)]
+mod private_lane_configured_tests {
+    use super::*;
+
+    struct Idle;
+    impl LLMBackend for Idle {
+        fn chat(
+            &self,
+            _: &[ChatMessage],
+            _: &GenerationConfig,
+            _: Option<&[serde_json::Value]>,
+        ) -> anyhow::Result<LLMResponse> {
+            anyhow::bail!("never called")
+        }
+        fn chat_streaming(
+            &self,
+            m: &[ChatMessage],
+            c: &GenerationConfig,
+            t: Option<&[serde_json::Value]>,
+            _: &mut dyn FnMut(&str),
+        ) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, s: &str) -> anyhow::Result<usize> {
+            Ok(s.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "idle"
+        }
+    }
+
+    #[test]
+    fn a_dedicated_private_backend_is_a_configured_lane() {
+        let pool = InferencePool::new(Arc::new(Idle) as Arc<dyn LLMBackend>, 1)
+            .with_provider("ollama-cloud:deepseek-v4.1-flash")
+            .with_private_backend(Arc::new(Idle), "ollama-local:qwen");
+        assert!(pool.private_lane_configured());
+    }
+
+    /// The owner's allowlist clears a cloud provider -- VM 520's own configuration.
+    #[test]
+    fn a_cloud_provider_on_the_owners_allowlist_is_a_configured_lane() {
+        let cloud = "ollama-cloud:deepseek-v4.1-flash";
+        assert!(lane_cleared(false, cloud, DEFAULT_HOUSEHOLD, cloud));
+        assert!(!lane_cleared(false, cloud, DEFAULT_HOUSEHOLD, ""), "household is not private");
+        assert!(lane_cleared(true, cloud, DEFAULT_HOUSEHOLD, ""));
+    }
+
+    #[test]
+    fn a_cloud_provider_nobody_cleared_is_not() {
+        // A provider name no allowlist in any environment would carry.
+        let pool = InferencePool::new(Arc::new(Idle) as Arc<dyn LLMBackend>, 1)
+            .with_provider("zz-uncleared-cloud:model");
+        assert!(!pool.private_lane_configured());
     }
 }

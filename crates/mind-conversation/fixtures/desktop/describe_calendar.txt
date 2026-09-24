@@ -1,0 +1,45 @@
+Calendar — September 2026, nothing on day 30
+revision: cd741374b340140c
+{
+  "days_with_events": [{"day": 22, "events": 1}, {"day": 25, "events": 3}],
+  "events_on_selected_day": [],
+  "events_this_month": 4,
+  "month": "September 2026",
+  "month_number": 9,
+  "notice": "",
+  "selected_day": 30,
+  "view": "month",
+  "year": 2026
+}
+  act: select_day(day)  [standard, settles on return]
+       Show what is on one day of the month shown
+         day: number — Day of the month, 1-31
+  act: show_month(direction)  [standard, settles on return]
+       Move to the next or previous month
+         direction: string — next | previous
+  act: go_to_today()  [standard, settles on return]
+       Jump back to the current month and day
+  act: add_event(date, time, title, all_day?, duration_min?, notes?)  [standard, settles on return]
+       Put something on the calendar
+         date: string — YYYY-MM-DD
+         time: string — HH:MM, 24-hour
+         title: string
+         all_day?: boolean — A whole day rather than a time; `time` and `duration_min` are not used with it
+         duration_min?: number — How long it runs, in minutes; an hour when not given
+         notes?: string
+  act: delete_event(date?, id?, title?)  [sensitive, settles on return]
+       Take an event off the calendar. It is not recoverable
+         date?: string — YYYY-MM-DD, given with `title`
+         id?: string — The id the store gave the event — `add_event` answers with it and `describe` lists it for every event it shows
+         title?: string — The event's exact title, given with `date`, when the id is not known
+  act: update_event(id, date?, duration_min?, notes?, time?, title?)  [standard, settles on return]
+       Move or rename an event that is already on the calendar
+         id: string — The id the store gave the event
+         date?: string — Move it to this day, YYYY-MM-DD
+         duration_min?: number — How long it runs, in minutes; unchanged when not given
+         notes?: string
+         time?: string — Move it to this time, HH:MM
+         title?: string — A new title
+  act: set_view(view)  [standard, settles on return]
+       Switch between the month, week and day views
+         view: string — month | week | day

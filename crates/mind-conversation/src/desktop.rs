@@ -89,6 +89,17 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
     let mut out: String = state.chars().take(DESKTOP_STATE_HEAD).collect();
     if state.chars().count() > DESKTOP_STATE_HEAD {
         out.push_str("\n… (state trimmed)");
+        // Small fields worth more than their place in the alphabet: kept whole even when the
+        // head cut them off.
+        for key in ALWAYS_KEPT {
+            let marker = format!("\"{key}\": ");
+            if !out.contains(&marker) {
+                if let Some(field) = kept_field(&state, key) {
+                    out.push('\n');
+                    out.push_str(&field);
+                }
+            }
+        }
     }
     out.push_str(CONDENSED_MARK);
 
@@ -557,6 +568,55 @@ pub(crate) fn home_sentence(desktop: bool, home: Option<&str>) -> String {
 /// Where a condensed description's action list begins. Also how a second pass recognises one.
 const CONDENSED_MARK: &str = "\nACTIONS:";
 
+/// Top-level state fields a condensed description keeps even when the head cut them off.
+///
+/// `clock`: the desktop's own date, weekday, time and zone (yantrik-os #207 makes it an object,
+/// so minds stop running `date` through an approval card). `describe shell` sorts its keys, and
+/// `apps` -- a list of ~3,000 characters -- sorts before `clock`, so the 900-character head cut it
+/// off every time: the mind was never shown the desktop's clock.
+const ALWAYS_KEPT: [&str; 1] = ["clock"];
+
+/// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
+/// value is taken to its matching bracket when it is an object or a list (however it was
+/// pretty-printed), else to the end of its line. `None` when absent, or longer than a kept field
+/// should be.
+fn kept_field(state: &str, key: &str) -> Option<String> {
+    const MAX: usize = 300;
+    let pat = format!("\n  \"{key}\": ");
+    let rest = &state[state.find(&pat)? + pat.len()..];
+    let value = if rest.starts_with('{') || rest.starts_with('[') {
+        let (mut depth, mut in_str, mut esc, mut end) = (0i32, false, false, None);
+        for (i, c) in rest.char_indices() {
+            if in_str {
+                match (esc, c) {
+                    (true, _) => esc = false,
+                    (false, '\\') => esc = true,
+                    (false, '"') => in_str = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + c.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[..end?]
+    } else {
+        rest.lines().next()?.trim_end().trim_end_matches(',')
+    };
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (compact.chars().count() <= MAX).then(|| format!("  \"{key}\": {compact}"))
+}
+
 /// The cap every read-only MCP result gets, for data from somewhere else.
 pub(crate) const MCP_OUTPUT_CAP: usize = 6000;
 
@@ -731,6 +791,39 @@ mod tests {
         let unsaved = repeated_action_note(ACT, true).unwrap();
         assert!(unsaved.contains("save it"), "{unsaved}");
         assert_eq!(repeated_action_note(DESCRIBE, true), None, "reads keep the loop's own nudge");
+    }
+
+    /// The real shell description: `apps` (~3,000 characters) sorts before `clock`, and the head
+    /// cut the clock off every time. It is kept now -- today's string, and #207's object whether
+    /// it arrives inline or pretty-printed.
+    #[test]
+    fn the_desktop_clock_survives_condensing() {
+        let today = condense_description(SHELL).unwrap();
+        assert!(today.contains("\"clock\": \"14:23\""), "the clock was cut: {}", &today[..today.find(CONDENSED_MARK).unwrap()]);
+        let inline = SHELL.replace(
+            "  \"clock\": \"14:23\",",
+            "  \"clock\": {\"date\": \"2026-09-23\", \"weekday\": \"Wednesday\", \"time\": \"18:31\", \"utc_offset\": \"-05:00\", \"zone\": \"America/Chicago\"},",
+        );
+        assert_ne!(inline, SHELL, "the fixture's clock line moved; update this test");
+        let c = condense_description(&inline).unwrap();
+        assert!(c.contains("\"weekday\": \"Wednesday\"") && c.contains("\"zone\": \"America/Chicago\""), "{c}");
+        let pretty = SHELL.replace(
+            "  \"clock\": \"14:23\",",
+            "  \"clock\": {\n    \"date\": \"2026-09-23\",\n    \"weekday\": \"Wednesday\",\n    \"time\": \"18:31\",\n    \"utc_offset\": \"-05:00\",\n    \"zone\": \"\"\n  },",
+        );
+        let c = condense_description(&pretty).unwrap();
+        let kept = c.lines().find(|l| l.starts_with("  \"clock\": ")).expect("kept on one line");
+        assert!(kept.ends_with("\"zone\": \"\" }"), "whole, to its matching brace: {kept}");
+        assert_eq!(c.matches("\"clock\": ").count(), 1, "kept once");
+    }
+
+    #[test]
+    fn only_a_top_level_field_is_kept_and_only_when_small() {
+        let state = "Head\n{\n  \"a\": 1,\n  \"inner\": {\n    \"clock\": \"nested\"\n  },\n  \"clock\": \"12:00\"\n}";
+        assert_eq!(kept_field(state, "clock").as_deref(), Some("  \"clock\": \"12:00\""));
+        let big = format!("Head\n{{\n  \"clock\": \"{}\"\n}}", "x".repeat(400));
+        assert_eq!(kept_field(&big, "clock"), None, "a kept field stays small");
+        assert_eq!(kept_field(state, "absent"), None);
     }
 
     /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.

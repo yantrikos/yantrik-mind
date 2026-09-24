@@ -16776,7 +16776,8 @@ mod desktop_consent_and_stall_wiring {
                 "mcp.yantrik-os.os_act",
                 serde_json::json!({"app": "files", "action": "files_go", "args": {"path": "/home/yantrik"}}),
             )],
-            vec![SHELL],
+            // F15 reads the `files` app's grades first; the desktop answers as it really does.
+            vec!["(mcp.yantrik-os.os_describe: failed (exit 1) yos: no socket for 'files')", SHELL],
             vec![NO_FILES_APP, "WENT-TO-THE-SHELL"],
         )
         .await;
@@ -16935,6 +16936,29 @@ mod desktop_consent_and_stall_wiring {
             vec![("editor".into(), "new".into())],
             "set_content never reached the desktop; new did"
         );
+    }
+
+    /// E.ARENA1-F15: the model acts on the #253 editor WITHOUT describing it. The loop reads the
+    /// editor's listing itself, sees `set_content` is sensitive, and the route is offered instead
+    /// of a card; the model's `new{text}` then reaches the desktop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_undescribed_sensitive_write_still_meets_the_route() {
+        const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", "hello")),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello")),
+            ],
+            vec![EDITOR_253],
+            vec!["Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 1 line, unsaved"],
+        )
+        .await;
+        let read_editor = r.reached.iter().any(|(t, a)| {
+            t.ends_with("os_describe") && *a == serde_json::json!({"app": "editor"})
+        });
+        assert!(read_editor, "the loop did not read the editor's grades: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("`new(text?)` graded standard")), "no route offered");
+        assert_eq!(reached_acts(&r), vec![("editor".into(), "new".into())], "a card went up: {:?}", r.reached);
     }
 
     /// E.ARENA1-F13, VM 520 turn 3: a reply to an INSTRUCTION ends without a get-to-know-you

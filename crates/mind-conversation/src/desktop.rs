@@ -290,6 +290,22 @@ pub(crate) fn record_described(
 /// `editor_*`).
 pub(crate) const TWIN_HOST: &str = "shell";
 
+/// E.ARENA1-F15: the read an action needs when its app's grades are unknown this turn.
+///
+/// F7, F8 and F14 all start from the grade the app LISTED for the action -- so a model that acts
+/// on an app without describing it first (`editor.set_content` straight away) meets none of them,
+/// and a card goes up. The loop now reads the app's own listing itself, once per app per turn,
+/// before the first action on it. The read is for the loop, not the model: it only lets the
+/// checks that already exist see the grade. The shell (the twin host) is read by F8 on demand.
+pub(crate) fn grade_lookup(
+    tool: &str,
+    args: &serde_json::Value,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> Option<serde_json::Value> {
+    let (app, _) = act_target(tool, args)?;
+    (app != TWIN_HOST && !described.contains_key(&app)).then(|| serde_json::json!({ "app": app }))
+}
+
 /// E.ARENA1-F8: the one read a sensitive action needs before it may put a card in front of the
 /// person.
 ///
@@ -896,6 +912,18 @@ mod tests {
             l.grade = "sensitive".into();
         }
         assert_eq!(same_app_route("editor", "set_content", "sensitive", &d253), None);
+    }
+
+    #[test]
+    fn an_undescribed_apps_grades_are_read_before_acting_on_it() {
+        let write = serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "x"}});
+        let empty = std::collections::HashMap::new();
+        assert_eq!(grade_lookup(ACT, &write, &empty), Some(serde_json::json!({"app": "editor"})));
+        let d = described_from_fixtures();
+        assert_eq!(grade_lookup(ACT, &write, &d), None, "already described this turn");
+        let shell = serde_json::json!({"app": "shell", "action": "files_go"});
+        assert_eq!(grade_lookup(ACT, &shell, &empty), None, "the shell is F8's to read");
+        assert_eq!(grade_lookup(DESCRIBE, &serde_json::json!({"app": "editor"}), &empty), None);
     }
 
     /// The OS's own sentences (yos-mcp `guard_act`), as the mind receives them.

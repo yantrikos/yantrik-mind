@@ -13397,6 +13397,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let not_sent = if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
                 Some(note)
             } else {
+                // E.ARENA1-F15: an app acted on without a describe this turn has its grades read
+                // first -- for the loop, not the model -- so the checks below can see them.
+                if let Some(look) = desktop::grade_lookup(&tool, &args, &described) {
+                    if twin_looked.insert(look.to_string()) {
+                        let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        desktop::record_described(&look, &seen, &mut described);
+                    }
+                }
                 if let Some(look) = desktop::twin_lookup(&tool, &args, &described) {
                     if twin_looked.insert(look.to_string()) {
                         let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;

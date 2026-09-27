@@ -163,13 +163,35 @@ class Void(Exception):
     """The grader could not establish what is true, so the cell is not graded at all."""
 
 
+ARENA_MONTH = (2026, 9)  # every task's dates are in September 2026
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August",
+               "September", "October", "November", "December"]
+
+
+def show_arena_month():
+    """Step the calendar window to September 2026, a month at a time, reading where it is from
+    `describe calendar`'s "month" ("September 2026"). No OS action names a month; this works on
+    every build. False when the window cannot say where it is."""
+    for _ in range(48):
+        parts = str((describe("calendar") or {}).get("month", "")).split()
+        if len(parts) != 2 or parts[0] not in MONTH_NAMES or not parts[1].isdigit():
+            return False
+        shown = (int(parts[1]), MONTH_NAMES.index(parts[0]) + 1)
+        if shown == ARENA_MONTH:
+            return True
+        act("calendar", "show_month", direction="next" if shown < ARENA_MONTH else "previous")
+    return False
+
+
 def calendar_day(day):
     # Opened HERE, at the moment of reading, not only at reset: Reading D's first attempt found the
     # calendar closed when T2 read its truth, read an empty day, and failed a correct answer.
     ensure_calendar_open()
-    # September on screen, whatever a mind did last: since yantrik-os #387 the window follows an
-    # event added or moved in another month, and `select_day` picks a day of the month shown.
-    act("calendar", "go_to_today")
+    # September 2026 on screen, whatever a mind did last: since yantrik-os #387 the window follows
+    # an event added or moved in another month, and `select_day` picks a day of the month shown.
+    # Not `go_to_today`: every task is written for September 2026, and from 1 October "today" is
+    # another month (yantrik-mind's review of a620fd1).
+    show_arena_month()
     act("calendar", "select_day", day=day)
     time.sleep(0.5)
     c = describe("calendar") or {}

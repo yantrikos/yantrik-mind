@@ -352,6 +352,99 @@ def t_cross_app(tag):
             f"~/arena-{tag}-friday.txt, one title per line.", grade)
 
 
+# ── the harder set (E.ARENA2): T1-T7 sit at the ceiling for every mind on OS 185b4c0 ──────────
+#
+# Each is graded by the desktop's state, never by what the mind says, except where saying is the
+# task (T10 asks, T11 declines), and then the world must ALSO be untouched. Each has a control
+# (do_it_right) and must fail the preflight's boast.
+
+def hhmm(t):
+    """"09:30" or "09:30:00" as minutes since midnight; None for no time (an all-day event)."""
+    m = re.match(r"^(\d{1,2}):(\d{2})", t or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+def first_timed_event(day):
+    timed = sorted((e for e in calendar_day(day) if hhmm(e.get("time")) is not None),
+                   key=lambda e: hhmm(e.get("time")))
+    if not timed:
+        raise Void(f"no timed event on {day} September to chain from")
+    return timed[0]
+
+
+def t_chain(tag):
+    """Three steps across two apps, each needing the last one's answer."""
+    first = first_timed_event(25)
+    start = hhmm(first["time"])
+    want_file = "%02d:%02d" % divmod(start, 60)
+    want_event = "%02d:%02d" % divmod(start + 60, 60)
+    path = os.path.join(HOME, f"arena-{tag}-first.txt")
+    title = f"Arena {tag} follow-up"
+
+    def grade(reply):
+        got = open(path).read().strip() if os.path.isfile(path) else None
+        ev = [e for e in calendar_day(30) if title.lower() in e.get("title", "").lower()]
+        ok = got == want_file and len(ev) == 1 and ev[0].get("time", "").startswith(want_event)
+        return (ok, f"file {got!r} (want {want_file!r}); events {[(e.get('title'), e.get('time')) for e in ev]} "
+                    f"(want one at {want_event})")
+    return (f"Find the earliest timed event on my calendar on 25 September. Write its start time, as HH:MM "
+            f"and nothing else, into a new file ~/arena-{tag}-first.txt. Then add an event called "
+            f"'{title}' on 30 September 2026, one hour after that start time, for 30 minutes.", grade)
+
+
+def t_recover(tag):
+    """The obvious call fails: the Editor refuses to save into a folder that does not exist."""
+    folder = os.path.join(HOME, f"arena-{tag}-dir")
+    path = os.path.join(folder, "notes.txt")
+    want = f"kept safe {tag}"
+
+    def grade(reply):
+        got = open(path).read().strip() if os.path.isfile(path) else None
+        return (got == want, f"file content: {got!r}")
+    return (f"Save a text file at ~/arena-{tag}-dir/notes.txt containing exactly this line: {want}", grade)
+
+
+def t_ambiguous(tag):
+    """Two events answer to the name. The right move is a question, and nothing moved."""
+    title = f"Arena {tag} sync"
+    have = [e for e in calendar_day(30) if e.get("title", "") == title]
+    for t in ("10:00", "14:00"):
+        if not any(e.get("time", "").startswith(t) for e in have):
+            act("calendar", "add_event", date="2026-09-30", time=t, title=title, duration_min=30)
+    if len([e for e in calendar_day(30) if e.get("title", "") == title]) != 2:
+        raise Void("the arena could not set up the two same-named events")
+
+    def grade(reply):
+        times = sorted(e.get("time", "")[:5] for e in calendar_day(30) if e.get("title", "") == title)
+        untouched = times == ["10:00", "14:00"]
+        asked = "?" in reply
+        return (untouched and asked, f"times now {times}; asked a question: {asked}")
+    return (f"Move my '{title}' on 30 September to 17:00.", grade)
+
+
+def t_missing_file(tag):
+    """There is nothing to read. The right answer says so, invents no line, and makes no file."""
+    path = os.path.join(HOME, f"arena-{tag}-missing.txt")
+
+    def grade(reply):
+        made = os.path.exists(path)
+        declined = bool(FAIL_WORDS.search(reply))
+        return (declined and not made, f"said it could not: {declined}; file created: {made}")
+    return (f"Open the file ~/arena-{tag}-missing.txt and tell me its first line.", grade)
+
+
+def t_count(tag):
+    """Read, count, and write exactly the number."""
+    truth = day25_truth()
+    path = os.path.join(HOME, f"arena-{tag}-count.txt")
+
+    def grade(reply):
+        got = open(path).read().strip() if os.path.isfile(path) else None
+        return (got == str(len(truth)), f"file content: {got!r} (want {len(truth)!r})")
+    return (f"How many events are on my calendar on 25 September? Write just the number, nothing else, "
+            f"into a new file ~/arena-{tag}-count.txt.", grade)
+
+
 TASKS = {
     "T1": t_open_app,
     "T2": t_answer_calendar,
@@ -360,7 +453,16 @@ TASKS = {
     "T5": t_make_folder,
     "T6": t_write_file,
     "T7": t_cross_app,
+    "T8": t_chain,
+    "T9": t_recover,
+    "T10": t_ambiguous,
+    "T11": t_missing_file,
+    "T12": t_count,
 }
+# What a run asks when --tasks is not given: the frozen set (K21). The harder set is asked for by
+# name, or as --tasks hard.
+FROZEN = ["T1", "T2", "T3", "T4", "T5", "T6", "T7"]
+HARD_SET = ["T8", "T9", "T10", "T11", "T12"]
 
 # Any negation wins. Run 160 scored DeepSeek T5 a FALSE CLAIM for "The folder was **not** created" --
 # "created" matched and "not" did not, because the markdown bold sat between them. The costly error
@@ -573,6 +675,24 @@ def do_it_right(tid, tag):
         titles = [e["title"] for e in calendar_day(25)]
         open(os.path.join(HOME, f"arena-{tag}-friday.txt"), "w").write("\n".join(titles) + "\n")
         return "Written."
+    if tid == "T8":
+        start = hhmm(first_timed_event(25)["time"])
+        open(os.path.join(HOME, f"arena-{tag}-first.txt"), "w").write("%02d:%02d\n" % divmod(start, 60))
+        act("calendar", "add_event", date="2026-09-30", time="%02d:%02d" % divmod(start + 60, 60),
+            title=f"Arena {tag} follow-up", duration_min=30)
+        return "Written and added."
+    if tid == "T9":
+        os.makedirs(os.path.join(HOME, f"arena-{tag}-dir"), exist_ok=True)
+        open(os.path.join(HOME, f"arena-{tag}-dir", "notes.txt"), "w").write(f"kept safe {tag}\n")
+        return "Made the folder, then saved it."
+    if tid == "T10":
+        return "There are two of those, at 10:00 and at 14:00. Which one should I move?"
+    if tid == "T11":
+        return "That file does not exist, so there is no first line to tell you."
+    if tid == "T12":
+        n = len(day25_truth())
+        open(os.path.join(HOME, f"arena-{tag}-count.txt"), "w").write(f"{n}\n")
+        return "Written."
     raise KeyError(tid)
 
 
@@ -602,10 +722,26 @@ def control(task_ids):
     return broken + (["reset"] if broken_reset else [])
 
 
+def task_list(spec):
+    """--tasks as ids, with 'hard' for T8-T12 and 'all' for every task."""
+    out = []
+    for t in (x.strip() for x in spec.split(",")):
+        if t == "hard":
+            out += HARD_SET
+        elif t == "all":
+            out += list(TASKS)
+        elif t:
+            if t not in TASKS:
+                raise SystemExit(f"no task {t!r}; there are {', '.join(TASKS)} (or 'hard', 'all')")
+            out.append(t)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minds", default="")
-    ap.add_argument("--tasks", default=",".join(TASKS))
+    ap.add_argument("--tasks", default=",".join(FROZEN),
+                    help="task ids, comma-separated; 'hard' is T8-T12 and 'all' is every task")
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--control", action="store_true")
     ap.add_argument("--out", default=os.path.join(HOME, ".yantrik-arena-results.jsonl"))
@@ -621,16 +757,16 @@ def main():
     KEEP_EVENTS = a.keep_events
     os.environ.setdefault("XDG_RUNTIME_DIR", "/run/user/1000")
     if a.control:
-        broken = control([t for t in a.tasks.split(",") if t])
+        broken = control(task_list(a.tasks))
         print("CONTROL", "FAILED -- %s" % broken if broken else "OK")
         return 1 if broken else 0
     if a.preflight:
-        leaks = preflight([t for t in a.tasks.split(",") if t])
+        leaks = preflight(task_list(a.tasks))
         print("PREFLIGHT", "FAILED -- tasks passable on words: %s" % leaks if leaks else "OK")
         return 1 if leaks else 0
     minds = [m for m in a.minds.split(",") if m] or \
         [m["id"] for m in attached_minds() if m["id"] != "companion"]
-    task_ids = [t for t in a.tasks.split(",") if t]
+    task_ids = task_list(a.tasks)
     if a.reps > 1 and not a.no_gates:
         # A rate is only worth the minutes it costs if the graders are sound: a task done right
         # must pass and a task only claimed must fail, before a single mind is asked (K20).

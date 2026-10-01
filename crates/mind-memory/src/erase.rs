@@ -20,21 +20,12 @@
 
 use std::collections::BTreeMap;
 
-/// What a forgotten literal is replaced with, wherever it stood.
-pub const ERASED: &str = "[forgotten]";
+pub use mind_types::erase_text::{erase_cell, replace_ci, ERASED};
+use mind_types::erase_text::is_structural;
 
 /// The shortest literal an erase takes. Shorter strings are words, not secrets, and a sweep for a
 /// word rewrites every sentence that uses it.
 pub const MIN_NEEDLE: usize = 4;
-
-/// Columns that hold identity, keys, clocks or enums -- never content. A literal that happens to
-/// match one of these is not the person's text, and rewriting it would corrupt the store.
-const STRUCTURAL: &[&str] = &[
-    "rid", "node_id", "op_id", "op_type", "target_rid", "hlc", "origin_actor", "kind", "type",
-    "consolidation_status", "domain", "namespace", "status", "key", "id", "session_id",
-    "fingerprint", "embedding_hash", "actor_id", "source_turn", "memory_type", "provenance",
-    "idempotency_key", "certainty", "polarity", "valence",
-];
 
 /// Tables that are the engine's own bookkeeping, never content.
 const STRUCTURAL_TABLES: &[&str] = &["meta"];
@@ -53,22 +44,6 @@ pub fn check_needle(needle: &str) -> Result<String, String> {
     Ok(n.to_ascii_lowercase())
 }
 
-/// `hay` with every ASCII-case-insensitive occurrence of `needle_lc` replaced by `with`.
-/// `to_ascii_lowercase` keeps every byte offset, so positions found in the lowered copy are
-/// positions (and char boundaries) in the original.
-pub fn replace_ci(hay: &str, needle_lc: &str, with: &str) -> String {
-    let lc = hay.to_ascii_lowercase();
-    let mut out = String::with_capacity(hay.len());
-    let mut i = 0;
-    while let Some(p) = lc[i..].find(needle_lc) {
-        out.push_str(&hay[i..i + p]);
-        out.push_str(with);
-        i += p + needle_lc.len();
-    }
-    out.push_str(&hay[i..]);
-    out
-}
-
 /// What a sweep found (dry run) or rewrote (applied), by `table.column`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SweepCounts {
@@ -81,51 +56,6 @@ impl SweepCounts {
     pub fn total(&self) -> usize {
         self.cells.values().sum()
     }
-}
-
-/// The erased form of one cell. A JSON object or array (the oplog's payloads, a node's payload) is
-/// rewritten as JSON: only string values under content keys change, never keys, never the values
-/// of structural keys (a record op's `"type":"episodic"` is the store's own field, and rewriting it
-/// would change what the operation replays as). Anything else is plain text.
-/// `None` when there is nothing of the person's to erase in it (the literal is absent, or stands
-/// only in structural JSON fields).
-pub fn erase_cell(value: &str, needle_lc: &str) -> Option<String> {
-    let trimmed = value.trim_start();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(value) {
-            return erase_json(&mut v, None, needle_lc).then(|| v.to_string());
-        }
-    }
-    let erased = replace_ci(value, needle_lc, ERASED);
-    (erased != value).then_some(erased)
-}
-
-/// Whether anything was replaced.
-fn erase_json(v: &mut serde_json::Value, key: Option<&str>, needle_lc: &str) -> bool {
-    match v {
-        serde_json::Value::String(s) => {
-            if key.is_some_and(is_structural) || !s.to_ascii_lowercase().contains(needle_lc) {
-                return false;
-            }
-            *s = replace_ci(s, needle_lc, ERASED);
-            true
-        }
-        serde_json::Value::Array(items) => items.iter_mut().fold(false, |any, i| erase_json(i, key, needle_lc) | any),
-        serde_json::Value::Object(map) => {
-            map.iter_mut().fold(false, |any, (k, child)| erase_json(child, Some(k.as_str()), needle_lc) | any)
-        }
-        _ => false,
-    }
-}
-
-fn is_structural(col: &str) -> bool {
-    let c = col.to_ascii_lowercase();
-    STRUCTURAL.contains(&c.as_str())
-        || c.ends_with("_id")
-        || c.ends_with("_rid")
-        || c.ends_with("_hash")
-        || c.ends_with("_ms")
-        || c.ends_with("_at")
 }
 
 /// The content tables: ordinary tables, minus sqlite's own, the engine's bookkeeping, every
@@ -254,6 +184,8 @@ pub struct EraseReport {
     pub remaining_cells: usize,
     /// AFTER the erase: occurrences in the raw bytes of the file and its WAL (`None`: in memory).
     pub remaining_bytes: Option<usize>,
+    /// The read-receipt ledger beside the store, redacted and re-chained (`None`: a dry run).
+    pub receipts: Option<mind_types::erase_text::LedgerRedaction>,
 }
 
 impl EraseReport {

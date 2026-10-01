@@ -38,6 +38,7 @@ pub use turn::TurnContext;
 pub mod output_scope;
 pub mod reliability;
 pub mod scratch;
+pub mod erase_text;
 pub use output_scope::{
     admit_working_set, admitted_evidence, detect_minimization, Channel, EntityClass,
     EvidenceDecision, MinimizationRequest, OutputPolicy, OutputScope,

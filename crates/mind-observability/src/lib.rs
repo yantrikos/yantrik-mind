@@ -639,6 +639,78 @@ impl RecordOutcome {
     }
 }
 
+impl DecisionLog {
+    /// E.ERASE1: erase a literal from every event, re-chain the whole log, and append one
+    /// `redaction` event naming how many events changed and the OLD head -- never the literal, and
+    /// no fingerprint of it (a hash of a four-digit code is the code).
+    ///
+    /// Runs under the file's lock and only in the process that holds the file's writer claim, like
+    /// `record`: a redaction racing an append would be the interleaved chain E.OBS2 exists to stop.
+    /// Refuses a log that does not verify (a redaction must not launder a break), and an event that
+    /// no longer parses as an event once rewritten. The rewrite is atomic: a temporary file renamed
+    /// over the log; the claim is on the separate `.lock` file, so it survives the rename.
+    pub fn redact(&self, needle_lc: &str) -> Result<mind_types::erase_text::LedgerRedaction, String> {
+        use mind_types::erase_text::{erase_json, LedgerRedaction};
+        let path = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(p) = path else { return Ok(LedgerRedaction::default()) };
+        let state = path_state(&p);
+        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.claim.is_none() {
+            st.claim = Some(take_claim(&p));
+        }
+        if matches!(st.claim, Some(Err(()))) {
+            return Err(format!("another process holds {}; refusing to rewrite it", p.display()));
+        }
+        let Ok(content) = std::fs::read_to_string(&p) else { return Ok(LedgerRedaction::default()) };
+        if let Err(i) = verify_log(&p) {
+            return Err(format!("the decision log does not verify at line {i}; refusing to rewrite it"));
+        }
+        let old_head = chain_head(&p);
+        let mut events = Vec::new();
+        let mut rewritten = 0usize;
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let parsed: ChainedLine = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            let mut v = serde_json::to_value(&parsed.event).map_err(|e| e.to_string())?;
+            if erase_json(&mut v, None, needle_lc) {
+                rewritten += 1;
+                events.push(serde_json::from_value::<DecisionEvent>(v).map_err(|e| format!("an event no longer parses once erased: {e}"))?);
+            } else {
+                events.push(parsed.event);
+            }
+        }
+        if rewritten == 0 {
+            return Ok(LedgerRedaction { lines_rewritten: 0, old_head: old_head.clone(), new_head: old_head });
+        }
+        let now = now_ms();
+        let mut marker = DecisionEvent::new(format!("redact-{now}"), "redaction");
+        marker.trigger = Some(format!(
+            "the person asked the Mind to erase something; {rewritten} event(s) rewritten; previous head {}",
+            old_head.as_deref().unwrap_or("genesis")
+        ));
+        events.push(marker);
+        let mut prev = "genesis".to_string();
+        let mut out = String::new();
+        for event in &events {
+            let event_json = serde_json::to_string(event).map_err(|e| e.to_string())?;
+            let mut hasher = Sha256::new();
+            hasher.update(prev.as_bytes());
+            hasher.update(event_json.as_bytes());
+            prev = format!("{:x}", hasher.finalize());
+            out.push_str(&format!("{{\"chain\":\"{prev}\",\"event\":{event_json}}}\n"));
+        }
+        let tmp = p.with_extension("jsonl.redact-tmp");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            f.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
+            f.sync_all().map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&tmp, &p).map_err(|e| e.to_string())?;
+        st.head = Some(prev.clone());
+        Ok(LedgerRedaction { lines_rewritten: rewritten, old_head, new_head: Some(prev) })
+    }
+}
+
 /// Everything about one LOG FILE's chain: its lock, and the head every writer must chain onto.
 ///
 /// Shared by every `DecisionLog` handle that names the file, because the identity that matters is
@@ -9162,5 +9234,61 @@ mod spend_ledger_tests {
         assert_eq!(l.per_hour.iter().sum::<u32>(), 1);
         let text = render_spend_ledger_since_process_at(&events, 3_000, 1_000);
         assert!(text.contains("other-process rows excluded 1"), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    fn event(kind: &str, goal: &str) -> DecisionEvent {
+        let mut e = DecisionEvent::new(format!("t-{}", now_ms()), kind);
+        e.goal = Some(goal.to_string());
+        e
+    }
+
+    /// E.ERASE1: what the person asked to forget is erased from the decision log; the log is
+    /// re-chained and still verifies; the event kinds (the log's own fields) and a near miss
+    /// survive; a redaction event names the old head, not the secret.
+    #[test]
+    fn a_redaction_erases_the_literal_and_the_log_still_verifies() {
+        let s = mind_types::scratch::file("decisions_redact", "jsonl");
+        let log = DecisionLog::open(s.path());
+        log.record(event("user_message", "remember the safe code is Plum Seventeen"));
+        log.record(event("user_message", "the shed code is plum eighteen"));
+        log.record(event("tool_call", "weather in Bentonville"));
+        let path = s.path().to_path_buf();
+        let before = std::fs::read_to_string(&path).unwrap().to_ascii_lowercase();
+        assert!(before.contains("plum seventeen"), "the recorder dropped the phrase itself; this test proves nothing");
+        let old_head = chain_head(&path);
+        let r = log.redact("plum seventeen").unwrap();
+        assert_eq!(r.lines_rewritten, 1);
+        assert_eq!(r.old_head, old_head);
+        assert_eq!(verify_log(&path), Ok(4), "the rewritten log does not verify");
+        let after = std::fs::read_to_string(&path).unwrap().to_ascii_lowercase();
+        assert!(!after.contains("plum seventeen"), "the literal survived in the decision log");
+        assert!(after.contains("plum eighteen"), "the near miss was erased too");
+        let events = log.read_all_verified().unwrap();
+        assert_eq!(events.iter().filter(|e| e.kind == "user_message").count(), 2, "an event kind was rewritten");
+        let last = events.last().unwrap();
+        assert_eq!(last.kind, "redaction");
+        assert!(last.trigger.as_deref().unwrap_or("").contains(old_head.as_deref().unwrap()));
+        assert!(!serde_json::to_string(last).unwrap().to_ascii_lowercase().contains("plum seventeen"), "the redaction event names the secret");
+        log.record(event("tool_call", "after the redaction"));
+        assert_eq!(verify_log(&path), Ok(5), "an append after a redaction broke the chain");
+    }
+
+    #[test]
+    fn a_broken_log_is_not_laundered_by_a_redaction() {
+        let s = mind_types::scratch::file("decisions_redact_broken", "jsonl");
+        let log = DecisionLog::open(s.path());
+        log.record(event("user_message", "the safe code is plum seventeen"));
+        log.record(event("tool_call", "two"));
+        let path = s.path().to_path_buf();
+        let tampered = std::fs::read_to_string(&path).unwrap().replacen("\"two\"", "\"TWO\"", 1);
+        std::fs::write(&path, tampered).unwrap();
+        assert!(verify_log(&path).is_err());
+        assert!(log.redact("plum seventeen").is_err(), "a broken log was rewritten");
+        assert!(std::fs::read_to_string(&path).unwrap().to_ascii_lowercase().contains("plum seventeen"));
     }
 }

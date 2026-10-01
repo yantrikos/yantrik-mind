@@ -107,6 +107,70 @@ impl ReadReceiptLedger {
     }
 }
 
+impl ReadReceiptLedger {
+    /// E.ERASE1: erase a literal from every receipt (a recall's query can carry what the person later
+    /// asks to forget), re-chain the whole ledger, and append one `redact` receipt naming how many
+    /// lines changed and the OLD head -- never the literal, and no fingerprint of it either: a hash
+    /// of a four-digit code is the code. Refuses a ledger that does not verify (it would launder a
+    /// break as a redaction). The rewrite is atomic: a temporary file renamed over the ledger.
+    pub fn redact(&self, needle_lc: &str) -> Result<mind_types::erase_text::LedgerRedaction, String> {
+        use mind_types::erase_text::{erase_json, LedgerRedaction};
+        let Some(path) = &self.path else { return Ok(LedgerRedaction::default()) };
+        let mut head = self.head.lock().unwrap_or_else(|p| p.into_inner());
+        let Ok(content) = std::fs::read_to_string(path) else { return Ok(LedgerRedaction::default()) };
+        if let Err(i) = verify_ledger(path) {
+            return Err(format!("the read-receipt ledger does not verify at line {i}; refusing to rewrite it"));
+        }
+        let old_head = chain_head(path);
+        let mut records = Vec::new();
+        let mut rewritten = 0usize;
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let parsed: ChainedLine = serde_json::from_str(line).map_err(|e| e.to_string())?;
+            let mut v = serde_json::to_value(&parsed.record).map_err(|e| e.to_string())?;
+            if erase_json(&mut v, None, needle_lc) {
+                rewritten += 1;
+                records.push(serde_json::from_value::<ReadReceipt>(v).map_err(|e| e.to_string())?);
+            } else {
+                records.push(parsed.record);
+            }
+        }
+        if rewritten == 0 {
+            return Ok(LedgerRedaction { lines_rewritten: 0, old_head: old_head.clone(), new_head: old_head });
+        }
+        records.push(ReadReceipt {
+            ts_ms: now_ms(),
+            principal: "operator".into(),
+            method: "redact".into(),
+            detail: format!(
+                "erased what the person asked to forget from {rewritten} receipt(s); previous head {}",
+                old_head.as_deref().unwrap_or("genesis")
+            ),
+            results: rewritten,
+            purpose: None,
+            suppressed: None,
+        });
+        let mut prev = "genesis".to_string();
+        let mut out = String::new();
+        for record in &records {
+            let record_json = serde_json::to_string(record).map_err(|e| e.to_string())?;
+            let mut hasher = Sha256::new();
+            hasher.update(prev.as_bytes());
+            hasher.update(record_json.as_bytes());
+            prev = format!("{:x}", hasher.finalize());
+            out.push_str(&format!("{{\"chain\":\"{prev}\",\"record\":{record_json}}}\n"));
+        }
+        let tmp = path.with_extension("jsonl.redact-tmp");
+        {
+            let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+            f.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
+            f.sync_all().map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        *head = Some(prev.clone());
+        Ok(LedgerRedaction { lines_rewritten: rewritten, old_head, new_head: Some(prev) })
+    }
+}
+
 /// The current chain head (last line's chain value), or None for a missing/empty ledger.
 pub fn chain_head(path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -233,5 +297,51 @@ mod tests {
         ledger2.append(receipt("recall_typed", "second"));
         assert_eq!(verify_ledger(&path), Ok(2));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// E.ERASE1: a recall's query carried the secret into a receipt. Redacting erases it from the
+    /// file, re-chains so the ledger still verifies, keeps the near miss, and appends a redaction
+    /// receipt naming the old head -- not the secret.
+    #[test]
+    fn a_redaction_erases_the_literal_and_the_ledger_still_verifies() {
+        let s = scratch("redact");
+        let path = s.path().to_path_buf();
+        let ledger = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+        ledger.append(receipt("recall_typed", "family birthdays"));
+        ledger.append(receipt("recall_typed", "storage locker code QX7-Canary-4417"));
+        ledger.append(receipt("recall_typed", "gym locker QX7-CANARY-4418"));
+        let old_head = chain_head(&path);
+        assert_eq!(verify_ledger(&path), Ok(3));
+        let r = ledger.redact("qx7-canary-4417").unwrap();
+        assert_eq!(r.lines_rewritten, 1);
+        assert_eq!(r.old_head, old_head);
+        assert_eq!(verify_ledger(&path), Ok(4), "the rewritten ledger does not verify");
+        let bytes = std::fs::read_to_string(&path).unwrap().to_ascii_lowercase();
+        assert!(!bytes.contains("qx7-canary-4417"), "the literal survived in the ledger");
+        assert!(bytes.contains("qx7-canary-4418"), "the near miss was erased too");
+        let all = read_ledger(&path);
+        let last = all.last().unwrap();
+        assert_eq!(last.method, "redact");
+        assert!(last.detail.contains(old_head.as_deref().unwrap()), "{}", last.detail);
+        assert!(!last.detail.to_ascii_lowercase().contains("qx7-canary"), "the redaction line names the secret");
+        // Appends after a redaction chain onto the new head.
+        ledger.append(receipt("recall_typed", "after"));
+        assert_eq!(verify_ledger(&path), Ok(5));
+        assert_eq!(ledger.redact("nothing-like-this").unwrap().lines_rewritten, 0);
+    }
+
+    /// A ledger that does not verify is refused, not "redacted" into verifying again.
+    #[test]
+    fn a_broken_ledger_is_not_laundered_by_a_redaction() {
+        let s = scratch("redact_broken");
+        let path = s.path().to_path_buf();
+        let ledger = ReadReceiptLedger { path: Some(path.clone()), head: Mutex::new(None) };
+        ledger.append(receipt("recall_typed", "one QX7-CANARY-4417"));
+        ledger.append(receipt("recall_typed", "two"));
+        let tampered = std::fs::read_to_string(&path).unwrap().replacen("\"two\"", "\"TWO\"", 1);
+        std::fs::write(&path, tampered).unwrap();
+        assert!(verify_ledger(&path).is_err());
+        assert!(ledger.redact("qx7-canary-4417").is_err(), "a broken ledger was rewritten");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("QX7-CANARY-4417"), "it was changed anyway");
     }
 }

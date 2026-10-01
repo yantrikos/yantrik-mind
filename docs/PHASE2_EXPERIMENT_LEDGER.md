@@ -11662,3 +11662,27 @@ Rewriting a line breaks every later chain value. So redaction must re-chain from
   - M6: beliefs never tombstoned.
 - **Found while building:** the first generic sweep rewrote a record op's `"type":"episodic"` inside an oplog payload, because it was erasing a word. That is why `erase_cell` reads JSON as JSON.
 - **Prereg correction:** criterion (b) said a superstring decoy (`XQX7-CANARY-4417X`) survives. It must not: it contains the secret. The decoy that must survive is the near miss, and it does.
+
+**E.ERASE1 — B2 RESULT (the chained ledgers): built, every B2 criterion held.** Suite 2189/0.
+- **One rule in one place:** `mind_types::erase_text` (`ERASED`, `replace_ci`, `is_structural`, `erase_json`, `erase_cell`, `LedgerRedaction`). It is shared by the store sweep and both ledgers, so "forgotten" means the same everywhere.
+- **`ReadReceiptLedger::redact(needle)`:**
+  1. under the ledger's head lock, refuse a ledger that does not verify;
+  2. rewrite each receipt's content strings, structural fields spared;
+  3. re-chain from genesis, and append a `redact` receipt holding the count and the **old head**;
+  4. atomic temp file + rename, then update the cached head.
+
+  `MemoryHandle::erase_literal` calls it after the store erase, and the report carries the result.
+- **`DecisionLog::redact(needle)`:** the same discipline, under the file's lock **and** this process's writer claim (E.OBS2), so it never races an append. Every rewritten event must still parse as a `DecisionEvent`; the marker is a `redaction` event. The claim is on the separate `.jsonl.lock` file, so it survives the rename.
+- **Correction to the prereg:** the redaction line carries **no fingerprint** of the needle, only the count, the time and the old head. A hash of a four-digit code can be reversed in a millisecond.
+- **Tests:**
+  - receipts: `a_redaction_erases_the_literal_and_the_ledger_still_verifies` (3 → 4 lines verify; literal gone; near miss kept; the marker names the old head and not the secret; a later append still verifies) and `a_broken_ledger_is_not_laundered_by_a_redaction`;
+  - decisions: the same pair, with an event kind (`user_message`) preserved;
+  - the store's main erase test now also searches FOR the code first, so its receipt holds it, and checks the receipt ledger reads 0 afterwards and verifies.
+- **Mutants, seven, each watched to fail a test:**
+  - R1: stale chain values.
+  - R2: no redaction line. It first "died" of a compile error, which proves nothing; it was redone as a compiling mutant and killed.
+  - R3: a broken ledger rewritten.
+  - R4: the marker names the literal.
+  - D1: a broken log rewritten.
+  - D2: the marker names the literal.
+  - D3: the head not updated, so the next append breaks the chain.

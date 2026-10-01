@@ -5774,8 +5774,15 @@ impl MemoryHandle {
     /// The report's `remaining_*` fields are an after-count, the only proof. With `apply` false
     /// nothing changes: it counts where the literal lives, for the person to confirm against.
     pub async fn erase_literal(&self, needle: &str, apply: bool) -> Result<erase::EraseReport> {
-        let needle = needle.to_string();
-        self.call(|reply| Cmd::EraseLiteral { needle, apply, reply }).await
+        let lc = erase::check_needle(needle).map_err(MindError::Memory)?;
+        let owned = needle.to_string();
+        let mut report = self.call(|reply| Cmd::EraseLiteral { needle: owned, apply, reply }).await?;
+        if apply {
+            // The ledger lives beside the store, not in it: a recall's query can carry the literal
+            // there. Redacted after the store, so nothing this erase did is left unrecorded.
+            report.receipts = Some(self.receipts.redact(&lc).map_err(MindError::Memory)?);
+        }
+        Ok(report)
     }
 
     // flat-path helpers retained from Spike A
@@ -12675,8 +12682,16 @@ mod erase_tests {
         assert!(dry.remaining_bytes.unwrap_or(0) > 0, "the report's own byte count missed what is on disk: {dry:?}");
         assert_eq!(mem.erase_literal(SECRET, false).await.unwrap().remaining_cells, dry.remaining_cells, "a dry run changed something");
 
+        // A recall that searched FOR the code: its receipt now carries it (staging, Phase A step 2).
+        let ctx0 = mind_types::AccessContext::operator_audit();
+        let _ = mem.beliefs_matching_n(SECRET, 10, &ctx0).await.unwrap();
+        let ledger = std::path::PathBuf::from(format!("{path}.read_receipts.jsonl"));
+        assert!(hits(&std::fs::read(&ledger).unwrap(), SECRET) > 0, "the recall left no receipt holding the code");
         let done = mem.erase_literal(SECRET, true).await.unwrap();
         assert!(done.beliefs_tombstoned >= 1 && done.memories_tombstoned >= 1, "{done:?}");
+        assert!(done.receipts.as_ref().is_some_and(|r| r.lines_rewritten >= 1), "{done:?}");
+        assert_eq!(hits(&std::fs::read(&ledger).unwrap(), SECRET), 0, "the receipt ledger still holds it");
+        assert!(receipts::verify_ledger(&ledger).is_ok(), "the receipt ledger no longer verifies");
         assert!(done.is_clean(), "the literal survived the erase: {done:?}");
         assert_eq!(hits(&file_bytes(&path), SECRET), 0, "the raw bytes still hold it");
 

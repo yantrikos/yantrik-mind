@@ -11475,3 +11475,31 @@ E.NAME1 and E.NAME1b are closed.
 - **Rollback.** 0.18.0 opens the migrated store and recalls 5 hits. It leaves the marker at 54. The candidate then reopens that store cleanly, again 164 goals and 5 hits.
 - **Verdict.** Kill criteria (a)–(c) hold. For (d), going back to the current production binary is a binary swap: no restore, and nothing learned in between is lost. This was checked at the engine level. The old Mind's own memory layer was not run against the new tables; its changes are additive.
 - **Clean-up.** The production copy and every working copy were deleted from staging after the test. Only the row-count JSONs (table names and numbers) remain.
+
+## PRODUCTION DEPLOY — v0.2.1 (7fa2c04) on .90, 2026-10-01 00:56 UTC, on Pranab's direct word
+
+**Pranab's decisions, direct:** "Yes, deploy now"; keep the Jina reader off (no `YM_WEB_READER`).
+
+**Before:**
+- the binary was 0e839169fecb389a, hand-installed 2026-09-06, engine 0.18.0, store at schema 50, Debian 12 / glibc 2.36;
+- the self-improve kill switch was on, with no self-build process running.
+
+**Build, on .90 itself.** A staging-built binary cannot run there: staging is Debian 13 / glibc 2.41, and its binary needs `GLIBC_2.39` (`pidfd_spawnp`). The build used `/root/codes/ym-autodeploy` at v0.2.1 with companion 3203e2e, Rust 1.96, `nice -n 10`, 4 min 25 s, with the live Mind untouched. Result: sha256 68159676d4704c2f, stamped 7fa2c04, glibc ≤ 2.34.
+
+**Swap (`prod_swap_021.sh`):**
+- **Preflight:** live and built hashes, the stamp, the kill switch, and ownership of the live store files. The first run stopped at preflight with nothing touched, because the check also matched two root-owned August backups that the Mind never opens. It was narrowed to the live files.
+- **A guard added before the run:** an EXIT trap restarts the Mind if the script leaves for any reason after stopping it.
+- **Steps:** stage beside the target; keep `mind-core.rollback-0e839169fecb389a`; stop; back up as `yantrikmind` with `sqlite3 .backup` (`mind.db.pre-0.2.1`, 81,686,528 bytes, schema 50, integrity ok) plus the decisions and receipts logs; rename; start.
+- **Telegram was down for about 2 s** (00:56:16 → 00:56:18).
+
+**After:**
+- **Service:** active; one process; schema 54; 0 panic and 0 error lines.
+- **Lanes:** the local primary/private lane, `ollama-local:qwen3.8:27b-q4_K_M`, active.
+- **Telegram:** live as @th_ym_c1_bot.
+- **MCP:** `crawl` (4 tools) and `sdf` (9 tools) connected.
+- **Web UI:** listening.
+- **Console checks, read-only:** `ym now` 19:56 CDT is correct; `ym mcp list` lists the tools; `ym recall family` reads the family memory through engine 0.23.0.
+
+**Rollback, if needed:** stop; put `mind-core.rollback-0e839169fecb389a` back; start. The store stays at schema 54, which E.PRODDB1 showed 0.18.0 opens and recalls from. `mind.db.pre-0.2.1` is the full backup.
+
+**Still in place:** the kill switch `SELF_IMPROVE_OFF`. Self-build and self-deploy remain halted until Pranab says otherwise.

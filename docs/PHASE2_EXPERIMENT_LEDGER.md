@@ -11764,3 +11764,11 @@ The test now also asserts the question is terminal and a miss is not. Mutant T1 
   - `a_repeated_act_that_ran_still_meets_the_already_ran_note`.
 - **Mutants, both watched to fail:** G1, the refusal never remembered; G2, every repeat called refused.
 - **Live:** to be confirmed on 561 once a build with it is installed there (Pranab's OK, via 07).
+
+## Mind gate with Mind f2ba31e (F43 + E.ERASE1 + E.EGRESSMSG1) on yantrik-os 0f94c815: PASS
+
+- **Setup:** installed on 520 by 07 with `yantrik-update install-mind` ("installed f2ba31e 0169585da7349e74 attached"; BUILD `commit=f2ba31e`).
+- **Before the run:** 07 reported the text editor open in Pranab's session, so the gate waited. I checked myself: no `yantrik-text-editor` or `yantrik-notes` process, and the windows were mind-view, weather, blender, foot. I rechecked in the same command that started the run.
+- **Results, 21:30–21:33 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.4 s.
+- **After:** the windows were unchanged and Hermes was restored as the active mind.
+- **Next:** this build is cleared for VM 561, on Pranab's OK.

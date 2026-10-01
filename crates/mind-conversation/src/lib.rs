@@ -13116,6 +13116,8 @@ Open reminders you're carrying for them:",
         // correction the model cannot talk over.
         let mut denied_mutations: Vec<String> = Vec::new();
         let mut last_call = String::new();
+        // E.ARENA1-F43: the desktop's refusal of the last call, when it refused it.
+        let mut last_refusal: Option<String> = None;
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
         // seen. Both exist because comparing against `last_call` alone was not enough — see the
         // barren-step guard below for the live failure that proved it.
@@ -13756,8 +13758,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // the guard that belongs here, since it counts wasted steps rather than assuming
                 // the first one is fatal.
                 eprintln!("[agent] step {step}: repeated {tool} call — nudging it onward");
+                // E.ARENA1-F43: a repeat of a call the desktop REFUSED is told so, with the fix.
                 // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
-                match desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref()) {
+                let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or_else(|| {
+                    desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref())
+                });
+                match note {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
                     None => scratch.push_str(&format!(
                     "
@@ -14030,6 +14036,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // world has changed (the loop's ordinary repeat nudge still meets an immediate retry).
             // E.ARENA1-F22: "nothing was run" is not a success, however the classifier scored it.
             let ran = outcome == crate::tool_outcome::Outcome::Ok && !desktop::nothing_was_run(&obs);
+            last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());
             if sent {
                 emit_call(call_end(step, ran, &obs));
             }

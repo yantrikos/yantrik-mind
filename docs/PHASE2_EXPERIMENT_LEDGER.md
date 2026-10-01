@@ -11756,3 +11756,11 @@ The test now also asserts the question is terminal and a miss is not. Mutant T1 
 1. On a scripted desktop that refuses a bare-value `os_act`, the model's next prompt after the identical repeat carries "REFUSED and nothing ran" and the refusal's own instruction ("takes named parameters"), and never "that action already ran".
 2. A repeat of an act that **ran** still gets F12's note.
 3. Each is watched to fail under a mutant.
+
+**E.ARENA1-F43 — RESULT: built, every kill criterion held.** Suite 2195/0.
+- **Code:** the loop keeps `last_refusal`, the desktop's answer when the last executed `os_act` came back "REFUSED — nothing was run". On an identical repeat, `desktop::repeated_refusal_note` replies "(that exact call was REFUSED and nothing ran -- sending it again unchanged will be refused again. What the desktop said: <the refusal's own words> Change the call the way it says…)" in place of F12's note.
+- **Tests:**
+  - `a_repeated_refused_act_is_told_it_was_refused_and_how_to_fix_it`: 561's bare-value `notes.new_note`, refused three times. The prompt carries the refusal and "takes named parameters: title, text", never "already ran", and the identical call reached the desktop once.
+  - `a_repeated_act_that_ran_still_meets_the_already_ran_note`.
+- **Mutants, both watched to fail:** G1, the refusal never remembered; G2, every repeat called refused.
+- **Live:** to be confirmed on 561 once a build with it is installed there (Pranab's OK, via 07).

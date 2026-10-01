@@ -16887,6 +16887,48 @@ mod desktop_consent_and_stall_wiring {
             .collect()
     }
 
+    /// E.ARENA1-F43 (VM 561, Mind 371bedb): a bare-value `os_act` the desktop refused, sent again
+    /// unchanged. The model is told it was REFUSED and what to change -- never F12's "that action
+    /// already ran", which on 561 kept it resending the identical call four more times.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_refused_act_is_told_it_was_refused_and_how_to_fix_it() {
+        const REFUSED_BARE: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Send them as an object.";
+        let bare = serde_json::json!({"app": "notes", "action": "new_note", "args": "1. Water and snacks\n2. Sunscreen"});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_act", bare),
+            ],
+            vec!["Notes is open."],
+            vec![REFUSED_BARE, REFUSED_BARE, REFUSED_BARE],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("REFUSED and nothing ran") && p.contains("takes named parameters: title, text")),
+            "the repeat was not told it was refused, with the fix"
+        );
+        assert!(!r.prompts.iter().any(|p| p.contains("that action already ran")), "a refused act was called 'already ran'");
+        assert_eq!(acts_reached(&r).len(), 1, "the identical refused call reached the desktop again: {:?}", r.reached);
+    }
+
+    /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {
+        let named = serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Hike", "text": "water"}});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", named.clone()),
+                Step::Call("mcp.yantrik-os.os_act", named),
+            ],
+            vec!["Notes is open."],
+            vec!["Done \u{2014} notes.new_note: accepted, settled."],
+        )
+        .await;
+        assert!(r.prompts.iter().any(|p| p.contains("that action already ran")), "F12's note is gone for acts that ran");
+        assert!(!r.prompts.iter().any(|p| p.contains("REFUSED and nothing ran")), "an act that ran was called refused");
+    }
+
     /// F8, Reading C's T7: the editor was described, the shell never was. The loop reads the
     /// shell's editor family itself and points at the twin before any card goes up.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

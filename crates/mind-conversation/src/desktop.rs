@@ -803,6 +803,20 @@ pub(crate) const UNSAVED_NOTE: &str =
 
 /// E.ARENA1-F12: the repeat nudge for a desktop ACTION. The loop's own nudge was written for fetch
 /// tasks and ends "otherwise answer" -- Reading E's T7 took that exit with the save still undone.
+/// E.ARENA1-F43 (VM 561, Mind 371bedb): the same `os_act` sent again after the desktop REFUSED it.
+/// Nothing has changed, so it will be refused again -- yet the note it met was F12's "that action
+/// already ran", false for a refusal, and the model resent an identical bare-value call four more
+/// times. Say it was refused, that the same call cannot succeed, and quote what the desktop said to
+/// change (yos-mcp's refusals name the fix: "takes named parameters: title, …").
+pub(crate) fn repeated_refusal_note(refusal: &str) -> String {
+    let why = refusal.split_once("refused:").map_or(refusal, |(_, w)| w).trim();
+    let why: String = why.chars().take(500).collect();
+    format!(
+        "(that exact call was REFUSED and nothing ran -- sending it again unchanged will be refused again. \
+         What the desktop said: {why} Change the call the way it says, or say plainly what you could not do.)"
+    )
+}
+
 pub(crate) fn repeated_action_note(
     tool: &str,
     args: &serde_json::Value,

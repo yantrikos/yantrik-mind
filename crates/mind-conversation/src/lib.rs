@@ -1869,6 +1869,9 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// …") and a refusal from the gate. An action that ran and reported back — done, or didn't go
 /// through — goes to the model, which can take the next step, correct the call, or say what
 /// happened.
+/// The start of the question `forget` puts to the person when it found the text (E.ERASE1).
+pub(crate) const FORGET_ASK: &str = "I found it in ";
+
 fn mutating_mcp_result_ends_the_turn(obs: &str) -> bool {
     let o = obs.trim_start();
     o.starts_with("Ready to ") || o.starts_with("(I can't run ")
@@ -10882,7 +10885,7 @@ WINDOW: all-time, latest 200
         )
     }
 
-    /// The outward-action path: resolve a pending confirmation, or propose a new gated action.
+        /// The outward-action path: resolve a pending confirmation, or propose a new gated action.
     /// Returns `Some(reply)` if this turn was an action turn (handled), `None` to fall through to chat.
     #[deny(unused_variables)]
     async fn handle_action(&self, user_text: &str) -> Option<String> {
@@ -11375,6 +11378,12 @@ WINDOW: all-time, latest 200
     /// - A DENIED NATIVE MUTATION: the gate's bounded postcondition is the answer. Giving the model
     ///   another turn after `remember` was refused is how "memory was not changed" became "noted".
     pub(crate) fn terminal_delivery(&self, tool: &str, obs: &str) -> bool {
+        // E.ERASE1: once `forget` has found the text and is holding it for a yes, its question is
+        // the reply. Letting the loop go on, staging's model called again with a whole sentence
+        // (replacing the held text) and then composed "nothing to delete" over the question.
+        if matches!(tool, "forget" | "erase") {
+            return obs.starts_with(FORGET_ASK);
+        }
         if matches!(tool, "remember" | "add_reminder")
             && crate::tool_outcome::Outcome::classify(tool, obs)
                 == crate::tool_outcome::Outcome::Denied
@@ -12212,8 +12221,11 @@ WINDOW: all-time, latest 200
                     }
                     Ok(r) => {
                         *self.pending_erase.lock().unwrap() = Some(what);
+                        // Delivered to the person verbatim (`terminal_delivery`): the model does not get
+                        // to call again or compose over it -- on staging it did both, then told the
+                        // person there was "nothing to delete".
                         format!(
-                            "(Ready to erase it permanently: it is in {} place(s) in my memory. This cannot be undone. Ask them to confirm with \"yes\" (or \"no\" to keep it). Do NOT repeat the text itself in your reply.)",
+                            "I found it in {} place(s) in my memory. Erase it permanently? This can't be undone — reply \"yes\" to erase it, or \"no\" to keep it.",
                             r.remaining_cells.max(1)
                         )
                     }

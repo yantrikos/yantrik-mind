@@ -18036,7 +18036,9 @@ async fn forgetting_from_chat_erases_every_copy_after_a_yes() {
     assert!(erase_hits(log.path(), ERASE_SECRET) > 0, "the decision log does not hold the secret; this test proves nothing");
 
     let ask = conv.run_agent_tool("forget", &serde_json::json!({ "what": ERASE_SECRET })).await;
-    assert!(ask.contains("Ready to erase") && ask.contains("\"yes\""), "{ask}");
+    assert!(ask.starts_with(crate::FORGET_ASK) && ask.contains("\"yes\""), "{ask}");
+    assert!(conv.terminal_delivery("forget", &ask), "the question is not delivered as the reply");
+    assert!(!conv.terminal_delivery("forget", "(nothing in my memory holds that exact text — ask them)"), "a miss ended the turn");
     assert!(!ask.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "the tool repeated the secret: {ask}");
 
     let reply = conv.handle_turn("yes").await.unwrap();

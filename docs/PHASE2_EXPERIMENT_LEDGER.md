@@ -11709,3 +11709,16 @@ Rewriting a line breaks every later chain value. So redaction must re-chain from
   - C5: a new subject keeps the erase pending.
   - C6: nothing found still waits for a yes.
 - **Still to confirm live:** Phase A rerun on staging, all the way to 0.
+
+**E.ERASE1 — first live rerun on staging (9c3d4ca), canary `PLM-CANARY-7719`: two defects only driving could find.**
+1. "Please remember… my bike lock code is …" was **refused by the memory write gate** ("memory was not changed"). That is correct: the gate judged it secret-shaped. Only the transcript line, the WAL and one receipt held it.
+2. "Please forget my bike lock code." The model's step 0 was `forget {"what":"<code>"}` → found in 1 place, holding for a yes. Then:
+   - step 1 repeated the call (the guard nudged);
+   - step 2 called `forget {"what":"my bike lock code is <code>"}`, which **replaced** the held text with a sentence that contains it;
+   - the barren limit hit, and the composer replied **"I don't have a bike lock code stored… there is nothing to delete"**, contradicting the tool and never asking for the yes.
+
+**Fixes:**
+- `forget`'s question is now person-facing ("I found it in N place(s) in my memory. Erase it permanently? This can't be undone — reply "yes"…") and **terminal** (`terminal_delivery`: a result starting with `FORGET_ASK`). The model can neither call again nor compose over it. A miss ("nothing in my memory holds that exact text") is not terminal, so the model can recall and retry.
+- The tool's description now says `what` is the secret itself, never a sentence about it. A held sentence would erase the sentence and leave standalone copies of the code, while its own after-count read 0.
+
+The test now also asserts the question is terminal and a miss is not. Mutant T1 (forget never ends the turn) was watched to fail. Suite 2193/0.

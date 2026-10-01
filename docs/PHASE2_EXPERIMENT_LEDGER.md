@@ -11733,3 +11733,11 @@ The test now also asserts the question is terminal and a miss is not. Mutant T1 
 - **Both replies after "yes":** "Erased (… place(s) rewritten). I checked afterwards: no copy is left in my memory, its search index, its history or its logs. Out of my reach: the system's own log, and any backup made before now." The Mind's own log line agrees: "left: 0 cell(s), Some(0) byte hit(s)".
 - **Both chained logs verify byte-exactly afterwards.** Each line's chain equals sha256(previous chain ++ the exact event bytes on disk): decisions 192,739 lines, receipts 9,065 lines. There are two redaction lines, one per erase, each naming the count and the old head and holding no code.
 - **What remains, as the reply says:** the system journal (`[agent] … raw args` lines carry the code), and backups made before the erase. On production that includes `mind.db.pre-0.2.1` and the older `*.bak` files. Journal hygiene needs its own prereg, and backup retention is Pranab's call.
+
+## Mind gate on yantrik-os 0f94c815 (#547, #549, #550, #551, #552, #555): PASS, and a Notes window was closed
+
+- **Setup:** Mind c7d470b, on 520, with Pranab's session open. Hermes was the active mind; the arena switched to `mind` and restored Hermes in its `finally`.
+- **Results, 20:56–20:59 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.7 s.
+- **The run closed a window.** Before: notes, weather, blender, foot. After: mind-view, weather, blender, foot. `harness_arena.reset_world` runs `pkill -x yantrik-notes` and `close_editor()` at the start and end of every run, so a gate kills whatever Notes window and editor document are open. Whose this Notes window was is not known: the newest saved note under ~ is from 09-18.
+- **My earlier claim was wrong** for these two apps: I had said the gate never closes the person's windows, and it does close Notes and the editor. Raised with 07: the arena should refuse to start while Notes or the editor is open, or close only what it opened.
+- **Until then:** before any gate, Notes or editor open → ask.

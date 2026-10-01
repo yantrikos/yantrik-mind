@@ -11503,3 +11503,11 @@ E.NAME1 and E.NAME1b are closed.
 **Rollback, if needed:** stop; put `mind-core.rollback-0e839169fecb389a` back; start. The store stays at schema 54, which E.PRODDB1 showed 0.18.0 opens and recalls from. `mind.db.pre-0.2.1` is the full backup.
 
 **Still in place:** the kill switch `SELF_IMPROVE_OFF`. Self-build and self-deploy remain halted until Pranab says otherwise.
+
+## Mind gate on yantrik-os b400b3f6 (#536, the companion socket's allow-list): PASS
+
+- **Setup:** Mind c7d470b, at yantrik-os-07's request before promoting to the public nightly.
+- **Pranab's session was open:** Weather, an unsaved Blender scene, a terminal, Chromium. His standing approval for gate runs on 520 with his session open was relayed by 07; it covers 520 only, never production.
+- **Results, 06:02–06:06 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 8.8 s (T1 6.3, T2 4.1, T3 5.4, T4 8.8, T5 13.1, T6 13.9, T7 9.0).
+- **His windows afterwards:** every one still open. The Blender window was never driven.
+- **#536 doesn't touch the Mind:** the Mind uses the mind door, yos-mcp and the app sockets, never `companion_rpc`.

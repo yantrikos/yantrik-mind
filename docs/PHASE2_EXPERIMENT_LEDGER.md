@@ -11722,3 +11722,14 @@ Rewriting a line breaks every later chain value. So redaction must re-chain from
 - The tool's description now says `what` is the secret itself, never a sentence about it. A held sentence would erase the sentence and leave standalone copies of the code, while its own after-count read 0.
 
 The test now also asserts the question is terminal and a miss is not. Mutant T1 (forget never ends the turn) was watched to fail. Suite 2193/0.
+
+**E.ERASE1 — LIVE ON STAGING (2fc132f): PASS, through the person's own words.** Every count comes from the independent `erase_scan.py`, not from the Mind's report.
+
+| Canary | Before | Chat | After "yes" |
+|---|---|---|---|
+| `PLM-CANARY-7719` (the write gate had refused to store it) | transcript 1 · WAL 5 · receipts 1 | "Please forget my bike lock code." → `recall`, then `forget {"what":"<code>"}` → "I found it in 1 place(s)… Erase it permanently?…" | rows **none** · bytes **none** · journal 5 |
+| `QX7-CANARY-4417` (Phase A's: 3 beliefs, earlier only hidden) | **24 rows** (oplog 6, cognitive_nodes 3+3, transcript 3, mind_belief_scope/evidence_version/authors 3 each) · `mind.db` 33 · decisions 5 · receipts 4 | "Please forget my storage locker code." → `recall` (its query carried the code into a receipt), then `forget` → "I found it in 24 place(s)…" | rows **none** · `mind.db` **0** · decisions **0** · receipts **0** · journal 11 |
+
+- **Both replies after "yes":** "Erased (… place(s) rewritten). I checked afterwards: no copy is left in my memory, its search index, its history or its logs. Out of my reach: the system's own log, and any backup made before now." The Mind's own log line agrees: "left: 0 cell(s), Some(0) byte hit(s)".
+- **Both chained logs verify byte-exactly afterwards.** Each line's chain equals sha256(previous chain ++ the exact event bytes on disk): decisions 192,739 lines, receipts 9,065 lines. There are two redaction lines, one per erase, each naming the count and the old head and holding no code.
+- **What remains, as the reply says:** the system journal (`[agent] … raw args` lines carry the code), and backups made before the erase. On production that includes `mind.db.pre-0.2.1` and the older `*.bak` files. Journal hygiene needs its own prereg, and backup retention is Pranab's call.

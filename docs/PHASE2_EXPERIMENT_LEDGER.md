@@ -11602,3 +11602,33 @@ It reports an **after-count of the literal across the store's bytes**, never its
 5. **The journal** gets the literal through `[agent] … raw args` lines. That is the system log, outside the Mind's store; it needs log hygiene, which is its own prereg.
 
 That map is what Phase B must clear: rows, oplog, my three side tables, transcript, FTS shadows, side files, then checkpoint and VACUUM, proved by the same scan reading 0.
+
+**E.ERASE1 — PHASE B/C PREREG, against Phase A's map.**
+
+**Two side files are hash-chained ledgers:**
+- `read_receipts.jsonl`: `chain = sha256(prev ++ record)`, from "genesis";
+- the decision log: "an existing file continues its chain".
+
+Rewriting a line breaks every later chain value. So redaction must re-chain from the first changed line, and append a `redaction` record carrying the needle's fingerprint, the number of lines rewritten and the **old head**. An auditor can then tell a sanctioned redaction from tampering. The record never carries the text.
+
+**B1, the core erase.** `MemoryHandle::erase_literal(needle)` runs on the memory actor; matching is ASCII case-insensitive.
+1. Tombstone the matching beliefs and memories through the engine (`tombstone_cognitive_node`, `forget`), keeping its invariants (graph, caches, vector index).
+2. **Generic sweep:** every column of every ordinary table gets the literal replaced with `[forgotten]`; a row whose rewrite would collide on a key is deleted, because it duplicates one already redacted. FTS is rewritten through the virtual table and then `optimize`d. Sealed (`ENCv1:`) oplog payloads are counted and reported, never claimed clean.
+3. `wal_checkpoint(TRUNCATE)` then `VACUUM`.
+4. **After-count:** the literal across every column, plus the raw bytes of the db and WAL. That count, not a tally, is the report.
+
+**B2, the chained ledgers.** Redact, re-chain, and append the redaction record. The ledger's own verifier must pass afterwards.
+
+**C, the chat route.** A `forget` tool: `{"what": "<exact text to erase>"}`.
+- **Irreversible,** so it needs the person's confirmation.
+- **The reply** states the after-count, and says what is out of reach (the journal, earlier backups).
+- **The turn's own copies:** the turn's transcript and its reply are written after the tool runs, so an erase in a turn triggers one more sweep at the end of the turn. The reply sent to the person has the literal redacted. The needle is held in memory only.
+
+**Kill criteria:**
+- **(a)** On staging, rerunning Phase A's three steps and then forgetting through the chat route leaves the canary at **0** in every column and in the raw bytes of `mind.db`, the WAL, `decisions.jsonl` and `read_receipts.jsonl`.
+- **(b)** A decoy that only resembles the literal (`QX7-CANARY-4418`, `XQX7-CANARY-4417X`) survives untouched.
+- **(c)** Both ledgers verify after the redaction, and the redaction record holds no text.
+- **(d)** The chat reply names the after-count, and never claims "gone" while the count is above 0.
+- **(e)** Each is watched to fail under a mutant.
+
+**Out of scope, stated in the reply:** the system journal, which gets log hygiene as its own prereg; backups made before the erase; peers that already replicated the oplog.

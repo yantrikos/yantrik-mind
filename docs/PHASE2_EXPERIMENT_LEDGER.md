@@ -11511,3 +11511,25 @@ E.NAME1 and E.NAME1b are closed.
 - **Results, 06:02–06:06 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 8.8 s (T1 6.3, T2 4.1, T3 5.4, T4 8.8, T5 13.1, T6 13.9, T7 9.0).
 - **His windows afterwards:** every one still open. The Blender window was never driven.
 - **#536 doesn't touch the Mind:** the Mind uses the mind door, yos-mcp and the app sockets, never `companion_rpc`.
+
+## E.EGRESSMSG1 — PREREG: an outbound refusal names its real cause
+
+**Seen on VM 561** (via yantrik-os-07, for the website's hero recording): "the web fetches in my work log all failed with 'couldn't compose a safe outbound request'". The guard's text in full is "(I couldn't compose a safe outbound request for {tool} without pulling in private context — …)".
+
+**Cause, from the code:** the refusal comes from `egress_clean_args`. Before an eligible outbound call, it re-authors the arguments with a separate model call that never sees private context. It returns `None`, and the guard refuses, in exactly three cases:
+- that model call errors;
+- its answer holds no JSON object;
+- the JSON doesn't parse into an object.
+
+The planner never sees private context, so it **never refuses for privacy**. Every refusal on this path is the planner failing, and "without pulling in private context" names a cause that never applies. On 561 the person (and a public stream) were told their request was a privacy risk when the compressed model had most likely just failed to answer or produced no clean JSON.
+
+**Plan:**
+- `egress_clean_args` returns `Result<args, CleanArgsFailure>`: `NoAnswer` when the model call errored, `NoUsableArgs` when there was no JSON or the JSON wasn't an object. Each failure is logged with its detail.
+- The guard's refusal says which, and that nothing was sent: "(I couldn't compose a safe outbound request for {tool}: the model that prepares outbound requests did not answer — nothing was sent. …)".
+- The marker "safe outbound request" stays, so `Outcome::classify` still reads it as Denied.
+
+**Kill criteria:**
+1. An erroring planner gives `NoAnswer`; prose gives `NoUsableArgs`; a JSON array gives `NoUsableArgs`.
+2. The refusal text names the reason, says nothing was sent, and never says "private context".
+3. `Outcome::classify` still returns Denied for the new text.
+4. Each is watched to fail under a mutant.

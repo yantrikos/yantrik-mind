@@ -2647,12 +2647,67 @@ async fn arch3_slice2_clean_planner_fails_closed_on_garbage() {
     let conv = ConversationEngine::new(mem, pool, "JARVIS")
         .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
     let grounded = serde_json::json!({ "query": "Alice oncology" });
-    assert!(
-        conv.egress_clean_args("web_search", "search", grounded, "")
-            .await
-            .is_none(),
-        "no usable clean args → fail closed (refuse), not fall back to grounded"
+    assert_eq!(
+        conv.egress_clean_args("web_search", "search", grounded, "").await,
+        Err(crate::egress_planning::CleanArgsFailure::NoUsableArgs),
+        "no usable clean args → fail closed (refuse), not fall back to grounded, and say why"
     );
+}
+
+/// E.EGRESSMSG1 (VM 561): the clean planner's failures are told apart -- a model that does not
+/// answer, and one that answers with something other than an argument object -- and both fail
+/// closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_clean_planner_says_why_it_produced_nothing() {
+    use crate::egress_planning::CleanArgsFailure;
+    use mind_governance::egress::EgressBroker;
+    struct Silent;
+    impl LLMBackend for Silent {
+        fn chat(&self, _m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            anyhow::bail!("the model gateway timed out")
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "silent"
+        }
+        fn chat_streaming(&self, _m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>, _on: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            anyhow::bail!("the model gateway timed out")
+        }
+    }
+    let engine = |backend: Arc<dyn LLMBackend>| {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        ConversationEngine::new(mem, InferencePool::new(backend, 1), "JARVIS")
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+    };
+    let fetch = serde_json::json!({ "url": "https://www.debian.org/releases/trixie/releasenotes" });
+    let ask = "Read the Debian 13 trixie release notes on debian.org";
+    assert_eq!(
+        engine(Arc::new(Silent)).egress_clean_args("web_fetch", ask, fetch.clone(), "").await,
+        Err(CleanArgsFailure::NoAnswer)
+    );
+    assert_eq!(
+        engine(Arc::new(ScriptedLLM::new("[\"https://www.debian.org/\"]"))).egress_clean_args("web_fetch", ask, fetch, "").await,
+        Err(CleanArgsFailure::NoUsableArgs),
+        "an answer holding no JSON object (here an array of strings) gives no usable arguments"
+    );
+}
+
+/// E.EGRESSMSG1: the refusal names the failure and that nothing left the device -- never "private
+/// context", which the planner by construction never sees -- and still reads as a gate refusal.
+#[test]
+fn an_outbound_refusal_names_its_real_cause() {
+    use crate::egress_planning::CleanArgsFailure;
+    for (failure, why) in [
+        (CleanArgsFailure::NoAnswer, "did not answer"),
+        (CleanArgsFailure::NoUsableArgs, "returned no usable arguments"),
+    ] {
+        let msg = crate::guards::egress_refusal("web_fetch", failure);
+        assert!(msg.contains(why) && msg.contains("nothing was sent"), "{msg}");
+        assert!(!msg.contains("private context"), "the refusal blamed private context again: {msg}");
+        assert_eq!(crate::tool_outcome::Outcome::classify("web_fetch", &msg), crate::tool_outcome::Outcome::Denied, "{msg}");
+    }
 }
 
 #[test]

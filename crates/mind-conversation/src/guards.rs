@@ -58,6 +58,16 @@ pub(crate) enum PreVerdict {
     Refuse { kind: RefusalKind, msg: String },
 }
 
+/// What the person reads when an outbound call could not be prepared (E.EGRESSMSG1): which part
+/// failed, and that nothing left the device. "safe outbound request" stays in it: it is the marker
+/// `Outcome::classify` reads as a gate refusal.
+pub(crate) fn egress_refusal(tool: &str, failure: crate::egress_planning::CleanArgsFailure) -> String {
+    format!(
+        "(I couldn't compose a safe outbound request for {tool}: {} — nothing was sent. Try again, or give me the exact URL or search terms.)",
+        failure.why()
+    )
+}
+
 /// Everything that must happen BEFORE a tool call reaches dispatch, in guard order:
 /// availability → arg normalization → egress clean-authoring → exact-value tripwire.
 /// `ctx` labels journal lines ("step 3", "bus").
@@ -93,14 +103,14 @@ pub(crate) async fn pre(
     // The provenance snapshot is cloned out of the lock; append-only, so the worst staleness can
     // do is clean-author a URL it could have passed through — the safe direction.
     let provenance = state.lock().unwrap().external_obs.clone();
-    let Some(args) = engine
+    let args = match engine
         .egress_clean_args(tool, user_text, grounded, &provenance)
         .await
-    else {
-        return PreVerdict::Refuse {
-            kind: RefusalKind::EgressUnsafe,
-            msg: format!("(I couldn't compose a safe outbound request for {tool} without pulling in private context — tell me the exact terms you want me to search/fetch)"),
-        };
+    {
+        Ok(args) => args,
+        Err(failure) => {
+            return PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, msg: egress_refusal(tool, failure) };
+        }
     };
     // The high-precision exact-value tripwire — a distinctive stored private value the model
     // injected that the user did not type. Catches the residue clean planning can't.

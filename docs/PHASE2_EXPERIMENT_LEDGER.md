@@ -11533,3 +11533,15 @@ The planner never sees private context, so it **never refuses for privacy**. Eve
 2. The refusal text names the reason, says nothing was sent, and never says "private context".
 3. `Outcome::classify` still returns Denied for the new text.
 4. Each is watched to fail under a mutant.
+
+**E.EGRESSMSG1 — RESULT: built, and every kill criterion held.** Suite 2178/0.
+- **The shape:** `egress_clean_args` → `Result<args, CleanArgsFailure>`, with `NoAnswer` (the model call errored, logged with its error) and `NoUsableArgs` (no JSON object, or JSON that isn't an object, logged with the length only). `guards::egress_refusal(tool, failure)` says "(I couldn't compose a safe outbound request for {tool}: {why} — nothing was sent. Try again, or give me the exact URL or search terms.)". The gate marker stays, and "private context" is gone.
+- **Tests:**
+  - `the_clean_planner_says_why_it_produced_nothing`: a backend that always errors gives `NoAnswer`; an answer with no JSON object gives `NoUsableArgs`. It uses 561's actual request and URL.
+  - `an_outbound_refusal_names_its_real_cause`: both reasons, "nothing was sent", never "private context", still `Outcome::Denied`.
+  - The existing fail-closed test now asserts `Err(NoUsableArgs)`.
+  - The live-fixture string in tool_outcome is updated to the new wording.
+- **Mutants:**
+  - Killed: M1 (a silent model reported as bad output), M3 (the "private context" wording back), M4 ("nothing was sent" dropped), M5 (the gate marker dropped).
+  - **M2 (a JSON array accepted) is equivalent.** The parser slices from the first `{` to the last `}`, so anything that parses is an object, and `is_object()` can never be false. The check is kept as a defensive guard, and the test's comment now says it covers "no JSON object" rather than claiming an array.
+- **Still to confirm live:** a web turn on 561 or 520 that fails at the planner reads the new sentence.

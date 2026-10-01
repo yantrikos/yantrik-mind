@@ -459,7 +459,7 @@ mod tests {
         let real = [
             "BLOCKED by harm-gate: outbound email to an unknown recipient",
             "PROPOSED — needs the user's confirmation; NOT executed",
-            "(I couldn't compose a safe outbound request for web_search without pulling in private context)",
+            "(I couldn't compose a safe outbound request for web_search: the model that prepares outbound requests did not answer — nothing was sent. Try again, or give me the exact URL or search terms.)",
         ];
         for s in real {
             assert_eq!(Outcome::classify("send_email", s), Outcome::Denied, "{s}");

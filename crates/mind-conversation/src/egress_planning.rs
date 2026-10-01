@@ -69,6 +69,29 @@ pub(crate) fn distinctive_pii(text: &str) -> Vec<String> {
     out
 }
 
+/// Why the clean planner produced no outbound arguments (E.EGRESSMSG1). It never sees private
+/// context, so it never refuses FOR privacy: every failure is the planner's own, and the refusal
+/// the person reads names which one (VM 561 was told "without pulling in private context" when the
+/// model had simply not answered).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanArgsFailure {
+    /// The model call that authors the arguments errored.
+    NoAnswer,
+    /// It answered, but with no JSON argument object.
+    NoUsableArgs,
+}
+
+impl CleanArgsFailure {
+    pub(crate) fn why(self) -> &'static str {
+        match self {
+            CleanArgsFailure::NoAnswer => "the model that prepares outbound requests did not answer",
+            CleanArgsFailure::NoUsableArgs => {
+                "the model that prepares outbound requests returned no usable arguments"
+            }
+        }
+    }
+}
+
 impl ConversationEngine {
     /// ARCH-3 slice 2 — EGRESS-CLEAN TOOL PLANNING. For an outbound tool whose argument is a
     /// self-contained query/url the model can build from the LITERAL request, RE-AUTHOR the argument
@@ -102,10 +125,10 @@ impl ConversationEngine {
         user_text: &str,
         grounded: serde_json::Value,
         external_provenance: &str,
-    ) -> Option<serde_json::Value> {
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
         if self.egress.is_none() {
-            return Some(grounded);
+            return Ok(grounded);
         }
         // Eligible = external tools whose arg is a self-contained query/url/text authored from the
         // literal request. Contextual tools ("more like that") are deliberately excluded for now —
@@ -129,13 +152,13 @@ impl ConversationEngine {
                 | "tr"
         );
         if !eligible {
-            return Some(grounded);
+            return Ok(grounded);
         }
         if !matches!(
             mind_governance::egress::classify(tool),
             Some(mind_governance::egress::EgressClass::External(_))
         ) {
-            return Some(grounded);
+            return Ok(grounded);
         }
         // PROVENANCE PASS-THROUGH (scoped to the url-bearing fetch tools, where the breakage is
         // total): a URL the user typed, or that an external service returned this turn, is not a
@@ -145,7 +168,7 @@ impl ConversationEngine {
             if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
                 if !url.is_empty() && (user_text.contains(url) || external_provenance.contains(url))
                 {
-                    return Some(grounded);
+                    return Ok(grounded);
                 }
             }
         }
@@ -174,20 +197,29 @@ impl ConversationEngine {
                 concat!(module_path!(), ":egress-clean"),
             )
             .await
-            .ok()?
+            .map_err(|e| {
+                eprintln!("[egress] clean planner for {tool} did not answer: {e}");
+                CleanArgsFailure::NoAnswer
+            })?
             .text;
         let body_owned = crate::strip_reasoning(&text);
         let body = body_owned.as_str();
         let obj = match (body.find('{'), body.rfind('}')) {
             (Some(a), Some(b)) if b > a => &body[a..=b],
-            _ => return None, // fail closed: no usable JSON from the clean planner
+            _ => {
+                eprintln!("[egress] clean planner for {tool} returned no JSON ({} chars)", body.len());
+                return Err(CleanArgsFailure::NoUsableArgs); // fail closed
+            }
         };
-        let parsed: serde_json::Value = serde_json::from_str(obj).ok()?;
-        if parsed.is_object() {
-            let _ = grounded; // grounded args are intentionally DISCARDED for eligible egress tools
-            Some(parsed)
-        } else {
-            None
+        match serde_json::from_str::<serde_json::Value>(obj) {
+            Ok(parsed) if parsed.is_object() => {
+                let _ = grounded; // grounded args are intentionally DISCARDED for eligible egress tools
+                Ok(parsed)
+            }
+            _ => {
+                eprintln!("[egress] clean planner for {tool} returned JSON that is not an argument object");
+                Err(CleanArgsFailure::NoUsableArgs)
+            }
         }
     }
 

@@ -11545,3 +11545,42 @@ The planner never sees private context, so it **never refuses for privacy**. Eve
   - Killed: M1 (a silent model reported as bad output), M3 (the "private context" wording back), M4 ("nothing was sent" dropped), M5 (the gate marker dropped).
   - **M2 (a JSON array accepted) is equivalent.** The parser slices from the first `{` to the last `}`, so anything that parses is an object, and `is_object()` can never be false. The check is kept as a defensive guard, and the test's comment now says it covers "no JSON object" rather than claiming an array.
 - **Still to confirm live:** a web turn on 561 or 520 that fails at the planner reads the new sentence.
+
+## E.ERASE1 — PREREG: forgetting erases
+
+**Pranab's decision (2026-10-01, direct, "yes it should"):** when the person tells the Mind to forget something, the Mind erases it. A tombstone is not enough. The audit may keep a fingerprint, never the text.
+
+**Known since 2026-09-08 (E.SEC5/E.FORGET1/E.TOMB1):** forgetting hides but does not erase.
+- the engine's `forget()` tombstones the row but keeps `memories.text`;
+- the oplog keeps the full text as the replication stream;
+- the file's free pages and the WAL keep further copies.
+
+**What reading the code adds (2026-10-01):**
+- **No chat route.** The forgets are operator CLI verbs: `forget-belief <text>`, which has been exhaustive since E.FORGET1, and `forget <person>`. The model has no general forget tool, so "forget my safe code" said in Telegram may reach no forget at all. To be confirmed by driving it.
+- **Other places text lands:** the conversation transcript (`mind_transcript`), recall query logs, `*.read_receipts.jsonl`, `bus.decisions.jsonl`, and the service's journal lines.
+
+**Phase A, measurement before any code:** on staging, through the real paths:
+1. Tell the Mind a canary secret in a chat turn.
+2. Ask it, in plain words, to forget it.
+3. Then run `ym forget-belief <canary>`.
+
+After each step, count the canary in every table and text column (sqlite, read-only), in the raw bytes of `mind.db`, the WAL and every side file, and in the journal. That map is what Phase B must clear.
+
+**Phase B, the erase (prereg'd after Phase A, against its map):** `forget` of a literal clears every copy:
+- the rows' text in memories, chunks, FTS and beliefs;
+- the oplog payloads for those rids or nodes;
+- the transcript, with the literal redacted;
+- query logs and side files;
+- then a checkpoint and VACUUM.
+
+It reports an **after-count of the literal across the store's bytes**, never its own tally (K15).
+
+**Phase C:** a chat route. "Forget X" from the person reaches Phase B, and the reply states the after-count truthfully.
+
+**Kill criteria (Phase B/C):**
+- After forgetting, the canary occurs **0 times** in the bytes of `mind.db`, its WAL and the Mind's side files.
+- The tombstone keeps a fingerprint only.
+- Unrelated rows are untouched (a decoy containing a superstring or a near-miss survives).
+- Each criterion is watched to fail under a mutant.
+
+**Out of reach, to be said plainly:** backups made before the erase (e.g. production's `mind.db.pre-0.2.1` and older `*.bak`), the system journal, and any peer that already replicated the oplog. Those need a retention decision, which is Pranab's.

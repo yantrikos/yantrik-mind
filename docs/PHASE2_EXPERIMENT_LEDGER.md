@@ -11584,3 +11584,21 @@ It reports an **after-count of the literal across the store's bytes**, never its
 - Each criterion is watched to fail under a mutant.
 
 **Out of reach, to be said plainly:** backups made before the erase (e.g. production's `mind.db.pre-0.2.1` and older `*.bak`), the system journal, and any peer that already replicated the oplog. Those need a retention decision, which is Pranab's.
+
+**E.ERASE1 — PHASE A RESULT: where a told secret lives, and what each "forget" does to it.** The test ran on staging (v0.2.1), through the real paths, with canary `QX7-CANARY-4417`. `erase_scan.py` counts it, read-only, in every table and column, in the raw bytes of every file in the state folder, and in the journal.
+
+| Step | Rows (table.column: count) | Raw bytes | Journal |
+|---|---|---|---|
+| 0. baseline | none | none | 0 |
+| 1. chat: "Please remember… my storage locker code is QX7-CANARY-4417." → "has been remembered" | oplog.payload 6 · cognitive_nodes.label 3 · cognitive_nodes.payload 3 · mind_transcript.text 2 · mind_belief_scope.proposition 3 · mind_belief_evidence_version.proposition 3 · mind_belief_authors.proposition 3 | WAL 81 · decisions.jsonl 4 · read_receipts.jsonl 1 | 3 |
+| 2. chat: "Please forget my storage locker code. Delete it completely." | the same, transcript 3 | WAL 91 · decisions 5 · receipts 4 | 9 |
+| 3. `ym forget-belief QX7-CANARY-4417` → "Forgot 3 belief(s)… None remain." | **the same: every row still there** | WAL 130 · decisions 5 · receipts 4 | 9 |
+
+**Findings:**
+1. **There is no chat route, and the Mind made a false claim.** Asked in plain words to forget, it ran `recall` twice and the wrong tool (`drop_reminder`), then answered "No open item matching the storage locker code 'QX7-CANARY-4417' is currently in any store I track". The code was in 3 beliefs and 6 oplog rows at that moment. Asking also *added* copies: its recall queries carried the code into the transcript, receipts and journal.
+2. **`forget-belief` hides and calls it gone.** "None remain" is true of recall only: the 3 belief rows keep their text (tombstoned), and so do the oplog, transcript and side files.
+3. **Three of my own tables key on the proposition's text:** `mind_belief_scope` (E.MEMSCOPE1), `mind_belief_evidence_version`, `mind_belief_authors` (E.STAMP1). A belief forget never touches them.
+4. **Side files hold the text in clear:** `mind.db.decisions.jsonl` and `mind.db.read_receipts.jsonl`. Before rewriting either, check whether it is hash-chained (receipt-chained stores, the "sixteen seams").
+5. **The journal** gets the literal through `[agent] … raw args` lines. That is the system log, outside the Mind's store; it needs log hygiene, which is its own prereg.
+
+That map is what Phase B must clear: rows, oplog, my three side tables, transcript, FTS shadows, side files, then checkpoint and VACUUM, proved by the same scan reading 0.

@@ -11632,3 +11632,33 @@ Rewriting a line breaks every later chain value. So redaction must re-chain from
 - **(e)** Each is watched to fail under a mutant.
 
 **Out of scope, stated in the reply:** the system journal, which gets log hygiene as its own prereg; backups made before the erase; peers that already replicated the oplog.
+
+**E.ERASE1 — B1 RESULT (the store): built, every B1 criterion held.** Suite 2183/0.
+- **`mind_memory::erase`:**
+  - `check_needle`: at least 4 characters, never `[forgotten]`.
+  - `replace_ci`: ASCII case-insensitive, offset-exact.
+  - `erase_cell`: JSON is rewritten as JSON, and only under content keys; a structural key's value is never touched.
+  - `sweep`: dry run or apply. It covers every ordinary table and every text column, skipping the engine's `meta`, virtual tables and their shadows, and identity, key, clock and enum columns. A rewrite that collides on a key deletes the row instead.
+  - `compact`: FTS5 `optimize`, `wal_checkpoint(TRUNCATE)`, `VACUUM`, then another `TRUNCATE`.
+  - `raw_byte_hits`: the proof, over the db file and its WAL.
+- **`MemoryHandle::erase_literal(needle, apply)`**, on the actor:
+  1. engine tombstones first (matching beliefs through `tombstone_cognitive_node` with reason `user-erased`, matching memories through `forget`);
+  2. the sweep, in one `BEGIN IMMEDIATE` transaction (rolled back on error);
+  3. compact;
+  4. the after-count of cells and bytes.
+
+  `apply=false` changes nothing and reports where the literal lives. The log line carries counts, never the needle.
+- **Tests:**
+  - `an_erase_leaves_no_copy_and_spares_the_near_miss`. A belief, a flat memory and a lower-case transcript line are planted. The dry run sees oplog, transcript and memories, and its byte count is > 0. A second dry run changes nothing. Apply: the report is clean, an independent byte count reads 0, the near miss `…4418` survives on disk and as a belief, and no remaining belief holds the secret.
+  - `an_erase_clears_the_free_pages_a_sweep_cannot_see`. A long row holding the secret is deleted the way old rows go, its oplog with it, `secure_delete` off. The precondition: no cell holds the secret, yet the raw bytes do. After the erase they don't.
+  - `an_erase_never_rewrites_the_stores_own_fields`. Erasing "episodic" leaves `memories.type` and the record ops' `"type"` inside oplog payloads unchanged, and counts nothing as content.
+  - `an_erase_refuses_what_is_not_a_secret`, and `replace_ci…`.
+- **Mutants, all six watched to fail:**
+  - M1: the oplog never swept.
+  - M2: no VACUUM. It first SURVIVED: a tiny store rewrites in place and leaves no residue. The free-page test was written for it, and then it failed.
+  - M3: case-sensitive matching.
+  - M4: JSON structural keys not spared.
+  - M5: the byte count always 0.
+  - M6: beliefs never tombstoned.
+- **Found while building:** the first generic sweep rewrote a record op's `"type":"episodic"` inside an oplog payload, because it was erasing a word. That is why `erase_cell` reads JSON as JSON.
+- **Prereg correction:** criterion (b) said a superstring decoy (`XQX7-CANARY-4417X`) survives. It must not: it contains the secret. The decoy that must survive is the near miss, and it does.

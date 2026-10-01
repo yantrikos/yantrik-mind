@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 pub mod receipts;
+pub mod erase;
 
 use async_trait::async_trait;
 use rusqlite::OptionalExtension;
@@ -77,6 +78,12 @@ enum Cmd {
     ForgetMemory {
         rid: String,
         reply: Reply<bool>,
+    },
+    /// E.ERASE1: erase a literal from every copy in the store (`apply`), or count where it lives.
+    EraseLiteral {
+        needle: String,
+        apply: bool,
+        reply: Reply<erase::EraseReport>,
     },
     RememberObservation {
         text: String,
@@ -3719,6 +3726,62 @@ fn quarantine_rid(db: &YantrikDB, rid: &str, reason: &str) -> std::result::Resul
     Ok(gone)
 }
 
+/// E.ERASE1, on the actor thread: the engine's own tombstones first (so its graph, caches and
+/// vector index let go), then the store sweep, then compaction, then the after-count.
+fn erase_literal_in(db: &YantrikDB, path: &str, needle: &str, apply: bool) -> std::result::Result<erase::EraseReport, String> {
+    let lc = erase::check_needle(needle)?;
+    let mut report = erase::EraseReport::default();
+    if !apply {
+        report.swept = erase::sweep(&db.conn(), &lc, false)?;
+        report.remaining_cells = report.swept.total();
+        report.remaining_bytes = erase::raw_byte_hits(path, &lc);
+        return Ok(report);
+    }
+    for n in all_beliefs(db) {
+        let statement = node_prop(&n).map_or_else(|| n.label.clone(), |s| s.to_string());
+        if statement.to_ascii_lowercase().contains(&lc) || n.label.to_ascii_lowercase().contains(&lc) {
+            if db.tombstone_cognitive_node(n.id).map_err(|e| e.to_string())? {
+                // Fingerprinted and redacted by the ledger; the sweep below clears any preview.
+                let _ = record_tombstone(db, &statement, "user-erased");
+                report.beliefs_tombstoned += 1;
+            }
+        }
+    }
+    let rids: Vec<String> = db
+        .conn()
+        .prepare("SELECT rid FROM memories WHERE consolidation_status != 'tombstoned' AND instr(lower(text), ?1) > 0")
+        .and_then(|mut s| s.query_map([&lc], |r| r.get::<_, String>(0))?.collect::<std::result::Result<Vec<_>, _>>())
+        .map_err(|e| e.to_string())?;
+    for rid in rids {
+        if db.forget(&rid).map_err(|e| e.to_string())? {
+            report.memories_tombstoned += 1;
+        }
+    }
+    {
+        let conn = db.conn();
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+        match erase::sweep(&conn, &lc, true) {
+            Ok(swept) => {
+                conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                report.swept = swept;
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+        erase::compact(&conn)?;
+        report.remaining_cells = erase::sweep(&conn, &lc, false)?.total();
+    }
+    report.remaining_bytes = erase::raw_byte_hits(path, &lc);
+    eprintln!(
+        "[memory] erase: {} belief(s) and {} memory(ies) tombstoned, {} cell(s) rewritten, {} row(s) deleted; left: {} cell(s), {:?} byte hit(s)",
+        report.beliefs_tombstoned, report.memories_tombstoned, report.swept.total(), report.swept.rows_deleted,
+        report.remaining_cells, report.remaining_bytes
+    );
+    Ok(report)
+}
+
 /// Belief-lifecycle storage: the tombstone ledger. One row per forgotten
 /// proposition, carrying WHY — readable after the fact, unlike the row it
 /// marks, so "user-deleted" stays forever distinguishable from dedup/hygiene.
@@ -4804,6 +4867,9 @@ impl MemoryHandle {
                         Cmd::ForgetMemory { rid, reply } => {
                             let _ = reply.send(db.forget(&rid).map_err(|e| e.to_string()));
                         }
+                        Cmd::EraseLiteral { needle, apply, reply } => {
+                            let _ = reply.send(erase_literal_in(&db, &path, &needle, apply));
+                        }
                         Cmd::RememberObservation { text, source, reply } => {
                             // Provenance-tagged, secret-scanned, low-certainty: an Observation, never a Belief.
                             let r = gate_write(&text).and_then(|_| {
@@ -5701,6 +5767,15 @@ impl MemoryHandle {
     pub async fn forget_memory(&self, rid: &str) -> Result<bool> {
         let rid = rid.to_string();
         self.call(|reply| Cmd::ForgetMemory { rid, reply }).await
+    }
+
+    /// E.ERASE1: erase `needle` from every copy this store holds -- beliefs and memories through
+    /// the engine, then every content cell, the full-text index, the WAL and the file's free pages.
+    /// The report's `remaining_*` fields are an after-count, the only proof. With `apply` false
+    /// nothing changes: it counts where the literal lives, for the person to confirm against.
+    pub async fn erase_literal(&self, needle: &str, apply: bool) -> Result<erase::EraseReport> {
+        let needle = needle.to_string();
+        self.call(|reply| Cmd::EraseLiteral { needle, apply, reply }).await
     }
 
     // flat-path helpers retained from Spike A
@@ -12540,4 +12615,148 @@ mod sec1c_quarantine {
     // default returns an error for it, but asserting it needs a full MemoryFacade stub — dozens of
     // methods — and a test whose scaffolding dwarfs the claim tends to get deleted rather than
     // maintained. Recorded as documented-but-unasserted instead of faked.
+}
+
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+
+    const SECRET: &str = "QX7-CANARY-4417";
+    const NEAR: &str = "QX7-CANARY-4418";
+
+    fn hits(bytes: &[u8], needle: &str) -> usize {
+        let (lc, n) = (bytes.to_ascii_lowercase(), needle.to_ascii_lowercase());
+        lc.windows(n.len()).filter(|w| *w == n.as_bytes()).count()
+    }
+
+    fn file_bytes(path: &str) -> Vec<u8> {
+        let mut b = std::fs::read(path).unwrap_or_default();
+        b.extend(std::fs::read(format!("{path}-wal")).unwrap_or_default());
+        b
+    }
+
+    /// The secret the way Phase A saw it land: a belief (beliefs, oplog, the Mind's proposition-keyed
+    /// tables), a flat memory (memories, full-text index), a transcript line in lower case. Beside
+    /// it, a near miss that must survive.
+    async fn planted(tag: &str) -> (mind_types::scratch::Scratch, MemoryHandle) {
+        let s = mind_types::scratch::file(&format!("erase_{tag}"), "db");
+        let mem = MemoryHandle::spawn(&s.as_str(), 8).unwrap();
+        for statement in [format!("The storage locker code is {SECRET}"), format!("The gym locker code is {NEAR}")] {
+            mem.remember_as_belief(BeliefAssertion {
+                statement,
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+        }
+        mem.record(format!("Note: locker code {SECRET}, keep it safe")).await.unwrap();
+        mem.append_message("user", &format!("please remember: my storage locker code is {}", SECRET.to_lowercase()))
+            .await
+            .unwrap();
+        (s, mem)
+    }
+
+    /// E.ERASE1: after an erase the literal is nowhere -- not in a content cell, not in the raw bytes
+    /// of the file or its WAL -- and a near miss beside it is untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_erase_leaves_no_copy_and_spares_the_near_miss() {
+        let (s, mem) = planted("all").await;
+        let path = s.as_str().to_string();
+
+        let dry = mem.erase_literal(SECRET, false).await.unwrap();
+        assert!(dry.remaining_cells > 0, "the dry run found nothing: {dry:?}");
+        for place in ["oplog.payload", "mind_transcript.text", "memories.text"] {
+            assert!(dry.swept.cells.contains_key(place), "the dry run missed {place}: {dry:?}");
+        }
+        assert!(hits(&file_bytes(&path), SECRET) > 0, "the planted secret is not on disk at all");
+        assert!(dry.remaining_bytes.unwrap_or(0) > 0, "the report's own byte count missed what is on disk: {dry:?}");
+        assert_eq!(mem.erase_literal(SECRET, false).await.unwrap().remaining_cells, dry.remaining_cells, "a dry run changed something");
+
+        let done = mem.erase_literal(SECRET, true).await.unwrap();
+        assert!(done.beliefs_tombstoned >= 1 && done.memories_tombstoned >= 1, "{done:?}");
+        assert!(done.is_clean(), "the literal survived the erase: {done:?}");
+        assert_eq!(hits(&file_bytes(&path), SECRET), 0, "the raw bytes still hold it");
+
+        assert!(mem.erase_literal(NEAR, false).await.unwrap().remaining_cells > 0, "the near miss was erased too");
+        assert!(hits(&file_bytes(&path), NEAR) > 0, "the near miss is gone from disk");
+        let ctx = mind_types::AccessContext::operator_audit();
+        let left = mem.beliefs_matching_n("locker code", 50, &ctx).await.unwrap();
+        assert!(left.iter().all(|b| !b.statement.to_ascii_lowercase().contains(&SECRET.to_ascii_lowercase())), "{left:?}");
+        assert!(left.iter().any(|b| b.statement.contains(NEAR)), "the near miss belief is gone: {left:?}");
+    }
+
+    /// A word that is also a value the store uses for its own bookkeeping is not rewritten where it
+    /// is bookkeeping: erasing "episodic" leaves every memory's type alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_erase_never_rewrites_the_stores_own_fields() {
+        let (s, mem) = planted("structural").await;
+        let path = s.as_str().to_string();
+        let count_type = || {
+            let c = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            c.query_row("SELECT count(*) FROM memories WHERE type = 'episodic'", [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        let before = count_type();
+        assert!(before > 0);
+        let op_types = || {
+            let c = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            c.query_row("SELECT count(*) FROM oplog WHERE instr(payload, '\"episodic\"') > 0", [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        let ops_before = op_types();
+        assert!(ops_before > 0, "no record op carries the type to protect");
+        let r = mem.erase_literal("episodic", true).await.unwrap();
+        assert_eq!(count_type(), before, "the erase rewrote the memories' own type field");
+        assert_eq!(op_types(), ops_before, "the erase rewrote a record op's type inside its payload: {r:?}");
+        assert!(r.swept.cells.is_empty(), "structural fields were counted as content: {r:?}");
+    }
+
+    /// The copies no cell holds: a row deleted long ago leaves its bytes in the file's free pages,
+    /// where no sweep can find them. Only compaction lets go of them (the safe-code incident counted
+    /// 364 such copies in a live file).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_erase_clears_the_free_pages_a_sweep_cannot_see() {
+        let (s, mem) = planted("freepages").await;
+        let path = s.as_str().to_string();
+        // A long memory holding the secret, deleted the way old rows go: its pages are freed, not wiped.
+        let long = format!("{} {SECRET} {}", "filler ".repeat(1200), "tail ".repeat(1200));
+        let rid = mem.record(long).await.unwrap();
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch("PRAGMA secure_delete = OFF;").unwrap();
+            c.execute("DELETE FROM memories WHERE rid = ?1", [&rid]).unwrap();
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        }
+        // Everything a sweep can see, cleared first -- what is left is only free-page residue.
+        mem.erase_literal(SECRET, true).await.unwrap();
+        let rid2 = mem.record(format!("{} {SECRET} {}", "filler ".repeat(1200), "tail ".repeat(1200))).await.unwrap();
+        {
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch("PRAGMA secure_delete = OFF;").unwrap();
+            c.execute("DELETE FROM memories WHERE rid = ?1", [&rid2]).unwrap();
+            c.execute("DELETE FROM oplog WHERE target_rid = ?1", [&rid2]).unwrap();
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        }
+        assert_eq!(mem.erase_literal(SECRET, false).await.unwrap().remaining_cells, 0, "a cell still holds it; this test is about free pages only");
+        assert!(hits(&file_bytes(&path), SECRET) > 0, "deleting the row left no residue, so this test proves nothing here");
+        let done = mem.erase_literal(SECRET, true).await.unwrap();
+        assert!(done.is_clean(), "free-page residue survived the erase: {done:?}");
+        assert_eq!(hits(&file_bytes(&path), SECRET), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_erase_refuses_what_is_not_a_secret() {
+        let (_s, mem) = planted("refuse").await;
+        for bad in ["", "  ab ", "abc", erase::ERASED] {
+            assert!(mem.erase_literal(bad, true).await.is_err(), "{bad:?} was taken as a needle");
+        }
+    }
+
+    #[test]
+    fn replace_ci_takes_every_case_and_keeps_the_rest() {
+        assert_eq!(erase::replace_ci("Code qx7-canary-4417 / QX7-CANARY-4417!", "qx7-canary-4417", "[x]"), "Code [x] / [x]!");
+        assert_eq!(erase::replace_ci("héllo SECRET wörld", "secret", "[x]"), "héllo [x] wörld");
+        assert_eq!(erase::replace_ci("nothing here", "secret", "[x]"), "nothing here");
+    }
 }

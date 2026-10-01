@@ -11743,3 +11743,16 @@ The test now also asserts the question is terminal and a miss is not. Mutant T1 
 - **Until then:** before any gate, Notes or editor open → ask.
 
 **Follow-up (07):** nothing was lost. The Notes window was already in 520's taskbar when 07 unlocked the desktop at 15:42 CDT, after the update restart. All three of 07's captures of it show Notes' own "All changes saved", with no note open. 07's fix is yantrik-os #558: harness_arena refuses to start, before control and preflight too, while `yantrik-notes` or `yantrik-text-editor` is running, using the same patterns `reset_world` kills. Until it merges, an open Notes or editor means: ask first.
+
+## E.ARENA1-F43 — PREREG: a repeated call the desktop REFUSED is told so, not "already ran"
+
+**Seen on VM 561** (Mind 371bedb, ollama-cloud:deepseek-v4.1-flash; via yantrik-os-07). Task: "Make a new note in Notes called 'Weekend hike — what to pack'… export it". Step 3 sent `os_act {"app":"notes","action":"new_note","args":"1. Water…"}`, with `args` as a bare string. yos-mcp (#551) refused: "REFUSED — nothing was run… args arrived as a bare value, but notes.new_note takes named parameters: title…". The model then sent the **identical** call four more times, and the turn ended with no note.
+
+**Cause, from the code:** for a repeated `os_act`, the loop's repeat note is F12's `repeated_action_note`, written for acts that ran: "(that action already ran; its result is above. Do not repeat it. Take the NEXT step…)". After a refusal that is **false**. The model is told the act ran while the work log says it was refused, and it resends. Nothing after 371bedb changes this; c7d470b passed today's gate only because no gate task draws a refusal from this model.
+
+**Plan:** the loop remembers whether the last desktop act came back "REFUSED — nothing was run". If the model repeats that exact call, the note says it was refused, that the same call will be refused again, and **quotes what the desktop said to change**. F12's "already ran" note never answers a refused act. The barren limit still ends the turn after two wasted steps.
+
+**Kill criteria:**
+1. On a scripted desktop that refuses a bare-value `os_act`, the model's next prompt after the identical repeat carries "REFUSED and nothing ran" and the refusal's own instruction ("takes named parameters"), and never "that action already ran".
+2. A repeat of an act that **ran** still gets F12's note.
+3. Each is watched to fail under a mutant.

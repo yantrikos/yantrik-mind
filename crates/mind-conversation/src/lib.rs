@@ -5761,6 +5761,10 @@ pub struct ConversationEngine {
     runtime: Option<Arc<dyn ActionRuntime>>,
     /// An outward action awaiting the user's yes/no.
     pending: Mutex<Option<ActionRequest>>,
+    /// E.ERASE1: the exact text the person asked to erase, waiting for their "yes". Held here, in
+    /// memory, for one turn -- never written anywhere, because writing it down would make one more
+    /// copy of the thing being erased.
+    pending_erase: Mutex<Option<String>>,
     /// A recipe paused on an AskUser question — holds the run_id to resume with the next message.
     pending_question: Mutex<Option<String>>,
     /// Recipe engine — when set, recipes (e.g. the citation-validated briefing) run through it.
@@ -5913,6 +5917,7 @@ impl ConversationEngine {
             home_alerts_seen: Mutex::new(None),
             runtime: None,
             pending: Mutex::new(None),
+            pending_erase: Mutex::new(None),
             pending_question: Mutex::new(None),
             recipes: None,
             route_budget: crate::delegate::ROUTE_BUDGET,
@@ -10805,6 +10810,78 @@ WINDOW: all-time, latest 200
         }
     }
 
+    /// E.ERASE1: the person's answer to "erase it permanently?". `Some((reply, needle))` when this
+    /// message settled it; `None` when nothing was pending, or when the message was neither yes nor
+    /// no -- then the pending erase is dropped and the message is handled as usual.
+    pub(crate) async fn handle_pending_erase(&self, user_text: &str) -> Option<(String, String)> {
+        let needle = self.pending_erase.lock().unwrap().take()?;
+        if Self::is_erase_confirmation(user_text) {
+            let reply = self.erase_everywhere(&needle).await;
+            return Some((reply, needle));
+        }
+        if Self::is_denial(user_text) {
+            return Some(("Kept — nothing was erased.".to_string(), needle));
+        }
+        None
+    }
+
+    /// E.ERASE1: erase `needle` from the store, its receipt ledger and the decision log, then say
+    /// what the after-count found. "Gone" is said only when every count is 0 -- the operator verb
+    /// this replaces answered "None remain" with every copy still on disk.
+    pub(crate) async fn erase_everywhere(&self, needle: &str) -> String {
+        let lc = needle.trim().to_ascii_lowercase();
+        let store = match self.memory.erase_literal(needle, true).await {
+            Ok(r) => r,
+            Err(e) => return format!("I couldn't erase it ({e}). Nothing has been removed, so please don't treat it as forgotten."),
+        };
+        let decisions = self.recorder.redact(&lc);
+        let log_left = self.recorder.literal_hits(&lc);
+        Self::erase_reply(&store, &decisions, log_left)
+    }
+
+    /// A clear yes to "erase it permanently?": the usual confirmations, plus the words a person
+    /// actually answers this question with. Not "forget it" -- in plain English that means "never mind".
+    fn is_erase_confirmation(text: &str) -> bool {
+        let t = text.trim().to_lowercase();
+        let t = t.trim_end_matches(['.', '!']);
+        Self::is_confirmation(t)
+            || matches!(t, "erase it" | "delete it" | "yes erase it" | "yes, erase it" | "yes delete it" | "yes, delete it")
+    }
+
+    /// What the person is told after an erase. "Gone" only when every after-count is 0.
+    pub(crate) fn erase_reply(
+        store: &mind_types::erase_text::EraseReport,
+        decisions: &std::result::Result<mind_types::erase_text::LedgerRedaction, String>,
+        log_left: usize,
+    ) -> String {
+        let removed = format!(
+            "{} belief(s) and {} note(s) removed, {} place(s) rewritten",
+            store.beliefs_tombstoned,
+            store.memories_tombstoned,
+            store.swept.total()
+        );
+        if store.is_clean() && decisions.is_ok() && log_left == 0 {
+            return format!(
+                "Erased ({removed}). I checked afterwards: no copy is left in my memory, its search index, its history or its logs. Out of my reach: the system's own log, and any backup made before now."
+            );
+        }
+        let mut left = Vec::new();
+        if store.remaining_cells > 0 {
+            left.push(format!("{} place(s) in my memory", store.remaining_cells));
+        }
+        let bytes = store.remaining_bytes.unwrap_or(0) + store.remaining_receipt_bytes.unwrap_or(0) + log_left;
+        if bytes > 0 {
+            left.push(format!("{bytes} copy(ies) in my files"));
+        }
+        if let Err(e) = &decisions {
+            left.push(format!("my decision log ({e})"));
+        }
+        format!(
+            "I erased what I could ({removed}), but the check afterwards still finds it in {}. It is NOT fully gone yet.",
+            left.join(", ")
+        )
+    }
+
     /// The outward-action path: resolve a pending confirmation, or propose a new gated action.
     /// Returns `Some(reply)` if this turn was an action turn (handled), `None` to fall through to chat.
     #[deny(unused_variables)]
@@ -12123,6 +12200,24 @@ WINDOW: all-time, latest 200
                     return "(need a media url to watch)".to_string();
                 }
                 self.watch_media(&url, &s("question")).await
+            }
+            // E.ERASE1: the person asked to forget something. Count where the exact text lives
+            // (nothing changes), hold it for their "yes", and never repeat it back.
+            "forget" | "erase" => {
+                let what = s("what").trim().to_string();
+                match self.memory.erase_literal(&what, false).await {
+                    Err(e) => format!("(can't erase that: {e})"),
+                    Ok(r) if r.remaining_cells == 0 && r.remaining_bytes.unwrap_or(0) == 0 => {
+                        "(nothing in my memory holds that exact text — ask them for the exact words to erase, or recall first to find them)".to_string()
+                    }
+                    Ok(r) => {
+                        *self.pending_erase.lock().unwrap() = Some(what);
+                        format!(
+                            "(Ready to erase it permanently: it is in {} place(s) in my memory. This cannot be undone. Ask them to confirm with \"yes\" (or \"no\" to keep it). Do NOT repeat the text itself in your reply.)",
+                            r.remaining_cells.max(1)
+                        )
+                    }
+                }
             }
             "drop_reminder" | "drop_thread" | "stop_tracking" => {
                 let words = s("words");
@@ -14898,6 +14993,18 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Emotional-continuity ledger: infer coarse valence from the message, persist a rolling
         // 14-day baseline per person, and record a wellbeing Tension when a 3-day flat-or-negative
         // deviation is detected (surfaced by proactive_digest; rate-limited to once per 3 days).
+        // E.ERASE1: an answer to "erase it permanently?" is settled before anything else reads this
+        // message -- a "yes, erase <the code>" must not be recorded on the way to erasing the code.
+        if let Some((reply, needle)) = self.handle_pending_erase(user_text).await {
+            let said = mind_types::erase_text::replace_ci(
+                user_text,
+                &needle.trim().to_ascii_lowercase(),
+                mind_types::erase_text::ERASED,
+            );
+            let _ = self.memory.append_message_scoped("user", &said, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+            return Ok(reply);
+        }
         let _ = emotion::record_turn(self.memory.as_ref(), &id.owner, user_text).await;
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.

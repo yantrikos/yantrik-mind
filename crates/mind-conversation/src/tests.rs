@@ -17985,3 +17985,113 @@ mod unreachable_model_is_named {
         assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
     }
 }
+
+// ── E.ERASE1 Phase C: forgetting from chat ─────────────────────────────────────────────────────
+
+const ERASE_SECRET: &str = "QX7-CANARY-4417";
+const ERASE_NEAR: &str = "QX7-CANARY-4418";
+
+fn erase_hits(path: &std::path::Path, needle: &str) -> usize {
+    mind_types::erase_text::file_hits(path, &needle.to_ascii_lowercase())
+}
+
+/// A file-backed engine holding the secret the way Phase A saw it land (a belief, a note, a
+/// transcript line, a decision event), with a near miss beside it.
+async fn erase_engine(tag: &str) -> (mind_types::scratch::Scratch, mind_types::scratch::Scratch, ConversationEngine) {
+    let db = mind_types::scratch::file(&format!("erase_conv_{tag}"), "db");
+    let log = mind_types::scratch::file(&format!("erase_conv_{tag}_decisions"), "jsonl");
+    let handle = MemoryHandle::spawn(&db.as_str(), 8).unwrap();
+    for statement in [format!("The storage locker code is {ERASE_SECRET}"), format!("The gym locker code is {ERASE_NEAR}")] {
+        handle
+            .remember_as_belief(mind_types::memory::BeliefAssertion {
+                statement,
+                polarity: 1.0,
+                weight: 1.5,
+                source_event: Some("test".into()),
+                provenance: "told".into(),
+            })
+            .await
+            .unwrap();
+    }
+    handle.record(format!("Note: locker code {ERASE_SECRET}")).await.unwrap();
+    handle.append_message("user", &format!("remember my storage locker code is {ERASE_SECRET}")).await.unwrap();
+    let recorder = Arc::new(mind_observability::DecisionLog::open(log.path()));
+    let mut e = mind_observability::DecisionEvent::new("t-erase", "user_message");
+    e.goal = Some(format!("remember the storage locker code {ERASE_SECRET}"));
+    recorder.record(e);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_recorder(recorder);
+    (db, log, conv)
+}
+
+/// E.ERASE1 (staging Phase A: chat "forget" erased nothing and claimed it was gone). The person asks;
+/// the tool counts and asks for a yes without repeating the secret; "yes" erases it from the store,
+/// the receipt ledger and the decision log -- 0 copies in any of their bytes -- and the reply says so.
+/// The near miss survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgetting_from_chat_erases_every_copy_after_a_yes() {
+    let (db, log, conv) = erase_engine("yes").await;
+    let receipts = std::path::PathBuf::from(format!("{}.read_receipts.jsonl", db.as_str()));
+    assert!(erase_hits(log.path(), ERASE_SECRET) > 0, "the decision log does not hold the secret; this test proves nothing");
+
+    let ask = conv.run_agent_tool("forget", &serde_json::json!({ "what": ERASE_SECRET })).await;
+    assert!(ask.contains("Ready to erase") && ask.contains("\"yes\""), "{ask}");
+    assert!(!ask.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "the tool repeated the secret: {ask}");
+
+    let reply = conv.handle_turn("yes").await.unwrap();
+    assert!(reply.starts_with("Erased") && reply.contains("no copy is left"), "{reply}");
+    let db_path = std::path::Path::new(db.path());
+    let wal = std::path::PathBuf::from(format!("{}-wal", db.as_str()));
+    for (what, path) in [("the store", db_path), ("its WAL", wal.as_path()), ("the receipts", receipts.as_path()), ("the decision log", log.path())] {
+        assert_eq!(erase_hits(path, ERASE_SECRET), 0, "{what} still holds the secret");
+    }
+    assert!(erase_hits(db_path, ERASE_NEAR) + erase_hits(&wal, ERASE_NEAR) > 0, "the near miss was erased too");
+    assert!(mind_observability::verify_log(log.path()).is_ok(), "the decision log no longer verifies");
+}
+
+/// "No" keeps it, and so does changing the subject: the pending erase is dropped, never run later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_no_or_a_new_subject_erases_nothing() {
+    for (tag, answer) in [("no", "no"), ("other", "what's the weather like")] {
+        let (db, _log, conv) = erase_engine(tag).await;
+        let _ = conv.run_agent_tool("forget", &serde_json::json!({ "what": ERASE_SECRET })).await;
+        let reply = conv.handle_turn(answer).await.unwrap();
+        if answer == "no" {
+            assert_eq!(reply, "Kept — nothing was erased.");
+        }
+        // A later "yes" must not erase what was dropped.
+        let _ = conv.handle_turn("yes").await;
+        let left = conv.memory.erase_literal(ERASE_SECRET, false).await.unwrap();
+        assert!(left.remaining_cells > 0, "[{answer}] the secret was erased without a yes to it");
+        assert!(erase_hits(std::path::Path::new(db.path()), ERASE_SECRET) > 0 || erase_hits(&std::path::PathBuf::from(format!("{}-wal", db.as_str())), ERASE_SECRET) > 0);
+    }
+}
+
+/// Nothing to erase is said plainly, and nothing is held for a yes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forgetting_what_isnt_there_says_so() {
+    let (_db, _log, conv) = erase_engine("absent").await;
+    let r = conv.run_agent_tool("forget", &serde_json::json!({ "what": "ZZ9-NOT-STORED-0000" })).await;
+    assert!(r.contains("nothing in my memory holds that exact text"), "{r}");
+    assert!(conv.pending_erase.lock().unwrap().is_none());
+}
+
+/// "Gone" is said only when every after-count is 0; otherwise the reply says what is left.
+#[test]
+fn the_erase_reply_never_claims_gone_while_a_copy_remains() {
+    use mind_types::erase_text::{EraseReport, LedgerRedaction};
+    let clean = EraseReport { remaining_bytes: Some(0), remaining_receipt_bytes: Some(0), ..Default::default() };
+    let ok: std::result::Result<LedgerRedaction, String> = Ok(LedgerRedaction::default());
+    assert!(ConversationEngine::erase_reply(&clean, &ok, 0).contains("no copy is left"));
+    for (report, decisions, log_left, why) in [
+        (EraseReport { remaining_cells: 2, ..clean.clone() }, ok.clone(), 0, "cells"),
+        (EraseReport { remaining_bytes: Some(3), ..clean.clone() }, ok.clone(), 0, "file bytes"),
+        (EraseReport { remaining_receipt_bytes: Some(1), ..clean.clone() }, ok.clone(), 0, "receipt bytes"),
+        (clean.clone(), ok.clone(), 4, "decision-log bytes"),
+        (clean.clone(), Err("does not verify".to_string()), 0, "a decision-log error"),
+    ] {
+        let reply = ConversationEngine::erase_reply(&report, &decisions, log_left);
+        assert!(!reply.contains("no copy is left") && reply.contains("NOT fully gone"), "{why}: {reply}");
+    }
+}

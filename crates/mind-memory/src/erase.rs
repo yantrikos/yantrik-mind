@@ -18,9 +18,8 @@
 //! Matching is ASCII case-insensitive, the same way sqlite's `lower()` is: a model that wrote the
 //! code in lower case still had the code.
 
-use std::collections::BTreeMap;
 
-pub use mind_types::erase_text::{erase_cell, replace_ci, ERASED};
+pub use mind_types::erase_text::{erase_cell, replace_ci, EraseReport, SweepCounts, ERASED};
 use mind_types::erase_text::is_structural;
 
 /// The shortest literal an erase takes. Shorter strings are words, not secrets, and a sweep for a
@@ -42,20 +41,6 @@ pub fn check_needle(needle: &str) -> Result<String, String> {
         return Err(format!("`{ERASED}` is what erased text becomes; it cannot itself be erased"));
     }
     Ok(n.to_ascii_lowercase())
-}
-
-/// What a sweep found (dry run) or rewrote (applied), by `table.column`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub struct SweepCounts {
-    pub cells: BTreeMap<String, usize>,
-    /// Rows deleted because their rewritten form collided with a row already there.
-    pub rows_deleted: usize,
-}
-
-impl SweepCounts {
-    pub fn total(&self) -> usize {
-        self.cells.values().sum()
-    }
 }
 
 /// The content tables: ordinary tables, minus sqlite's own, the engine's bookkeeping, every
@@ -160,37 +145,6 @@ pub fn raw_byte_hits(db_path: &str, needle_lc: &str) -> Option<usize> {
     if db_path == ":memory:" || db_path.is_empty() {
         return None;
     }
-    let needle = needle_lc.as_bytes();
-    let mut hits = 0;
-    for p in [db_path.to_string(), format!("{db_path}-wal")] {
-        if let Ok(bytes) = std::fs::read(&p) {
-            let lc = bytes.to_ascii_lowercase();
-            hits += lc.windows(needle.len()).filter(|w| *w == needle).count();
-        }
-    }
-    Some(hits)
-}
-
-/// What an erase found, did, and -- the part that matters -- left behind.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-pub struct EraseReport {
-    /// Beliefs tombstoned through the engine before the sweep.
-    pub beliefs_tombstoned: usize,
-    /// Memories tombstoned through the engine before the sweep.
-    pub memories_tombstoned: usize,
-    /// Cells rewritten, by `table.column`.
-    pub swept: SweepCounts,
-    /// AFTER the erase: content cells still holding the literal.
-    pub remaining_cells: usize,
-    /// AFTER the erase: occurrences in the raw bytes of the file and its WAL (`None`: in memory).
-    pub remaining_bytes: Option<usize>,
-    /// The read-receipt ledger beside the store, redacted and re-chained (`None`: a dry run).
-    pub receipts: Option<mind_types::erase_text::LedgerRedaction>,
-}
-
-impl EraseReport {
-    /// Nothing of the literal is left anywhere this store can see.
-    pub fn is_clean(&self) -> bool {
-        self.remaining_cells == 0 && self.remaining_bytes.unwrap_or(0) == 0
-    }
+    let f = mind_types::erase_text::file_hits;
+    Some(f(std::path::Path::new(db_path), needle_lc) + f(std::path::Path::new(&format!("{db_path}-wal")), needle_lc))
 }

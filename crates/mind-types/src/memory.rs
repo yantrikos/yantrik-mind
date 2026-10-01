@@ -1021,6 +1021,12 @@ pub trait MemoryFacade: Send + Sync {
     async fn forget_with_reason(&self, id: &str, _reason: &str) -> Result<bool> {
         self.forget(id).await
     }
+    /// E.ERASE1: erase `needle` from every copy this memory holds, or (`apply` false) count where
+    /// it lives without changing anything. The report's `remaining_*` fields are an after-count.
+    /// A memory that cannot erase says so -- it never pretends to have forgotten.
+    async fn erase_literal(&self, _needle: &str, _apply: bool) -> Result<crate::erase_text::EraseReport> {
+        Err(crate::error::MindError::Memory("this memory cannot erase".into()))
+    }
     /// Every tombstone on record: (proposition, reason, ts_ms). The audit
     /// story for deletions — readable after the fact, unlike the row it marks.
     async fn belief_tombstones(&self) -> Result<Vec<(String, String, u64)>> {

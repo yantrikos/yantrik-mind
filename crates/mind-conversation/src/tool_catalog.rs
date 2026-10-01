@@ -21,6 +21,7 @@ pub(crate) const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per st
 - remember {text}: store a durable fact about the user/world (do this when they tell you something lasting)\n\
 - add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due — 'when' like tomorrow / next week / in 3 days / July 23\n\
 - drop_reminder {words}: when they say to drop/cancel/stop tracking something, CLOSE it for real — this clears matching reminders, threads, watches, and planned items everywhere. Never just SAY something is dropped: call this, then report what it closed\n\
+- forget {what}: when they ask you to FORGET or DELETE something they told you (a code, a password, a private fact), ERASE that exact text from everywhere in your memory — it asks them to confirm first. 'what' is the exact words; recall first if you need them. Never say something is forgotten unless this tool erased it\n\
 - now {}: the current date and time\n\
 - myself {}: your LIVE setup — providers, model lanes, keys present, mounted packs. ANY question about your own configuration is answered from THIS, never from memory: your memories about your own code are history, not state\n\
 MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a skill for a task they cover):";
@@ -397,6 +398,11 @@ fn core_meta_schemas() -> Vec<Value> {
             "watch",
             "WATCH or LISTEN to a video/audio URL (YouTube, podcast, stream): reads published captions, hears it with the local speech model, and looks at sampled frames with the local vision model. Use this for ANY media link — never say you cannot watch video without calling it first",
             &[("url", true), ("question", false)],
+        ),
+        arg_schema(
+            "forget",
+            "when they ask you to FORGET or DELETE something they told you (a code, a password, a private fact): ERASE that exact text from everywhere in your memory. It asks them to confirm first. 'what' is the exact words (recall first if you need them). Never say something is forgotten unless this tool erased it",
+            &[("what", true)],
         ),
         arg_schema(
             "drop_reminder",

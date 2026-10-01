@@ -649,6 +649,12 @@ impl DecisionLog {
     /// Refuses a log that does not verify (a redaction must not launder a break), and an event that
     /// no longer parses as an event once rewritten. The rewrite is atomic: a temporary file renamed
     /// over the log; the claim is on the separate `.lock` file, so it survives the rename.
+    /// E.ERASE1's after-count for this log: occurrences of `needle_lc` in its raw bytes (0: no log).
+    pub fn literal_hits(&self, needle_lc: &str) -> usize {
+        let path = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        path.map_or(0, |p| mind_types::erase_text::file_hits(&p, needle_lc))
+    }
+
     pub fn redact(&self, needle_lc: &str) -> Result<mind_types::erase_text::LedgerRedaction, String> {
         use mind_types::erase_text::{erase_json, LedgerRedaction};
         let path = self.path.lock().unwrap_or_else(|e| e.into_inner()).clone();

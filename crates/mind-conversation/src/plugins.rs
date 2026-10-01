@@ -85,6 +85,7 @@ pub(crate) const CORE_RESTRICTED_TURN_CLASSES: &[(&str, RestrictedTurnClass)] = 
     ("browse", RestrictedTurnClass::Mutating),
     ("watch", RestrictedTurnClass::PublicRead),
     ("drop_reminder", RestrictedTurnClass::Mutating),
+    ("forget", RestrictedTurnClass::Mutating),
     ("now", RestrictedTurnClass::PrivateRead),
     ("myself", RestrictedTurnClass::PrivateRead),
     ("discover_tools", RestrictedTurnClass::PrivateRead),

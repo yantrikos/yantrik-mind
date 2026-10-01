@@ -11686,3 +11686,26 @@ Rewriting a line breaks every later chain value. So redaction must re-chain from
   - D1: a broken log rewritten.
   - D2: the marker names the literal.
   - D3: the head not updated, so the next append breaks the chain.
+
+**E.ERASE1 — PHASE C RESULT (the chat route): built.** Suite 2193/0.
+- **The `forget {what}` core tool:** in `CORE_HEAD` and `core_meta_schemas`, restricted class `Mutating`. It **dry-runs**: it counts where the exact text lives and changes nothing. It holds the text in `pending_erase`, which is in memory only and never written, and answers "(Ready to erase it permanently: it is in N place(s)… confirm with "yes"… Do NOT repeat the text)". Nothing found is said plainly, and nothing is held.
+- **The confirmation:** `handle_pending_erase` runs first in `handle_turn_as`, **before** the emotion recorder and the outward-action path, so the confirming message is not recorded on the way to the erase.
+  - Yes (the usual confirmations plus "erase it" or "delete it"; not "forget it", which means "never mind") runs `erase_everywhere`: the store and its receipts through `MemoryFacade::erase_literal`, then `DecisionLog::redact`, then the decision log's after-count.
+  - No → "Kept — nothing was erased."
+  - Anything else drops the pending erase, and a later "yes" erases nothing.
+- **`erase_reply`:** "Erased… no copy is left…" only when every after-count is 0. Otherwise it says what is left and "It is NOT fully gone yet". It always names what is out of reach: the system log and earlier backups.
+- **A guard that cannot fire today, recorded honestly:** the confirming message is redacted before it is stored, but confirmations are exact short phrases, so one cannot carry the secret.
+- **Plumbing:** `EraseReport`, `SweepCounts` and `file_hits` moved to `mind_types::erase_text`. There is a `MemoryFacade::erase_literal` default, which for a memory that can't erase returns an error rather than pretending. The report gains `remaining_receipt_bytes`. `DecisionLog::literal_hits` is added.
+- **Tests:**
+  - `forgetting_from_chat_erases_every_copy_after_a_yes`: the tool's answer never contains the secret. After "yes", 0 copies remain in the store, its WAL, the receipts and the decision log; the near miss survives; the decision log verifies.
+  - `a_no_or_a_new_subject_erases_nothing`: both cases, with a later "yes".
+  - `forgetting_what_isnt_there_says_so`.
+  - `the_erase_reply_never_claims_gone_while_a_copy_remains`: five residue cases.
+- **Mutants, six, each watched to fail a test:**
+  - C1: a yes does not erase.
+  - C2: the tool repeats the secret. It first only failed to compile; it was redone as a compiling mutant and killed.
+  - C3: the decision log is not redacted.
+  - C4: "gone" said regardless.
+  - C5: a new subject keeps the erase pending.
+  - C6: nothing found still waits for a yes.
+- **Still to confirm live:** Phase A rerun on staging, all the way to 0.

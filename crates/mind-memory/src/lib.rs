@@ -5781,6 +5781,7 @@ impl MemoryHandle {
             // The ledger lives beside the store, not in it: a recall's query can carry the literal
             // there. Redacted after the store, so nothing this erase did is left unrecorded.
             report.receipts = Some(self.receipts.redact(&lc).map_err(MindError::Memory)?);
+            report.remaining_receipt_bytes = self.receipts.path().map(|p| mind_types::erase_text::file_hits(p, &lc));
         }
         Ok(report)
     }
@@ -6437,6 +6438,10 @@ impl MemoryFacade for MemoryHandle {
         let (rid, reason) = (rid.to_string(), reason.to_string());
         self.call(|reply| Cmd::QuarantineRid { rid, reason, reply })
             .await
+    }
+
+    async fn erase_literal(&self, needle: &str, apply: bool) -> Result<mind_types::erase_text::EraseReport> {
+        MemoryHandle::erase_literal(self, needle, apply).await
     }
 
     async fn forget_with_reason(&self, id: &str, reason: &str) -> Result<bool> {

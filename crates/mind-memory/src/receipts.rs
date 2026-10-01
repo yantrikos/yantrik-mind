@@ -75,6 +75,11 @@ impl ReadReceiptLedger {
         }
     }
 
+    /// Where this ledger lives (`None`: recording is off).
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// Append one receipt. Best-effort: a ledger failure must never fail the
     /// read itself (availability), but it is loudly logged (auditability).
     pub fn append(&self, receipt: ReadReceipt) {

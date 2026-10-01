@@ -113,3 +113,55 @@ pub struct LedgerRedaction {
     /// The chain head after it, including the redaction line.
     pub new_head: Option<String>,
 }
+
+/// What a store sweep found (dry run) or rewrote (applied), by `table.column`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct SweepCounts {
+    pub cells: std::collections::BTreeMap<String, usize>,
+    /// Rows deleted because their rewritten form collided with a row already there.
+    pub rows_deleted: usize,
+}
+
+impl SweepCounts {
+    pub fn total(&self) -> usize {
+        self.cells.values().sum()
+    }
+}
+
+/// What an erase found, did, and -- the part that matters -- left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct EraseReport {
+    /// Beliefs tombstoned through the engine before the sweep.
+    pub beliefs_tombstoned: usize,
+    /// Memories tombstoned through the engine before the sweep.
+    pub memories_tombstoned: usize,
+    /// Cells rewritten (or, on a dry run, found), by `table.column`.
+    pub swept: SweepCounts,
+    /// AFTER the erase: content cells still holding the literal.
+    pub remaining_cells: usize,
+    /// AFTER the erase: occurrences in the raw bytes of the file and its WAL (`None`: in memory).
+    pub remaining_bytes: Option<usize>,
+    /// The read-receipt ledger beside the store, redacted and re-chained (`None`: a dry run).
+    pub receipts: Option<LedgerRedaction>,
+    /// AFTER the erase: occurrences in the receipt ledger's bytes (`None`: no ledger, or a dry run).
+    pub remaining_receipt_bytes: Option<usize>,
+}
+
+impl EraseReport {
+    /// Nothing of the literal is left anywhere this store or its receipt ledger can see.
+    pub fn is_clean(&self) -> bool {
+        self.remaining_cells == 0
+            && self.remaining_bytes.unwrap_or(0) == 0
+            && self.remaining_receipt_bytes.unwrap_or(0) == 0
+    }
+}
+
+/// Occurrences of `needle_lc` (ASCII case-insensitive) in a file's raw bytes; 0 for no file.
+pub fn file_hits(path: &std::path::Path, needle_lc: &str) -> usize {
+    let Ok(bytes) = std::fs::read(path) else { return 0 };
+    let (lc, n) = (bytes.to_ascii_lowercase(), needle_lc.as_bytes());
+    if n.is_empty() {
+        return 0;
+    }
+    lc.windows(n.len()).filter(|w| *w == n).count()
+}

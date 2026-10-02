@@ -11817,3 +11817,25 @@ The turn ended with nothing made. The wire was right (`nothing_was_run` is a con
 - **Results, 00:21–00:24 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 8.1 s.
 - **After:** the windows were unchanged and Hermes was restored as the active mind.
 - **Next:** this build is cleared for VM 561 between missions, on Pranab's OK. 561 now runs kimi-k3 as primary (OS #563).
+
+## E.SANDBOX1 — PREREG: only a message that IS a run request runs in the sandbox
+
+**Seen on VM 561** (Mind 7798a30, via yantrik-os-9d). The Director's first mission message, twice, was answered "Ran it in the sandbox (no network, resource-limited): stderr: prog.sh: 1: Syntax error: "(" unexpected — exit code: 2". Both were long English briefs. One mentioned a backticked `mkdir -p ~/Projects/starfall`; the other carried an `os_act {…}` example.
+
+**Cause:** `parse_code_request` (skills.rs) runs ahead of the agent loop, and its trigger is loose:
+- the message only has to **contain** "run ", "execute ", "exec " or "eval " anywhere;
+- it only has to **contain** a language word anywhere, "command" included;
+- with no code fence, the code is **everything after the first `:`** in the whole message.
+
+So a brief that says "run" and "command" anywhere has the rest of its prose executed as a shell script.
+
+**Plan:** the message must BE a run request.
+- Its opening clause (up to the first `:`, code fence or newline; at most 80 characters; a leading "please" or "can/could you" allowed) starts with run, execute, exec or eval.
+- The language comes from that clause or the fence's info string, never from the rest of the message.
+- The code is the fenced block, or what follows the opening clause's `:`.
+
+**Kill criteria:**
+1. The existing `code_request_parsing` cases still hold: `run python: …`, `run this rust:` + fence, `run shell: ls -la`, and the two negatives.
+2. Two Director-shaped briefs, prose that mentions "run", "command", a backticked `mkdir -p …` and an `os_act {…}` example, parse to **None**.
+3. "please run bash: echo hi" and "Run this command: mkdir -p ~/x" still parse.
+4. Each is watched to fail under a mutant.

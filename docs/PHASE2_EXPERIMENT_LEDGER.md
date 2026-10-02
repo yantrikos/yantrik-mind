@@ -12036,3 +12036,10 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
   - P7: any tool counted.
   - P8: 127 not explained.
 - **Not built: F47b.** 9d traced turn 44's steps 2 and 4: `"wait": true` was refused with "`wait` is a number of seconds", behind the 400-character note. I took the model's 300-character cut on failures to be hiding the reason and widened it for commands. The mutant (P9) **survived**. The outcome classifier reads any answer over 240 characters as content (Ok), so the refusal already had the 4,000-character command budget and reached the model. Only the journal's 120-character line was cut. The change was reverted and nothing ships for it. OS #566 puts the reason first; the OS's `wait: true` acceptance removes the cause.
+
+## Mind gate with Mind e248474 (F46 + F47) on VM 520: PASS
+
+- **Setup:** installed by yantrik-os-9d ("installed e248474 ba65260114125a8e attached"). BUILD says commit=e248474; the binary's sha256 is f1aa969e…, matching the bundle.
+- **Before the run:** `yos describe editor` and `yos describe notes` both read closed.
+- **Results, 02:02–02:05 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.6 s.
+- **Next:** 9d is asking Pranab directly for e248474 on 561, which replaces 814cc5e.

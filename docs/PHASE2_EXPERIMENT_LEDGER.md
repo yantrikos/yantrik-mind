@@ -12068,3 +12068,48 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
 - **Side notes from yantrik-os-9d:**
   - The "(801 characters total)" on 561 is `describe shell` clipping each message to 600 characters (control.rs MESSAGE_CLIP). The Lens window shows F47's line in full.
   - Starfall reached FINISHED at 02:29:08Z with a clean page check by the Director, 6 minutes after the restart.
+
+## E.DOOR3 — PREREG: sensitive grants only through a door the person's processes cannot replace
+
+**Found by yantrik-os-4c's security review of Hermes-on-YantrikDB.** It goes live when OS #574 sets `YANTRIK_PERSON_UID`.
+- The door validator (`mind-memory-mcp/src/door.rs`) trusts whatever answers on `$YANTRIK_MIND_RUN/app-shell.sock`.
+- `/run/yantrik-minds` is person-owned (2750). Any process running as the person can unlink the socket, bind its own, and answer `memory_validate` for any `mem-` credential with `recall_health`, `recall_finance` and `household`.
+- The only check on the answer is `person_uid`, a value the impostor chooses.
+- SO_PEERCRED cannot separate the impostor from the real shell, because both run as the person.
+
+**Plan (option 3 of 4c's three, checkable once option 1 lands):**
+- Before trusting an answer, the validator looks at the door's directory with `symlink_metadata`. The door counts as **fixed** only when that directory:
+  - is a real directory, not a symlink;
+  - is owned by root (uid 0);
+  - has no group or other write bit (`mode & 0o022 == 0`).
+  Then no non-root process can replace the socket in it. The check runs on every validation, not once at start.
+- When the door is not fixed, `recall_health`, `recall_finance` and `household` are removed from the answer's grants before the footing is built, and the server says so in its log.
+- `recall_ordinary`, `remember` and `believe` stand either way.
+
+**Residual, stated, not fixed here:** until the OS makes the door fixed (4c's option 1: a root-owned directory with the shell's socket from a systemd socket unit), any process running as the person can still impersonate the door and obtain the ordinary grants for a made-up credential. That is the #448 limit ("third-party harnesses run as the person, so their per-mind grants are advisory") becoming live for ordinary memory. It is Pranab's to accept or to wait on.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. A validator whose door is not fixed, given an answer granting `recall_ordinary`, `believe`, `recall_health`, `recall_finance` and `household`, yields a footing with exactly `recall_ordinary` and `believe`.
+2. The same answer through a fixed door yields all five.
+3. `door_dir_is_fixed`, on (uid, mode, symlink, dir):
+   - true only for (0, 0o755, no, yes) and (0, 0o750, no, yes);
+   - false for uid 1000 at 0o2750, for root 0o775, for root 0o757, for a symlink, and for a non-directory.
+4. Every existing door and auth test holds.
+
+**E.DOOR3 — RESULT: built, every kill criterion held.** Suite 2207/0.
+- **The rule:**
+  - `Validator` asks `fixed_door` on every validation. `over_door` wires it to `door_is_fixed(socket)`: `symlink_metadata` of the socket's directory, then `door_dir_is_fixed(uid, mode, is_symlink, is_dir)`.
+  - A validator built any other way treats its door as replaceable.
+  - Through a replaceable door, `NEEDS_A_FIXED_DOOR` (`recall_health`, `recall_finance`, `household`) is stripped from the answer before `AgentFooting::from_validation`, with one log line.
+- **Tests:**
+  - `sensitive_grants_need_a_door_the_person_cannot_replace`: criteria 1–3, plus "an untold validator does not trust its door";
+  - `the_door_check_reads_the_real_directory` (unix only): a real tempdir at 0777, then 0755 (fixed only when root owns it), then through a symlink.
+  - All 16 door and auth tests that already existed hold (criterion 4).
+- **Mutants, each watched to fail on an assertion:**
+  - D1: never stripped.
+  - D2: an untold validator trusts its door.
+  - D3: any owner.
+  - D4: any mode.
+  - D5: group write allowed.
+  - D6: a symlink allowed. It first survived, because the symlink case also had is_dir false; the case was isolated and D6 then failed.
+- **Residual, unchanged and stated in the prereg:** ordinary grants stay impersonable by any process of the person's until the OS makes the door's directory root-owned.

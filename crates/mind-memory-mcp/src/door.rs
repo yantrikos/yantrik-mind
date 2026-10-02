@@ -72,9 +72,36 @@ pub fn ask(socket: &std::path::Path, sha: &str) -> Result<Option<Value>, String>
 
 type Asker = Box<dyn Fn(&str) -> Result<Option<Value>, String> + Send + Sync>;
 
+/// E.DOOR3: the grants a validated answer may open only through a door the person's processes
+/// cannot replace. The shell runs as the person, so whatever answers on a person-writable socket
+/// may be any process of theirs -- it could grant itself these. The ordinary grants stand either way.
+pub const NEEDS_A_FIXED_DOOR: [&str; 3] = ["recall_health", "recall_finance", "household"];
+
+/// E.DOOR3: is the door's directory one only root can change? A real directory (not a symlink),
+/// owned by root, with no group or other write bit. Then no non-root process can unlink the socket
+/// in it and bind its own.
+pub fn door_dir_is_fixed(uid: u32, mode: u32, is_symlink: bool, is_dir: bool) -> bool {
+    !is_symlink && is_dir && uid == 0 && mode & 0o022 == 0
+}
+
+/// E.DOOR3: the directory holding `socket`, looked at now.
+#[cfg(unix)]
+pub fn door_is_fixed(socket: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(dir) = socket.parent() else {
+        return false;
+    };
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) => door_dir_is_fixed(m.uid(), m.mode(), m.file_type().is_symlink(), m.is_dir()),
+        Err(_) => false,
+    }
+}
+
 /// Turns credentials into footings, asking the desktop and remembering a live answer briefly.
 pub struct Validator {
     ask: Asker,
+    /// E.DOOR3: may an answer open `NEEDS_A_FIXED_DOOR`? Asked on every validation.
+    fixed_door: Box<dyn Fn() -> bool + Send + Sync>,
     own_person_uid: u32,
     cache: Mutex<HashMap<String, (Instant, AgentFooting)>>,
 }
@@ -83,12 +110,20 @@ impl Validator {
     /// Validate through the door at `socket`, for the person this Mind belongs to.
     #[cfg(unix)]
     pub fn over_door(socket: std::path::PathBuf, own_person_uid: u32) -> Self {
+        let door = socket.clone();
         Self::with_asker(Box::new(move |sha| ask(&socket, sha)), own_person_uid)
+            .with_fixed_door(Box::new(move || door_is_fixed(&door)))
     }
 
     /// Validate with any asker -- the door in production, a script in tests.
     pub fn with_asker(ask: Asker, own_person_uid: u32) -> Self {
-        Self { ask, own_person_uid, cache: Mutex::new(HashMap::new()) }
+        Self { ask, fixed_door: Box::new(|| false), own_person_uid, cache: Mutex::new(HashMap::new()) }
+    }
+
+    /// E.DOOR3: how to tell whether the door is fixed. Without this, it is not.
+    pub fn with_fixed_door(mut self, fixed: Box<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.fixed_door = fixed;
+        self
     }
 
     /// The footing a credential stands for right now, or None. Every failure is None.
@@ -100,7 +135,7 @@ impl Validator {
                 return Some(f.clone());
             }
         }
-        let answer = match (self.ask)(&sha) {
+        let mut answer = match (self.ask)(&sha) {
             Ok(Some(a)) => a,
             Ok(None) => {
                 self.forget(&sha);
@@ -116,6 +151,17 @@ impl Validator {
                 return None;
             }
         };
+        if !(self.fixed_door)() {
+            if let Some(Value::Array(grants)) = answer.get_mut("grants") {
+                let before = grants.len();
+                grants.retain(|g| !g.as_str().is_some_and(|g| NEEDS_A_FIXED_DOOR.contains(&g.trim())));
+                if grants.len() != before {
+                    eprintln!(
+                        "[memory] health, finance and household grants withheld: the door could be replaced by any of                          the person's processes (it needs a root-owned directory nobody else can write)"
+                    );
+                }
+            }
+        }
         let (footing, unknown) = match AgentFooting::from_validation(&answer, self.own_person_uid) {
             Ok(x) => x,
             Err(e) => {
@@ -199,6 +245,57 @@ mod tests {
         assert!(read_answer("").is_err());
         assert!(read_answer("not json").is_err());
         assert!(read_answer(r#"{"jsonrpc":"2.0","result":{"accepted":true},"id":1}"#).is_err(), "no answer is not 'unknown'");
+    }
+
+    /// E.DOOR3 (yantrik-os-4c's review): the person's processes can replace a door in a directory
+    /// they can write, so only a root-owned, unwritable one may open health, finance and household.
+    #[test]
+    fn sensitive_grants_need_a_door_the_person_cannot_replace() {
+        let answer = serde_json::json!({"v": 1, "person_uid": 1000, "mind": "hermes", "attach": "hermes:c1@s1",
+            "grants": ["recall_ordinary", "believe", "recall_health", "recall_finance", "household"], "valid_for_ms": 0});
+        let grants_through = |fixed: bool| {
+            let a = answer.clone();
+            let v = Validator::with_asker(Box::new(move |_| Ok(Some(a.clone()))), 1000).with_fixed_door(Box::new(move || fixed));
+            let f = v.footing("mem-x").expect("an ordinary footing either way");
+            ["recall_ordinary", "believe", "recall_health", "recall_finance", "household"]
+                .into_iter()
+                .filter(|g| f.has(g))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(grants_through(false), vec!["recall_ordinary", "believe"]);
+        assert_eq!(grants_through(true), vec!["recall_ordinary", "believe", "recall_health", "recall_finance", "household"]);
+        let a = answer.clone();
+        let default = Validator::with_asker(Box::new(move |_| Ok(Some(a.clone()))), 1000).footing("mem-y").unwrap();
+        assert!(!default.has("recall_health"), "a validator told nothing about its door treats it as replaceable");
+
+        assert!(door_dir_is_fixed(0, 0o40755, false, true));
+        assert!(door_dir_is_fixed(0, 0o40750, false, true));
+        assert!(!door_dir_is_fixed(1000, 0o42750, false, true), "today's /run/yantrik-minds: the person's");
+        assert!(!door_dir_is_fixed(0, 0o40775, false, true), "group-writable");
+        assert!(!door_dir_is_fixed(0, 0o40757, false, true), "other-writable");
+        assert!(!door_dir_is_fixed(0, 0o40755, true, true), "a symlink, whatever it points at");
+        assert!(!door_dir_is_fixed(0, 0o100644, false, false), "not a directory");
+    }
+
+    /// E.DOOR3 on a real directory: other-writable is never fixed; 0755 is fixed only when root owns it.
+    #[cfg(unix)]
+    #[test]
+    fn the_door_check_reads_the_real_directory() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("ym-door3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("app-shell.sock");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!door_is_fixed(&socket), "an other-writable directory");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let owner = std::fs::metadata(&dir).unwrap().uid();
+        assert_eq!(door_is_fixed(&socket), owner == 0, "0755, owned by uid {owner}");
+        let link = std::env::temp_dir().join(format!("ym-door3-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(!door_is_fixed(&link.join("app-shell.sock")), "a symlinked directory");
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn live(uid: u32, valid_for_ms: u64) -> Value {

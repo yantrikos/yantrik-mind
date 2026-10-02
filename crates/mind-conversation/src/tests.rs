@@ -16910,6 +16910,34 @@ mod desktop_consent_and_stall_wiring {
         );
         assert!(!r.prompts.iter().any(|p| p.contains("that action already ran")), "a refused act was called 'already ran'");
         assert_eq!(acts_reached(&r).len(), 1, "the identical refused call reached the desktop again: {:?}", r.reached);
+        // E.ARENA1-F44: resent again after the fix was shown -- the turn ends, and says what happened.
+        assert!(r.reply.contains("nothing was created") && r.reply.contains("takes named parameters"), "{}", r.reply);
+    }
+
+    /// E.ARENA1-F44 (VM 561, f2ba31e): yos-mcp's refusal ends with a ready-to-copy call; the note
+    /// LEADS with it, and a second identical resend ends the turn with a plain account.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_with_a_copyable_call_leads_with_it_and_a_second_resend_stops() {
+        const WITH_CALL: &str = "Done \u{2014} REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Send this, with each <placeholder> filled in: {\"app\":\"notes\",\"action\":\"new_note\",\"args\":{\"title\":\"<title>\",\"text\":\"<text>\"}}";
+        let bare = serde_json::json!({"app": "notes", "action": "new_note", "args": "- [ ] 1. index.html"});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_act", bare),
+            ],
+            vec!["Notes is open."],
+            vec![WITH_CALL, WITH_CALL],
+        )
+        .await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("(Send exactly this next, with each <placeholder> filled in: {\"app\":\"notes\",\"action\":\"new_note\"")),
+            "the note did not lead with the copyable call"
+        );
+        assert!(r.reply.starts_with("I couldn't do that: the desktop refused `notes.new_note`, and nothing was created."), "{}", r.reply);
+        assert_eq!(acts_reached(&r).len(), 1, "{:?}", r.reached);
+        assert_eq!(r.prompts.iter().filter(|p| p.contains("Send exactly this next")).count(), 1, "the fix was shown more than once before stopping");
     }
 
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.

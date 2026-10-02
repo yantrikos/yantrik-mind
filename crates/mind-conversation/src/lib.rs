@@ -1869,6 +1869,18 @@ fn looks_like_non_answer(text: &str) -> bool {
 /// …") and a refusal from the gate. An action that ran and reported back — done, or didn't go
 /// through — goes to the model, which can take the next step, correct the call, or say what
 /// happened.
+/// What a mutating MCP call that went through the action runtime says it did. "Done — " in front,
+/// unless the server's own answer is a refusal: yos-mcp answers "REFUSED — nothing was run" without
+/// flagging an error, and "Done — REFUSED — nothing was run" made "Done" the first word a model
+/// (and once, a person) read on a call where nothing happened (VM 561, yantrik-os-9d).
+fn mcp_ran_text(output: &str) -> String {
+    if output.trim_start().starts_with("REFUSED") {
+        output.trim_start().to_string()
+    } else {
+        format!("Done — {output}")
+    }
+}
+
 /// The start of the question `forget` puts to the person when it found the text (E.ERASE1).
 pub(crate) const FORGET_ASK: &str = "I found it in ";
 
@@ -12494,7 +12506,7 @@ WINDOW: all-time, latest 200
                             match decision {
                                 ActionDecision::Deny { reason } => format!("(I can't run {name} — {reason}.)"),
                                 ActionDecision::Execute => match runtime.execute(req).await {
-                                    Ok(r) if r.ok => format!("Done — {}", r.output),
+                                    Ok(r) if r.ok => mcp_ran_text(&r.output),
                                     Ok(r) => format!("That didn't go through: {}", r.output),
                                     Err(e) => format!("That didn't go through: {e}"),
                                 },
@@ -13118,6 +13130,8 @@ Open reminders you're carrying for them:",
         let mut last_call = String::new();
         // E.ARENA1-F43: the desktop's refusal of the last call, when it refused it.
         let mut last_refusal: Option<String> = None;
+        // E.ARENA1-F44: refused calls the model has already been shown the fix for.
+        let mut refusal_told: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
         // seen. Both exist because comparing against `last_call` alone was not enough — see the
         // barren-step guard below for the live failure that proved it.
@@ -13758,6 +13772,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // the guard that belongs here, since it counts wasted steps rather than assuming
                 // the first one is fatal.
                 eprintln!("[agent] step {step}: repeated {tool} call — nudging it onward");
+                // E.ARENA1-F44: resent unchanged AFTER the fix was shown -- stop, and say so plainly.
+                if let Some(refusal) = last_refusal.as_deref() {
+                    if !refusal_told.insert(call_sig.clone()) {
+                        eprintln!("[agent] step {step}: a refused {tool} was resent after its fix was shown \u{2014} stopping");
+                        let reply = desktop::refusal_stop_reply(&args, refusal);
+                        let _ = self.memory.append_message_scoped("user", user_text, id.write_scope()).await;
+                        let _ = self.memory.append_message_scoped("assistant", &reply, id.write_scope()).await;
+                        return Ok(reply);
+                    }
+                }
                 // E.ARENA1-F43: a repeat of a call the desktop REFUSED is told so, with the fix.
                 // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
                 let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or_else(|| {
@@ -16612,5 +16636,18 @@ mod turn_routing_regressions {
             unattempted_side_effect("what is on the current page", &reads),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod mcp_ran_text_tests {
+    /// VM 561: a refusal is passed on as itself, never as "Done — REFUSED — …"; F43 still sees it.
+    #[test]
+    fn a_refusal_is_never_called_done() {
+        let refused = "REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text.";
+        let shown = super::mcp_ran_text(refused);
+        assert!(!shown.starts_with("Done"), "{shown}");
+        assert!(crate::desktop::nothing_was_run(&shown), "F43 no longer recognises the refusal: {shown}");
+        assert_eq!(super::mcp_ran_text("notes.new_note: accepted, settled."), "Done \u{2014} notes.new_note: accepted, settled.");
     }
 }

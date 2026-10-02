@@ -11794,3 +11794,18 @@ The turn ended with nothing made. The wire was right (`nothing_was_run` is a con
 - The second repeat ends the turn: the reply contains "nothing was created" and the refusal's reason, and the identical call reached the desktop once.
 - An act that ran still meets F12.
 - Each is watched to fail under a mutant.
+
+**E.ARENA1-F44 — RESULT: built, every kill criterion held.** Suite 2197/0.
+- **The note leads with the fix.** `desktop::copyable_call` finds yos-mcp's "Send this, with each <placeholder> filled in: {…}", and F43's note then starts "(Send exactly this next, with each <placeholder> filled in: {…} -- that exact call you just repeated was REFUSED…".
+- **A second resend ends the turn.** The loop keeps `refusal_told`, the refused calls whose fix was already shown. A second identical resend writes both transcript lines and returns `desktop::refusal_stop_reply`: "I couldn't do that: the desktop refused `notes.new_note`, and nothing was created. What it said: … I was shown how to fix the call and sent it unchanged again, so I stopped rather than keep repeating it."
+- **The MCP write wrapper:** `mcp_ran_text` no longer prefixes a REFUSED answer with "Done — ".
+- **Tests:**
+  - `a_refusal_with_a_copyable_call_leads_with_it_and_a_second_resend_stops`: the call leads, the fix is shown once, the reply is the plain account, and the desktop is reached once.
+  - The F43 test now also expects the stop.
+  - `a_repeated_act_that_ran…` is unchanged.
+  - `mcp_ran_text_tests`.
+- **Mutants, each watched to fail:**
+  - H1: never stops.
+  - H2: stops on the first repeat, so the fix is never shown.
+  - H3: the copyable call does not lead.
+  - D1: a refusal called "Done".

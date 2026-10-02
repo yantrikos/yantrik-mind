@@ -809,11 +809,46 @@ pub(crate) const UNSAVED_NOTE: &str =
 /// times. Say it was refused, that the same call cannot succeed, and quote what the desktop said to
 /// change (yos-mcp's refusals name the fix: "takes named parameters: title, …").
 pub(crate) fn repeated_refusal_note(refusal: &str) -> String {
+    let why = refusal_reason(refusal, 500);
+    // E.ARENA1-F44 (VM 561, f2ba31e): with the call it should send buried after the reason, the
+    // model resent the refused one three times. A ready-to-copy call leads.
+    match copyable_call(refusal) {
+        Some(call) => format!(
+            "(Send exactly this next, with each <placeholder> filled in: {call} -- that exact call you just \
+             repeated was REFUSED and nothing ran; sent again unchanged it will be refused again. What the \
+             desktop said: {why})"
+        ),
+        None => format!(
+            "(that exact call was REFUSED and nothing ran -- sending it again unchanged will be refused again. \
+             What the desktop said: {why} Change the call the way it says, or say plainly what you could not do.)"
+        ),
+    }
+}
+
+/// The desktop's reason for a refusal: what follows "refused:", clipped to `max` chars.
+pub(crate) fn refusal_reason(refusal: &str, max: usize) -> String {
     let why = refusal.split_once("refused:").map_or(refusal, |(_, w)| w).trim();
-    let why: String = why.chars().take(500).collect();
+    why.chars().take(max).collect()
+}
+
+/// The ready-to-copy call a refusal offers (yos-mcp's `bare_value_refusal`: "Send this, with each
+/// <placeholder> filled in: {…}"), when it offers one.
+pub(crate) fn copyable_call(refusal: &str) -> Option<String> {
+    let lc = refusal.to_ascii_lowercase();
+    let from = lc.find("send this")?;
+    let start = from + refusal[from..].find('{')?;
+    let end = refusal.rfind('}')?;
+    (end > start).then(|| refusal[start..=end].to_string())
+}
+
+/// E.ARENA1-F44: what the person is told when the model resent a refused call after being shown
+/// the fix. The turn ends here: more nudges were wasted steps, and a composed answer could claim
+/// the thing was made.
+pub(crate) fn refusal_stop_reply(args: &serde_json::Value, refusal: &str) -> String {
+    let what = act_target(ACT, args).map_or_else(|| "that".to_string(), |(app, action)| format!("`{app}.{action}`"));
     format!(
-        "(that exact call was REFUSED and nothing ran -- sending it again unchanged will be refused again. \
-         What the desktop said: {why} Change the call the way it says, or say plainly what you could not do.)"
+        "I couldn't do that: the desktop refused {what}, and nothing was created. What it said: {} I was shown how to fix the call and sent it unchanged again, so I stopped rather than keep repeating it.",
+        refusal_reason(refusal, 300)
     )
 }
 

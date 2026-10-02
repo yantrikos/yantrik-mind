@@ -11982,3 +11982,10 @@ The model was handed step 1's output, with step 1 still unticked, after it had j
   - N4: a command counted as a change made.
   - N5': every command exempted from both dedupes, the over-broad fix, killed by criterion 2.
   - N5, the nudge removed alone, survives correctly: the done-call dedupe holds an immediate repeat on its own.
+
+## Mind gate with Mind 814cc5e (F46) on VM 520: PASS
+
+- **Setup:** installed by yantrik-os-9d ("installed 814cc5e becf8bc5537fc6b7 attached"). BUILD says commit=814cc5e; the binary's sha256 is a909ac85…, matching the bundle.
+- **Before the run:** 9d reported the editor open. When I checked there was no `yantrik-text-editor` process, and `yos describe editor` read "editor is closed". 9d's `pgrep -f` probably matched its own ssh command line.
+- **Results, 01:38–01:42 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.7 s.
+- **Next:** cleared for 561 on Pranab's earlier word ("Yes, after the gate").

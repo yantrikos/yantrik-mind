@@ -17699,6 +17699,31 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(looks(&r), looks(&settled) + 1, "exactly one extra look, and only when unsettled");
     }
 
+    /// E.ARENA1-F45 through the loop: VM 561's `cat PLAN.md` comes back unsettled; the loop does not
+    /// look at the shell again, and the model is shown the output's last line.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_commands_output_reaches_the_model_and_the_shell_is_not_looked_at() {
+        const DONE: &str = include_str!("../fixtures/desktop/act_agent_run_done_92fecdf.txt");
+        let cat = || {
+            Step::Call(
+                "mcp.yantrik-os.os_act",
+                serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "cat ~/Projects/starfall/PLAN.md"}}),
+            )
+        };
+        let prompt = "Read the Starfall plan and tell me the last step.";
+        let r = run_with(prompt, vec![cat()], vec![SHELL, SHELL, SHELL], vec![DONE]).await;
+        assert!(!r.prompts.iter().any(|p| p.contains("Looked again")), "a command was judged by a look at the shell");
+        assert!(
+            r.prompts.iter().any(|p| p.contains("-> The command finished: exit code 0")
+                && p.contains("END-OF-PLAN: ship the demo build to ~/Projects/starfall/dist")),
+            "the model never saw the output"
+        );
+        let settled = DONE.replace("settled: False", "settled: True");
+        let s = run_with(prompt, vec![cat()], vec![SHELL, SHELL, SHELL], vec![settled.as_str()]).await;
+        let looks = |r: &Run| r.reached.iter().filter(|(t, _)| t.ends_with("os_describe")).count();
+        assert_eq!(looks(&r), looks(&s), "no extra look for an unsettled command");
+    }
+
     /// E.ARENA1-F26 through the loop, on R3's T3 arguments and the real add_event result (185b4c0):
     /// the re-add with `reminder_minutes` never reaches the desktop; a refused call still can (F22).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,13 @@
+Done — Nobody was asked about this. The desktop is in `bypass` mode and they have allowed shell.agent_run for this session, so it ran straight away; in `ask` mode this would have put a card in front of the person. It has been written into the machine's record of unasked actions, which they can read from the mode chip in the status bar. Report it as something you did, not as something you were permitted.
+
+Yantrik — desktop screen, 1 windows open, calendar, email and perception not running
+accepted: True, settled: False
+revision: 676de581d9f10eec
+{
+  "exit_code": 0,
+  "cwd_after": "/home/yantrik",
+  "tail": "24. Milestone 24: build the starfield layer, wire the input handler, test frame time\n25. Milestone 25: build the starfield layer, wire the input handler, test frame time\n26. Milestone 26: build the starfield layer, wire the input handler, test frame time\n27. Milestone 27: build the starfield layer, wire the input handler, test frame time\n28. Milestone 28: build the starfield layer, wire the input handler, test frame time\n29. Milestone 29: build the starfield layer, wire the input handler, test frame time\n30. Milestone 30: build the starfield layer, wire the input handler, test frame time\n31. Milestone 31: build the starfield layer, wire the input handler, test frame time\n32. Milestone 32: build the starfield layer, wire the input handler, test frame time\n33. Milestone 33: build the starfield layer, wire the input handler, test frame time\n34. Milestone 34: build the starfield layer, wire the input handler, test frame time\n35. Milestone 35: build the starfield layer, wire the input handler, test frame time\n36. Milestone 36: build the starfield layer, wire the input handler, test frame time\n37. Milestone 37: build the starfield layer, wire the input handler, test frame time\n38. Milestone 38: build the starfield layer, wire the input handler, test frame time\n39. Milestone 39: build the starfield layer, wire the input handler, test frame time\nEND-OF-PLAN: ship the demo build to ~/Projects/starfall/dist",
+  "job": "j7f3a"
+}
+state: {"screen":"desktop","windows":1,"focused":"terminal"}
+(more state: `yos describe shell`)

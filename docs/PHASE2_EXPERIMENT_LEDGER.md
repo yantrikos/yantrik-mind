@@ -11850,3 +11850,63 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
   - S2: the language from the whole message.
   - S3: any colon, not the clause's.
   - S4: no length cap.
+
+## E.ARENA1-F45 — PREREG: a command's output reaches the model, first and whole
+
+**Seen on VM 561** (Mind 7798a30, kimi-k3, via yantrik-os-9d, 00:40 UTC):
+- The Director's agent ran `os_act {"app":"shell","action":"agent_run","args":{"command":"cat ~/Projects/starfall/PLAN.md"}}` and called it again and again. The output never reached the model.
+
+**Cause, read from yos and yos-mcp on yantrik-os 92fecdf:**
+- **The order of the answer.** It arrives as:
+  1. "Done — " (the Mind's own prefix);
+  2. yos-mcp's grant note, about 400 characters;
+  3. the shell's summary line;
+  4. `accepted: True, settled: False` (agent_run defers);
+  5. `revision:`;
+  6. the result as indented JSON, `{"exit_code", "cwd_after", "tail", "job"}` or `{"running": true, "job"}`;
+  7. the state line.
+- **The look-again (F23).** `settled: False` makes F23 look at the shell again and append "Judge the action from this, not from the first line", which points the model at a screen summary for a `cat`.
+- **The clip.** The work log keeps only the first 900 characters of a successful result, which is about where the JSON begins.
+
+**Plan.** These steps key off the **action** (shell `agent_run`, `agent_job`, `agent_input`), not off the answer's shape. The shape is about to change (9d is moving the result first on the OS side).
+1. `settle_look` declines these actions. A command's "settled: false" means the command was started, not that the screen is stale.
+2. When the answer carries the JSON result, it is rebuilt with the result first:
+   - finished: exit code and cwd, then the tail, fenced as content rather than instructions;
+   - still running: the job id and the exact `agent_job` call to wait for it.
+   The note follows, while the shell summary, the settled line and the state line are dropped. An answer without that JSON is left unchanged.
+3. The work log gives these actions a budget of 4,000 characters instead of 900.
+
+**Kill criteria:**
+1. On the answer as yos-mcp builds it today, with a tail of 1,500 characters, the work-log entry begins with the exit code and contains the tail's last line.
+2. The same answer with `running: true` yields an entry naming the job and an `agent_job` call with that job id.
+3. `settle_look` is None for `agent_run`, and still Some for `files_go` and `open_app`.
+4. Two loop tests:
+   - a scripted agent_run answering `settled: False` gets no os_describe call;
+   - an unsettled `files_go` still gets one.
+5. An answer with no result JSON comes back byte-for-byte.
+6. Each criterion is watched to fail under a compiling mutant.
+
+**E.ARENA1-F45 — RESULT: built, every kill criterion held.** Suite 2201/0.
+- **The rule:** `desktop::runs_a_command` covers shell `agent_run`, `agent_job` and `agent_input`.
+  - `settle_look` declines them.
+  - The loop passes their answer through `command_first`:
+    - finished: "The command finished: exit code N, working directory now D.", then the output fenced as content;
+    - still running: "The command is still running, as job J. To wait for it, call os_act {…agent_job…}".
+  - The note follows the result. The shell summary, settled, revision and state lines are dropped.
+  - The work log gives these actions `COMMAND_BUDGET` = 4,000 characters.
+- **Fixtures:** `act_agent_run_{done,running}_92fecdf.txt` are **built from yos and yos-mcp's code**, not captured. The OS needs the agent token to call agent_run, so no capture was possible from outside. On the old path a 900-character cut drops the output's last line; the test asserts that too.
+- **Tests:**
+  - `a_commands_answer_leads_with_its_output_whole`: criteria 1, 2 and 5;
+  - `a_command_is_not_looked_at_again`: criterion 3;
+  - `a_commands_output_reaches_the_model_and_the_shell_is_not_looked_at` (loop): criteria 1 and 4;
+  - the unsettled `files_go` loop test is unchanged and still passes: criterion 4b.
+- **Mutants, each watched to fail on an assertion:**
+  - K1: the look-again comes back.
+  - K2: the loop does not rebuild.
+  - K3: the 900 cut.
+  - K4: the output is dropped.
+  - K5: running is not recognised.
+  - K6: any app's agent_run.
+  - K7: a non-command result is rebuilt.
+  - K8: the shell summary is kept.
+- **Residual:** the fixtures are not a capture. The first real agent_run on 520 or 561 is the check. 9d's OS change (result first, note last, no settled line) leaves `command_first` returning None, while the skipped look-again and the 4,000 budget still apply by action.

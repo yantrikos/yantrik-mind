@@ -13999,6 +13999,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 None => obs,
             };
+            // E.ARENA1-F45: a command's answer leads with what the command did.
+            let obs = match desktop::runs_a_command(&tool, &args).then(|| desktop::command_first(&obs)).flatten() {
+                Some(first) => first,
+                None => obs,
+            };
             // E.ARENA1-F30: the app said it was still loading -- look once more after a moment.
             // E.ARENA1-F34: or its window is up and it has not answered yet (yantrik-os #464).
             let starting = desktop::still_starting(&obs);
@@ -14183,7 +14188,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // the person rather than worked around, and only a real break is worth one retry. The
             // model was left to re-derive that from the same words the classifier had just read.
             let head = if outcome == crate::tool_outcome::Outcome::Ok {
-                900
+                // E.ARENA1-F45: a command's output is what it was run for.
+                if desktop::runs_a_command(&tool, &args) { desktop::COMMAND_BUDGET } else { 900 }
             } else {
                 300
             };

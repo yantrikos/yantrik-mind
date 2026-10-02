@@ -1,0 +1,12 @@
+Done — Nobody was asked about this. The desktop is in `bypass` mode and they have allowed shell.agent_run for this session, so it ran straight away; in `ask` mode this would have put a card in front of the person. It has been written into the machine's record of unasked actions, which they can read from the mode chip in the status bar. Report it as something you did, not as something you were permitted.
+
+Yantrik — desktop screen, 1 windows open, calendar, email and perception not running
+accepted: True, settled: False
+revision: 676de581d9f10eec
+{
+  "running": true,
+  "job": "j9c21",
+  "tail": "Compiling starfall v0.1.0"
+}
+state: {"screen":"desktop","windows":1,"focused":"terminal"}
+(more state: `yos describe shell`)

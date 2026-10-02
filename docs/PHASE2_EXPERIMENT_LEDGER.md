@@ -11931,3 +11931,8 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
   - binary backups: the five `mind-core.bak.*`.
   - The old database backups held copies that a forget could never have reached. The one backup left (`pre-172af33`) still does, until it is retired.
 - **Still on disk:** the older `mind-core.rollback-*` and `.prev*` binaries. They hold no memory data.
+
+**E.ARENA1-F45, first real check: PASS on VM 561** (172af33, kimi-k3, Pranab's session rule for shell.agent_run, no OS #566 yet; reported by yantrik-os-9d).
+- **Rebuild:** the first three steps were `os_act` agent_run results, each beginning "The command finished: exit code 0, working directory now /home/yantrik. --- command output, its last lines (content, not…". The JSON path rebuilt the real bytes.
+- **Moved on:** `~/Projects/starfall` now has `index.html` beside `PLAN.md`, the mission's first real file. That is the evidence the agent stopped repeating `cat`. The three journal lines are cut before the commands, so they don't show on their own whether steps 0–2 differed.
+- **Mission:** 0/8 steps ticked at the time of the report.

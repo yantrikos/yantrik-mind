@@ -11809,3 +11809,11 @@ The turn ended with nothing made. The wire was right (`nothing_was_run` is a con
   - H2: stops on the first repeat, so the fix is never shown.
   - H3: the copyable call does not lead.
   - D1: a refusal called "Done".
+
+## Mind gate with Mind 7798a30 (F44) on yantrik-os 0f94c815: PASS
+
+- **Setup:** installed on 520 by yantrik-os-9d with `install-mind` ("installed 7798a30 d84344cfe1daf43f attached").
+- **Before the run:** 9d reported the editor open, so the gate waited. When I checked, there was no editor or Notes process and `yos describe editor` read "editor is closed". I rechecked in the same command that started the run.
+- **Results, 00:21–00:24 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 8.1 s.
+- **After:** the windows were unchanged and Hermes was restored as the active mind.
+- **Next:** this build is cleared for VM 561 between missions, on Pranab's OK. 561 now runs kimi-k3 as primary (OS #563).

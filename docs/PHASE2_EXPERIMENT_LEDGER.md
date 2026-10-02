@@ -12060,3 +12060,11 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
 - **The system line:** the reply ended "⚠️ To be clear (from the system, not the model): `/opt/yantrik-live/director/check-page ~/Projects/starfall/index.html` (exit code 1), `cd /home/yantrik/Projects/starfall && cat PLAN.md && cat index.html && cat style…` (exit code 1), …". The false "CLEAN" is contradicted in the same message.
 - **The Mind acted on the error:** it read check-page's SyntaxError, fixed game.js and wrote the missing code (stars set gameOver, level = floor(score/100)+1, start and restart screens). It did not untick, but after the turn the Director's check was clean, and 9d confirmed it independently. The one remaining gap is the unwired "Sound: OFF" button.
 - **Proposed by 9d, not built:** a system line on every reply composed after the wall budget. In this turn F47 already caught the false claim, so the extra line would rest on n=1 with nothing missed. It waits for a budget-ended false claim with no failed command to anchor on.
+
+## Mind gate with Mind e248474 on yantrik-os 43ce7322 (#565, #567) on VM 520: PASS
+
+- **Reattach check before the run:** one yantrik-ui pid (975703), started 21:29:28 local. Both harness.sock files have mtime 21:29:29, the new shell's. BUILD says commit=e248474. Editor and Notes described as closed.
+- **Results, ~02:31–02:34 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.5 s. The shell's new actions (#565 volume and brightness, #567 panels) broke nothing.
+- **Side notes from yantrik-os-9d:**
+  - The "(801 characters total)" on 561 is `describe shell` clipping each message to 600 characters (control.rs MESSAGE_CLIP). The Lens window shows F47's line in full.
+  - Starfall reached FINISHED at 02:29:08Z with a clean page check by the Director, 6 minutes after the restart.

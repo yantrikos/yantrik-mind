@@ -12253,3 +12253,16 @@ Nothing changes in the Mind, so the effect is the OS answer's alone.
 - **The OS fix suffices** if all 5 runs pass and all 5 replies say the folder was created or made. None may say it already existed, was refused, was not created, or that nothing was done.
 - **Otherwise,** any pass whose reply denies or understates the creation means a Mind-side fix (a work-log note on a stat of a path this turn created), preregistered separately.
 - **A run that fails** is read on its own and counts toward neither.
+
+## Mind gate with Mind cef6127 on yantrik-os b22b1865 (nightly candidate: main with #586, so #574 reverted) on VM 520: PASS 7/7
+
+- **Before the run:**
+  - `yantrik-update` name: yantrik-os-v0.1.0-1138-gb22b1865;
+  - BUILD says commit=cef6127; the binary's sha256 is d7dbde0b…;
+  - one yantrik-ui pid (1302094), started 14:05:17; both harness.sock files show 14:05:18;
+  - editor and Notes closed.
+- **Results, ending 19:09 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 10.0 s.
+- **The T5 reply again contradicts the outcome**, this time in the other direction: "The folder arena-minljg does not exist… the path check returned not_found… the files screen was still loading and the operation was busy". The folder exists.
+  - **Likely cause:** `files_new_folder` defers (settled: False), so the stat ran before the creation landed.
+  - **Covered by:** 4c's queued OS change (`{"created"|"existed": path}`, settled: true when synchronous), measured by E.T5REPORT1.
+  - **A second instance:** the arena's false-claim count does not see an understated reply.

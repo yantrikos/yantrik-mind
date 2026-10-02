@@ -566,9 +566,25 @@ async fn serve(
                     }
                 })
             };
+            // E.STATUS1: the turn's status lines, as the work card's one live activity line.
+            let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let latest: Latest = Default::default();
+            let started = std::time::Instant::now();
+            let status_fwd = {
+                let (address, session) = (address.to_string(), session.to_string());
+                tokio::spawn(forward_status(
+                    status_rx,
+                    move |ev| call(address.clone(), EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev }), timeout),
+                    latest.clone(),
+                ))
+            };
             let mut thinking = tokio::spawn(async move {
-                mind_conversation::TURN_CALLS
-                    .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context)))
+                mind_conversation::TURN_STATUS
+                    .scope(
+                        status_tx,
+                        mind_conversation::TURN_CALLS
+                            .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                    )
                     .await
             });
             // A turn can outlast the desktop's 90-second presence window, and this loop does not
@@ -588,11 +604,18 @@ async fn serve(
                             timeout,
                         )
                         .await;
+                        // E.STATUS1: a long model call sends nothing else; say it is still going.
+                        let now = latest.lock().ok().and_then(|l| l.clone());
+                        if let Some(text) = now {
+                            let ev = serde_json::json!({ "kind": "status", "text": heartbeat_status(&text, started.elapsed()) });
+                            let _ = call(address.to_string(), EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev }), timeout).await;
+                        }
                     }
                 }
             };
             // E.CARDS1: every card lands before the answer does (the sender went with the turn).
             let _ = forward.await;
+            let _ = status_fwd.await;
             done
         };
 
@@ -621,6 +644,107 @@ async fn serve(
                 .await;
             }
         }
+    }
+}
+
+/// E.STATUS1: the latest status line of a turn, for the heartbeat to repeat.
+type Latest = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// E.STATUS1: a status line as the desktop's work card shows it, or None for a line that is not a
+/// status (reasoning, tokens, lane, detail -- each starts with its `\u{1}` marker). Code-authored
+/// lines only, so nothing from the model or a tool rides here.
+pub(crate) fn status_event(line: &str) -> Option<serde_json::Value> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('\u{1}') {
+        return None;
+    }
+    let t = t
+        .replace("using mcp.yantrik-os.os_act", "doing an action on the desktop")
+        .replace("using mcp.yantrik-os.os_describe", "looking at the desktop")
+        .replace("mcp.yantrik-os.", "the desktop's ");
+    let mut c = t.chars();
+    let text: String = match c.next() {
+        Some(f) => f.to_uppercase().chain(c).take(120).collect(),
+        None => return None,
+    };
+    Some(serde_json::json!({ "kind": "status", "text": text }))
+}
+
+/// E.STATUS1: the latest status, with how long the turn has run, to the heartbeat's 30 seconds.
+pub(crate) fn heartbeat_status(text: &str, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs() / 30 * 30;
+    format!("{text} ({secs} s)")
+}
+
+/// E.STATUS1: send each status line as a `harness.event` of kind `status`, in order, and keep the
+/// latest for the heartbeat. A desktop that does not take `harness.event` gets none after the first.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn forward_status<C, F>(mut rx: tokio::sync::mpsc::UnboundedReceiver<String>, send: C, latest: Latest)
+where
+    C: Fn(serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let mut listening = true;
+    while let Some(line) = rx.recv().await {
+        let Some(ev) = status_event(&line) else {
+            continue;
+        };
+        if let Ok(mut l) = latest.lock() {
+            *l = ev["text"].as_str().map(str::to_string);
+        }
+        if !listening {
+            continue;
+        }
+        if let Err(msg) = send(ev).await {
+            if msg.contains("unknown method") {
+                listening = false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_status_line_is_shown_and_nothing_else_is() {
+        assert_eq!(status_event("thinking…"), Some(serde_json::json!({ "kind": "status", "text": "Thinking…" })));
+        assert_eq!(status_event("using mcp.yantrik-os.os_act…").unwrap()["text"], "Doing an action on the desktop…");
+        assert_eq!(status_event("using mcp.yantrik-os.os_describe…").unwrap()["text"], "Looking at the desktop…");
+        for mark in [
+            mind_conversation::THINKING_MARK,
+            mind_conversation::TOKEN_MARK,
+            mind_conversation::LANE_MARK,
+            mind_conversation::DETAIL_MARK,
+        ] {
+            assert_eq!(status_event(&format!("{mark}the model's own words")), None, "{mark:?}");
+        }
+        assert_eq!(heartbeat_status("Thinking…", Duration::from_secs(61)), "Thinking… (60 s)");
+    }
+
+    #[tokio::test]
+    async fn status_lines_reach_the_desktop_in_order() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        for l in ["grounding from memory…", &format!("{}secret reasoning", mind_conversation::THINKING_MARK), "thinking…", "using web_search…"] {
+            tx.send(l.to_string()).unwrap();
+        }
+        drop(tx);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = sent.clone();
+        let latest: Latest = Default::default();
+        forward_status(
+            rx,
+            move |ev: serde_json::Value| {
+                log.lock().unwrap().push(ev["text"].as_str().unwrap_or("").to_string());
+                std::future::ready(Ok(serde_json::Value::Null))
+            },
+            latest.clone(),
+        )
+        .await;
+        assert_eq!(*sent.lock().unwrap(), vec!["Grounding from memory…", "Thinking…", "Using web_search…"]);
+        assert_eq!(latest.lock().unwrap().as_deref(), Some("Using web_search…"), "the heartbeat repeats the latest");
     }
 }
 

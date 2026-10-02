@@ -1485,6 +1485,17 @@ pub(crate) fn emit_progress(msg: &str) {
     let _ = TURN_PROGRESS.try_with(|tx| {
         let _ = tx.send(msg.to_string());
     });
+    let _ = TURN_STATUS.try_with(|tx| {
+        let _ = tx.send(msg.to_string());
+    });
+}
+
+tokio::task_local! {
+    /// E.STATUS1: a listener for the turn's status lines only -- the desktop harness, which shows
+    /// one live activity line. Its own channel, because attaching `TURN_PROGRESS` also switches
+    /// compose to a streaming call (`chat_streamed_to_progress`), and showing what the Mind is doing
+    /// must not change how it calls its model. It also hears the marked lines; the listener filters.
+    pub static TURN_STATUS: tokio::sync::mpsc::UnboundedSender<String>;
 }
 
 /// Marks a progress message as REASONING rather than a status line, so the transport can route it

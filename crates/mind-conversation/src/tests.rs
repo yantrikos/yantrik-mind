@@ -17826,6 +17826,21 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.STATUS1: a status-only listener hears the turn's status lines, and attaching it does not
+    /// stand in for `TURN_PROGRESS` (which would switch compose to a streaming call).
+    #[tokio::test]
+    async fn a_status_listener_hears_status_lines_without_becoming_a_progress_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let progress_attached = crate::TURN_STATUS
+            .scope(tx, async {
+                crate::emit_progress("thinking…");
+                crate::TURN_PROGRESS.try_with(|_| ()).is_ok()
+            })
+            .await;
+        assert_eq!(rx.recv().await.as_deref(), Some("thinking…"));
+        assert!(!progress_attached, "the status listener became a progress channel");
+    }
+
     /// E.SLASH1 at the real entry (`handle_turn_as`), VM 561 turn 60's "/new": answered by code, with
     /// a model and a desktop standing by that would act if they were reached.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

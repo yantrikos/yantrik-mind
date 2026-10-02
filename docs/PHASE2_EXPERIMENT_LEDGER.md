@@ -12174,3 +12174,45 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
   - An answer the host drops, because its chat is gone, still cannot reach the person. The Mind now logs it, and 4c is adding the host-side log.
   - "/new" does not start a fresh conversation in the Mind; it says so, truthfully.
 - **Note:** `target/debug/incremental` had grown to 71 GB and filled C:. It was deleted; builds run with CARGO_INCREMENTAL=0 for now.
+
+## E.STATUS1 — PREREG: the desktop sees what the Mind is doing while it works
+
+**Seen on VM 561** (Pranab's main complaint, via yantrik-os-4c): during a Mind turn the chat shows nothing for minutes.
+- The harness forwards only tool cards (`harness.event` tool_start / tool_end).
+- The engine already writes true status lines to `TURN_PROGRESS`: "grounding from memory…", "thinking…", "thinking (continuing)…", "using <tool>…". The harness never attaches that channel, so they go nowhere.
+- On 561 the minutes went to model calls (AIG at 25–60 s each, retries, 429s), which emit no card at all.
+
+**Shape, agreed with 4c for Chat v2's work card:** `harness.event` with `event = {kind: "status", text}`.
+
+**Plan:**
+1. The harness attaches `TURN_PROGRESS` for the turn. A forwarder sends each **unmarked** line (no `\u{1}` marker, so never reasoning, tokens, lane or detail text) as a status event:
+   - first letter capitalised;
+   - `mcp.yantrik-os.os_act` read as "an action on the desktop", `os_describe` as "looking at the desktop";
+   - at most 120 characters.
+2. The 30-second heartbeat also sends the latest status with the time it has been running, e.g. "Thinking… (60 s)". A long model wait is then visible and stays true.
+3. A desktop that answers "unknown method" for `harness.event` stops getting status events for the turn, as cards already do.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `status_event`:
+   - "thinking…" → `{kind:"status", text:"Thinking…"}`;
+   - "using mcp.yantrik-os.os_act…" → text "Doing an action on the desktop…";
+   - a `THINKING_MARK`, `TOKEN_MARK`, `LANE_MARK` or `DETAIL_MARK` line → None.
+2. `forward_status`, with scripted lines and a fake desktop: one status event per unmarked line, in order; none for marked lines; the latest status is kept for the heartbeat.
+3. `heartbeat_status("Thinking…", 61 s)` → "Thinking… (60 s)", rounded down to the 30-second beat. Nothing is sent before any status exists.
+
+**E.STATUS1 — RESULT: built, every kill criterion held.** Suite 2212/0 here; the unix-only serve loop is compiled and tested on staging (below).
+- **The rule:**
+  - `emit_progress` also writes to a new status-only task-local, `TURN_STATUS`. It deliberately is not `TURN_PROGRESS`, which would switch compose to a streaming model call.
+  - The harness attaches it per turn. `forward_status` sends each unmarked line as `harness.event {kind:"status", text}` (`status_event`: capitalised, desktop tools named in words, at most 120 characters; every `\u{1}`-marked line is dropped) and keeps the latest.
+  - The 30-second heartbeat re-sends it as "<latest> (N s)".
+- **Tests:**
+  - `status_tests::a_status_line_is_shown_and_nothing_else_is` (criteria 1 and 3);
+  - `status_tests::status_lines_reach_the_desktop_in_order` (criterion 2);
+  - `a_status_listener_hears_status_lines_without_becoming_a_progress_channel`.
+- **Mutants, each watched to fail on an assertion:**
+  - T1: marked lines shown.
+  - T2: latest not kept.
+  - T3: heartbeat not on the beat.
+  - T4: the desktop action not named.
+  - T5: emit_progress does not feed the listener.
+- **Not done:** the inference layer's own retries (a 502 or a 429 from AIG) emit nothing yet, so a retry shows as the same "Thinking… (N s)", which is true but less specific.

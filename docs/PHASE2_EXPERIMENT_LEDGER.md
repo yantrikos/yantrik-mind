@@ -11910,3 +11910,10 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
   - K7: a non-command result is rebuilt.
   - K8: the shell summary is kept.
 - **Residual:** the fixtures are not a capture. The first real agent_run on 520 or 561 is the check. 9d's OS change (result first, note last, no settled line) leaves `command_first` returning None, while the skipped look-again and the 4,000 budget still apply by action.
+
+## Mind gate with Mind 172af33 (F45 + E.SANDBOX1) on VM 520: PASS
+
+- **Setup:** installed by yantrik-os-9d with `install-mind` ("installed 172af33 4936547473f15fd1 attached"). BUILD says commit=172af33; the binary's sha256 is c3a19ce9…, matching the bundle.
+- **Before the run:** 9d reported the editor open. Pranab said "run it anyway". When I checked, there was no editor or Notes process, and `yos describe editor` read "editor is closed".
+- **Results, 00:54–00:58 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.7 s.
+- **Not exercised:** no gate task runs agent_run, so F45's first real test is VM 561's Starfall mission (Pranab: "Mind now, #566 later").

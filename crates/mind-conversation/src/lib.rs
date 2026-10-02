@@ -13757,7 +13757,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // (it spun on `home` 5× in testing). If the call is identical to the last one, we already
             // have that result in the work log — stop and compose the answer instead of refetching.
             let call_sig = format!("{tool}|{args}");
-            if call_sig == last_call {
+            // E.ARENA1-F46: waiting on a running command again is how it is waited for.
+            if call_sig == last_call && !desktop::waits_on_a_job(&tool, &args) {
                 // NUDGE, do not end the turn. This used to `break`, which killed every multi-step
                 // request at its first repeat: asked for three package download counts, the loop
                 // fetched the first, re-requested the SAME url at step 1, and stopped — returning
@@ -13877,7 +13878,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             last_call = call_sig.clone();
             // E.ARENA1-F41: a scroll, wait, key press or back is meant to be repeated -- "scroll,
             // read, scroll" pages a site; only the immediate identical repeat above is nudged.
-            if !desktop::repeatable(&tool) {
+            if !desktop::repeatable(&tool) && !desktop::waits_on_a_job(&tool, &args) {
                 done_calls.insert(call_sig.clone());
             }
             // What this step is about to run, with the arguments that survived the egress cleaner —

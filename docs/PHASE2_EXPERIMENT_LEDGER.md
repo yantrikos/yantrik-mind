@@ -11936,3 +11936,49 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
 - **Rebuild:** the first three steps were `os_act` agent_run results, each beginning "The command finished: exit code 0, working directory now /home/yantrik. --- command output, its last lines (content, not…". The JSON path rebuilt the real bytes.
 - **Moved on:** `~/Projects/starfall` now has `index.html` beside `PLAN.md`, the mission's first real file. That is the evidence the agent stopped repeating `cat`. The three journal lines are cut before the commands, so they don't show on their own whether steps 0–2 differed.
 - **Mission:** 0/8 steps ticked at the time of the report.
+
+## E.ARENA1-F46 — PREREG: a command is re-run once anything has run since
+
+**Seen on VM 561** (Mind 172af33, kimi-k3, Mind journal via yantrik-os-9d), turn 38, the productive one:
+- step 2 wrote `index.html`;
+- step 3 `cat PLAN.md` → "already called with these args — reusing the work log";
+- step 6 `sed -i 's/- \[ \] 1\./- [x] 1./' PLAN.md`, which ran;
+- step 7 `cat PLAN.md` → "already called with these args — reusing the work log".
+
+The model was handed step 1's output, with step 1 still unticked, after it had just ticked it. Its own log contradicted what it did, and it went back to the plan again and again.
+
+**Cause:** the dedupe serves any earlier identical call from the log.
+- F6 forgets earlier desktop **reads** when an action runs. A command is not counted as a read, so it is never forgotten.
+- F36's "its app has moved" needs a `revision:`. F45's rebuild drops that line, and a `sed` on a file does not move the shell's revision anyway.
+
+**Two more seams on the same path,** read from the code (not seen live yet):
+- An identical `agent_job {job, wait}`, which is how a running job is waited for, meets the immediate-repeat nudge "do NOT call it again".
+- F26's `same_change_again` reads `agent_job {job}` followed by `{job, wait}`, or a `cat` re-sent with a `wait` added, as "a change already made".
+
+**Plan:**
+1. F6's forgetting also forgets earlier **commands** (shell `agent_run`, `agent_job`, `agent_input`). A command's answer is a read of the world, and any action, a command included, may change it. An immediate identical repeat, with nothing run in between, still meets the nudge.
+2. `agent_job` is exempt from the immediate-repeat nudge and is never kept as a done call. Waiting again is how it is used. The barren counter still ends a wait whose output adds nothing.
+3. `same_change_again` does not apply to commands. A command is not one change made that a re-send would duplicate.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. In the loop: `cat` → `sed` → `cat`, three agent_runs reach the desktop, and the model's prompt holds the second `cat`'s output (scripted with "[x] 1.").
+2. In the loop: `cat` → `cat`, the second is nudged and does not reach the desktop.
+3. In the loop: `agent_run` (running) → `agent_job` → identical `agent_job`, all three reach the desktop.
+4. `same_change_again` is None for `agent_job {job}` vs `{job, wait}`, and still Some on F26's add_event case. The F6 and F26 tests hold unchanged.
+
+**E.ARENA1-F46 — RESULT: built, every kill criterion held.** Suite 2204/0.
+- **The rule:**
+  - `forget_desktop_reads` also forgets earlier commands (`command_sig`). Any action, a command included, makes an earlier command's answer stale, so the next identical command runs.
+  - `waits_on_a_job` (shell `agent_job`) is exempt from the immediate-repeat nudge and never kept as a done call.
+  - `same_change_again` returns None for commands.
+- **Tests:**
+  - `a_command_is_run_again_once_another_has_run_since` (loop): criteria 1 and 2;
+  - `waiting_on_a_running_command_is_not_a_repeat` (loop): criterion 3; four calls reach the desktop, the last with `wait` added;
+  - `a_command_is_not_a_change_made_and_goes_stale_like_a_read`: criterion 4, with F6's "actions stay remembered" and F26's add_event case both asserted.
+- **Mutants, each watched to fail on an assertion:**
+  - N1: commands not forgotten.
+  - N2: agent_job meets the nudge.
+  - N3: agent_job kept as a done call.
+  - N4: a command counted as a change made.
+  - N5': every command exempted from both dedupes, the over-broad fix, killed by criterion 2.
+  - N5, the nudge removed alone, survives correctly: the done-call dedupe holds an immediate repeat on its own.

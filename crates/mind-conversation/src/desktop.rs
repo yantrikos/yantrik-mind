@@ -363,7 +363,21 @@ pub(crate) fn forget_desktop_reads(done: &mut std::collections::HashSet<String>)
     done.retain(|sig| {
         !DESKTOP_READS.iter().chain(PURE_WEB_READS.iter()).any(|r| sig.starts_with(&format!("{r}|")))
             && !read_act_sig(sig)
+            // E.ARENA1-F46: a command's answer is a read of the world, stale after any action.
+            && !command_sig(sig)
     });
+}
+
+/// E.ARENA1-F46: a `tool|args` signature of a command (`runs_a_command`).
+fn command_sig(sig: &str) -> bool {
+    sig.split_once('|')
+        .and_then(|(tool, args)| serde_json::from_str::<serde_json::Value>(args).ok().map(|a| runs_a_command(tool, &a)))
+        .unwrap_or(false)
+}
+
+/// E.ARENA1-F46: `shell.agent_job` -- waiting on a running command, which is meant to be repeated.
+pub(crate) fn waits_on_a_job(tool: &str, args: &serde_json::Value) -> bool {
+    act_target(tool, args).is_some_and(|(app, action)| app == TWIN_HOST && action == "agent_job")
 }
 
 /// E.ARENA1-F40: an app name as yos-mcp's `surface_name` folds it (yantrik-os #479) -- trimmed,
@@ -1098,6 +1112,11 @@ pub(crate) fn same_change_again(
     args: &serde_json::Value,
     made: &[(serde_json::Value, String)],
 ) -> Option<String> {
+    // E.ARENA1-F46: a command is not one change made that a re-send would duplicate -- `agent_job
+    // {job}` then `{job, wait}` is waiting twice.
+    if runs_a_command(tool, args) {
+        return None;
+    }
     let (app, action) = act_target(tool, args)?;
     let now = inner_args(args);
     if now.is_empty() {
@@ -2084,6 +2103,25 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F46: a command is never "a change already made", and is forgotten like a read.
+    #[test]
+    fn a_command_is_not_a_change_made_and_goes_stale_like_a_read() {
+        let job = |args: serde_json::Value| serde_json::json!({"app": "shell", "action": "agent_job", "args": args});
+        let made = vec![(job(serde_json::json!({"job": "j1"})), "The command is still running".to_string())];
+        assert_eq!(same_change_again(ACT, &job(serde_json::json!({"job": "j1", "wait": 30})), &made), None);
+        let add = |a: serde_json::Value| serde_json::json!({"app": "calendar", "action": "add_event", "args": a});
+        let added = vec![(add(serde_json::json!({"title": "x", "date": "2026-09-30"})), "added".to_string())];
+        assert!(same_change_again(ACT, &add(serde_json::json!({"title": "x", "date": "2026-09-30", "time": "15:00"})), &added).is_some(), "F26 holds");
+        let cat = format!("{ACT}|{}", serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "cat x"}}));
+        let new = format!("{ACT}|{}", serde_json::json!({"app": "editor", "action": "new", "args": "x"}));
+        let mut done: std::collections::HashSet<String> = [cat.clone(), new.clone()].into_iter().collect();
+        forget_desktop_reads(&mut done);
+        assert!(!done.contains(&cat), "a command's answer is stale after an action");
+        assert!(done.contains(&new), "actions stay remembered (F6)");
+        assert!(waits_on_a_job(ACT, &job(serde_json::json!({"job": "j1"}))));
+        assert!(!waits_on_a_job(ACT, &serde_json::json!({"app": "shell", "action": "agent_run"})));
     }
 
     #[test]

@@ -17724,6 +17724,62 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(looks(&r), looks(&s), "no extra look for an unsettled command");
     }
 
+    /// A command's answer in yos-mcp's shape at 92fecdf, with `result` as the JSON yos prints.
+    fn command_answer(result: serde_json::Value) -> String {
+        format!(
+            "Done \u{2014} Yantrik \u{2014} desktop screen, 1 windows open\naccepted: True, settled: False\nrevision: 676de581\n{}",
+            serde_json::to_string_pretty(&result).unwrap()
+        )
+    }
+
+    fn shell_cmd(action: &str, args: serde_json::Value) -> Step {
+        Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": action, "args": args}))
+    }
+
+    /// E.ARENA1-F46, VM 561 turn 38's shape: `cat PLAN.md`, the `sed` that ticks step 1, `cat` again.
+    /// The second `cat` runs, and the model reads the ticked plan -- not step 1's copy from the log.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_is_run_again_once_another_has_run_since() {
+        let cat = || shell_cmd("agent_run", serde_json::json!({"command": "cat ~/Projects/starfall/PLAN.md"}));
+        let sed = shell_cmd("agent_run", serde_json::json!({"command": "cd ~/Projects/starfall && sed -i 's/- \\[ \\] 1\\./- [x] 1./' PLAN.md"}));
+        let done = |tail: &str| command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": tail}));
+        let (before, ticked, quiet) = (done("- [ ] 1. index.html"), done("- [x] 1. index.html"), done(""));
+        let prompt = "Carry on with the Starfall plan.";
+        let r = run_with(prompt, vec![cat(), sed, cat()], vec![SHELL, SHELL, SHELL], vec![&before, &quiet, &ticked]).await;
+        let runs = reached_acts(&r).iter().filter(|(_, a)| a == "agent_run").count();
+        assert_eq!(runs, 3, "{:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("- [x] 1. index.html")), "the model never read the ticked plan");
+        assert!(!r.prompts.iter().any(|p| p.contains("already called with exactly these arguments")), "served from the log");
+
+        let again = run_with(prompt, vec![cat(), cat()], vec![SHELL, SHELL, SHELL], vec![&before, &before]).await;
+        let runs = reached_acts(&again).iter().filter(|(_, a)| a == "agent_run").count();
+        assert_eq!(runs, 1, "nothing ran in between: the repeat is nudged, {:?}", again.reached);
+    }
+
+    /// E.ARENA1-F46: waiting on a running command is repeated by design -- `agent_job` again, and
+    /// again with `wait` added, both reach the desktop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn waiting_on_a_running_command_is_not_a_repeat() {
+        let running = |tail: &str| command_answer(serde_json::json!({"running": true, "job": "j9c21", "tail": tail}));
+        let (r1, r2, r3) = (running("Compiling a"), running("Compiling b"), running("Compiling c"));
+        let finished = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": "Finished"}));
+        let r = run_with(
+            "Build Starfall.",
+            vec![
+                shell_cmd("agent_run", serde_json::json!({"command": "cargo build", "wait": 30})),
+                shell_cmd("agent_job", serde_json::json!({"job": "j9c21"})),
+                shell_cmd("agent_job", serde_json::json!({"job": "j9c21"})),
+                shell_cmd("agent_job", serde_json::json!({"job": "j9c21", "wait": 30})),
+            ],
+            vec![SHELL, SHELL, SHELL],
+            vec![&r1, &r2, &r3, &finished],
+        )
+        .await;
+        let actions: Vec<String> = reached_acts(&r).into_iter().map(|(_, a)| a).collect();
+        assert_eq!(actions, vec!["agent_run", "agent_job", "agent_job", "agent_job"], "{:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("exit code 0")), "the finished wait reached the model");
+    }
+
     /// E.ARENA1-F26 through the loop, on R3's T3 arguments and the real add_event result (185b4c0):
     /// the re-add with `reminder_minutes` never reaches the desktop; a refused call still can (F22).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -12043,3 +12043,10 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
 - **Before the run:** `yos describe editor` and `yos describe notes` both read closed.
 - **Results, 02:02–02:05 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.6 s.
 - **Next:** 9d is asking Pranab directly for e248474 on 561, which replaces 814cc5e.
+
+## VM 561 on Mind e248474 (F45–F47), on Pranab's word given directly to yantrik-os-9d
+
+- **Install:** "installed e248474 ba65260114125a8e attached", between turns (the Mind idle, the Director stopped). The backend is kimi-k3 first; the harness attached.
+- **Director from OS #569:** after each turn it loads the Starfall page (`check-page`). While the page throws, currently a SyntaxError at game.js:65 (the F47 turn's broken `sed`), the next prompt leads with the error, asks for false ticks to be undone, and refuses FINISHED.
+- **Mission:** the earlier FINISHED, which the old Director accepted, was moved aside, and the mission restarted at 02:23:20Z.
+- **Pending:** F47's real-bytes check, the first reply after a failed command ending in "⚠️ To be clear (from the system, not the model): …".

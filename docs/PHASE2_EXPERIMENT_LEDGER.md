@@ -11917,3 +11917,17 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
 - **Before the run:** 9d reported the editor open. Pranab said "run it anyway". When I checked, there was no editor or Notes process, and `yos describe editor` read "editor is closed".
 - **Results, 00:54–00:58 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.7 s.
 - **Not exercised:** no gate task runs agent_run, so F45's first real test is VM 561's Starfall mission (Pranab: "Mind now, #566 later").
+
+## Production .90 on Mind 172af33 (E.ERASE1 + F43–F45 + E.SANDBOX1), on Pranab's direct word (2026-10-02)
+
+- **Build:** on .90 (glibc 2.36) from `ym-autodeploy`, detached at 172af33. The binary is 81e21a94f7908d7f, stamped 172af33. Nothing changed in the schema or Cargo.lock since v0.2.1.
+- **Swap, 01:07 UTC:**
+  - live 68159676d4704c2f (v0.2.1) → 81e21a94f7908d7f;
+  - backup `mind.db.pre-172af33` passed its integrity check, schema 54, along with the two ledgers;
+  - after the start: active, 1 process, schema 54, Telegram live, both MCP servers connected, 0 panics or errors.
+- **Kept:** the kill switch `SELF_IMPROVE_OFF`, and the rollback binary `mind-core.rollback-68159676d4704c2f`.
+- **Old backups deleted, on Pranab's word:**
+  - database backups: `mind.db.bak.1786746454`, `.pre-0.12.1`, `.pre-0.15.bak`, `.pre-0.2.1` (with its -shm and -wal), and the two `.pre-0.2.1` ledger copies;
+  - binary backups: the five `mind-core.bak.*`.
+  - The old database backups held copies that a forget could never have reached. The one backup left (`pre-172af33`) still does, until it is retired.
+- **Still on disk:** the older `mind-core.rollback-*` and `.prev*` binaries. They hold no memory data.

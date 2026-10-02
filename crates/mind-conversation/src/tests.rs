@@ -16682,6 +16682,8 @@ mod desktop_consent_and_stall_wiring {
     enum Step {
         Call(&'static str, serde_json::Value),
         Fail,
+        /// Free text with no tool call, as a model that writes its protocol by hand answers.
+        Say(&'static str),
     }
 
     /// Plays `steps` on the calls that offer tools; answers compose (no tools) with COMPOSED.
@@ -16716,6 +16718,7 @@ mod desktop_consent_and_stall_wiring {
             };
             let (text, tool_calls) = match step {
                 Some(Step::Fail) => anyhow::bail!("the endpoint stopped answering"),
+                Some(Step::Say(t)) => (t.to_string(), vec![]),
                 Some(Step::Call(n, a)) => (
                     String::new(),
                     vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a.clone() }],
@@ -17778,6 +17781,49 @@ mod desktop_consent_and_stall_wiring {
         let actions: Vec<String> = reached_acts(&r).into_iter().map(|(_, a)| a).collect();
         assert_eq!(actions, vec!["agent_run", "agent_job", "agent_job", "agent_job"], "{:?}", r.reached);
         assert!(r.prompts.iter().any(|p| p.contains("exit code 0")), "the finished wait reached the model");
+    }
+
+    /// E.ARENA1-F47 through the loop, VM 561 Mind turn 44's shape: the check fails with 127 and the
+    /// model answers that everything works. The reply carries the system's line after its own text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_check_is_in_the_reply_whatever_the_model_says() {
+        let check = || shell_cmd("agent_run", serde_json::json!({"command": "node -e \"process.exit(0)\""}));
+        let failed = command_answer(serde_json::json!({"exit_code": 127, "cwd_after": "/home/yantrik", "tail": "bash: node: command not found"}));
+        let ok = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": ""}));
+        let claim = Step::Call("answer", serde_json::json!({"text": "game.js implements all planned features."}));
+        let prompt = "Carry on with the Starfall plan.";
+        let r = run_with(prompt, vec![check(), claim], vec![SHELL, SHELL], vec![&failed]).await;
+        assert!(r.reply.starts_with("game.js implements all planned features.\n\n"), "{}", r.reply);
+        assert!(r.reply.contains("`node -e \"process.exit(0)\"` (exit code 127 -- the program it calls is not installed) did not succeed"), "{}", r.reply);
+
+        let fixed = run_with(
+            prompt,
+            vec![check(), shell_cmd("agent_run", serde_json::json!({"command": "ls"})), check(), Step::Call("answer", serde_json::json!({"text": "Checked."}))],
+            vec![SHELL, SHELL],
+            vec![&failed, &ok, &ok],
+        )
+        .await;
+        assert_eq!(fixed.reply, "Checked.", "a re-run that succeeded clears it");
+
+        // The free-text `answer` tool exit.
+        let said = run_with(
+            prompt,
+            vec![check(), Step::Say(r#"{"tool": "answer", "args": {"text": "All features work."}}"#)],
+            vec![SHELL, SHELL],
+            vec![&failed],
+        )
+        .await;
+        assert!(said.reply.starts_with("All features work.
+
+"), "{}", said.reply);
+        assert!(said.reply.contains("(exit code 127"), "the answer-tool exit carries it: {}", said.reply);
+
+        // The compose exit: the failed check, then repeats until the barren limit ends the turn.
+        let cat = || shell_cmd("agent_run", serde_json::json!({"command": "cat PLAN.md"}));
+        let plan = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": "- [x] 6."}));
+        let composed = run_with(prompt, vec![check(), cat(), cat(), cat(), cat()], vec![SHELL, SHELL], vec![&failed, &plan]).await;
+        assert!(composed.reply.starts_with(COMPOSED), "{}", composed.reply);
+        assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
     /// E.ARENA1-F26 through the loop, on R3's T3 arguments and the real add_event result (185b4c0):

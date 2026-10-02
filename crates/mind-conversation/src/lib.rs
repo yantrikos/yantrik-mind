@@ -13127,6 +13127,8 @@ Open reminders you're carrying for them:",
         // the live sweep proved words do not bind, so every composing exit appends a deterministic
         // correction the model cannot talk over.
         let mut denied_mutations: Vec<String> = Vec::new();
+        // E.ARENA1-F47: commands that failed this turn, said in the reply whatever the model writes.
+        let mut failed_cmds: Vec<(String, i64)> = Vec::new();
         let mut last_call = String::new();
         // E.ARENA1-F43: the desktop's refusal of the last call, when it refused it.
         let mut last_refusal: Option<String> = None;
@@ -13427,6 +13429,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         }
                     }
                     apply_denied_write_correction(&mut a, &denied_mutations);
+                    desktop::apply_failed_commands(&mut a, &failed_cmds);
                     let _ = self
                         .memory
                         .append_message_scoped("user", user_text, id.write_scope())
@@ -13462,6 +13465,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let mut ans = args_text(&v);
                 if !ans.trim().is_empty() {
                     apply_denied_write_correction(&mut ans, &denied_mutations);
+                    desktop::apply_failed_commands(&mut ans, &failed_cmds);
                     let _ = self
                         .memory
                         .append_message_scoped("user", user_text, id.write_scope())
@@ -14068,6 +14072,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let ran = outcome == crate::tool_outcome::Outcome::Ok && !desktop::nothing_was_run(&obs);
             last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());
             if sent {
+                desktop::note_command_result(&mut failed_cmds, &tool, &args, &obs);
+            }
+            if sent {
                 emit_call(call_end(step, ran, &obs));
             }
             if desktop::retry_after_failure(&tool, ran) {
@@ -14315,6 +14322,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // That should be in an idle time, not when something [is] ongoing." Those questions come
         // only from the idle drive (loops.rs), which waits for the person to be quiet.
         apply_denied_write_correction(&mut ans, &denied_mutations);
+        desktop::apply_failed_commands(&mut ans, &failed_cmds);
         // E.ARENA1-F12: a turn that ended with its document unsaved says so, whatever compose wrote.
         if unsaved_doc {
             ans = format!("{ans}\n\n{}", desktop::UNSAVED_NOTE);

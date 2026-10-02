@@ -1087,6 +1087,86 @@ pub(crate) fn command_first(obs: &str) -> Option<String> {
     Some(out)
 }
 
+/// E.ARENA1-F47: the exit code of a finished command, read off `command_first`'s own first line.
+pub(crate) fn command_exit(obs: &str) -> Option<i64> {
+    let rest = obs.strip_prefix("The command finished: exit code ")?;
+    let code: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+    code.parse().ok()
+}
+
+/// E.ARENA1-F47: a command as the person would recognise it: its `command`, or the job it waits on.
+fn command_label(args: &serde_json::Value) -> String {
+    let inner = args.get("args");
+    let text = inner
+        .and_then(|a| a.get("command"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            let (_, action) = act_target(ACT, args)?;
+            let job = inner.and_then(|a| a.get("job")).and_then(|j| j.as_str()).unwrap_or("");
+            Some(format!("{action} {job}").trim().to_string())
+        })
+        .unwrap_or_default();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// E.ARENA1-F47: keep the commands that failed this turn. A failure is recorded; the same command
+/// finishing 0 later clears it. Anything that is not a finished command is ignored.
+pub(crate) fn note_command_result(
+    failed: &mut Vec<(String, i64)>,
+    tool: &str,
+    args: &serde_json::Value,
+    obs: &str,
+) {
+    if !runs_a_command(tool, args) {
+        return;
+    }
+    let Some(code) = command_exit(obs) else {
+        return;
+    };
+    let label = command_label(args);
+    failed.retain(|(l, _)| *l != label);
+    if code != 0 {
+        failed.push((label, code));
+    }
+}
+
+/// E.ARENA1-F47: the line every model-text exit carries when a command failed this turn. VM 561,
+/// Mind turn 44: the one check of the work (`node -e …`) answered exit code 127 -- node is not
+/// installed -- and the reply said "game.js implements all planned features". The exit code is the
+/// one fact the Mind holds for certain; the model's prose has no floor under it.
+pub(crate) fn apply_failed_commands(answer: &mut String, failed: &[(String, i64)]) {
+    if failed.is_empty() {
+        return;
+    }
+    let shown: Vec<String> = failed
+        .iter()
+        .take(3)
+        .map(|(label, code)| {
+            let mut l: String = label.chars().take(80).collect::<String>().replace('`', "'");
+            if label.chars().count() > 80 {
+                l.push('\u{2026}');
+            }
+            let why = match code {
+                127 => " -- the program it calls is not installed",
+                126 => " -- it could not be run",
+                _ => "",
+            };
+            format!("`{l}` (exit code {code}{why})")
+        })
+        .collect();
+    let more = match failed.len().saturating_sub(3) {
+        0 => String::new(),
+        n => format!(", and {n} more"),
+    };
+    answer.push_str(&format!(
+        "\n\n\u{26a0}\u{fe0f} To be clear (from the system, not the model): {} did not succeed this turn{more}, so \
+         whatever {} run to do or check is not done or confirmed, regardless of anything above.",
+        shown.join(", "),
+        if failed.len() == 1 { "it was" } else { "they were" },
+    ));
+}
+
 /// E.ARENA1-F26: an action's own arguments as a map. A bare string (`"args": "hello"`, as models
 /// send `editor.new`) is one unnamed field.
 fn inner_args(args: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
@@ -2103,6 +2183,36 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F47 on VM 561's Mind turn 44 commands: the failed check is kept and said; a re-run
+    /// that succeeds clears it; reads, other tools and successes add nothing.
+    #[test]
+    fn a_failed_command_is_said_from_the_system() {
+        let run = |cmd: &str| serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": cmd}});
+        let check = "node -e \"const s=require('fs').readFileSync('game.js','utf8'); if(!/gameOver/.test(s)) process.exit(1);\"";
+        let finished = |code: i64| format!("The command finished: exit code {code}, working directory now /home/yantrik/Projects/starfall. It printed nothing.");
+        assert_eq!(command_exit(&finished(127)), Some(127));
+        assert_eq!(command_exit("Done \u{2014} Notes"), None);
+        let mut failed = Vec::new();
+        note_command_result(&mut failed, ACT, &run("python3 -m http.server 8733 & sleep 1; echo started"), &finished(0));
+        note_command_result(&mut failed, ACT, &run(check), &finished(127));
+        note_command_result(&mut failed, DESCRIBE, &serde_json::json!({"app": "shell"}), &finished(1));
+        note_command_result(&mut failed, ACT, &serde_json::json!({"app": "editor", "action": "save"}), &finished(1));
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        let mut reply = "game.js implements all planned features.".to_string();
+        apply_failed_commands(&mut reply, &failed);
+        assert!(reply.starts_with("game.js implements all planned features.\n\n"), "the model's text is kept: {reply}");
+        assert!(reply.contains("(from the system, not the model): `node -e \"const s=require('fs').readFileSync('game.js','utf8'); if(!/gameOver/.te\u{2026}` (exit code 127 -- the program it calls is not installed) did not succeed this turn, so whatever it was run to do or check is not done or confirmed"), "{reply}");
+        note_command_result(&mut failed, ACT, &run(check), &finished(0));
+        assert!(failed.is_empty(), "the same command succeeding clears it");
+        let mut clean = "ok".to_string();
+        apply_failed_commands(&mut clean, &failed);
+        assert_eq!(clean, "ok");
+        let many: Vec<(String, i64)> = (0..5).map(|i| (format!("false {i}"), 1)).collect();
+        let mut r = String::new();
+        apply_failed_commands(&mut r, &many);
+        assert!(r.contains("`false 2` (exit code 1) did not succeed this turn, and 2 more, so whatever they were"), "{r}");
     }
 
     /// E.ARENA1-F46: a command is never "a change already made", and is forgotten like a read.

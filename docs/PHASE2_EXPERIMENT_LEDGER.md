@@ -11989,3 +11989,50 @@ The model was handed step 1's output, with step 1 still unticked, after it had j
 - **Before the run:** 9d reported the editor open. When I checked there was no `yantrik-text-editor` process, and `yos describe editor` read "editor is closed". 9d's `pgrep -f` probably matched its own ssh command line.
 - **Results, 01:38–01:42 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.7 s.
 - **Next:** cleared for 561 on Pranab's earlier word ("Yes, after the gate").
+
+## E.ARENA1-F47 — PREREG: a command that failed this turn is in the reply, from the system
+
+**Seen on VM 561** (Mind 172af33, kimi-k3, Mind turn 44, journal via yantrik-os-9d), command fields:
+- s5 `cat game.js` really ran.
+- s6 is ONE command: it ticks steps 6, 7 and 8 in PLAN.md by `sed`, then runs a `sed` on game.js that unbalances its braces.
+- s8 starts `python3 -m http.server` (exit 0).
+- s10 `node -e "…readFileSync('game.js')…/gameOver/…"` → **exit code 127**: node is not installed.
+- The turn then ended, and the reply said "game.js implements all planned features … collision detection (star hit triggers game over)".
+
+The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
+
+**What the Mind knew and did not say:** its one check of the work had **failed**, with "The command finished: exit code 127" in the work log since F45. The reply was the model's prose and had no floor under it.
+
+**Why not "written, then not run":** spotting writes and runs from shell text is guesswork, and on this very turn it would have passed. `http.server` ran, exit 0, after the writes. The exit code is the one fact the Mind holds for certain.
+
+**Plan:**
+- The loop keeps the commands (shell `agent_run`, `agent_job`, `agent_input`) whose answer this turn was "The command finished: exit code N" with N ≠ 0.
+- A later identical command that finishes 0 clears its entry.
+- Every model-text exit of the loop (the in-loop `answer`, the `answer` tool, compose) gets, beside `apply_denied_write_correction`, a line marked "from the system, not the model". It names each failed command (at most 80 characters, at most three listed) and its exit code (127 reads as "not installed"), and says that whatever they were run to do or check is not done or confirmed.
+
+**Out of scope:**
+- **The Director's.** Whether a step is done (the tick) is checked independently by headless Chromium after a ticking turn, and "several steps ticked in one command with no code change" is a plan-specific tell.
+- **A residual for later.** OS #566's text shape: its exit-code line is not parsed until its exact wording is seen.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. In the loop: a `node -e` check answering exit code 127, then the answer "game.js implements all planned features". The reply ends with the system line naming `node -e` and 127, and the model's text comes before it unchanged.
+2. In the loop: the same command fails, then is re-run and finishes 0, so no line is added.
+3. A turn whose commands all finish 0, and a turn with no commands, get no line.
+4. The compose exit adds the line too: a turn that hits the barren limit after a failed command.
+
+**E.ARENA1-F47 — RESULT: built, every kill criterion held.** Suite 2206/0.
+- **The rule:**
+  - `desktop::note_command_result` keeps each command whose answer this turn was "The command finished: exit code N", N ≠ 0. The same command finishing 0 clears it; anything else is ignored.
+  - `desktop::apply_failed_commands` runs on all three model-text exits (the in-loop answer, the free-text `answer` tool, compose), beside `apply_denied_write_correction`. It appends: "⚠️ To be clear (from the system, not the model): `<command>` (exit code 127 -- the program it calls is not installed) did not succeed this turn, so whatever it was run to do or check is not done or confirmed, regardless of anything above."
+- **Tests:**
+  - `a_failed_command_is_said_from_the_system`, on turn 44's real commands: the failure is kept, a success clears it, other tools and successes add nothing, the 80-character cut, the three-item cap;
+  - `a_failed_check_is_in_the_reply_whatever_the_model_says` (loop): all three exits, plus a re-run that clears it.
+  - The harness gained `Step::Say`, free text with no tool call, to reach the `answer`-tool exit.
+- **Mutants, each watched to fail on an assertion:**
+  - P1: nothing collected.
+  - P2, P3, P4: each exit left bare in turn.
+  - P5: a success does not clear.
+  - P6: exit 0 counted as a failure.
+  - P7: any tool counted.
+  - P8: 127 not explained.
+- **Not built: F47b.** 9d traced turn 44's steps 2 and 4: `"wait": true` was refused with "`wait` is a number of seconds", behind the 400-character note. I took the model's 300-character cut on failures to be hiding the reason and widened it for commands. The mutant (P9) **survived**. The outcome classifier reads any answer over 240 characters as content (Ok), so the refusal already had the 4,000-character command budget and reached the model. Only the journal's 120-character line was cut. The change was reverted and nothing ships for it. OS #566 puts the reason first; the OS's `wait: true` acceptance removes the cause.

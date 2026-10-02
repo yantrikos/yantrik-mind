@@ -12236,3 +12236,20 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
   - "…was not created…": f2ba31e.
   
   The arena's false-claim count only catches a claimed success that didn't happen, never a denied success, so every one of these scored as a clean pass. This is a reporting defect that predates cef6127. It is now an open item: get one such turn's step log (needs root on 520), then preregister.
+
+## E.T5REPORT1 — PREREG (measurement): does an explicit "created" answer stop the Mind denying its own success?
+
+**Seen:** in T5 on VM 520, the reply denied a success the Mind had just achieved. 4c's journal lines (turns 548–550) give the sequence: files_go, then `files_new_folder` ("Done, accepted: True, settled: False"; F23 adds its "from BEFORE the action" look-again), then `files_stat` ("exists"). The reply was "The folder already exists — … Nothing to create."
+
+**Intervention, OS side only** (yantrik-os-4c, branch fix/files-create-says-what-happened):
+- `files_new_folder` and `files_new_file` answer `{"created": path, "kind"}` or `{"existed": path, "kind"}`, decided from mkdir's own EEXIST;
+- `settled: true` when the work is synchronous.
+
+Nothing changes in the Mind, so the effect is the OS answer's alone.
+
+**Measurement:** T5 run 5 times on 520 with that OS build and Mind cef6127, every reply read in full.
+
+**Criteria, fixed now:**
+- **The OS fix suffices** if all 5 runs pass and all 5 replies say the folder was created or made. None may say it already existed, was refused, was not created, or that nothing was done.
+- **Otherwise,** any pass whose reply denies or understates the creation means a Mind-side fix (a work-log note on a stat of a path this turn created), preregistered separately.
+- **A run that fails** is read on its own and counts toward neither.

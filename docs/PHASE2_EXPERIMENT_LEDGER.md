@@ -11772,3 +11772,25 @@ The test now also asserts the question is terminal and a miss is not. Mutant T1 
 - **Results, 21:30–21:33 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 7.4 s.
 - **After:** the windows were unchanged and Hermes was restored as the active mind.
 - **Next:** this build is cleared for VM 561, on Pranab's OK.
+
+**E.ARENA1-F43 — LIVE on VM 561 (f2ba31e): it fired, and the model resent anyway.** The full step sequence, from yantrik-os-9d (deepseek-v4.1-flash, the Director's Starfall mission):
+- step 2 sent `os_act new_note` with a bare string and got "Done — REFUSED — nothing was run… takes named parameters: title…". yos-mcp's `bare_value_refusal` ends with a complete copyable call.
+- steps 3, 4 and 5 were **identical repeats with nothing executed between**, so F43's note, quoting that call, went out three times.
+- step 4 brought F33's "~/Projects/starfall missing" nudge;
+- step 6 sent `open_app`;
+- step 7 resent the bare value, refused again;
+- step 8 repeated it.
+
+The turn ended with nothing made. The wire was right (`nothing_was_run` is a contains check, so the "Done — " prefix never hid the refusal). The model does not take the instruction. Separately, the MCP write wrapper's "Done — REFUSED — …" now passes the refusal as itself (`mcp_ran_text`, tested; mutant D1 killed): "Done" was the first word read on a call where nothing ran.
+
+## E.ARENA1-F44 — PREREG: lead with the fix, and stop honestly after it is ignored
+
+**Plan:**
+1. When the refusal carries a ready-to-copy call, F43's note **starts** with it ("Send exactly this next, with each <placeholder> filled in: {…}"), then says why.
+2. A repeat of a refused call **after** F43's note was already given ends the turn with a fixed reply. The reply says the desktop refused it, quotes why, and states that nothing was made. No more nudges, and no composed answer that could claim otherwise.
+
+**Kill criteria:**
+- On the scripted bare-value refusal, the first repeat's prompt starts its note with the copyable call.
+- The second repeat ends the turn: the reply contains "nothing was created" and the refusal's reason, and the identical call reached the desktop once.
+- An act that ran still meets F12.
+- Each is watched to fail under a mutant.

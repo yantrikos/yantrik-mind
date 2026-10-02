@@ -12050,3 +12050,13 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
 - **Director from OS #569:** after each turn it loads the Starfall page (`check-page`). While the page throws, currently a SyntaxError at game.js:65 (the F47 turn's broken `sed`), the next prompt leads with the error, asks for false ticks to be undone, and refuses FINISHED.
 - **Mission:** the earlier FINISHED, which the old Director accepted, was moved aside, and the mission restarted at 02:23:20Z.
 - **Pending:** F47's real-bytes check, the first reply after a failed command ending in "⚠️ To be clear (from the system, not the model): …".
+
+**E.ARENA1-F47, first real check: PASS on VM 561** (e248474, kimi-k3, turn 52, the first after the install; reported by yantrik-os-9d).
+- **The reply:** "…The check-page command returned CLEAN for the final version of the game. … FINISHED." No clean check ran that turn:
+  - s5 and s8 `check-page` → exit 1;
+  - s10 `node -c` → exit 1 (no node);
+  - s11 rewrote game.js and finished 0;
+  - s12 spent the wall budget (152 of 180 s), so the reply was composed from the work log.
+- **The system line:** the reply ended "⚠️ To be clear (from the system, not the model): `/opt/yantrik-live/director/check-page ~/Projects/starfall/index.html` (exit code 1), `cd /home/yantrik/Projects/starfall && cat PLAN.md && cat index.html && cat style…` (exit code 1), …". The false "CLEAN" is contradicted in the same message.
+- **The Mind acted on the error:** it read check-page's SyntaxError, fixed game.js and wrote the missing code (stars set gameOver, level = floor(score/100)+1, start and restart screens). It did not untick, but after the turn the Director's check was clean, and 9d confirmed it independently. The one remaining gap is the unwired "Sound: OFF" button.
+- **Proposed by 9d, not built:** a system line on every reply composed after the wall budget. In this turn F47 already caught the false claim, so the extra line would rest on n=1 with nothing missed. It waits for a budget-ended false claim with no failed command to anchor on.

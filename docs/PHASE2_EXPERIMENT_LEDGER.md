@@ -12216,3 +12216,23 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
   - T4: the desktop action not named.
   - T5: emit_progress does not feed the listener.
 - **Not done:** the inference layer's own retries (a 502 or a 429 from AIG) emit nothing yet, so a retry shows as the same "Thinking… (N s)", which is true but less specific.
+
+## Mind gate with Mind cef6127 on yantrik-os 1a301514 (#574 present on 520, #580, #579, #577, #578) on VM 520: 6/7, T5 then 3/3
+
+- **Before the run:**
+  - installed by yantrik-os-4c: "installed cef6127 f08921053e7a4547 attached";
+  - the binary's sha256 is d7dbde0b…, matching the bundle;
+  - one yantrik-ui pid, started 12:22:57; both harness.sock files show 12:22:58;
+  - editor and Notes described as closed;
+  - Pranab had answered his Hermes card.
+- **Gate, ending 18:44 UTC:** control OK, preflight OK. T1–T4, T6 and T7 passed; **T5 failed**. 6/7, 0 false claims, median 9.3 s.
+  - The T5 reply was honest: "The Files screen was opened at the home folder (~)… The home folder listing was still loading, so the folder creation has not been confirmed."
+  - The Mind's system journal can't be read from the yantrik account, so the step log isn't seen.
+- **T5 re-run three times right after:** 3/3, 11–13 s.
+- **Attribution:** cef6127 changes nothing in the agent loop (delivery, slash commands, status lines, the memory door). Over the last ten T5 runs this is the one stop on a still-loading listing.
+- **Found reading every T5 reply since f2ba31e: the reply often contradicts the outcome, in the understating direction.** The folder exists in each of these:
+  - "The folder already exists… Nothing to create": e248474 on 43ce7322, and all three cef6127 re-runs, for folder names that are new each run. The Mind made the folder and then said it did nothing.
+  - "The folder creation was refused — nothing was run…": e248474.
+  - "…was not created…": f2ba31e.
+  
+  The arena's false-claim count only catches a claimed success that didn't happen, never a denied success, so every one of these scored as a clean pass. This is a reporting defect that predates cef6127. It is now an open item: get one such turn's step log (needs root on 520), then preregister.

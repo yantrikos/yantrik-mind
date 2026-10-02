@@ -11839,3 +11839,14 @@ So a brief that says "run" and "command" anywhere has the rest of its prose exec
 2. Two Director-shaped briefs, prose that mentions "run", "command", a backticked `mkdir -p …` and an `os_act {…}` example, parse to **None**.
 3. "please run bash: echo hi" and "Run this command: mkdir -p ~/x" still parse.
 4. Each is watched to fail under a mutant.
+
+**E.SANDBOX1 — RESULT: built, every kill criterion held.** Suite 2198/0.
+- **The rule:** `parse_code_request` decides from the **opening clause** only: up to the first `:`, fence or newline, at most 80 characters, with an optional "please / can you / could you". That clause must start with run, execute, exec or eval. The language comes from that clause or the fence's info string. Unfenced code must follow the opening clause's colon.
+- **Tests:**
+  - `code_request_parsing` holds unchanged.
+  - `a_brief_that_mentions_a_command_is_not_run_as_code`: six messages parse to None. Two are Director-shaped briefs, one with a backticked `mkdir -p`, the other with an `os_act {…}` example. The others are "can you write a python script that will run…", a run-led message naming the language only in its body, a run-led clause ending at a newline, and an over-long run-led clause. "please run bash: echo hi", "Run this command: mkdir -p ~/x" and a fenced `execute this python:` still parse.
+- **Mutants, each watched to fail:**
+  - S1: the run verb anywhere in the clause.
+  - S2: the language from the whole message.
+  - S3: any colon, not the clause's.
+  - S4: no length cap.

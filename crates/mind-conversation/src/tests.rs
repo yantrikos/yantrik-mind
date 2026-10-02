@@ -4619,6 +4619,33 @@ fn code_request_parsing() {
     assert!(ConversationEngine::parse_code_request("run this: foo").is_none());
 }
 
+/// E.SANDBOX1 (VM 561): an English brief that MENTIONS running a command is not a run request. The
+/// Director's mission messages ran -- everything after their first colon -- as a shell script.
+#[test]
+fn a_brief_that_mentions_a_command_is_not_run_as_code() {
+    let briefs = [
+        "You are starting mission Starfall: a browser game. First make the project folder with `mkdir -p ~/Projects/starfall`, then write index.html. When it works, run it in the browser and check the command output for errors.",
+        "Plan the build first. If you need a note, send the copyable call exactly: os_act {\"app\":\"notes\",\"action\":\"new_note\",\"args\":{\"title\":\"Starfall plan\",\"text\":\"1. index.html (canvas + loop)\"}} and then run the shell steps.",
+        "Can you write a python script that will run every morning: it should list my files.",
+        // run-led, but the language is only named later: never inferred from the body
+        "Run the plan below: 1. make the folder 2. write the python file 3. check it",
+        // run-led and naming a language, but the opening clause ends at a newline, not a colon
+        "Run the python tests\nand then report the result: done or not",
+        // run-led, but the opening clause is a paragraph, not a command
+        "Run through the whole plan carefully, step by step, writing the python files and checking each one works: then report",
+    ];
+    for b in briefs {
+        assert!(ConversationEngine::parse_code_request(b).is_none(), "a brief was taken for code: {b}");
+    }
+    // ...while a message that IS a run request still runs.
+    let (lang, code) = ConversationEngine::parse_code_request("please run bash: echo hi").unwrap();
+    assert_eq!((lang, code.as_str()), (CodeLang::Shell, "echo hi"));
+    let (lang, code) = ConversationEngine::parse_code_request("Run this command: mkdir -p ~/x").unwrap();
+    assert_eq!((lang, code.as_str()), (CodeLang::Shell, "mkdir -p ~/x"));
+    let (lang, _) = ConversationEngine::parse_code_request("execute this python:\n```python\nprint(1)\n```").unwrap();
+    assert_eq!(lang, CodeLang::Python);
+}
+
 #[test]
 fn research_triggers_route_correctly() {
     assert_eq!(

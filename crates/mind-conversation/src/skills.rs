@@ -493,17 +493,33 @@ impl super::ConversationEngine {
     /// Parse a "run/execute … <lang> … <code>" request → (language, code). Requires an explicit run
     /// intent AND a determinable language (never guesses), so ordinary code chat isn't executed.
     pub(crate) fn parse_code_request(text: &str) -> Option<(CodeLang, String)> {
-        let l = text.to_ascii_lowercase();
+        // E.SANDBOX1 (VM 561): the message must BE a run request. Matching "run"/"command"
+        // anywhere ran the Director's English brief -- everything after its first colon -- as a
+        // shell script. Only the OPENING CLAUSE decides: up to the first `:`, fence or newline.
+        let trimmed = text.trim_start();
+        let end = [trimmed.find(':'), trimmed.find("```"), trimmed.find('\n')]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(trimmed.len());
+        let lead = trimmed[..end].trim().to_ascii_lowercase();
+        if lead.chars().count() > 80 {
+            return None;
+        }
+        let lead_verb = ["please ", "can you ", "could you "]
+            .iter()
+            .fold(lead.as_str(), |s, p| s.strip_prefix(p).unwrap_or(s));
         if !["run ", "execute ", "exec ", "eval "]
             .iter()
-            .any(|p| l.contains(p))
+            .any(|p| lead_verb.starts_with(p))
         {
             return None;
         }
+        let l = format!(" {lead} ");
         let fence = Self::fenced_code(text);
         let kw_lang = if l.contains("rust") {
             Some(CodeLang::Rust)
-        } else if l.contains("python") || l.contains(" py") {
+        } else if l.contains("python") || l.contains(" py ") {
             Some(CodeLang::Python)
         } else if l.contains("shell") || l.contains("bash") || l.contains("command") {
             Some(CodeLang::Shell)
@@ -519,9 +535,13 @@ impl super::ConversationEngine {
         let lang = kw_lang.or(fence_lang)?;
         let code = match fence {
             Some((_, c)) => c,
+            // Unfenced: the code is what follows the OPENING clause's colon -- never a colon
+            // somewhere later in a paragraph of prose.
             None => {
-                let idx = text.find(':')?;
-                text[idx + 1..].trim().to_string()
+                if !trimmed[end..].starts_with(':') {
+                    return None;
+                }
+                trimmed[end + 1..].trim().to_string()
             }
         };
         if code.trim().is_empty() {

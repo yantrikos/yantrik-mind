@@ -54,13 +54,13 @@ const NAME: &str = "Yantrik Mind";
 const ATTACH: &str = "harness.attach";
 #[cfg(unix)]
 const POLL: &str = "harness.poll";
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(dead_code))]
 const CHUNK: &str = "harness.chunk";
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(dead_code))]
 const COMPLETE: &str = "harness.complete";
 /// E.CARDS1: a tool call's card, beside the text.
 const EVENT: &str = "harness.event";
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(dead_code))]
 const FAIL: &str = "harness.fail";
 
 /// How long to wait after an empty poll. The OS's `poll` answers at once either way, so this is
@@ -603,20 +603,7 @@ async fn serve(
                 // and chopping it into pieces with sleeps between them would be an animation of
                 // streaming rather than streaming. The desktop shows its thinking state until
                 // this lands, which is the truth of what is happening.
-                let _ = call(
-                    address.to_string(),
-                    CHUNK,
-                    serde_json::json!({ "session": session, "turn_id": turn_id, "delta": said }),
-                    timeout,
-                )
-                .await;
-                let _ = call(
-                    address.to_string(),
-                    COMPLETE,
-                    serde_json::json!({ "session": session, "turn_id": turn_id }),
-                    timeout,
-                )
-                .await;
+                deliver(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &said).await;
             }
             Err(e) => {
                 // Said, not swallowed. A turn that simply never completed would leave the person
@@ -634,6 +621,108 @@ async fn serve(
                 .await;
             }
         }
+    }
+}
+
+/// E.REPLY1: what a turn that produced no text says, so the person never sees a blank bubble.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const EMPTY_TURN: &str = "That turn ended without an answer I could show you -- nothing came back from \
+     my side. Ask again, or ask me what I did.";
+
+/// E.REPLY1: did the desktop throw this away? The host answers `{"dropped": true}`, not an error,
+/// when the chat a turn was for is gone -- New chat, a mind switch, the person stopping it, or a
+/// shell restart (yantrik-harness host.rs).
+fn dropped(reply: &serde_json::Value) -> bool {
+    reply.get("dropped").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+/// E.REPLY1: hand a finished answer to the desktop, and say so when it was not taken. VM 561,
+/// turns 58 and 59: the person saw no reply at all, and this used to send with `let _ =`, so an
+/// answer the desktop refused or dropped vanished without a trace. True when the whole turn landed.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn deliver<C, F>(call: C, session: &str, turn_id: u64, said: &str) -> bool
+where
+    C: Fn(&'static str, serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let text = if said.trim().is_empty() { EMPTY_TURN } else { said };
+    match call(CHUNK, serde_json::json!({ "session": session, "turn_id": turn_id, "delta": text })).await {
+        Ok(reply) if dropped(&reply) => {
+            eprintln!(
+                "[harness] turn {turn_id}: the desktop dropped the answer -- the chat it was for is gone \
+                 (New chat, a mind switch, or the person stopped it)"
+            );
+            return false;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[harness] turn {turn_id}: the desktop did not take the answer ({e}) -- telling it the turn failed");
+            let error = format!("the answer could not be delivered: {e}");
+            if let Err(e) = call(FAIL, serde_json::json!({ "session": session, "turn_id": turn_id, "error": error })).await {
+                eprintln!("[harness] turn {turn_id}: it did not take that either ({e}) -- this answer is lost");
+            }
+            return false;
+        }
+    }
+    match call(COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id })).await {
+        Ok(reply) if dropped(&reply) => {
+            eprintln!("[harness] turn {turn_id}: the desktop dropped the end of the turn -- the chat it was for is gone");
+            false
+        }
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("[harness] turn {turn_id}: the desktop did not take the end of the turn ({e})");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod deliver_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    type Seen = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+    /// A desktop that records every call; `answer` says what it gives back for each method.
+    fn desktop(
+        answer: fn(&str) -> Result<serde_json::Value, String>,
+    ) -> (Seen, impl Fn(&'static str, serde_json::Value) -> std::future::Ready<Result<serde_json::Value, String>>) {
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        (seen, move |m: &'static str, p: serde_json::Value| {
+            log.lock().unwrap().push((m.to_string(), p));
+            std::future::ready(answer(m))
+        })
+    }
+
+    fn methods(seen: &Seen) -> Vec<String> {
+        seen.lock().unwrap().iter().map(|(m, _)| m.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_delivered_or_its_loss_is_said() {
+        let (seen, call) = desktop(|_| Ok(serde_json::Value::Null));
+        assert!(deliver(&call, "s1", 58, "Here it is.").await);
+        assert_eq!(methods(&seen), vec![CHUNK, COMPLETE]);
+        assert_eq!(seen.lock().unwrap()[0].1["delta"], "Here it is.");
+
+        let (seen, call) = desktop(|m| if m == CHUNK { Err("not_in_flight".into()) } else { Ok(serde_json::Value::Null) });
+        assert!(!deliver(&call, "s1", 58, "Here it is.").await);
+        assert_eq!(methods(&seen), vec![CHUNK, FAIL]);
+        assert_eq!(seen.lock().unwrap()[1].1["error"], "the answer could not be delivered: not_in_flight");
+
+        // VM 561, turns 58-59: the chat was gone, and the host said so in an Ok.
+        let (seen, call) = desktop(|_| Ok(serde_json::json!({ "dropped": true })));
+        assert!(!deliver(&call, "s1", 59, "Here it is.").await);
+        assert_eq!(methods(&seen), vec![CHUNK], "nothing more is sent into a chat that is gone");
+
+        let (seen, call) = desktop(|_| Ok(serde_json::Value::Null));
+        assert!(deliver(&call, "s1", 60, "  \n").await);
+        assert_eq!(seen.lock().unwrap()[0].1["delta"], EMPTY_TURN, "a blank bubble was sent");
+
+        let (_, call) = desktop(|m| if m == COMPLETE { Err("not_in_flight".into()) } else { Ok(serde_json::Value::Null) });
+        assert!(!deliver(&call, "s1", 61, "ok").await);
     }
 }
 

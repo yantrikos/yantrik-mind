@@ -1881,6 +1881,32 @@ fn mcp_ran_text(output: &str) -> String {
     }
 }
 
+/// E.SLASH1: the reply to a message that is exactly one slash command (`/new`, `/stop@bot`), or None.
+/// Only the bare command: a slash word followed by text, or a path, is an ordinary message.
+pub(crate) fn slash_reply(text: &str) -> Option<String> {
+    let t = text.trim();
+    let word = t.strip_prefix('/')?;
+    let cmd = word.split_once('@').map(|(c, _)| c).unwrap_or(word);
+    let bare = t.chars().count() <= 32
+        && cmd.starts_with(|c: char| c.is_ascii_alphabetic())
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '@'));
+    if !bare {
+        return None;
+    }
+    Some(match cmd.to_ascii_lowercase().as_str() {
+        "new" | "reset" | "clear" => "I don't start over from a message: I keep one continuing conversation, and what I \
+             remember stays. To open a fresh chat, use your app's new-chat control. Nothing was run."
+            .to_string(),
+        "stop" | "cancel" => "Nothing is running for a message to stop -- each message is its own turn, and this one \
+             does nothing. Nothing was run."
+            .to_string(),
+        _ => format!(
+            "`/{cmd}` looks like a command, and I don't run commands typed that way -- nothing was done. Tell me in words \
+             what you'd like."
+        ),
+    })
+}
+
 /// The start of the question `forget` puts to the person when it found the text (E.ERASE1).
 pub(crate) const FORGET_ASK: &str = "I found it in ";
 
@@ -14816,6 +14842,14 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                                    // turn: presence means the primary's presence, by construction, never by inference.
         if id.owner == mind_types::PRIMARY {
             self.world_ingest_presence();
+        }
+        // E.SLASH1: a bare slash command is not work. VM 561, turn 60: "/new" (Hermes's new-chat
+        // habit) became 12 steps and 195 s of opening a terminal. Answered by code, before the
+        // router's shadow or anything else can call a model.
+        if let Some(reply) = slash_reply(user_text) {
+            let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+            let _ = self.memory.append_message_scoped("assistant", &reply, ws.clone()).await;
+            return Ok(reply);
         }
         // E.MQ5: THE ROUTER'S SHADOW. A closed-schema classifier says which claim (or ABSTAIN)
         // this turn is about, and the verdict is RECORDED — never acted on. It runs detached so

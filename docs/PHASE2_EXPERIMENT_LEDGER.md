@@ -12113,3 +12113,64 @@ The real game.js throws a SyntaxError, and steps 6–8 are not implemented.
   - D5: group write allowed.
   - D6: a symlink allowed. It first survived, because the symlink case also had is_dir false; the case was isolated and D6 then failed.
 - **Residual, unchanged and stated in the prereg:** ordinary grants stay impersonable by any process of the person's until the OS makes the door's directory root-owned.
+
+## E.REPLY1 + E.SLASH1 — PREREG: every desktop turn ends in words the person sees; a bare slash command is not work
+
+**Seen on VM 561** (2 Oct, journal via yantrik-os-4c), during Pranab's own use:
+- Turn 58 (202 s: the private lane failed closed mid-turn) and turn 59 (80 s, stuck re-describing the shell) both ended with **no reply in the chat**.
+- Turn 60 was a bare "/new" (Hermes's new-chat habit). It was taken as a request: 12 steps and 195 s opening a terminal and running ls/cat in ~/nyc3d.
+
+**What the code shows, before any evidence of which happened:**
+- Both of those turns should have *produced* text: compose's private-lane failure returns a fixed line, and an empty compose falls back to an honest one.
+- The harness then ignores the result of `harness.chunk` and `harness.complete` (`let _ =`). An answer the desktop refused is lost without a log line.
+- An empty answer would be sent as an empty chunk, a blank bubble.
+- Which of the two happened is asked of 4c and not assumed.
+
+**Plan, E.REPLY1 (harness):**
+- One `deliver` function sends the answer.
+- An empty or whitespace answer is replaced by a fixed honest line.
+- A refused chunk is logged, and then `harness.fail` is sent with "the answer could not be delivered: <why>". If that is refused too, it is logged as lost.
+- A refused complete is logged.
+
+**Plan, E.SLASH1 (conversation entry, every channel):**
+- A message that is exactly one slash word (`/word`, optionally `@bot`, at most 32 characters) is answered by code. It never reaches the loop, starts no tool and calls no model:
+  - `/new`, `/reset`, `/clear`: I keep one continuing conversation and my memory stays; use the app's new-chat control; nothing was run.
+  - `/stop`, `/cancel`: nothing is running for a message to stop.
+  - anything else: I don't run slash commands; nothing was done; say it in words.
+- A slash word followed by text, and a path like `/home/x`, are not affected.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `deliver` against a fake desktop:
+   - an accepted answer means chunk, then complete, true;
+   - a refused chunk means chunk, then fail carrying the reason, false;
+   - an empty answer sends the fixed line, never "".
+2. The engine: "/new", "/stop", "/frobnicate" and "/new@th_ym_c1_bot" each get their fixed reply, with zero model calls and zero tool calls.
+3. "/new project plan please" and "/home/yantrik" are not answered by the slash rule.
+- **Prereg amendment, before any code (yantrik-os-4c, from host.rs and 561's shell log):**
+  - The host has no time-based give-up. A chunk or complete for a turn whose receiver is gone answers `Ok({"dropped": true})`, not an error. The receiver goes when the person stops the agent, presses New chat, switches minds, or the shell restarts.
+  - A turn id not in flight answers `Err(not_in_flight)`.
+  - 561's shell log shows "New chat" and a mind switch around turns 58 and 59, with nothing logged for 59. That fits a silent drop, so the answers were most likely produced and dropped, not empty.
+  - `deliver` therefore also treats `dropped: true` as not delivered: it logs it, sends no fail (that would be dropped too) and returns false. Criterion 1 gains "a dropped chunk is logged and returns false, with no complete sent". The empty-answer guard stays as cheap insurance, not as the fix for these two turns.
+
+**E.REPLY1 + E.SLASH1 — RESULT: built, every kill criterion held.** Suite 2209/0.
+- **E.REPLY1:** `harness::deliver` sends the answer:
+  - an empty one becomes `EMPTY_TURN`;
+  - a refused chunk is logged and followed by `harness.fail` with the reason;
+  - a `{"dropped": true}` chunk or complete is logged as "the chat it was for is gone" and nothing more is sent;
+  - a refused complete is logged.
+  - Test `deliver_tests::an_answer_is_delivered_or_its_loss_is_said`, against a fake desktop, covers all five cases.
+- **E.SLASH1:** `slash_reply` runs at the top of `handle_turn_as`, before the router's shadow, so no model is called.
+  - Test `a_bare_slash_command_is_answered_without_work`, at the real entry: "/new", "/new@bot", "/stop" and "/frobnicate" each get their reply with 0 model calls and 0 tool calls, while a model and a desktop stand scripted to act.
+  - "/new project plan please", "/home/yantrik", "/" and "/2fa" are not slash commands.
+- **Mutants, each watched to fail on an assertion:**
+  - R1: a drop not noticed.
+  - R2: an empty answer sent.
+  - R3': a refused chunk followed by complete instead of fail. The first R3 died by a compile error and was redone.
+  - S1: the rule not consulted.
+  - S2: words after the command allowed.
+  - S3: paths allowed.
+  - S4: a digit may start a command.
+- **What this does not change:**
+  - An answer the host drops, because its chat is gone, still cannot reach the person. The Mind now logs it, and 4c is adding the host-side log.
+  - "/new" does not start a fresh conversation in the Mind; it says so, truthfully.
+- **Note:** `target/debug/incremental` had grown to 71 GB and filled C:. It was deleted; builds run with CARGO_INCREMENTAL=0 for now.

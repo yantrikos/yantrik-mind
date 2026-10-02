@@ -17826,6 +17826,52 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.SLASH1 at the real entry (`handle_turn_as`), VM 561 turn 60's "/new": answered by code, with
+    /// a model and a desktop standing by that would act if they were reached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bare_slash_command_is_answered_without_work() {
+        let turn = |text: &'static str| async move {
+            let seen = Arc::new(StdMutex::new(Vec::new()));
+            let script: Arc<dyn LLMBackend> = Arc::new(Script {
+                at: AtomicUsize::new(0),
+                steps: vec![Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "ls ~/nyc3d"}}))],
+                seen: seen.clone(),
+                timeouts: Arc::new(StdMutex::new(Vec::new())),
+            });
+            let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+            let hub = Arc::new(mind_tools::McpHub::new());
+            let tool = mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_act".into(),
+                description: "os_act on this computer".into(),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            };
+            hub.add_scripted_tool(tool, vec![Ok("The command finished: exit code 0".to_string())]).unwrap();
+            let memarc: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(hub.clone());
+            let reply = conv.handle_turn_as(text, TurnIdentity::primary()).await.unwrap();
+            let calls = seen.lock().unwrap().len();
+            (reply, calls, hub.scripted_calls().len())
+        };
+        for (text, starts) in [
+            ("/new", "I don't start over from a message"),
+            ("  /new@th_ym_c1_bot ", "I don't start over from a message"),
+            ("/stop", "Nothing is running for a message to stop"),
+            ("/frobnicate", "`/frobnicate` looks like a command"),
+        ] {
+            let (reply, model_calls, tool_calls) = turn(text).await;
+            assert!(reply.starts_with(starts), "{text:?} -> {reply}");
+            assert_eq!((model_calls, tool_calls), (0, 0), "{text:?} did work");
+        }
+        assert_eq!(crate::slash_reply("/new project plan please"), None, "a command with words is a message");
+        assert_eq!(crate::slash_reply("/home/yantrik"), None, "a path is a message");
+        assert_eq!(crate::slash_reply("/"), None);
+        assert_eq!(crate::slash_reply("/2fa"), None, "a command starts with a letter");
+    }
+
     /// E.ARENA1-F26 through the loop, on R3's T3 arguments and the real add_event result (185b4c0):
     /// the re-add with `reminder_minutes` never reaches the desktop; a refused call still can (F22).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

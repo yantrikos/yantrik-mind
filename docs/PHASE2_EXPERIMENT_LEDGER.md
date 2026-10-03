@@ -12504,3 +12504,14 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - `a_page_for_a_folder_is_saved_inside_it` (loop, L2c's shape): criterion 3.
 - **Mutants, each watched to fail on an assertion:** K1, a folder named as the file; K2, a file path also given the placeholder.
 - **Flaky, recorded:** `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it` failed once in a full parallel run. It passed alone three times and on the next full run. It writes a shared "trunc-cut" file set, and the likely cause is a race with another test in parallel. It is unrelated to F51 and noted for a later look.
+
+**E.LONG1, L2d (L2 on Mind f4bfb14): FAIL in 62 s; a contaminated run.**
+- **The contamination:** my cleanup removed `~/longtask` but left L2c's unsaved draft tab open in the editor. The model read it as its own progress ("the index.html content was drafted… unsaved"). From now on, leftover tabs are saved aside (`save_as` to `~/.longtask-stale/`) and closed between runs.
+- **The turn itself (turn 581):** `files_go` home, settled: false, then ×4 more despite the F50 note.
+- **The same OS gap as L2/L2b.** 4c's #596 fixes it: `files_go` answers settled with a listing, nested `new_folder` makes parents, and a missing folder names the call. L2 re-runs wait for it on 520.
+
+**E.LONG1, L4 (notes to a deadlines list): FAIL in 64 s, nothing written, a false capability claim.**
+- **The reply:** "I can't read a note's full body: the notes tool gives me titles and metadata only, and there's no action that returns a note's text". It used `search` ("deadline", "Sep", "2026") and listed some titles.
+- **The truth, checked on 520:** after `open_note`, `describe notes` carries the note's whole text in `"content"`.
+- **Ground truth:** about 4–6 notes with dates (Speaker checklist, US Market Status, Northwind, audit 2026-09-17, Overnight, possibly Standup).
+- **Step lines requested:** did it open a note, and if so, did the condensed description cut `content`?

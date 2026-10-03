@@ -12548,3 +12548,8 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **Judgment:** the task needs a command whatever happens (the script must run), so one card is unavoidable in `auto` mode. Writing the CSV and script with the editor first would only leave partial files behind the same card. F48 is not tightened on this evidence.
 - **The outcome depends on a person answering.** Pranab agreed to answer cards; this one came while nobody was at 520.
 - **The driver's own bug, fixed:** it logged the single card on every poll (its key included the card's age). It now counts cards by id.
+
+**E.LONG1, L1b (L1 on OS d95f4444, Mind bc5410b): VOID, because the update did not reach the running Calendar.** It failed the old way in 41 s (worked from the Sunday-week view, said 25 September was in the week, wrote nothing).
+- **Why it is void:** 520's `yantrik-calendar` process dates from Thursday 1 October 21:31. The binary on disk was rewritten today at 16:50:53. `describe calendar` lists 10 actions, with no `events_between` and no `week_starts_on`. The shell restarted; open apps did not.
+- **OS gap, raised with 4c:** `yantrik-update apply` leaves open apps on their old binaries, so a nightly (and its gate) can test yesterday's apps under today's shell.
+- **To redo** once the apps are restarted.

@@ -12473,3 +12473,9 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - J3: the parent not visited first.
   - J4: the nested folder not made.
   - J5: `~` not resolved by the home.
+
+**E.LONG1, L2c (L2 on Mind 8dceeb4, the Mind half alone; OS still adfcc32f): further, still FAIL, in 50 s.**
+- **On disk:** `~/longtask` and `~/longtask/recipes` were made. **F50 worked:** the folders the earlier runs never reached now exist.
+- **In the editor, not on disk:** about 930 characters of page text in an untitled tab.
+- **The reply:** true about the state (folder made, text unsaved, links unchecked), but it ends on a **false capability claim**: "I have no tool to write files into ~/longtask/recipes. The editor's save_as takes a file path, not a folder". `save_as ~/longtask/recipes/index.html` is that tool.
+- **No card.** Step lines requested.

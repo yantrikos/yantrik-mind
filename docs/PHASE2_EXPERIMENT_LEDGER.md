@@ -12266,3 +12266,22 @@ Nothing changes in the Mind, so the effect is the OS answer's alone.
   - **Likely cause:** `files_new_folder` defers (settled: False), so the stat ran before the creation landed.
   - **Covered by:** 4c's queued OS change (`{"created"|"existed": path}`, settled: true when synchronous), measured by E.T5REPORT1.
   - **A second instance:** the arena's false-claim count does not see an understated reply.
+
+## Mind gate with Mind cef6127 on yantrik-os adfcc32f (b22b1865 + #582, #573, #589 UI batch 1) on VM 520: FAIL 6/7, and a card went up in Pranab's session
+
+- **Before the run:** v0.1.0-1141-gadfcc32f; BUILD says commit=cef6127 (sha d7dbde0b…); one yantrik-ui pid (1408183, started 18:58:24); both harness.sock files 18:58:25; editor and Notes closed.
+- **Results, ending 00:05 UTC:** control OK, preflight OK. T1–T6 passed; **T7 failed in 128 s**. 6/7, 0 false claims.
+- **T7** ("Write the titles of everything on my calendar on 25 September into a new file ~/arena-minaav-friday.txt"). The reply, which was honest:
+  - the Mind called the editor's `new_note`, which doesn't exist (the editor offers `new`, `set_content`, `save_as`, and the reply even names them);
+  - it then fell back to a shell `agent_run`;
+  - **on 520 that is not granted, so an approval card went up in Pranab's live session.** Nobody answered in 110 s and it expired.
+  - The reply then gave the three titles and offered to try again. No file was written.
+  - `pending_approvals` was `[]` when I checked after.
+- **Not re-run:** another T7 attempt could put up another card in his session. Attribution (the new OS versus the model's choice) waits for the step log and for a way to run the gate that refuses `agent_run` without asking.
+- **What is the Mind's own here, whatever the OS:** with F45 a command's output became usable, and a command is now a fallback the model reaches for. On a machine where `agent_run` asks the person, that fallback becomes a card. Open item: get the step log, then preregister. Candidates:
+  - the refusal's copyable fix (F44) did not steer it to `new`;
+  - nothing tells the model a command will ask the person when an app action exists.
+- **The "already" replies are widespread in this run:**
+  - T1 "Notes is already open", T3 "The event is already there", T6 "The file is already written".
+  - All three are passes that describe the Mind's own work as pre-existing.
+  - It is the same reporting defect as T5, and wider than files.

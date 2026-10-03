@@ -12386,3 +12386,15 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - **Mind:** a long task gives up after 21 s of its 180 s when one approach stalls. Everything needed except one empty day was already in view. The repeat and barren guards ended the turn, and the goal note did not turn the model towards writing with what it had.
   - **Mind:** the compose put days outside the asked range into the answer.
   - Fix design waits for the other tasks' data.
+
+**E.LONG1, L2 (a recipe website): FAIL in 18 s, nothing created; the reply was true about that.** Turn 578 (step lines via 4c). F48 was not involved: no command was attempted.
+- **Steps:**
+  - `describe shell {"actions":"files_"}` ×3 (2 nudges, then the goal note "~/longtask/recipes missing");
+  - `files_go /home/yantrik` ×3 (unsettled, then looked at again, then 2 nudges);
+  - the turn ended after 4 steps in 16 s. No write was ever tried.
+- **The same shape as L1:** the model repeats an identical look, and the repeat and goal guards end a long turn after about 20 s of its 180 s, before any work starts.
+- **OS fixes queued by 4c:**
+  - `files_go` answers settled with what the folder holds, or "no such folder";
+  - `files_new_folder` makes missing parents and says which.
+- **Mind, open:** the first repeat should get a concrete next step, not a generic nudge.
+- **Waiting on 520's Mind model configuration** before designing. On 561's cloud model, the Starfall agent wrote files turn after turn.

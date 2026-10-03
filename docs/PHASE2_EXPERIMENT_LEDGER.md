@@ -12285,3 +12285,33 @@ Nothing changes in the Mind, so the effect is the OS answer's alone.
   - T1 "Notes is already open", T3 "The event is already there", T6 "The file is already written".
   - All three are passes that describe the Mind's own work as pre-existing.
   - It is the same reporting defect as T5, and wider than files.
+
+## E.ARENA1-F48 — PREREG: a command that would put a card up is not the first resort
+
+**Correction from the step lines** (yantrik-os-4c, 520 turn 567, as root): T7's order was:
+- s0 and s1: describe the calendar;
+- s2: describe the shell (`files_`);
+- **s3: `agent_run printf … > ~/arena-minaav-friday.txt` → card, unanswered, REFUSED at 110 s**;
+- s4: `editor.new_note` → refused ("how the OS grades it could not be read").
+
+The command came first; no app action was tried before it. Earlier gates passed T7 only because 520's session held a "shell.agent_run for this session" rule, and the shell restart from the OS update cleared it.
+
+**The seam:** since F45 a command's output is usable, so a command is the model's general-purpose tool. On a desktop where commands ask (`ask`, or `auto` before the session's first), that choice puts a card in front of the person even when an app (the editor's `new` + `save_as`) could do the job without asking.
+
+**What the Mind can know, read from 520 (fixture `shell_mind_mode_auto_adfcc32f.txt`):** the shell state carries `"mind_mode": {…, "means": "…once per session before it runs commands.", "mode": "auto", "session_rules": [], …}`.
+
+**Plan:**
+- Before the first `shell.agent_run` of a turn, the loop knows whether commands would ask. It reads `mind_mode` from this turn's shell description, or takes one look of its own, as F15 does for grades. Commands ask when `mode` is `ask` or `auto` and no session rule covers `shell.agent_run`. In `bypass`, or with that rule, they don't. When the answer can't be read, nothing changes.
+- When they would ask, the first `agent_run` of the turn is **not sent**. The model is told:
+  - running a command here puts a card in front of the person;
+  - if an app's own actions can do this, use those;
+  - otherwise send the command again, and the person will be asked.
+- The second attempt is sent.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. Loop, T7's shape on the auto fixture: the first `agent_run` does not reach the desktop and the steering note reaches the model; a second `agent_run` does reach the desktop.
+2. The same with `mode: bypass`, and with a session rule for `shell.agent_run` (spelled as 561's real line spells it): the first `agent_run` reaches the desktop.
+3. With no `mind_mode` readable: unchanged, the first `agent_run` reaches the desktop.
+4. `agent_job` (waiting on a running command) is never held back.
+
+**Waiting on:** 561's real `mind_mode` line with a session rule, for criterion 2's spelling.

@@ -1,0 +1,1 @@
+  "mind_mode": {"bypass_expires_in_secs": null, "bypass_until_restart": false, "ceiling": "sensitive", "means": "It gets on with things. You are still asked about the destructive ones, and once per session before it runs commands.", "mode": "auto", "previous": "auto", "session_rules": [], "session_rules_cleared": []},

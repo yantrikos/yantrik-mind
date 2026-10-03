@@ -17845,6 +17845,27 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.ARENA1-F50 through the loop, E.LONG1 L2b's shape: the request's folder is missing, the
+    /// model goes home and then goes home again. The repeat is answered with the next calls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeat_on_the_way_to_a_missing_folder_names_the_next_call() {
+        let home = std::env::temp_dir().join(format!("ym-f50-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let h = home.to_string_lossy().replace('\\', "/");
+        let go = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "files_go", "args": {"path": h.clone()}}));
+        let went = "Done \u{2014} Yantrik \u{2014} files screen, 1 windows open\naccepted: True, settled: True\nrevision: 1";
+        let prompt = "Make a small static recipe website in ~/longtask/recipes.";
+        let r = run_at(prompt, Some(h.clone()), vec![go(), go()], vec![SHELL, SHELL, SHELL], vec![went, went]).await;
+        let want = r#""action": "files_new_folder", "args": {"name": "longtask"}"#;
+        assert!(r.prompts.iter().any(|p| p.contains(want) && p.contains("already there")), "the repeat did not name the next call");
+
+        // Nothing the request asked for is missing: today's note.
+        std::fs::create_dir_all(home.join("longtask").join("recipes")).unwrap();
+        let fine = run_at(prompt, Some(h.clone()), vec![go(), go()], vec![SHELL, SHELL, SHELL], vec![went, went]).await;
+        assert!(!fine.prompts.iter().any(|p| p.contains(want)), "a folder that exists was offered");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     /// E.ARENA1-F49 through the loop, E.LONG1 L2's first call on the real answer: the model asks for
     /// the Files family and its prompt then carries what `files_new_folder` does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

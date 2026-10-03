@@ -1362,13 +1362,59 @@ pub(crate) fn parse_files_stat(obs: &str) -> Option<Stat> {
 }
 
 /// E.ARENA1-F21: said once, before a turn ends with the requested path still missing.
-pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>) -> String {
+/// E.ARENA1-F50: a path as `files_go` takes it -- absolute, `~` resolved by the home -- or None.
+fn files_path(p: &str, home: Option<&str>) -> Option<String> {
+    let home = home.map(str::trim).filter(|h| !h.is_empty()).map(|h| h.trim_end_matches('/'));
+    match p {
+        "~" => home.map(str::to_string),
+        _ if p.starts_with("~/") => home.map(|h| format!("{h}/{}", &p[2..])),
+        _ if p.starts_with('/') => Some(p.to_string()),
+        _ => None,
+    }
+}
+
+/// E.ARENA1-F50: the exact calls that make the first missing folder on the way to `asked`: go to its
+/// parent, then `files_new_folder` -- and then the next one, when `asked` is a folder too. VM 520,
+/// E.LONG1 L2b: told "go to its parent, then files_new_folder" in words, the model went to the
+/// parent, was refused as a repeat, and went there again until the turn ended at 15 s of 180.
+/// None when nothing here is a folder to make (a file whose folder exists keeps its editor steps).
+pub(crate) fn folder_steps(asked: &str, missing_folder: Option<&str>, home: Option<&str>) -> Option<String> {
+    let is_folder = |p: &str| !p.rsplit('/').next().unwrap_or(p).contains('.');
+    let first = match missing_folder {
+        Some(f) => f,
+        None if is_folder(asked) => asked,
+        None => return None,
+    };
+    let (parent, name) = first.rsplit_once('/')?;
+    let parent = if parent.is_empty() { "/" } else { parent };
+    let call = |action: &str, args: String| format!("os_act {{\"app\": \"shell\", \"action\": \"{action}\", \"args\": {args}}}");
+    let go = |p: &str| match files_path(p, home) {
+        Some(abs) => call("files_go", format!("{{\"path\": \"{abs}\"}}")),
+        None => format!("files_go to {p} (as an absolute path)"),
+    };
+    let mut steps = vec![go(parent), call("files_new_folder", format!("{{\"name\": \"{name}\"}}"))];
+    if first != asked {
+        if let Some((_, last)) = asked.rsplit_once('/').filter(|_| is_folder(asked)) {
+            steps.push(go(first));
+            steps.push(call("files_new_folder", format!("{{\"name\": \"{last}\"}}")));
+        } else {
+            steps.push(format!("then write {asked} (editor: `new` with the text, then `save_as` with that path)"));
+        }
+    }
+    Some(format!("The next calls are, in order: {}.", steps.join(", then ")))
+}
+
+pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>, home: Option<&str>) -> String {
     // E.ARENA1-F33: the concrete blocker, when the world shows one. The hard smoke's T9: the
     // folder did not exist, the Editor refuses to save into a missing folder, and the model went
     // back to `files_go` twice.
-    let folder = missing_folder
-        .map(|f| format!(" The folder {f} does not exist yet: make it first (Files: go to its parent, then `files_new_folder`)."))
-        .unwrap_or_default();
+    // E.ARENA1-F50: as calls to copy, not a description of them.
+    let folder = match (missing_folder, folder_steps(path, missing_folder, home)) {
+        (Some(f), Some(steps)) => format!(" The folder {f} does not exist yet: make it first. {steps}"),
+        (None, Some(steps)) => format!(" {steps}"),
+        (Some(f), None) => format!(" The folder {f} does not exist yet: make it first (Files: go to its parent, then `files_new_folder`)."),
+        (None, None) => String::new(),
+    };
     format!(
         "\n[{step}] (the request asked for {path}, and nothing is at {path} yet -- it was not \
          created.{folder} Make it now (for text: open the editor if it is closed, then its `new` with \
@@ -2188,9 +2234,9 @@ mod tests {
         assert_eq!(on_this_machine("~/a.txt", Some("  ")), None);
         assert_eq!(on_this_machine("/tmp/a.txt", None), Some(std::path::PathBuf::from("/tmp/a.txt")));
         assert!(goal_missing_note("~/a.txt").contains("~/a.txt"));
-        assert!(goal_nudge(3, "~/a.txt", None).contains("save_as"));
-        assert!(goal_nudge(3, "~/d/a.txt", Some("~/d")).contains("The folder ~/d does not exist yet"));
-        assert!(!goal_nudge(3, "~/a.txt", None).contains("does not exist yet"));
+        assert!(goal_nudge(3, "~/a.txt", None, None).contains("save_as"));
+        assert!(goal_nudge(3, "~/d/a.txt", Some("~/d"), None).contains(r#""action": "files_new_folder", "args": {"name": "d"}"#), "F50: the folder's call to copy");
+        assert!(!goal_nudge(3, "~/a.txt", None, None).contains("files_new_folder"));
         assert_eq!(missing_folder_of("~/a.txt", Some("/home/y")), None, "home itself is never the missing folder");
         assert_eq!(missing_folder_of("/ym-f33-nowhere/sub/a.txt", None).as_deref(), Some("/ym-f33-nowhere/sub"));
     }
@@ -2244,6 +2290,27 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F50, E.LONG1 L2b's request: the calls that make ~/longtask, then recipes in it.
+    #[test]
+    fn the_way_to_a_missing_folder_is_calls_to_copy() {
+        let s = folder_steps("~/longtask/recipes", Some("~/longtask"), Some("/home/yantrik/")).expect("folders to make");
+        let order = [
+            r#""action": "files_go", "args": {"path": "/home/yantrik"}"#,
+            r#""action": "files_new_folder", "args": {"name": "longtask"}"#,
+            r#""action": "files_go", "args": {"path": "/home/yantrik/longtask"}"#,
+            r#""action": "files_new_folder", "args": {"name": "recipes"}"#,
+        ];
+        let at: Vec<usize> = order.iter().map(|o| s.find(o).unwrap_or_else(|| panic!("{o} missing from {s}"))).collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "out of order: {s}");
+        let no_home = folder_steps("~/longtask/recipes", Some("~/longtask"), None).unwrap();
+        assert!(no_home.contains("files_go to ~ (as an absolute path)"), "{no_home}");
+        let one = folder_steps("~/arena-x", None, Some("/home/yantrik")).unwrap();
+        assert!(one.contains(r#""name": "arena-x""#) && one.contains(r#""path": "/home/yantrik""#), "{one}");
+        assert_eq!(folder_steps("~/notes.txt", None, Some("/home/yantrik")), None, "a file whose folder exists keeps its editor steps");
+        let file_in_missing = folder_steps("~/d/plan.md", Some("~/d"), Some("/h")).unwrap();
+        assert!(file_in_missing.contains(r#""name": "d""#) && file_in_missing.contains("save_as"), "{file_in_missing}");
     }
 
     /// E.ARENA1-F49 on the desktop's real answer to `os_describe {app: shell, actions: files_}` (520,

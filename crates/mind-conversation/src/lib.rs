@@ -7282,6 +7282,20 @@ impl ConversationEngine {
         Some((asked, folder))
     }
 
+    /// E.ARENA1-F50: the note for a repeated `files_go` while the request's folder is still missing:
+    /// the screen is already there, and the exact next calls. None for anything else.
+    async fn folder_repeat_note(&self, tool: &str, args: &serde_json::Value, user_text: &str, id: &TurnIdentity) -> Option<String> {
+        let (_, action) = desktop::act_target(tool, args)?;
+        if action != "files_go" {
+            return None;
+        }
+        let (path, folder) = self.missing_goal_now(user_text, id).await?;
+        let steps = desktop::folder_steps(&path, folder.as_deref(), self.person_home().as_deref())?;
+        Some(format!(
+            "(that files_go already ran -- the Files screen is already there, and going again changes nothing. {steps})"
+        ))
+    }
+
     /// E.HOME3: ask the desktop about one path.
     async fn desktop_stat(&self, path: &str, id: &TurnIdentity) -> Option<desktop::Stat> {
         let args = serde_json::json!({"app": "shell", "action": "files_stat", "args": {"path": path}});
@@ -13620,7 +13634,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if !goal_nudged {
                         goal_nudged = true;
                         eprintln!("[agent] step {step}: answering with {path} still missing \u{2014} asking for it");
-                        scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref()));
+                        scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::goal_missing_note(&path));
@@ -13831,7 +13845,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 // E.ARENA1-F43: a repeat of a call the desktop REFUSED is told so, with the fix.
                 // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
-                let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or_else(|| {
+                let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
+                let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or(folder_note).or_else(|| {
                     desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref())
                 });
                 match note {
@@ -13859,7 +13874,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             goal_nudged = true;
                             barren = 0;
                             eprintln!("[agent] step {step}: repeats would end the turn with {path} missing \u{2014} saying so");
-                            scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref()));
+                            scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                             continue;
                         }
                     }
@@ -13878,7 +13893,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
             if done_calls.contains(&call_sig) && !moved_since {
                 eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
-                match desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref()) {
+                let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
+                match folder_note.or_else(|| desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref())) {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
                     None => scratch.push_str(&format!(
                     "
@@ -13903,7 +13919,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             goal_nudged = true;
                             barren = 0;
                             eprintln!("[agent] step {step}: repeats would end the turn with {path} missing \u{2014} saying so");
-                            scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref()));
+                            scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                             continue;
                         }
                     }

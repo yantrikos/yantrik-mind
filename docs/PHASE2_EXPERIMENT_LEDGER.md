@@ -12432,3 +12432,44 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - H2: no room guaranteed.
   - H3: the family is not passed through.
 - **Next:** install on 520 and re-run L2, the real test of whether this was what stopped it.
+
+**E.LONG1, L2b (L2 re-run on Mind 2e0ec61): FAIL in 15 s, nothing created.** F49 worked: the model now knew `files_new_folder` and wrote the right plan in its reply. Turn 579 (step lines via 4c):
+- s1: `files_go /home/yantrik`, settled: FALSE;
+- s2: `files_go /home/yantrik/longtask`, refused ("no folder");
+- s3–s6: `files_go /home/yantrik` ×4, each "already called with these args — reusing the work log";
+- at s4, the goal note's "saying so" exit; the turn ended with 3 real steps in 15 s.
+
+## E.ARENA1-F50 — PREREG: a repeat caught on the way to a missing folder names the next call
+
+**The defect, the Mind's own:**
+- F33's goal note tells the model "make it first (Files: go to its parent, then `files_new_folder`)".
+- The model goes to the parent (`files_go /home/yantrik`, which it had already done, unsettled). The dedupe refuses that as "already called".
+- The model, never sure it got there, goes there again. The turn spends its one goal note and ends on "or say plainly that it was not made", 15 s into 180.
+- **So the guard refuses the very step the note recommended,** and neither tells the model it is already there or what to call next.
+- The OS half (`files_go` settled, saying what the folder holds) is 4c's.
+
+**Plan:**
+1. `desktop::folder_steps(asked, missing_folder, home)` gives the concrete calls to make the first missing folder: `files_go` its parent (an absolute path when the home is known), then `files_new_folder {name}`, then the rest. A goal that is itself a folder (no extension) is made the same way.
+2. F33's goal note carries those exact calls, ahead of its "or say plainly" exit.
+3. When the repeat guard catches a `files_go` (an immediate repeat or an earlier identical call) while the request's goal is missing, the note says the Files screen is already there and gives the next `files_new_folder` call, in place of the generic "do not repeat it".
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `folder_steps("~/longtask/recipes", Some("~/longtask"), Some("/home/yantrik"))` names `files_go` with `/home/yantrik` and `files_new_folder` with `"longtask"`, in that order, then `recipes`.
+2. Loop, L2b's shape (a home without `longtask`): after a `files_go` home is repeated, the model's prompt carries `files_new_folder` with `{"name": "longtask"}`.
+3. A repeated `files_go` when nothing the request asked for is missing keeps today's note.
+
+**E.ARENA1-F50 — RESULT: built, every kill criterion held.** Suite 2218/0.
+- **The rule:**
+  - `desktop::folder_steps` gives the copyable calls in order: `files_go` the first missing folder's parent (absolute when the home is known), `files_new_folder {name}`, then the next folder in, or the editor's `new` and `save_as` for a file.
+  - F33's goal note keeps its sentence ("The folder ~/d does not exist yet: make it first.") and adds the calls.
+  - A repeated `files_go` (immediate, or an earlier identical call) while the request's goal is missing gets `folder_repeat_note`: "the Files screen is already there, and going again changes nothing", plus the calls.
+- **Tests:**
+  - `the_way_to_a_missing_folder_is_calls_to_copy`: L2b's nested request, the order, `~` without a home, a single folder, a file whose folder exists, a file in a missing folder.
+  - `a_repeat_on_the_way_to_a_missing_folder_names_the_next_call` (loop, a real temporary home): a repeat names `files_new_folder {"name": "longtask"}`; with the folders present, today's note.
+  - F33's two existing tests hold, after the sentence was kept rather than replaced.
+- **Mutants, each watched to fail on an assertion:**
+  - J1: repeat notes ignore the missing folder.
+  - J2/J2': the goal note in words, not calls (re-run after the sentence was restored).
+  - J3: the parent not visited first.
+  - J4: the nested folder not made.
+  - J5: `~` not resolved by the home.

@@ -13127,6 +13127,9 @@ Open reminders you're carrying for them:",
         let mut described: std::collections::HashMap<String, desktop::ActionList> =
             std::collections::HashMap::new();
         let mut twin_hinted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F48: would a command put a card up on this desktop (read from the shell's
+        // mind_mode), whether the loop has looked for that, and whether the model was steered once.
+        let (mut commands_ask, mut mode_looked, mut command_steered): (Option<bool>, bool, bool) = (None, false, false);
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
         let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
@@ -13972,7 +13975,18 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if twin_looked.insert(look.to_string()) {
                         let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
                         desktop::record_described(&look, &seen, &mut described);
+                        if let Some(asks) = desktop::commands_would_ask(&seen) {
+                            commands_ask = Some(asks);
+                        }
                     }
+                }
+                // E.ARENA1-F48: before the turn's first command, know whether it would ask.
+                if desktop::is_agent_run(&tool, &args) && commands_ask.is_none() && !mode_looked && !command_steered {
+                    mode_looked = true;
+                    let look = serde_json::json!({ "app": desktop::TWIN_HOST });
+                    let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                    desktop::record_described(&look, &seen, &mut described);
+                    commands_ask = desktop::commands_would_ask(&seen);
                 }
                 if let Some(look) = desktop::twin_lookup(&tool, &args, &described) {
                     if twin_looked.insert(look.to_string()) {
@@ -13985,9 +13999,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                 }
                 let sig = call_sig_for_twin(&tool, &args);
-                match desktop::lower_grade_twin(&tool, &args, &described) {
-                    Some(note) if twin_hinted.insert(sig.clone()) => Some(note),
-                    _ => None,
+                if desktop::is_agent_run(&tool, &args) && commands_ask == Some(true) && !command_steered {
+                    // E.ARENA1-F48: once per turn, an app before a card. Sent again, it goes through.
+                    command_steered = true;
+                    eprintln!("[agent] step {step}: a command would ask the person here \u{2014} pointed at the apps first");
+                    Some(desktop::COMMAND_WOULD_ASK.to_string())
+                } else {
+                    match desktop::lower_grade_twin(&tool, &args, &described) {
+                        Some(note) if twin_hinted.insert(sig.clone()) => Some(note),
+                        _ => None,
+                    }
                 }
             };
             let sent = not_sent.is_none();
@@ -14072,6 +14093,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let obs = if tool.starts_with("mcp.yantrik-os.") { desktop::mcp_voice(&obs) } else { obs };
             if tool == desktop::DESCRIBE {
                 desktop::record_described(&args, &obs, &mut described);
+                if desktop::app_of(&tool, &args).as_deref() == Some(desktop::TWIN_HOST) {
+                    if let Some(asks) = desktop::commands_would_ask(&obs) {
+                        commands_ask = Some(asks);
+                    }
+                }
             }
             if sent && tool == desktop::ACT {
                 if let Some((key, answer)) = desktop::approval_answer(&obs) {

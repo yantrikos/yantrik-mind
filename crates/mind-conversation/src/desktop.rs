@@ -187,8 +187,11 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
         // Small fields worth more than their place in the alphabet: kept whole even when the
         // head cut them off.
         for key in ALWAYS_KEPT {
+            // Kept whole: re-added when the head cut it off entirely, and when the cut fell inside
+            // it -- a half field is the field missing (E.ARENA1-F48).
             let marker = format!("\"{key}\": ");
-            if !out.contains(&marker) {
+            let whole_in_head = out.lines().any(|l| l.contains(&marker) && state.lines().any(|s| s == l));
+            if !whole_in_head {
                 if let Some(field) = kept_field(&state, key) {
                     out.push('\n');
                     out.push_str(&field);
@@ -1087,6 +1090,40 @@ pub(crate) fn command_first(obs: &str) -> Option<String> {
     Some(out)
 }
 
+/// E.ARENA1-F48: is this call `shell.agent_run` -- a new command, not a wait on one?
+pub(crate) fn is_agent_run(tool: &str, args: &serde_json::Value) -> bool {
+    act_target(tool, args).is_some_and(|(app, action)| app == TWIN_HOST && action == "agent_run")
+}
+
+/// E.ARENA1-F48: would a command put a card in front of the person, read off the shell's own
+/// `mind_mode` line? `ask` and `auto` ask (auto once per session) unless a session rule
+/// `{"app": "shell", "action": "agent_run"}` covers it; `bypass` asks nothing; `plan` refuses
+/// without asking. None when the line is not there or not readable -- and then nothing changes.
+pub(crate) fn commands_would_ask(describe: &str) -> Option<bool> {
+    // The first `mind_mode` line that parses: a condensed description can carry a half one (the
+    // state head cut inside it) before the whole one kept after it.
+    let v: serde_json::Value = describe.lines().find_map(|l| {
+        let json = l.trim().strip_prefix("\"mind_mode\":")?.trim().trim_end_matches(',');
+        serde_json::from_str::<serde_json::Value>(json).ok().filter(|v| v.is_object())
+    })?;
+    let ruled = v.get("session_rules").and_then(|r| r.as_array()).is_some_and(|rules| {
+        rules.iter().any(|r| r.get("app").and_then(|a| a.as_str()) == Some(TWIN_HOST) && r.get("action").and_then(|a| a.as_str()) == Some("agent_run"))
+    });
+    match v.get("mode")?.as_str()? {
+        "ask" | "auto" => Some(!ruled),
+        "bypass" | "plan" => Some(false),
+        _ => None,
+    }
+}
+
+/// E.ARENA1-F48: what the model is told instead of a command that would put a card up. VM 520, T7:
+/// the Mind wrote a file with `agent_run printf … >` straight after reading the calendar; the card
+/// sat unanswered for 110 s in the person's session, and the editor (`new`, `save_as`) never asks.
+pub(crate) const COMMAND_WOULD_ASK: &str = "(not sent: on this desktop a command puts a card in front of the \
+     person and waits for their answer. If an app's own actions can do this -- for a file, the editor's `new` with \
+     the text, then `save_as` with the path -- use those instead. If no app can, send the same agent_run again and \
+     the person will be asked.)";
+
 /// E.ARENA1-F47: the exit code of a finished command, read off `command_first`'s own first line.
 pub(crate) fn command_exit(obs: &str) -> Option<i64> {
     let rest = obs.strip_prefix("The command finished: exit code ")?;
@@ -1515,14 +1552,18 @@ const CONDENSED_MARK: &str = "\nACTIONS:";
 /// so minds stop running `date` through an approval card). `describe shell` sorts its keys, and
 /// `apps` -- a list of ~3,000 characters -- sorts before `clock`, so the 900-character head cut it
 /// off every time: the mind was never shown the desktop's clock.
-const ALWAYS_KEPT: [&str; 1] = ["clock"];
+///
+/// `mind_mode` (E.ARENA1-F48): whether a command will put a card in front of the person. It sorts
+/// past the head too, so the loop's own check never saw it and the model never knew the mode.
+const ALWAYS_KEPT: [&str; 2] = ["clock", "mind_mode"];
 
 /// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
 /// value is taken to its matching bracket when it is an object or a list (however it was
 /// pretty-printed), else to the end of its line. `None` when absent, or longer than a kept field
 /// should be.
 fn kept_field(state: &str, key: &str) -> Option<String> {
-    const MAX: usize = 300;
+    // `mind_mode` carries a sentence and grows with each session rule (E.ARENA1-F48).
+    let max: usize = if key == "mind_mode" { 1200 } else { 300 };
     let pat = format!("\n  \"{key}\": ");
     let rest = &state[state.find(&pat)? + pat.len()..];
     let value = if rest.starts_with('{') || rest.starts_with('[') {
@@ -1555,7 +1596,7 @@ fn kept_field(state: &str, key: &str) -> Option<String> {
         rest.lines().next()?.trim_end().trim_end_matches(',')
     };
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    (compact.chars().count() <= MAX).then(|| format!("  \"{key}\": {compact}"))
+    (compact.chars().count() <= max).then(|| format!("  \"{key}\": {compact}"))
 }
 
 /// The cap every read-only MCP result gets, for data from somewhere else.
@@ -2183,6 +2224,36 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F48 on the desktop's real `mind_mode` lines (520 on adfcc32f; the session-rule
+    /// shape from yantrik-ui mind_mode.rs, as yantrik-os-4c read it): when a command would ask.
+    #[test]
+    fn whether_a_command_would_ask_is_read_off_the_mode() {
+        const AUTO: &str = include_str!("../fixtures/desktop/shell_mind_mode_auto_adfcc32f.txt");
+        assert_eq!(commands_would_ask(AUTO), Some(true), "auto, no rule: the first command asks");
+        let with = |from: &str, to: &str| AUTO.replace(from, to);
+        assert_eq!(commands_would_ask(&with("\"mode\": \"auto\"", "\"mode\": \"bypass\"")), Some(false));
+        assert_eq!(commands_would_ask(&with("\"mode\": \"auto\"", "\"mode\": \"ask\"")), Some(true));
+        assert_eq!(commands_would_ask(&with("\"mode\": \"auto\"", "\"mode\": \"plan\"")), Some(false), "refused, not asked");
+        let ruled = with("\"session_rules\": []", "\"session_rules\": [{\"app\": \"shell\", \"action\": \"agent_run\"}]");
+        assert_eq!(commands_would_ask(&ruled), Some(false), "the session's rule covers it");
+        let other = with("\"session_rules\": []", "\"session_rules\": [{\"app\": \"editor\", \"action\": \"save_as\"}]");
+        assert_eq!(commands_would_ask(&other), Some(true), "a rule for something else does not");
+        assert_eq!(commands_would_ask("Yantrik -- desktop screen"), None);
+        assert_eq!(commands_would_ask("  \"mind_mode\": {\"mode\": \"auto\", \"sess"), None, "half a line");
+        // Through the condensing every description gets on its way to the loop: the mode sorts
+        // past the 900-character head, and the loop never saw it until it was always kept.
+        let condensed = condense_description(SHELL).expect("the shell description condenses");
+        assert_eq!(commands_would_ask(&condensed), Some(true), "the real shell is in ask mode: {condensed:.1200}");
+        // The head can also end INSIDE the line: half a field is the field missing, so the whole
+        // one is kept after it. The real auto line, placed to straddle the 900-character cut.
+        let straddling = format!("{{\n  \"aaa\": \"{}\",\n{}\n}}\n  act: x()\n", "x".repeat(DESKTOP_STATE_HEAD - 60), AUTO.trim_end());
+        let cut = condense_description(&straddling).expect("condenses");
+        assert!(cut.lines().any(|l| l.contains("\"mind_mode\": ") && commands_would_ask(l).is_none()), "the head did not cut inside the line: {cut}");
+        assert_eq!(commands_would_ask(&cut), Some(true), "the whole field was not kept after the half: {cut}");
+        assert!(is_agent_run(ACT, &serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "ls"}})));
+        assert!(!is_agent_run(ACT, &serde_json::json!({"app": "shell", "action": "agent_job", "args": {"job": "j1"}})), "a wait is not a new command");
     }
 
     /// E.ARENA1-F47 on VM 561's Mind turn 44 commands: the failed check is kept and said; a re-run

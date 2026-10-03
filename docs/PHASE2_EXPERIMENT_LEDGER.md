@@ -12315,3 +12315,25 @@ The command came first; no app action was tried before it. Earlier gates passed 
 4. `agent_job` (waiting on a running command) is never held back.
 
 **Waiting on:** 561's real `mind_mode` line with a session rule, for criterion 2's spelling.
+
+**E.ARENA1-F48 — RESULT: built, every kill criterion held.** Suite 2214/0.
+- **The rule:**
+  - `desktop::commands_would_ask` reads the shell's `mind_mode`: `ask` or `auto` without a `{"app":"shell","action":"agent_run"}` session rule means it asks; `bypass` and `plan` don't; anything unreadable is None. Spelling from 561's real line and the yantrik-ui code, via 4c.
+  - The loop learns it from any shell description this turn (the model's own, F15's grade lookup, or one look of its own before the first `agent_run`).
+  - Once per turn, the first `agent_run` that would ask is not sent; `COMMAND_WOULD_ASK` points the model at the apps' own actions. Unsent calls already leave the done-set (F7), so a second `agent_run` goes to the person. `agent_job` is never held.
+- **Found while building, the same lesson as F45:**
+  - **The symptom:** the first loop run passed all 49 desktop tests when four should have broken. The hold-back never fired.
+  - **The cause:** every description is condensed before the loop sees it, and `mind_mode` sorts past the 900-character state head, so the loop, and the model, never saw the desktop's mode.
+  - **The fix:** `mind_mode` joins `clock` in `ALWAYS_KEPT`, with a 1,200-character limit since it grows with each rule. A kept field is also re-added when the head cut inside it, not only when it was absent.
+  - The four F45–F47 command tests now run on a bypass-mode shell (`bypass_shell()`), the desktop they were about.
+- **Tests:**
+  - `whether_a_command_would_ask_is_read_off_the_mode`: real lines; through `condense_description` on the real shell; a line placed to straddle the cut.
+  - `a_command_that_would_ask_is_not_the_first_resort` (loop): ask mode means the first is held and the second sent; bypass, or a session rule, means the first is sent; `agent_job` is never held.
+- **Mutants, each watched to fail on an assertion:**
+  - G1: never held back.
+  - G2: a session rule ignored.
+  - G3: bypass taken as asking.
+  - G4: mind_mode not kept.
+  - G5: held back every time.
+  - G6: a wait held back too.
+  - G7: a half field counts as kept. It first survived, because the real shell's line lies wholly past the cut; the straddling case was added and G7 then failed.

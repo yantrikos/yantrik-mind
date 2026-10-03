@@ -17706,6 +17706,9 @@ mod desktop_consent_and_stall_wiring {
     /// look at the shell again, and the model is shown the output's last line.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_commands_output_reaches_the_model_and_the_shell_is_not_looked_at() {
+        // E.ARENA1-F48: a desktop where commands do not ask (as on VM 561), so the first command is sent.
+        let sb = bypass_shell();
+        let sb = sb.as_str();
         const DONE: &str = include_str!("../fixtures/desktop/act_agent_run_done_92fecdf.txt");
         let cat = || {
             Step::Call(
@@ -17714,7 +17717,7 @@ mod desktop_consent_and_stall_wiring {
             )
         };
         let prompt = "Read the Starfall plan and tell me the last step.";
-        let r = run_with(prompt, vec![cat()], vec![SHELL, SHELL, SHELL], vec![DONE]).await;
+        let r = run_with(prompt, vec![cat()], vec![sb, sb, sb], vec![DONE]).await;
         assert!(!r.prompts.iter().any(|p| p.contains("Looked again")), "a command was judged by a look at the shell");
         assert!(
             r.prompts.iter().any(|p| p.contains("-> The command finished: exit code 0")
@@ -17722,9 +17725,16 @@ mod desktop_consent_and_stall_wiring {
             "the model never saw the output"
         );
         let settled = DONE.replace("settled: False", "settled: True");
-        let s = run_with(prompt, vec![cat()], vec![SHELL, SHELL, SHELL], vec![settled.as_str()]).await;
+        let s = run_with(prompt, vec![cat()], vec![sb, sb, sb], vec![settled.as_str()]).await;
         let looks = |r: &Run| r.reached.iter().filter(|(t, _)| t.ends_with("os_describe")).count();
         assert_eq!(looks(&r), looks(&s), "no extra look for an unsettled command");
+    }
+
+    /// E.ARENA1-F48: the real shell description with its desktop in `bypass` mode -- commands ask nothing.
+    fn bypass_shell() -> String {
+        let s = SHELL.replace("\"mode\": \"ask\"", "\"mode\": \"bypass\"");
+        assert_ne!(s, SHELL, "the fixture's mode line moved");
+        s
     }
 
     /// A command's answer in yos-mcp's shape at 92fecdf, with `result` as the JSON yos prints.
@@ -17743,18 +17753,21 @@ mod desktop_consent_and_stall_wiring {
     /// The second `cat` runs, and the model reads the ticked plan -- not step 1's copy from the log.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_command_is_run_again_once_another_has_run_since() {
+        // E.ARENA1-F48: a desktop where commands do not ask (as on VM 561), so the first command is sent.
+        let sb = bypass_shell();
+        let sb = sb.as_str();
         let cat = || shell_cmd("agent_run", serde_json::json!({"command": "cat ~/Projects/starfall/PLAN.md"}));
         let sed = shell_cmd("agent_run", serde_json::json!({"command": "cd ~/Projects/starfall && sed -i 's/- \\[ \\] 1\\./- [x] 1./' PLAN.md"}));
         let done = |tail: &str| command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": tail}));
         let (before, ticked, quiet) = (done("- [ ] 1. index.html"), done("- [x] 1. index.html"), done(""));
         let prompt = "Carry on with the Starfall plan.";
-        let r = run_with(prompt, vec![cat(), sed, cat()], vec![SHELL, SHELL, SHELL], vec![&before, &quiet, &ticked]).await;
+        let r = run_with(prompt, vec![cat(), sed, cat()], vec![sb, sb, sb], vec![&before, &quiet, &ticked]).await;
         let runs = reached_acts(&r).iter().filter(|(_, a)| a == "agent_run").count();
         assert_eq!(runs, 3, "{:?}", r.reached);
         assert!(r.prompts.iter().any(|p| p.contains("- [x] 1. index.html")), "the model never read the ticked plan");
         assert!(!r.prompts.iter().any(|p| p.contains("already called with exactly these arguments")), "served from the log");
 
-        let again = run_with(prompt, vec![cat(), cat()], vec![SHELL, SHELL, SHELL], vec![&before, &before]).await;
+        let again = run_with(prompt, vec![cat(), cat()], vec![sb, sb, sb], vec![&before, &before]).await;
         let runs = reached_acts(&again).iter().filter(|(_, a)| a == "agent_run").count();
         assert_eq!(runs, 1, "nothing ran in between: the repeat is nudged, {:?}", again.reached);
     }
@@ -17763,6 +17776,9 @@ mod desktop_consent_and_stall_wiring {
     /// again with `wait` added, both reach the desktop.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn waiting_on_a_running_command_is_not_a_repeat() {
+        // E.ARENA1-F48: a desktop where commands do not ask (as on VM 561), so the first command is sent.
+        let sb = bypass_shell();
+        let sb = sb.as_str();
         let running = |tail: &str| command_answer(serde_json::json!({"running": true, "job": "j9c21", "tail": tail}));
         let (r1, r2, r3) = (running("Compiling a"), running("Compiling b"), running("Compiling c"));
         let finished = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": "Finished"}));
@@ -17774,7 +17790,7 @@ mod desktop_consent_and_stall_wiring {
                 shell_cmd("agent_job", serde_json::json!({"job": "j9c21"})),
                 shell_cmd("agent_job", serde_json::json!({"job": "j9c21", "wait": 30})),
             ],
-            vec![SHELL, SHELL, SHELL],
+            vec![sb, sb, sb],
             vec![&r1, &r2, &r3, &finished],
         )
         .await;
@@ -17787,19 +17803,22 @@ mod desktop_consent_and_stall_wiring {
     /// model answers that everything works. The reply carries the system's line after its own text.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failed_check_is_in_the_reply_whatever_the_model_says() {
+        // E.ARENA1-F48: a desktop where commands do not ask (as on VM 561), so the first command is sent.
+        let sb = bypass_shell();
+        let sb = sb.as_str();
         let check = || shell_cmd("agent_run", serde_json::json!({"command": "node -e \"process.exit(0)\""}));
         let failed = command_answer(serde_json::json!({"exit_code": 127, "cwd_after": "/home/yantrik", "tail": "bash: node: command not found"}));
         let ok = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": ""}));
         let claim = Step::Call("answer", serde_json::json!({"text": "game.js implements all planned features."}));
         let prompt = "Carry on with the Starfall plan.";
-        let r = run_with(prompt, vec![check(), claim], vec![SHELL, SHELL], vec![&failed]).await;
+        let r = run_with(prompt, vec![check(), claim], vec![sb, sb], vec![&failed]).await;
         assert!(r.reply.starts_with("game.js implements all planned features.\n\n"), "{}", r.reply);
         assert!(r.reply.contains("`node -e \"process.exit(0)\"` (exit code 127 -- the program it calls is not installed) did not succeed"), "{}", r.reply);
 
         let fixed = run_with(
             prompt,
             vec![check(), shell_cmd("agent_run", serde_json::json!({"command": "ls"})), check(), Step::Call("answer", serde_json::json!({"text": "Checked."}))],
-            vec![SHELL, SHELL],
+            vec![sb, sb],
             vec![&failed, &ok, &ok],
         )
         .await;
@@ -17809,7 +17828,7 @@ mod desktop_consent_and_stall_wiring {
         let said = run_with(
             prompt,
             vec![check(), Step::Say(r#"{"tool": "answer", "args": {"text": "All features work."}}"#)],
-            vec![SHELL, SHELL],
+            vec![sb, sb],
             vec![&failed],
         )
         .await;
@@ -17821,9 +17840,40 @@ mod desktop_consent_and_stall_wiring {
         // The compose exit: the failed check, then repeats until the barren limit ends the turn.
         let cat = || shell_cmd("agent_run", serde_json::json!({"command": "cat PLAN.md"}));
         let plan = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": "- [x] 6."}));
-        let composed = run_with(prompt, vec![check(), cat(), cat(), cat(), cat()], vec![SHELL, SHELL], vec![&failed, &plan]).await;
+        let composed = run_with(prompt, vec![check(), cat(), cat(), cat(), cat()], vec![sb, sb], vec![&failed, &plan]).await;
         assert!(composed.reply.starts_with(COMPOSED), "{}", composed.reply);
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
+    }
+
+    /// E.ARENA1-F48 through the loop, VM 520 T7's shape: the first command on a desktop where it
+    /// would put a card up is not sent and the model is pointed at the apps; sent again, it goes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_that_would_ask_is_not_the_first_resort() {
+        let write = || shell_cmd("agent_run", serde_json::json!({"command": "printf '%s\\n' 'Perception API review' > ~/arena-x-friday.txt"}));
+        let done = command_answer(serde_json::json!({"exit_code": 0, "cwd_after": "/home/yantrik", "tail": ""}));
+        let prompt = "Write the titles of everything on my calendar on 25 September into a new file ~/arena-x-friday.txt.";
+        let runs = |r: &Run| reached_acts(r).iter().filter(|(_, a)| a == "agent_run").count();
+
+        // The real shell description is in `ask` mode with no session rule.
+        let asked = run_with(prompt, vec![write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        assert_eq!(runs(&asked), 0, "the first command went to the person: {:?}", asked.reached);
+        assert!(asked.prompts.iter().any(|p| p.contains("a command puts a card in front of the person")), "the model was not told");
+        let again = run_with(prompt, vec![write(), write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        assert_eq!(runs(&again), 1, "sent again, it goes to the person: {:?}", again.reached);
+
+        // Where commands ask nothing (bypass, or a session rule), the first command is sent.
+        let sb = bypass_shell();
+        let free = run_with(prompt, vec![write()], vec![&sb, &sb, &sb], vec![&done]).await;
+        assert_eq!(runs(&free), 1, "{:?}", free.reached);
+        let ruled = SHELL.replace("\"session_rules\": []", "\"session_rules\": [{\"app\": \"shell\", \"action\": \"agent_run\"}]");
+        assert_ne!(ruled, SHELL);
+        let ruled_run = run_with(prompt, vec![write()], vec![&ruled, &ruled, &ruled], vec![&done]).await;
+        assert_eq!(runs(&ruled_run), 1, "{:?}", ruled_run.reached);
+
+        // Waiting on a running command is never held back.
+        let job = shell_cmd("agent_job", serde_json::json!({"job": "j9c21"}));
+        let waited = run_with(prompt, vec![job], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        assert_eq!(reached_acts(&waited).iter().filter(|(_, a)| a == "agent_job").count(), 1, "{:?}", waited.reached);
     }
 
     /// E.STATUS1: a status-only listener hears the turn's status lines, and attaching it does not

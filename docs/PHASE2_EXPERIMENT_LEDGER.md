@@ -12553,3 +12553,10 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **Why it is void:** 520's `yantrik-calendar` process dates from Thursday 1 October 21:31. The binary on disk was rewritten today at 16:50:53. `describe calendar` lists 10 actions, with no `events_between` and no `week_starts_on`. The shell restarted; open apps did not.
 - **OS gap, raised with 4c:** `yantrik-update apply` leaves open apps on their old binaries, so a nightly (and its gate) can test yesterday's apps under today's shell.
 - **To redo** once the apps are restarted.
+- **4c's check after L1b:** six processes on 520 were running replaced binaries (`/proc/*/exe` "(deleted)"):
+  - Calendar (1 Oct), Notes (2 Oct), Weather (29 Sep), Terminal (28 Sep);
+  - **`yantrik-egress.service` (2 Oct), the minds' egress filter**;
+  - perception-service (2 Oct).
+- **Restarted by 4c:** Calendar, Notes and egress. The Terminal was left because it may hold Pranab's shells. `describe calendar` now lists `events_between` and `week_starts_on: "sunday"`.
+- **Updater fix owned by 4c:** after the swap, restart services whose binary changed, reopen apps that hold no work, and name the ones left.
+- **For the Mind's gates:** any gate on a fresh update may have been testing old apps. The egress filter running a stale binary is a security fact, not only a test one.

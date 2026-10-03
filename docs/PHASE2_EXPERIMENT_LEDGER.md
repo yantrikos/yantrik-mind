@@ -12667,3 +12667,10 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Against the ground truth:** all 12 events under Wednesday at 16:30–17:00, each with a preparation step, and "No events." on the other six days. That matches the store exactly, and nothing was invented.
 - **The reply** is true ("46 lines, saved… `matches_disk: true`"). No card.
 - **What changed since L1/L1c, both of which failed:** the OS's `events_between` (#593, now running), and the Mind's F55 (the read's whole answer reaches the model) and F54 (the goal note comes back with the calls).
+
+**E.LONG1, L2f (L2 on 9b462c37 + 731b603): nearly; 4 of 5 files right, and one false claim.** 36 s, no card.
+- **Made in `~/longtask/recipes`:** `index.html` (three recipes linked, plus style.css), `sheet-pan-chicken.html` and `black-bean-tacos.html` (ingredients, steps, style.css, a back link), `style.css`.
+- **Every link that exists resolves,** and all pages load in headless Chromium with 0 errors.
+- **`lemon-garlic-pasta.html` holds CSS** (a second version of the stylesheet), not the recipe page.
+- **The reply claimed** "style.css — shared stylesheet, linked from all four pages" and that every link was checked. **False for the pasta page,** which has no links.
+- Step lines requested to see how the CSS reached that path.

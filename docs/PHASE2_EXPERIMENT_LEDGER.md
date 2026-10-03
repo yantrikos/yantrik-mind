@@ -12538,3 +12538,13 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **The rule:** `content` is in `ALWAYS_KEPT`, with `CONTENT_KEPT` = 8,000 characters. An open note's or file's text is kept whole after the state head, and F48's straddle rule re-adds it when the head cut inside it.
 - **Test:** `an_open_document_reaches_the_model_whole`, on the real fixture: all four later sections reach the model, and the actions are still listed.
 - **Mutants, each watched to fail on an assertion:** N1, content not kept; N2, content under the old 300-character limit.
+
+**E.LONG1, L3 (CSV, script, report, run it): FAIL in 140 s. Blocked on an unanswered card, not a Mind defect.** Mind bc5410b, turn 583 (step lines via 4c).
+- **Steps:**
+  - s1: describe the shell's `agent_` family.
+  - s2: `agent_run python3 -c …`, **held by F48** ("a command would ask the person here — pointed at the apps first").
+  - s3: a different `agent_run`, one heredoc that writes the CSV and the script and runs them. Sent: **one card (appr-3) in Pranab's session at 18 s, unanswered for 110 s, refused.**
+  - s4: goal note; s5: an honest reply ("nothing ran… no CSV, no script, no report").
+- **Judgment:** the task needs a command whatever happens (the script must run), so one card is unavoidable in `auto` mode. Writing the CSV and script with the editor first would only leave partial files behind the same card. F48 is not tightened on this evidence.
+- **The outcome depends on a person answering.** Pranab agreed to answer cards; this one came while nobody was at 520.
+- **The driver's own bug, fixed:** it logged the single card on every poll (its key included the card's age). It now counts cards by id.

@@ -12560,3 +12560,9 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **Restarted by 4c:** Calendar, Notes and egress. The Terminal was left because it may hold Pranab's shells. `describe calendar` now lists `events_between` and `week_starts_on: "sunday"`.
 - **Updater fix owned by 4c:** after the swap, restart services whose binary changed, reopen apps that hold no work, and name the ones left.
 - **For the Mind's gates:** any gate on a fresh update may have been testing old apps. The egress filter running a stale binary is a security fact, not only a test one.
+
+**E.LONG1, L2e (L2 on OS d95f4444 with #596 live, Mind bc5410b): FAIL in 45 s, with a false reason in the reply.**
+- **#596 worked:** `files_go` now answers `settled: True` with the listing, and **`~/longtask/recipes` was made**.
+- **The reply was the fixed compose-failure line** `COMPOSE_LANE_UNAVAILABLE`: "my own hardware is unreachable, so composing it would mean sending that to a cloud model". **On 520 that is false:** there is no local lane, and the cloud model is the cleared private provider. `private_lane_configured()` is true because the cloud is cleared, so a compose failure picks a sentence written for a local lane.
+- **It also hides the work done:** the folders exist, and the reply says nothing of them.
+- **The compose error itself is requested from 4c** before any rewording.

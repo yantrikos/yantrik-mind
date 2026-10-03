@@ -12371,3 +12371,18 @@ The command came first; no app action was tried before it. Earlier gates passed 
   *Check:* the page still loads without errors; the filter element and script are present; L2's files still exist.
 
 **What counts as a finding:** any wrong or untrue reply, stall, loop, needless card, or lost answer. Each finding gets its own preregistered fix, built in the usual way and never folded into this drive.
+
+**E.LONG1, L1 (plan a week): FAIL in 25 s, nothing written, wrong facts in the reply.** Mind d392c82, 520 on OS adfcc32f, turn 577 (step lines via 4c).
+- **Ground truth:** 12 events between 28 Sep and 4 Oct, all "Arena min…" on Wed 30 Sep, 16:30–17:00.
+- **Steps:**
+  - describe the calendar (October; nothing on day 3);
+  - `set_view week` gave 27 Sep – 3 Oct, because the week starts on Sunday;
+  - `show_date 2026-09-28` ×5 always gave the same Sunday week (2 nudges, then the goal note "week-plan.md missing");
+  - `set_view` again was barren.
+  - The turn ended after 8 steps in 21 s.
+- **The reply:** called the week "27 Sep to 3 Oct" and counted 25 September's events in it. That is false: 25 September isn't in that week. The file was said not to be created, which was true.
+- **Findings:**
+  - **OS, 4c queues fixes:** a view that cannot show the asked range (a Sunday-start week). Coming: `calendar events_between {from, to}`, and the week start shown in describe.
+  - **Mind:** a long task gives up after 21 s of its 180 s when one approach stalls. Everything needed except one empty day was already in view. The repeat and barren guards ended the turn, and the goal note did not turn the model towards writing with what it had.
+  - **Mind:** the compose put days outside the asked range into the answer.
+  - Fix design waits for the other tasks' data.

@@ -63,6 +63,8 @@ pub(crate) fn superseded(tool: &str, desktop: bool) -> Option<String> {
 pub(crate) const DESKTOP_STATE_HEAD: usize = 900;
 /// How much room the ACTION list gets, descriptions included; signatures are never dropped.
 pub(crate) const DESKTOP_ACTIONS_BUDGET: usize = 6000;
+/// E.ARENA1-F52: how much of an open document's `content` a description keeps whole.
+pub(crate) const CONTENT_KEPT: usize = 8000;
 /// E.ARENA1-F49: the least room the asked-for family's explanations get, whatever the signatures took.
 pub(crate) const FAMILY_DETAIL_ROOM: usize = 6000;
 
@@ -1633,7 +1635,11 @@ const CONDENSED_MARK: &str = "\nACTIONS:";
 ///
 /// `mind_mode` (E.ARENA1-F48): whether a command will put a card in front of the person. It sorts
 /// past the head too, so the loop's own check never saw it and the model never knew the mode.
-const ALWAYS_KEPT: [&str; 2] = ["clock", "mind_mode"];
+///
+/// `content` (E.ARENA1-F52): the open note or file -- what a reading or writing task is about. A
+/// long note (3,545 characters) reached the model only to the 900-character head; its later
+/// sections were gone with no sign they existed.
+const ALWAYS_KEPT: [&str; 3] = ["clock", "mind_mode", "content"];
 
 /// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
 /// value is taken to its matching bracket when it is an object or a list (however it was
@@ -1641,7 +1647,11 @@ const ALWAYS_KEPT: [&str; 2] = ["clock", "mind_mode"];
 /// should be.
 fn kept_field(state: &str, key: &str) -> Option<String> {
     // `mind_mode` carries a sentence and grows with each session rule (E.ARENA1-F48).
-    let max: usize = if key == "mind_mode" { 1200 } else { 300 };
+    let max: usize = match key {
+        "mind_mode" => 1200,
+        "content" => CONTENT_KEPT,
+        _ => 300,
+    };
     let pat = format!("\n  \"{key}\": ");
     let rest = &state[state.find(&pat)? + pat.len()..];
     let value = if rest.starts_with('{') || rest.starts_with('[') {
@@ -2309,6 +2319,18 @@ mod tests {
         assert_eq!(command_first(other), None, "a result that is not a command's");
     }
 
+    /// E.ARENA1-F52 on the real Notes description with a 3,545-character note open (520, adfcc32f):
+    /// the whole note reaches the model, not the head's first sections.
+    #[test]
+    fn an_open_document_reaches_the_model_whole() {
+        const NOTE: &str = include_str!("../fixtures/desktop/describe_notes_long_open_adfcc32f.txt");
+        let shown = bound_mcp_output(NOTE, true);
+        for section in ["Bottom line", "Rates", "Talking points for the meeting", "To confirm before the meeting"] {
+            assert!(shown.contains(section), "{section:?} never reached the model");
+        }
+        assert!(shown.contains("act: open_note(title)"), "the actions are still there");
+    }
+
     /// E.ARENA1-F51, E.LONG1 L2c: a request that names a folder gets a save into it, never a save as it.
     #[test]
     fn the_save_hint_never_names_a_folder_as_the_file() {
@@ -2824,4 +2846,5 @@ mod tests {
         assert!(CALENDAR_ON_DESKTOP.contains("There is no other calendar on this machine"));
     }
 }
+
 

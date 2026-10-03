@@ -1,0 +1,78 @@
+Notes — "US Market Status — Wed 23 Sep 2026 close (for Thu 24 Sep meeting)" open (71 lines, saved), 17 notes, 1 in trash
+revision: f8ced0625be48a4d
+{
+  "busy": false,
+  "characters": 3545,
+  "content": "# US Market Status — Wed 23 Sep 2026 close (for Thu 24 Sep meeting)\n\n**Meeting:** Thursday 24 September 2026\n**Topic:** Today's US market status\n**Data as of:** Wed 23 Sep 2026, ~16:36 ET (US close)\n**Source:** Yahoo Finance quote API (fetched 23 Sep 2026)\n\n---\n\n## Bottom line\nBroad risk-off day. All four major US indices closed lower, small caps and the Nasdaq led the decline, volatility jumped, and the 10-year yield pushed to a fresh 52-week high. Energy was the only sector in the green; defensives (Utilities, Real Estate) were hit hardest. Rising yields + a firmer dollar + oil up ~2.4% is the story.\n\n## Major indices\n\n| Index | Close | Day % |\n|---|---|---|\n| S&P 500 | 7,706.03 | -0.76% |\n| Dow Jones Industrial Avg | 51,511.59 | -0.68% |\n| Nasdaq Composite | 26,936.04 | -1.13% |\n| Nasdaq 100 | 30,470.29 | -0.85% |\n| Russell 2000 | 2,838.66 | -1.77% |\n\nRead-through: the pain was worst at the small-cap end (-1.77%) and in growth/tech (Nasdaq -1.13%). Dow held up best, i.e. the selling was not uniform — it was concentrated in higher-beta and rate-sensitive names.\n\n## Rates, volatility, commodities, FX\n\n| Gauge | Level | Day % |\n|---|---|---|\n| US 10-year yield | 5.114% (52-wk high) | +2.94% |\n| VIX | 15.18 | +6.83% |\n| WTI crude | $92.71 | +2.42% |\n| Gold | $4,322.70 | -1.23% |\n| US dollar index | 101.13 | +0.53% |\n\n- 10-year at 5.114% is a 52-week high (range 3.947%–5.135%) — the key macro driver.\n- VIX 15.18 is up 6.8% on the day but still low in absolute terms (52-wk range 13.38–35.30): fear rose, but this is not a panic.\n- Oil +2.4% at $92.71 feeds the inflation story; dollar firmer; gold down as real yields rise.\n\n## Sector performance (SPDR sector ETFs)\n\n| Sector | Day % |\n|---|---|\n| Energy (XLE) | +0.95% |\n| Industrials (XLI) | -0.10% |\n| Staples (XLP) | -0.36% |\n| Tech (XLK) | -0.47% |\n| Financials (XLF) | -0.47% |\n| Materials (XLB) | -0.49% |\n| Health Care (XLV) | -0.64% |\n| Communication Svcs (XLC) | -0.85% |\n| Consumer Discretionary (XLY) | -1.50% |\n| Real Estate (XLRE) | -1.55% |\n| Utilities (XLU) | -1.92% |\n\nOnly Energy closed green. Rate-sensitive defensives — Utilities and Real Estate — were the worst performers, which fits the 10-year yield spike. Discretionary weakness alongside them suggests some consumer caution.\n\n## Talking points for the meeting\n1. **Yields are the driver.** 10-year at 5.11%, a 52-week high. Everything rate-sensitive (Utilities, Real Estate, small caps) bled; that is the cleanest thread through the day.\n2. **It is a sell-off, not a rout.** VIX at 15.18 is elevated on the day but historically low; no capitulation, breadth pain concentrated in beta.\n3. **Energy is the outlier.** Oil +2.4% and Energy the sole green sector — worth asking whether that is supply-driven (inflationary) or demand-driven (constructive).\n4. **Small caps are the tell.** Russell 2000 -1.77%, worst of the majors. Domestic, rate-sensitive, and most exposed to a higher-for-longer read.\n5. **Nasdaq vs Dow divergence.** Growth hit ~2x the Dow — the market is repricing duration, not the whole economy.\n\n## To confirm before the meeting\n- Whether the 10-year close held above 5.10% or faded late.\n- Any Fed speakers / data due Thursday that could move the open.\n- Whether oil's move was headline-driven (geopolitics/supply) — check news before presenting.\n\n## Notes\n- Figures are the last quoted regular-session values at fetch time; some indices stamped 16:00–17:13 ET.\n- Change values shown as % only; Yahoo's absolute change field returned empty at fetch, so % is the reliable figure.\n",
+  "focus": false,
+  "folder": "all",
+  "library_ready": true,
+  "lines": 71,
+  "matches": 3,
+  "metadata": "",
+  "note_count": 17,
+  "notes": [{"filename": "note-01a0bcc3-e80c-79fc-995c-1d1a18ec3ebf.md", "notebook": "Welcome", "pinned": false, "title": "A little space to think", "trash": false}, {"filename": "note-01a0c718-528d-7656-b77d-9940965b5ff9.md", "notebook": "", "pinned": false, "title": "Overnight", "trash": false}, {"filename": "note-01a0c76e-3d35-7f76-964b-347d98200c39.md", "notebook": "", "pinned": false, "title": "Standup", "trash": false}, {"filename": "note-01a0c7de-6245-72ab-9214-11b5dadd4700.md", "notebook": "", "pinned": false, "title": "Speaker checklist — AI Agents talk, Thu 1 Oct 15:00", "trash": false}, {"filename": "note-01a0c7e6-084c-7e91-8f19-0ab578899224.md", "notebook": "", "pinned": false, "title": "Northwind — 4 seats", "trash": false}, {"filename": "note-01a0cb98-3920-709c-a0ab-404cfdf394a0.md", "notebook": "", "pinned": false, "title": "Tuesday evening — three new apps", "trash": false}, {"filename": "note-01a0cbb4-fef6-7b55-93d2-96707bcce515.md", "notebook": "", "pinned": false, "title": "Tuesday at the desk — Bramble, a cairn, and fog", "trash": false}, {"filename": "note-01a0cf31-4d05-7fda-a1b1-003c2abe8c50.md", "notebook": "", "pinned": false, "title": "Groceries", "trash": false}, {"filename": "note-01a0cf45-fa30-74ac-a546-5d74463f6966.md", "notebook": "", "pinned": false, "title": "Writers' room — Voice A, beat 1", "trash": false}, {"filename": "note-01a0cf46-3c16-78c8-a600-c6f5b907b8cb.md", "notebook": "", "pinned": false, "title": "Writers' room — Voice B, beat 1", "trash": false}, {"filename": "note-01a0d01e-e71f-7b84-b77f-7831fe0777cb.md", "notebook": "", "pinned": false, "title": "US Market Status — Wed 23 Sep 2026 close (for Thu 24 Sep meeting)", "trash": false}, {"filename": "untitled-01a0b047-d686-7a0e-88fd-72eb6abb635a.md", "notebook": "", "pinned": false, "title": "Hermes on Yantrik", "trash": false}, {"filename": "untitled-01a0b1cd-ad8b-7a67-89b0-80ea28fbadc7.md", "notebook": "", "pinned": false, "title": "smoke test 1789689441", "trash": false}, {"filename": "untitled-01a0b1ef-475e-779a-9f1d-af4e396a8e4b.md", "notebook": "", "pinned": false, "title": "smoke test", "trash": false}, {"filename": "untitled-01a0b1fd-fa29-7b17-b245-db6f1df402e7.md", "notebook": "", "pinned": false, "title": "Desktop smoke test", "trash": false}, {"filename": "untitled-01a0b289-213b-70c0-9134-93ba5f4277ad.md", "notebook": "", "pinned": false, "title": "audit", "trash": false}, {"filename": "untitled-01a0b356-0eb5-76ba-b5b5-56979e7cae5c.md", "notebook": "", "pinned": false, "title": "smoke test", "trash": false}, {"filename": "note-01a0cbac-7866-7a62-b30f-d4b767236ea6.md", "notebook": "", "pinned": false, "title": "Gate probe", "trash": true}],
+  "notes_directory": "/home/yantrik/.local/share/yantrik/notes",
+  "notice": "",
+  "open_note": "note-01a0d01e-e71f-7b84-b77f-7831fe0777cb.md",
+  "path": "/home/yantrik/.local/share/yantrik/notes/note-01a0d01e-e71f-7b84-b77f-7831fe0777cb.md",
+  "preview": false,
+  "search_query": "2026",
+  "status": "All changes saved",
+  "title": "US Market Status — Wed 23 Sep 2026 close (for Thu 24 Sep meeting)",
+  "trash_count": 1,
+  "trashed_note_open": false,
+  "unsaved": false
+}
+  act: new_note(title, text?)  [standard, settles on return]
+       Create a note with this title, put `text` in it if given, save it, and open it. The title is written as the note's first line, `# <title>`, which is what the library lists it by; whatever note was open is saved first.
+         title: string — The new note's title. It is written as the first line, `# <title>`, and is what `open_note` and `search` find it by.
+         text?: string — The body, written under the title on its own lines. Leave it out for a note that is only a heading; `append` can add to it later.
+  act: open_note(title)  [standard, settles on return]
+       Open an existing note by its exact title or its filename and show it in the editor. The note that was open is saved first; a note in the Trash opens read-only.
+         title: string — The note's exact title, or the filename `describe` lists it under (`note-….md`). Trashed notes are matched too.
+  act: set_title(title)  [standard, settles on return]
+       Rename the note that is open by rewriting its first `# heading` line, adding one at the top if it has none, and save it. Nothing else in the note changes.
+         title: string — The new title, on one line; any line breaks in it become spaces.
+  act: append(text)  [standard, settles on return]
+       Add text to the end of the note that is open and save it. Nothing already in the note is removed; use `set_content` to replace it instead.
+         text: string — Exactly what to add, appended to the last character already there — begin it with a newline to start it on its own line.
+  act: set_content(text)  [sensitive, settles on return]
+       Replace everything in the note that is open with this text and save it. What was there is gone from the window; `undo` takes it back while the note stays open.
+         text: string — The note's entire new text, Markdown included — keep the `# <title>` first line if the note should keep its title. An empty string empties the note.
+  act: search(query)  [standard, settles on return]
+       Filter the library list to the notes whose text or metadata contains this, without opening anything. `set_folder` decides which section is searched.
+         query: string — Matched case-insensitively against each note's text and its notebook and tags; an empty string clears the filter.
+  act: set_folder(folder)  [standard, settles on return]
+       Switch the library list to one section of the library. It changes what `search` and `describe.matches` list, and opens nothing.
+         folder: string — One of `all`, `recent` (touched in the last seven days), `favorites` (pinned), `trash`, or `book:<notebook name>`.
+  act: notebook(text)  [standard, settles on return]
+       File the note that is open under a notebook, which is the section `set_folder book:<name>` lists, and save it. It replaces whatever notebook it was in.
+         text: string — The notebook's name, up to 80 characters; an empty string files the note under none.
+  act: tags(text)  [standard, settles on return]
+       Replace the tags on the note that is open and save it. Tags are searched by `search` along with the note's text.
+         text: string — Comma-separated tags, e.g. `work, ideas`, up to 512 characters; an empty string clears them.
+  act: save()  [standard, settles on return]
+       Write the note that is open to its file now instead of waiting for the 750 ms autosave, and check that the bytes on disk are the text in the window.
+  act: trash()  [sensitive, settles on return]
+       Move the note that is open to the Trash: it leaves the library, its file is removed from the notes directory, and `restore` puts it back.
+  act: restore()  [standard, settles on return]
+       Put the trashed note that is open back into the library, writing its file into the notes directory again. It refuses rather than overwrite a note of the same filename.
+  act: copy()  [standard, settles on return]
+       Duplicate the note that is open as a new note with its own filename, save that, and open it. Unsaved changes go with the copy — it is the way out of "this note changed on disk" — and the original file is left as it is.
+  act: reload()  [standard, settles on return]
+       Re-read every note from the notes directory, picking up files changed outside this window. The open note is saved first and stays open if its file is still there.
+  act: preview()  [standard, settles on return]
+       Turn the rendered Markdown preview of the open note on or off — it is a toggle, and the answer says which it now is. The note itself is not changed.
+  act: focus()  [standard, settles on return]
+       Turn focus mode, which hides the library list and the side panels, on or off — it is a toggle, and the answer says which it now is.
+  act: undo()  [standard, settles on return]
+       Take back the last change made to the note that is open in this window, and save the result. The history is cleared whenever another note is opened.
+  act: redo()  [standard, settles on return]
+       Put back the change that `undo` took off the note that is open, and save the result. Editing the note discards what redo was holding.
+  act: import(path)  [sensitive, settles on return]
+       Read a UTF-8 text or Markdown file from anywhere on disk and add its contents to the library as a new note, then open it. The file itself is left where it is.
+         path: string — Absolute path to the file to read, or one starting `~/`. Up to 256 KiB of text with no control characters.
+  act: export(path)  [sensitive, settles on return]
+       Write the open note's text to a file outside the library, at this path. It refuses rather than overwrite anything already there, and the note stays open.
+         path: string — Absolute path of the file to create, or one starting `~/`. Its folder must exist and nothing may already be at that path.

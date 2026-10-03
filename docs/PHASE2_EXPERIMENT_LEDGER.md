@@ -12515,3 +12515,26 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **The truth, checked on 520:** after `open_note`, `describe notes` carries the note's whole text in `"content"`.
 - **Ground truth:** about 4–6 notes with dates (Speaker checklist, US Market Status, Northwind, audit 2026-09-17, Overnight, possibly Standup).
 - **Step lines requested:** did it open a note, and if so, did the condensed description cut `content`?
+
+**L4, from the step lines (turn 582, via 4c):** `open_note` was never called. The model searched and filtered for 13 steps; its "no action returns a body" came from `describe notes` showing `content: null` while nothing was open. **OS (4c, next build after #596):** `notes read_notes {query?, ids?}` returns titles, dates and bodies in one call, and `search` answers with snippets.
+
+## E.ARENA1-F52 — PREREG: an open document's text reaches the model whole
+
+**Found probing the real bytes after L4.**
+- `describe notes --fold` on 520 with a long note open: "US Market Status", 3,545 characters; fixture `describe_notes_long_open_adfcc32f.txt`.
+- Through `bound_mcp_output`, the note's text survives only to the state head's 900-character cut.
+- "Bottom line" and "Major indices" are kept; **"Rates", "Talking points for the meeting" and "To confirm before the meeting" are gone.**
+- So even when the model opens a note, or a file in the editor (the same `content` field), a reading task works from a fragment, with no sign that the rest exists.
+
+**Plan:**
+- `content` joins `clock` and `mind_mode` in `ALWAYS_KEPT`, with an 8,000-character limit: the open document is what a reading or writing task is about.
+- Longer than that, the head's fragment stays as today.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. On the real fixture, the bounded description contains "Rates", "Talking points for the meeting" and "To confirm before the meeting".
+2. The action list is still present (`open_note` and `read`-style signatures kept).
+
+**E.ARENA1-F52 — RESULT: built, every kill criterion held.** Suite 2221/0.
+- **The rule:** `content` is in `ALWAYS_KEPT`, with `CONTENT_KEPT` = 8,000 characters. An open note's or file's text is kept whole after the state head, and F48's straddle rule re-adds it when the head cut inside it.
+- **Test:** `an_open_document_reaches_the_model_whole`, on the real fixture: all four later sections reach the model, and the actions are still listed.
+- **Mutants, each watched to fail on an assertion:** N1, content not kept; N2, content under the old 300-character limit.

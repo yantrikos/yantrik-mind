@@ -63,6 +63,8 @@ pub(crate) fn superseded(tool: &str, desktop: bool) -> Option<String> {
 pub(crate) const DESKTOP_STATE_HEAD: usize = 900;
 /// How much room the ACTION list gets, descriptions included; signatures are never dropped.
 pub(crate) const DESKTOP_ACTIONS_BUDGET: usize = 6000;
+/// E.ARENA1-F49: the least room the asked-for family's explanations get, whatever the signatures took.
+pub(crate) const FAMILY_DETAIL_ROOM: usize = 6000;
 
 /// E.ARENA1-F3: a desktop description, condensed so its ACTIONS survive the work log.
 ///
@@ -173,6 +175,15 @@ fn focused_objects(state: &str, head: &str, names: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn condense_description(obs: &str) -> Option<String> {
+    condense_description_for(obs, None)
+}
+
+/// E.ARENA1-F49: condensed for a caller that asked for one family of actions (`os_describe`'s
+/// `actions`, e.g. `files_`): the explanations get room whatever the signatures took. The desktop's
+/// `--fold` already explains only the asked family. VM 520, E.LONG1 L2: asked for `files_`, the 99
+/// signatures left room for three short explanations -- `files_new_folder`'s was cut, and the model
+/// asked again.
+pub(crate) fn condense_description_for(obs: &str, family: Option<&str>) -> Option<String> {
     // Idempotent: the MCP boundary condenses first and the work log condenses again, and a second
     // pass must not trim a state that is already trimmed.
     if obs.contains(CONDENSED_MARK) {
@@ -216,6 +227,10 @@ pub(crate) fn condense_description(obs: &str) -> Option<String> {
         .collect();
     let sig_len: usize = signatures.iter().map(|l| l.len() + 1).sum();
     let mut room = DESKTOP_ACTIONS_BUDGET.saturating_sub(sig_len);
+    let family = family.map(str::trim).filter(|f| !f.is_empty());
+    if family.is_some() {
+        room = room.max(FAMILY_DETAIL_ROOM);
+    }
 
     // Then each action WITH its detail lines while room lasts; after that, signature only.
     let mut trimmed = false;
@@ -1612,8 +1627,13 @@ pub(crate) const MCP_OUTPUT_CAP: usize = 6000;
 /// never saw it. A tool ON THIS COMPUTER whose output is a description is condensed instead, which
 /// is itself bounded (state head + action budget); everything else keeps the cap.
 pub(crate) fn bound_mcp_output(out: &str, on_this_computer: bool) -> String {
+    bound_mcp_output_for(out, on_this_computer, None)
+}
+
+/// E.ARENA1-F49: `bound_mcp_output` for a description asked for one family of actions.
+pub(crate) fn bound_mcp_output_for(out: &str, on_this_computer: bool, family: Option<&str>) -> String {
     if on_this_computer {
-        if let Some(condensed) = condense_description(out) {
+        if let Some(condensed) = condense_description_for(out, family) {
             return condensed;
         }
     }
@@ -2226,6 +2246,33 @@ mod tests {
         assert_eq!(command_first(other), None, "a result that is not a command's");
     }
 
+    /// E.ARENA1-F49 on the desktop's real answer to `os_describe {app: shell, actions: files_}` (520,
+    /// adfcc32f): asked for the Files family, the model gets the Files explanations.
+    #[test]
+    fn a_description_asked_for_one_family_explains_that_family() {
+        const FILES: &str = include_str!("../fixtures/desktop/describe_shell_fold_files_adfcc32f.txt");
+        let asked = bound_mcp_output_for(FILES, true, Some("files_"));
+        for want in [
+            "Create a folder in the current directory",
+            "To write text into a file, use the `editor` app",
+            "Open the Files screen at an absolute path",
+        ] {
+            assert!(asked.contains(want), "{want:?} missing from the family's answer");
+        }
+        let family_sigs = FILES.lines().filter(|l| l.starts_with("  act: files_")).count();
+        assert!(family_sigs > 10, "the fixture lists the Files family");
+        assert_eq!(asked.lines().filter(|l| l.starts_with("  act: files_")).count(), family_sigs, "every files_ signature is kept");
+        assert_eq!(
+            asked.lines().filter(|l| l.starts_with("  act: ")).count(),
+            FILES.lines().filter(|l| l.starts_with("  act: ")).count(),
+            "every other action keeps its signature"
+        );
+        // Without a family nothing changes: today's answer, which cut the folder's explanation.
+        let plain = bound_mcp_output(FILES, true);
+        assert_eq!(plain, bound_mcp_output_for(FILES, true, None));
+        assert!(!plain.contains("Create a folder in the current directory"), "the fixture no longer shows the cut");
+    }
+
     /// E.ARENA1-F48 on the desktop's real `mind_mode` lines (520 on adfcc32f; the session-rule
     /// shape from yantrik-ui mind_mode.rs, as yantrik-os-4c read it): when a command would ask.
     #[test]
@@ -2679,3 +2726,4 @@ mod tests {
         assert!(CALENDAR_ON_DESKTOP.contains("There is no other calendar on this machine"));
     }
 }
+

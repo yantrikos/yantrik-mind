@@ -12398,3 +12398,37 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - `files_new_folder` makes missing parents and says which.
 - **Mind, open:** the first repeat should get a concrete next step, not a generic nudge.
 - **Waiting on 520's Mind model configuration** before designing. On 561's cloud model, the Starfall agent wrote files turn after turn.
+
+## E.ARENA1-F49 — PREREG: a description asked for one family's actions keeps that family's explanations
+
+**Found by driving (E.LONG1, L2) and then probing the real bytes.**
+- **L2's first move:** `os_describe {"app":"shell","actions":"files_"}`, asking for what each Files action does. It sent it three times, then `files_go` three times, then gave up.
+- **The probe:** the desktop's real answer to that call (`yos describe shell --fold --actions files_` on 520, OS adfcc32f; fixture `describe_shell_fold_files_adfcc32f.txt`, 53,760 bytes, 99 actions), passed through the Mind's own `bound_mcp_output` and `work_log_entry`.
+- **What came out:**
+  - all 99 signatures, about 4,500 characters of the 6,000-character action budget;
+  - after that, explanations only where a short one still fitted: `files_go`, `files_up`, `files_cut`;
+  - **`files_new_folder`'s "Create a folder in the current directory" was cut,** and so was `files_new_file`'s "To write text into a file, use the editor: new with text, then save_as".
+- **So:** the model asked for exactly the explanations it needed, did not get them, and asked again. The repeat guard then counted that as a repeat.
+
+**Plan:**
+- When `os_describe` carries `actions: <prefix>`, the condensed answer gives that family's actions their explanations first, with room guaranteed. Every other action keeps its signature only, because the caller asked for the family.
+- Without `actions`, the condensing is unchanged.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. On the real fixture with `actions: "files_"`, the bounded answer contains `files_new_folder`'s "Create a folder in the current directory" and `files_new_file`'s editor hint, and every `files_*` signature is present.
+2. On the same fixture with no family, the output is unchanged from today's.
+3. Through the loop, an `os_describe` with `actions: "files_"` on the real fixture reaches the model's prompt with `files_new_folder`'s explanation.
+
+**E.ARENA1-F49 — RESULT: built, every kill criterion held.** Suite 2216/0.
+- **The rule:**
+  - `condense_description_for(obs, family)` and `bound_mcp_output_for(…, family)`: when the read-only MCP path runs `os_describe` with `actions`, the explanations get at least `FAMILY_DETAIL_ROOM` (6,000 characters), whatever the signatures took.
+  - Every other caller goes through the unchanged `condense_description` / `bound_mcp_output`.
+- **Dropped from the plan:** "every other action keeps its signature only". The desktop's `--fold` already explains only the asked family; on the real answer no other action carries an explanation. The filter could never be exercised by real data, so it was removed instead of kept untested.
+- **Tests:**
+  - `a_description_asked_for_one_family_explains_that_family` (real fixture): `files_new_folder`'s and `files_new_file`'s explanations present; every signature kept; with no family, output identical to today's, which still shows the cut.
+  - `the_family_the_model_asked_for_reaches_it_explained` (loop, real fixture).
+- **Mutants, each watched to fail on an assertion:**
+  - H1: the call site passes no family.
+  - H2: no room guaranteed.
+  - H3: the family is not passed through.
+- **Next:** install on 520 and re-run L2, the real test of whether this was what stopped it.

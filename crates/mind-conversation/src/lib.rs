@@ -12490,7 +12490,9 @@ WINDOW: all-time, latest 200
                             // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
                             Ok(Ok(out)) => {
                                 // E.ARENA1-F4: this machine's own surface is condensed, not cut.
-                                let out = desktop::bound_mcp_output(&out, !t.open_world);
+                                // E.ARENA1-F49: a describe asked for one family keeps that family's explanations.
+                                let family = (name == desktop::DESCRIBE).then(|| args.get("actions").and_then(|v| v.as_str())).flatten();
+                                let out = desktop::bound_mcp_output_for(&out, !t.open_world, family);
                                 if out.trim().is_empty() { format!("({name}: no result)") } else { out }
                             }
                             Ok(Err(e)) => format!("({name}: {e})"),

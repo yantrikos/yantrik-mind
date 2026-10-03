@@ -17845,6 +17845,19 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.ARENA1-F49 through the loop, E.LONG1 L2's first call on the real answer: the model asks for
+    /// the Files family and its prompt then carries what `files_new_folder` does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_family_the_model_asked_for_reaches_it_explained() {
+        const FILES: &str = include_str!("../fixtures/desktop/describe_shell_fold_files_adfcc32f.txt");
+        let look = Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell", "actions": "files_"}));
+        let r = run_with("Make a small static recipe website in ~/longtask/recipes.", vec![look], vec![FILES], vec!["Done"]).await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains("Create a folder in the current directory")),
+            "the model never saw what files_new_folder does"
+        );
+    }
+
     /// E.ARENA1-F48 through the loop, VM 520 T7's shape: the first command on a desktop where it
     /// would put a card up is not sent and the model is pointed at the apps; sent again, it goes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

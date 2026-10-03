@@ -1135,6 +1135,93 @@ pub(crate) fn command_first(obs: &str) -> Option<String> {
     Some(out)
 }
 
+/// E.ARENA1-F56: a coarse kind of file text, only where it is unmistakable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextKind {
+    Html,
+    Css,
+    Json,
+}
+
+impl TextKind {
+    fn words(self) -> &'static str {
+        match self {
+            TextKind::Html => "an HTML page",
+            TextKind::Css => "a CSS stylesheet",
+            TextKind::Json => "JSON",
+        }
+    }
+}
+
+/// E.ARENA1-F56: what kind of text this is, when it is clear: HTML that opens with `<!DOCTYPE` or
+/// `<html`; CSS whose first `{` has a selector before it and no `<`; JSON that parses. Else None.
+pub(crate) fn text_kind(text: &str) -> Option<TextKind> {
+    let t = text.trim_start();
+    let lower: String = t.chars().take(16).collect::<String>().to_ascii_lowercase();
+    if lower.starts_with("<!doctype") || lower.starts_with("<html") {
+        return Some(TextKind::Html);
+    }
+    if (t.starts_with('{') || t.starts_with('[')) && serde_json::from_str::<serde_json::Value>(t).is_ok() {
+        return Some(TextKind::Json);
+    }
+    let brace = t.find('{')?;
+    let selector = t[..brace].trim();
+    let rule = &t[brace..];
+    (!selector.is_empty() && !selector.contains('<') && rule.contains(':') && rule.contains('}'))
+        .then_some(TextKind::Css)
+}
+
+/// E.ARENA1-F56: the kind a path's extension says its file holds.
+pub(crate) fn path_kind(path: &str) -> Option<TextKind> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => Some(TextKind::Html),
+        "css" => Some(TextKind::Css),
+        "json" => Some(TextKind::Json),
+        _ => None,
+    }
+}
+
+/// E.ARENA1-F56: the text of an `editor new` the Mind is sending, when it carries one.
+pub(crate) fn new_text(tool: &str, args: &serde_json::Value) -> Option<String> {
+    let (app, action) = act_target(tool, args)?;
+    if !((app == "editor" && action == "new") || (app == TWIN_HOST && action == "editor_new")) {
+        return None;
+    }
+    let inner = args.get("args")?;
+    inner
+        .get("text")
+        .and_then(|t| t.as_str())
+        .or_else(|| inner.as_str())
+        .map(str::to_string)
+}
+
+/// E.ARENA1-F56: the path of an editor save, when this call is one.
+pub(crate) fn save_path(tool: &str, args: &serde_json::Value) -> Option<String> {
+    let (app, action) = act_target(tool, args)?;
+    if !((app == "editor" && action == "save_as") || (app == TWIN_HOST && action == "editor_save_as")) {
+        return None;
+    }
+    args.get("args")?.get("path")?.as_str().map(str::to_string)
+}
+
+/// E.ARENA1-F56: the note for a save whose text plainly is not what its file is for. VM 520,
+/// E.LONG1 L2f: the model wrote a stylesheet with `editor new` and saved it as
+/// lemon-garlic-pasta.html; the recipe page was never written, and the reply said every page used
+/// the stylesheet.
+pub(crate) fn kind_mismatch_note(path: &str, text: &str) -> Option<String> {
+    let (have, want) = (text_kind(text)?, path_kind(path)?);
+    (have != want).then(|| {
+        format!(
+            "(not sent: the text in this tab is {}, but {path} is meant to hold {}. Write what belongs in \
+             {path} with editor `new` and save that there, or save this text under a name that fits it. \
+             Sent again unchanged, it will be saved as it is.)",
+            have.words(),
+            want.words()
+        )
+    })
+}
+
 /// E.ARENA1-F48: is this call `shell.agent_run` -- a new command, not a wait on one?
 pub(crate) fn is_agent_run(tool: &str, args: &serde_json::Value) -> bool {
     act_target(tool, args).is_some_and(|(app, action)| app == TWIN_HOST && action == "agent_run")
@@ -2355,6 +2442,24 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F56, on L2f's real text: the stylesheet the model saved as lemon-garlic-pasta.html.
+    #[test]
+    fn a_files_text_and_its_name_are_checked_for_kind() {
+        let css = "body { font-family: Georgia, serif; margin: 0; background: #faf7f2; color: #2b2b2b; }\nheader { background: #7a3b2e; color: #fff; padding: 24px 32px; }";
+        let html = "<!DOCTYPE html>\n<html lang=\"en\">\n<head><title>Lemon Garlic Pasta</title></head><body></body></html>";
+        assert_eq!(text_kind(css), Some(TextKind::Css));
+        assert_eq!(text_kind(html), Some(TextKind::Html));
+        assert_eq!(text_kind(r#"{"a": 1}"#), Some(TextKind::Json));
+        assert_eq!(text_kind("Buy milk, eggs and coffee."), None, "prose has no kind");
+        assert_eq!(text_kind("Remember: {braces} are fine in notes"), None, "a colon and a brace are not CSS");
+        assert_eq!(path_kind("~/longtask/recipes/lemon-garlic-pasta.html"), Some(TextKind::Html));
+        assert_eq!(path_kind("~/notes.txt"), None);
+        let note = kind_mismatch_note("~/longtask/recipes/lemon-garlic-pasta.html", css).expect("CSS as a page");
+        assert!(note.contains("a CSS stylesheet") && note.contains("an HTML page"), "{note}");
+        assert_eq!(kind_mismatch_note("~/longtask/recipes/index.html", html), None);
+        assert_eq!(kind_mismatch_note("~/plan.md", css), None, "a kind the path does not name is not judged");
     }
 
     /// E.ARENA1-F54: the goal note may come back while time remains, and gives a file's calls.

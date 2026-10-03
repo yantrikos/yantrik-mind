@@ -17847,6 +17847,55 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.ARENA1-F56 through the loop, L2f's s8-s9: a stylesheet written with `new`, then saved as a
+    /// recipe page. The save is held once with the reason; sent again, it goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_save_that_gives_a_page_a_stylesheet_is_held_once() {
+        let css = "body { font-family: Georgia, serif; margin: 0; }\nheader { background: #7a3b2e; color: #fff; }";
+        let save = |p: &str| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": p}}));
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 2 lines, unsaved \u{b7} tab 4 of 4";
+        let saved = "Done \u{2014} Text Editor \u{2014} lemon-garlic-pasta.html, 2 lines, saved \u{b7} tab 4 of 4";
+        let saves = |r: &Run| reached_acts(r).iter().filter(|(_, a)| a == "save_as").count();
+        let prompt = "Make a small static recipe website in ~/longtask/recipes.";
+        let page = "~/longtask/recipes/lemon-garlic-pasta.html";
+        let once = run_with(prompt, vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", css)), save(page)], vec![EDITOR, EDITOR], vec![wrote, saved]).await;
+        assert_eq!(saves(&once), 0, "the stylesheet went to the page: {:?}", once.reached);
+        assert!(once.prompts.iter().any(|p| p.contains("the text in this tab is a CSS stylesheet")), "the model was not told why");
+        let twice = run_with(prompt, vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", css)), save(page), save(page)], vec![EDITOR, EDITOR], vec![wrote, saved, saved]).await;
+        assert_eq!(saves(&twice), 1, "sent again, it is saved: {:?}", twice.reached);
+        let fits = run_with(prompt, vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", css)), save("~/longtask/recipes/style.css")], vec![EDITOR, EDITOR], vec![wrote, saved]).await;
+        assert_eq!(saves(&fits), 1, "a stylesheet saved as .css is not held: {:?}", fits.reached);
+    }
+
+    /// E.ARENA1-F56b: the next page of a safe read is not "a change already made". The Notes listing
+    /// here is the real adfcc32f description with read_notes added as #600 grades it (`[safe]`) --
+    /// to be replaced by a capture when #600 is on 520.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_next_page_of_a_read_is_not_a_change_already_made() {
+        const NOTES: &str = include_str!("../fixtures/desktop/describe_notes_long_open_adfcc32f.txt");
+        let notes = NOTES.replacen(
+            "  act: new_note(",
+            "  act: read_notes(query?, skip?)  [safe, settles on return]\n  act: new_note(",
+            1,
+        );
+        assert_ne!(notes, NOTES);
+        let page = |a: serde_json::Value| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "notes", "action": "read_notes", "args": a}));
+        let answer = "Done \u{2014} Notes\naccepted: True, settled: True\n{\"returned\": 5, \"left_out\": 12}";
+        let r = run_with(
+            "Find every note that mentions a deadline.",
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "notes"})),
+                page(serde_json::json!({"query": "deadline"})),
+                page(serde_json::json!({"query": "deadline", "skip": 5})),
+            ],
+            vec![&notes, &notes],
+            vec![answer, answer],
+        )
+        .await;
+        let pages = reached_acts(&r).iter().filter(|(_, a)| a == "read_notes").count();
+        assert_eq!(pages, 2, "the second page was refused as a change already made: {:?}", r.reached);
+    }
+
     /// E.ARENA1-F55 through the loop, L1c's shape: the calendar described, then `events_between`;
     /// the model's prompt carries the last of the 12 events, not only the first four.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

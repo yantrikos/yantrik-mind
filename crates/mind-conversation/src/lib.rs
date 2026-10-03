@@ -13185,6 +13185,9 @@ Open reminders you're carrying for them:",
         // E.ARENA1-F48: would a command put a card up on this desktop (read from the shell's
         // mind_mode), whether the loop has looked for that, and whether the model was steered once.
         let (mut commands_ask, mut mode_looked, mut command_steered): (Option<bool>, bool, bool) = (None, false, false);
+        // E.ARENA1-F56: the text of the last `editor new` that ran, and the saves already held once.
+        let mut last_new_text: Option<String> = None;
+        let mut kind_held: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
         let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
@@ -14057,7 +14060,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                 }
                 let sig = call_sig_for_twin(&tool, &args);
-                if desktop::is_agent_run(&tool, &args) && commands_ask == Some(true) && !command_steered {
+                // E.ARENA1-F56: a save that would give the file the wrong kind of text, held once.
+                let kind_note = desktop::save_path(&tool, &args).and_then(|path| {
+                    let note = desktop::kind_mismatch_note(&path, last_new_text.as_deref()?)?;
+                    kind_held.insert(path).then_some(note)
+                });
+                if let Some(note) = kind_note {
+                    eprintln!("[agent] step {step}: a save would give the file the wrong kind of text \u{2014} held once");
+                    Some(note)
+                } else if desktop::is_agent_run(&tool, &args) && commands_ask == Some(true) && !command_steered {
                     // E.ARENA1-F48: once per turn, an app before a card. Sent again, it goes through.
                     command_steered = true;
                     eprintln!("[agent] step {step}: a command would ask the person here \u{2014} pointed at the apps first");
@@ -14201,7 +14212,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if desktop::retry_after_failure(&tool, ran) {
                 done_calls.remove(&call_sig);
             }
-            if sent && ran && tool == desktop::ACT && !desktop::is_read_act(&tool, &args) {
+            // E.ARENA1-F56: what the editor now holds, as the Mind wrote it.
+            if sent && ran {
+                if let Some(text) = desktop::new_text(&tool, &args) {
+                    last_new_text = Some(text);
+                }
+            }
+            // E.ARENA1-F56b: a read the app grades `safe` is not a change made -- or F26 refuses the
+            // next page of it (`read_notes {query, skip: 5}` after `{query}`) as "already ran".
+            if sent && ran && tool == desktop::ACT && !desktop::is_read_act(&tool, &args) && !desktop::is_safe_read(&tool, &args, &described) {
                 made.push((args.clone(), obs.lines().next().unwrap_or("").to_string()));
             }
             // E.ARENA1-F36: what the app now is, and what this act left it as.

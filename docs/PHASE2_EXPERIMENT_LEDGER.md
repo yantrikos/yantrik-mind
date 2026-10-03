@@ -12682,3 +12682,51 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **F21's line was appended** ("Nothing is at ~/deadlines-from-notes.md yet").
 - **Step lines are pending:** 520's guest agent is wedged (2.3 GB, peak 4.3 GB), so 4c cannot read the journal.
 - **The driver's own gap, fixed:** it had read replies through `describe shell`, which clips each message at 600 characters, so the ends of long replies (where F21/F47 lines sit) were invisible. It now reads every reply whole with `shell read_message`.
+- **L4b's step lines (turn 589, via 4c's root log reader):**
+  - `read_notes {}` **was** called at s1, then 8 more times, nudged;
+  - F54's goal note fired at s3, s5 and s7 (three times, as built).
+  - **The cause, OS-side:** #597 left `read_notes` at the default grade, not `safe`, so F55 did not apply. Its answer of about 24,000 characters was cut at 900, and the model saw the envelope (`how_to_see_the_rest`, `left_out`) and no note text. **4c's #600** grades it `safe`.
+  - **Open on my side:** 24k is still far over `COMMAND_BUDGET` (4,000), so to be measured after #600.
+  - The turn-done counter ("2 steps") leaves out repeats; cosmetic, noted.
+
+**L2f's step lines (turn 588):**
+- The model wrote the CSS itself in s8's `editor new` (14 lines) and saved it in s9 as `lemon-garlic-pasta.html`. It never wrote a pasta page.
+- A second CSS went to `style.css` at s13.
+- No step read a page back or followed a link, so the reply's "every link checked" is unsupported.
+- No tab mix-up, and no F19/F20/F51 involvement.
+
+## E.ARENA1-F56 — PREREG: a save that would give a file the wrong kind of text is held once
+
+**From L2f:** `save_as …/lemon-garlic-pasta.html` saved a tab whose text (written by the model's own `new` the step before) was a stylesheet. Every OS answer was right ("14 lines, saved"); the slip was the model's, and the Mind had both facts in hand: the text it had just sent and the path.
+
+**Plan:**
+1. The loop keeps the text of the latest `editor new` (or `set_content` / `append` result is not tracked; only `new`, whose text the Mind sent).
+2. `desktop::text_kind(text)` gives a coarse kind when it is clear:
+   - **HTML:** starts, after whitespace, with `<!DOCTYPE` or `<html`;
+   - **CSS:** no `<` before the first `{`, and a selector followed by `{ … : … ; }`;
+   - **JSON:** parses as an object or array.
+3. `desktop::path_kind(path)` comes from the extension: `.html`/`.htm`, `.css`, `.json`.
+4. When both are known and differ, the **first** such `save_as` for that path in the turn is not sent. The note names the mismatch ("the text in this tab is CSS, but lemon-garlic-pasta.html is an HTML page") and says what to do: write the page and save that, or save this text under a `.css` name. Sent again, it goes through, the same latch pattern as F48.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `text_kind` on L2f's s8 CSS is CSS; on an HTML page it is HTML; on prose it is None.
+2. Loop, L2f's shape: `new` with CSS, then `save_as …/lemon-garlic-pasta.html`. The save does not reach the desktop the first time, and the note names CSS and HTML. A second `save_as` reaches it.
+3. `new` with HTML, then `save_as …/index.html`: sent at once, with no note.
+
+**E.ARENA1-F56 + F56b — RESULT: built, every kill criterion held.** Suite 2229/0.
+- **F56:**
+  - The loop keeps `last_new_text`, from `desktop::new_text` on an `editor new` that ran.
+  - At `save_as`, `kind_mismatch_note(path, text)` compares `text_kind` (HTML opening with `<!DOCTYPE`/`<html`; CSS with a selector before its first `{`; JSON that parses) against `path_kind` (`.html`/`.htm`, `.css`, `.json`).
+  - A clear mismatch holds that path's first save once, with "the text in this tab is a CSS stylesheet, but … is meant to hold an HTML page". `kind_held` lets the second save through.
+- **F56b, found while building, from 4c's paging design for #600:** F26's "a change already made" listed every non-read act that ran, so `read_notes {query, skip: 5}` after `read_notes {query}` would have been refused. An action its app grades `safe` is no longer recorded as a change.
+- **Tests:**
+  - `a_files_text_and_its_name_are_checked_for_kind` (L2f's real CSS; prose and a braced note are no kind; an unnamed kind is not judged);
+  - `a_save_that_gives_a_page_a_stylesheet_is_held_once` (loop: held, then sent again; `.css` not held);
+  - `the_next_page_of_a_read_is_not_a_change_already_made` (loop: both pages reach the desktop). This one uses the real adfcc32f Notes description with `read_notes … [safe]` added as #600 grades it, to be replaced by a capture once #600 is on 520.
+- **Mutants, each watched to fail on an assertion:**
+  - R1: never held.
+  - R2: held every time.
+  - R3: CSS not recognised.
+  - R4: the written text not kept.
+  - R5: a safe read counted as a change.
+- **Not attempted:** catching L2f's unsupported "every link checked" claim (claim parsing; four sealed kills).

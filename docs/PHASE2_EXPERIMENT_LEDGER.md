@@ -12674,3 +12674,11 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **`lemon-garlic-pasta.html` holds CSS** (a second version of the stylesheet), not the recipe page.
 - **The reply claimed** "style.css — shared stylesheet, linked from all four pages" and that every link was checked. **False for the pasta page,** which has no links.
 - Step lines requested to see how the CSS reached that path.
+
+**E.LONG1, L4b (L4 on 9b462c37 with `read_notes` listed, Mind 731b603): FAIL in 16 s, with a false capability claim.**
+- **`read_notes` was never called,** though `describe notes` lists it.
+- **The reply, read whole via `read_message`:** "I cannot write ~/deadlines-from-notes.md: no tool in this session can create a file at an arbitrary path". **False:** the same Mind wrote `~/week-plan.md` with `editor save_as` twenty minutes earlier.
+- **Its wording** ("the source shows only titles… the other 15 notes' contents were not provided") reads like the citation rewrite (`cited_answer`), not the loop's own reasoning.
+- **F21's line was appended** ("Nothing is at ~/deadlines-from-notes.md yet").
+- **Step lines are pending:** 520's guest agent is wedged (2.3 GB, peak 4.3 GB), so 4c cannot read the journal.
+- **The driver's own gap, fixed:** it had read replies through `describe shell`, which clips each message at 600 characters, so the ends of long replies (where F21/F47 lines sit) were invisible. It now reads every reply whole with `shell read_message`.

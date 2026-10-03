@@ -12661,3 +12661,9 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - Q3: no calls for a file.
   - Q4: nothing is a safe read.
   - Q5: the loop keeps the 900 cut for reads.
+
+**E.LONG1, L1d (L1 on OS 9b462c37, Mind 731b603): PASS in 21 s, the first long task to pass.**
+- **The file:** `~/week-plan.md` (1,578 bytes), with seven sections, Monday 28 September to Sunday 4 October.
+- **Against the ground truth:** all 12 events under Wednesday at 16:30–17:00, each with a preparation step, and "No events." on the other six days. That matches the store exactly, and nothing was invented.
+- **The reply** is true ("46 lines, saved… `matches_disk: true`"). No card.
+- **What changed since L1/L1c, both of which failed:** the OS's `events_between` (#593, now running), and the Mind's F55 (the read's whole answer reaches the model) and F54 (the goal note comes back with the calls).

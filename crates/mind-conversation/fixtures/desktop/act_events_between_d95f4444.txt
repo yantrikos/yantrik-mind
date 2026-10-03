@@ -1,0 +1,95 @@
+Calendar — October 2026, nothing on day 3
+accepted: True, settled: True
+revision: 265b0de67d05a4d7
+{
+  "count": 12,
+  "events": [
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena min7s0"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena mintrl"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minaav"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena mindl6"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minv05"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minxs2"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena min8wn"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minljg"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena min75w"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena min2o4"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minvrh"
+    },
+    {
+      "date": "2026-09-30",
+      "end": "2026-09-30T17:00:00",
+      "location": null,
+      "start": "2026-09-30T16:30:00",
+      "title": "Arena minwxx"
+    }
+  ],
+  "from": "2026-09-28",
+  "to": "2026-10-04"
+}
+state: {"days_with_events":[],"events_on_selected_day":[],"events_this_month":0,"month":"October 2026","month_number":10,"naming":{},"notice":"","selected_day":3,"today":"2026-10-03 Saturday","view":"month","week_starts_on":"sunday","year":2026,"you":"yos"}

@@ -17438,7 +17438,8 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         let _ = std::fs::remove_dir_all(&home);
-        assert!(r.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", r.reply);
+        // E.ARENA1-F54: the goal note now comes back while time remains, so the turn no longer has
+        // to end in compose -- whichever exit ends it, the reply says the file is not there.
         assert!(r.reply.contains("Nothing is at ~/x.txt yet"), "{}", r.reply);
     }
 
@@ -17577,7 +17578,8 @@ mod desktop_consent_and_stall_wiring {
         let wrote = || vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello"))];
         let ask = "Create a text file at ~/x.txt containing hello";
         let stats = |r: &Run| r.reached.iter().filter(|(_, a)| a["action"] == "files_stat").count();
-        let missing = run_as(ask, None, true, wrote(), vec![SHELL], vec![new, F, F]).await;
+        // E.ARENA1-F54: the goal can be checked more than once a turn now -- the desktop answers each.
+        let missing = run_as(ask, None, true, wrote(), vec![SHELL], vec![new, F, F, F, F, F, F, F, F]).await;
         assert!(missing.prompts.iter().any(|p| p.contains("nothing is at ~/x.txt yet")), "not nudged on the desktop's 'not there'");
         assert!(missing.reply.contains("Nothing is at ~/x.txt yet"), "{}", missing.reply);
         let there = run_as(ask, None, true, wrote(), vec![SHELL], vec![new, T]).await;
@@ -17843,6 +17845,47 @@ mod desktop_consent_and_stall_wiring {
         let composed = run_with(prompt, vec![check(), cat(), cat(), cat(), cat()], vec![sb, sb], vec![&failed, &plan]).await;
         assert!(composed.reply.starts_with(COMPOSED), "{}", composed.reply);
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
+    }
+
+    /// E.ARENA1-F55 through the loop, L1c's shape: the calendar described, then `events_between`;
+    /// the model's prompt carries the last of the 12 events, not only the first four.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_whole_answer_of_a_read_reaches_the_model() {
+        const CAL: &str = include_str!("../fixtures/desktop/describe_calendar_fold_d95f4444.txt");
+        const EB: &str = include_str!("../fixtures/desktop/act_events_between_d95f4444.txt");
+        let eb = format!("Done \u{2014} {EB}");
+        let r = run_with(
+            "What is on my calendar from 28 September to 4 October 2026?",
+            vec![
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "calendar"})),
+                Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "calendar", "action": "events_between", "args": {"from": "2026-09-28", "to": "2026-10-04"}})),
+            ],
+            vec![CAL, CAL],
+            vec![&eb],
+        )
+        .await;
+        assert!(r.prompts.iter().any(|p| p.contains("Arena minwxx")), "the 12th event never reached the model");
+    }
+
+    /// E.ARENA1-F54 through the loop, L1c's shape: one call repeated while ~/week-plan.md is missing;
+    /// the goal note comes back, where it used to be given once and the turn ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stuck_call_does_not_end_a_turn_whose_goal_is_missing_while_time_remains() {
+        let home = std::env::temp_dir().join(format!("ym-f54-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let h = home.to_string_lossy().replace('\\', "/");
+        let read = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "calendar", "action": "events_between", "args": {"from": "2026-09-28", "to": "2026-10-04"}}));
+        let r = run_at(
+            "Look at my calendar for the week of 28 September and write a plan to ~/week-plan.md.",
+            Some(h),
+            (0..8).map(|_| read()).collect(),
+            vec![SHELL, SHELL, SHELL],
+            vec!["Done \u{2014} Calendar\naccepted: True, settled: True\n{\"count\": 0, \"events\": []}"],
+        )
+        .await;
+        let last = r.prompts.iter().rev().find(|p| p.contains("the request asked for ~/week-plan.md")).cloned().unwrap_or_default();
+        assert!(last.matches("the request asked for ~/week-plan.md").count() >= 2, "the goal note was given once and the turn ended");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     /// E.ARENA1-F51 through the loop, E.LONG1 L2c's shape: a page written into the editor for a

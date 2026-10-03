@@ -12602,3 +12602,62 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - The reply named the 30 September events correctly.
 - **`count 1` is suspect:** all 12 events were in the store at 15:10. Raised with 4c as a possible `events_between` defect.
 - **Fifth instance** of a long turn ending 15–30 s into 180 s with the goal missing (L1, L2, L2b, L2d, L1c).
+
+## E.ARENA1-F54 — PREREG: a long turn is not ended by one stuck call while the goal is missing and time remains
+
+**Evidence, five E.LONG1 turns on VM 520,** each ending 15–30 s into a 180 s budget with the request's file or folder missing:
+- L1 (21 s);
+- L2 (16 s);
+- L2b (15 s);
+- L2d (59 s, a contaminated run);
+- L1c (26 s).
+
+The shape each time: the model repeats one call, the repeat counter reaches its limit, F33's goal note fires **once** (`goal_nudged`, shared by three exits), the model repeats again, and the turn breaks to compose with the goal still missing.
+
+**Plan:**
+1. The goal note may be given up to **3** times in a turn. A second or third time only while the turn has used under 60% of its wall budget (`may_nudge_goal`). Each time resets the consecutive-barren count, as today's single note does.
+2. For a **file** goal whose folder exists, the note carries the exact calls: `editor new {"text": …}`, then `editor save_as {"path": "<the path>"}`, with `shell open_app {"name": "editor"}` first if the editor is closed. Folder goals already get F50's calls.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `may_nudge_goal`:
+   - (0 given, any time) → true;
+   - (1, 30 s of 180 s) → true;
+   - (1, 120 s of 180 s) → false;
+   - (3, 10 s) → false.
+2. `goal_nudge` for `~/week-plan.md` (folder exists) contains the `save_as` call with that path and the editor `new` call.
+3. Loop, L1c's shape: one call repeated 6 times with `~/week-plan.md` missing under a real temporary home. The goal note appears at least twice in the prompts, where today it appears once.
+
+## E.ARENA1-F55 — PREREG: a read action's answer reaches the model whole
+
+**Found from L1c with 4c:**
+- The journal's `"count": 1` was only its 120-character preview cutting off "12".
+- **What the model saw:** the real `events_between 2026-09-28..2026-10-04` answer on 520 is 2,469 characters with 12 events (fixture `act_events_between_d95f4444.txt`). Through `work_log_entry` at the 900 characters every successful action gets, **the model saw `"count": 12` and 4 of the 12 events**, exactly the four its reply named.
+- **So:** it asked again for the same range to get the rest. The repeats (s2–s5) were a rational answer to a cut, and the repeat guard then ended the turn.
+
+**Plan:** an action the app itself lists as `safe` (a pure read: `events_between`, `files_stat`, `read_notes` when it comes) gets the command budget in the work log (`COMMAND_BUDGET`, 4,000 characters), not 900. The grade is read from this turn's description of the app, which F15 already fetches before acting.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `is_safe_read` is true for `calendar.events_between` on a description that lists it as `[safe, …]`, and false for `calendar.add_event` [standard] and for an app not described.
+2. The work log, at the budget the loop would give, holds all 12 titles from the real fixture.
+3. Loop: `events_between` after `describe calendar`, and the model's prompt carries the 12th event's title.
+
+**E.ARENA1-F54 + F55 — RESULT: built, every kill criterion held.** Suite 2226/0.
+- **F54:**
+  - `goal_nudged` became `goal_nudges`, a count bounded by `may_nudge_goal`: the first note always; again, up to `MAX_GOAL_NUDGES` = 3, only under 60% of the wall budget. This applies at all three exits.
+  - A file goal whose folder exists gets `file_steps` (`editor new`, `save_as` the path, `open_app editor` first if closed).
+  - **Two older tests changed with the behaviour:**
+    - `a_requested_file_that_is_not_there_is_said_when_compose_ends_the_turn` no longer requires compose as the exit; it still requires the reply to say the file is missing.
+    - `under_the_minds_account_the_desktop_says_whether_the_file_is_there` scripts enough "not there" answers for repeated checks.
+- **F55:**
+  - `is_safe_read` (the app's own `[safe]` grade from this turn's description) gives a read the `COMMAND_BUDGET` work log.
+- **Tests:**
+  - `the_goal_note_comes_back_while_time_remains_and_names_the_calls`;
+  - `a_read_actions_answer_reaches_the_model_whole` (real fixtures: 12 of 12 events, against fewer than 12 at 900);
+  - `the_whole_answer_of_a_read_reaches_the_model` (loop: "Arena minwxx", the 12th, reaches the prompt);
+  - `a_stuck_call_does_not_end_a_turn_whose_goal_is_missing_while_time_remains` (loop: the note given at least twice).
+- **Mutants, each watched to fail on an assertion:**
+  - Q1: the goal note once only.
+  - Q2: no time limit.
+  - Q3: no calls for a file.
+  - Q4: nothing is a safe read.
+  - Q5: the loop keeps the 900 cut for reads.

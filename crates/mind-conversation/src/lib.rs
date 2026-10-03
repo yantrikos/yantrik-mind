@@ -13194,7 +13194,8 @@ Open reminders you're carrying for them:",
         let mut unsaved_doc = false;
         let mut unsaved_nudged = false;
         // E.ARENA1-F21: the one reminder that the path the request asked for is still missing.
-        let mut goal_nudged = false;
+        // E.ARENA1-F54: how many times this turn was told its goal is still missing.
+        let mut goal_nudges: usize = 0;
         // E.ARENA1-F30: apps already looked at again this turn because they said they were loading.
         let mut relooked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F35: apps whose within-the-limit actions the model has been shown this turn.
@@ -13670,8 +13671,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
                 } else if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
                     // E.ARENA1-F21: the world, not a result's first line, says the file is not there.
-                    if !goal_nudged {
-                        goal_nudged = true;
+                    if desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                        goal_nudges += 1;
                         eprintln!("[agent] step {step}: answering with {path} still missing \u{2014} asking for it");
                         scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                         continue;
@@ -13908,9 +13909,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
                     // what is missing, and what blocks it, once, instead of composing.
-                    if !unsaved_doc && !goal_nudged {
+                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
-                            goal_nudged = true;
+                            goal_nudges += 1;
                             barren = 0;
                             eprintln!("[agent] step {step}: repeats would end the turn with {path} missing \u{2014} saying so");
                             scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
@@ -13953,9 +13954,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
                     // what is missing, and what blocks it, once, instead of composing.
-                    if !unsaved_doc && !goal_nudged {
+                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
-                            goal_nudged = true;
+                            goal_nudges += 1;
                             barren = 0;
                             eprintln!("[agent] step {step}: repeats would end the turn with {path} missing \u{2014} saying so");
                             scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
@@ -14317,7 +14318,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // model was left to re-derive that from the same words the classifier had just read.
             let head = if outcome == crate::tool_outcome::Outcome::Ok {
                 // E.ARENA1-F45: a command's output is what it was run for.
-                if desktop::runs_a_command(&tool, &args) { desktop::COMMAND_BUDGET } else { 900 }
+                // E.ARENA1-F55: and a read's answer is the data the model asked for.
+                if desktop::runs_a_command(&tool, &args) || desktop::is_safe_read(&tool, &args, &described) {
+                    desktop::COMMAND_BUDGET
+                } else {
+                    900
+                }
             } else {
                 300
             };

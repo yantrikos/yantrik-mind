@@ -482,6 +482,23 @@ pub(crate) struct Listed {
 /// What one app lists.
 pub(crate) type ActionList = Vec<Listed>;
 
+/// E.ARENA1-F55: is this call an action its app lists as `safe` -- a pure read, whose answer is the
+/// data the model asked for? Read off this turn's description of the app; unknown is not safe.
+/// VM 520, E.LONG1 L1c: `events_between` answered 12 events in 2,469 characters, the work log kept
+/// 900, and the model saw "count": 12 with 4 events -- and asked again for the rest.
+pub(crate) fn is_safe_read(
+    tool: &str,
+    args: &serde_json::Value,
+    described: &std::collections::HashMap<String, ActionList>,
+) -> bool {
+    let Some((app, action)) = act_target(tool, args) else {
+        return false;
+    };
+    described
+        .get(&app)
+        .is_some_and(|list| list.iter().any(|l| l.name == action && l.grade == "safe"))
+}
+
 /// Every `act: name(args)  [grade, …]` line in a description.
 pub(crate) fn listed_actions(obs: &str) -> ActionList {
     obs.lines()
@@ -1423,6 +1440,26 @@ pub(crate) fn folder_steps(asked: &str, missing_folder: Option<&str>, home: Opti
     Some(format!("The next calls are, in order: {}.", steps.join(", then ")))
 }
 
+/// E.ARENA1-F54: how many times one turn may be told its goal is still missing.
+pub(crate) const MAX_GOAL_NUDGES: usize = 3;
+
+/// E.ARENA1-F54: may the goal note be given again? The first time always; again only while the turn
+/// has used under 60% of its wall budget. VM 520, E.LONG1: five long turns ended 15-30 s into 180 s
+/// on one stuck call, the single goal note already spent and the file never written.
+pub(crate) fn may_nudge_goal(given: usize, elapsed_ms: u64, wall_ms: u64) -> bool {
+    given == 0 || (given < MAX_GOAL_NUDGES && elapsed_ms.saturating_mul(10) < wall_ms.saturating_mul(6))
+}
+
+/// E.ARENA1-F54: the exact calls that write a file whose folder exists.
+fn file_steps(path: &str, home: Option<&str>) -> String {
+    let at = files_path(path, home).unwrap_or_else(|| path.to_string());
+    format!(
+        "The next calls are, in order: os_act {{\"app\": \"editor\", \"action\": \"new\", \"args\": {{\"text\": \"<the text>\"}}}}, \
+         then os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{at}\"}}}} -- open the editor \
+         first with os_act {{\"app\": \"shell\", \"action\": \"open_app\", \"args\": {{\"name\": \"editor\"}}}} if it is closed."
+    )
+}
+
 pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>, home: Option<&str>) -> String {
     // E.ARENA1-F33: the concrete blocker, when the world shows one. The hard smoke's T9: the
     // folder did not exist, the Editor refuses to save into a missing folder, and the model went
@@ -1432,7 +1469,8 @@ pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>, 
         (Some(f), Some(steps)) => format!(" The folder {f} does not exist yet: make it first. {steps}"),
         (None, Some(steps)) => format!(" {steps}"),
         (Some(f), None) => format!(" The folder {f} does not exist yet: make it first (Files: go to its parent, then `files_new_folder`)."),
-        (None, None) => String::new(),
+        // E.ARENA1-F54: a file whose folder is there gets its calls too.
+        (None, None) => format!(" {}", file_steps(path, home)),
     };
     format!(
         "\n[{step}] (the request asked for {path}, and nothing is at {path} yet -- it was not \
@@ -2319,6 +2357,36 @@ mod tests {
         assert_eq!(command_first(other), None, "a result that is not a command's");
     }
 
+    /// E.ARENA1-F54: the goal note may come back while time remains, and gives a file's calls.
+    #[test]
+    fn the_goal_note_comes_back_while_time_remains_and_names_the_calls() {
+        assert!(may_nudge_goal(0, 170_000, 180_000), "the first is always given");
+        assert!(may_nudge_goal(1, 30_000, 180_000));
+        assert!(!may_nudge_goal(1, 120_000, 180_000), "past 60% of the budget");
+        assert!(!may_nudge_goal(MAX_GOAL_NUDGES, 10_000, 180_000), "at most three");
+        let n = goal_nudge(4, "~/week-plan.md", None, Some("/home/yantrik"));
+        assert!(n.contains(r#""action": "save_as", "args": {"path": "/home/yantrik/week-plan.md"}"#), "{n}");
+        assert!(n.contains(r#""action": "new""#) && n.contains(r#""action": "open_app", "args": {"name": "editor"}"#), "{n}");
+    }
+
+    /// E.ARENA1-F55 on the real calendar description and `events_between` answer (520, d95f4444).
+    #[test]
+    fn a_read_actions_answer_reaches_the_model_whole() {
+        const CAL: &str = include_str!("../fixtures/desktop/describe_calendar_fold_d95f4444.txt");
+        const EB: &str = include_str!("../fixtures/desktop/act_events_between_d95f4444.txt");
+        let mut described = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "calendar"}), CAL, &mut described);
+        let read = serde_json::json!({"app": "calendar", "action": "events_between", "args": {"from": "2026-09-28", "to": "2026-10-04"}});
+        let add = serde_json::json!({"app": "calendar", "action": "add_event", "args": {"title": "x"}});
+        assert!(is_safe_read(ACT, &read, &described));
+        assert!(!is_safe_read(ACT, &add, &described), "a change is not a read");
+        assert!(!is_safe_read(ACT, &read, &std::collections::HashMap::new()), "an app not described is not known safe");
+        let obs = format!("Done \u{2014} {EB}");
+        let whole = work_log_entry(1, ACT, &obs, true, COMMAND_BUDGET, "");
+        assert_eq!(whole.matches("\"title\"").count(), 12, "every event reaches the model");
+        assert!(work_log_entry(1, ACT, &obs, true, 900, "").matches("\"title\"").count() < 12, "the fixture still shows the 900 cut");
+    }
+
     /// E.ARENA1-F52 on the real Notes description with a 3,545-character note open (520, adfcc32f):
     /// the whole note reaches the model, not the head's first sections.
     #[test]
@@ -2846,5 +2914,6 @@ mod tests {
         assert!(CALENDAR_ON_DESKTOP.contains("There is no other calendar on this machine"));
     }
 }
+
 
 

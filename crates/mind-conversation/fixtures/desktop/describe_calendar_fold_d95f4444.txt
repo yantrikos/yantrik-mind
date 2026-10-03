@@ -1,0 +1,72 @@
+Calendar — October 2026, nothing on day 3
+revision: 265b0de67d05a4d7
+{
+  "days_with_events": [],
+  "events_on_selected_day": [],
+  "events_this_month": 0,
+  "month": "October 2026",
+  "month_number": 10,
+  "naming": {},
+  "notice": "",
+  "selected_day": 3,
+  "today": "2026-10-03 Saturday",
+  "view": "month",
+  "week_starts_on": "sunday",
+  "year": 2026,
+  "you": "yos"
+}
+  act: select_day(day)  [standard, settles on return]
+       Show what is on one day of the month shown
+         day: integer — Day of the month, 1-31
+  act: show_date(date)  [standard, settles on return]
+       Show what is on one day, in whatever month it is
+         date: string — YYYY-MM-DD
+  act: events_between(from, to)  [safe, settles on return]
+       List the events from one date to another, inclusive, up to 62 days, read from the calendar store whatever the window is showing. Each has date, start, end, title and location
+         from: string — First day, YYYY-MM-DD
+         to: string — Last day, YYYY-MM-DD, at most 62 days after `from`
+  act: show_month(direction)  [standard, settles on return]
+       Move to the next or previous month
+         direction: string — next | previous
+  act: go_to_today()  [standard, settles on return]
+       Jump back to the current month and day
+  act: add_event(date, title, all_day?, duration_min?, notes?, reminder_minutes?, time?)  [standard, settles on return]
+       Put something on the calendar
+         date: string — YYYY-MM-DD
+         title: string
+         all_day?: boolean — A whole day rather than a time; `time` and `duration_min` are not used with it
+         duration_min?: integer — How long it runs, in minutes; an hour when not given
+         notes?: string
+         reminder_minutes?: integer — How many minutes before it starts to announce it; ten when not given. All-day events are not announced
+         time?: string — HH:MM, 24-hour; needed unless `all_day` is set
+  act: delete_event(date?, id?, title?)  [sensitive, settles on return]
+       Take an event off the calendar. It is not recoverable
+         date?: string — YYYY-MM-DD, given with `title`
+         id?: string — The id the store gave the event — `add_event` answers with it and `describe` lists it for every event it shows
+         title?: string — The event's exact title, given with `date`, when the id is not known
+  act: delete_own_event(date?, id?, title?)  [standard, settles on return]
+       Take an event this caller created itself off the calendar. Anything else is `delete_event`, which asks a person first
+         date?: string — YYYY-MM-DD, given with `title`
+         id?: string — The id the store gave the event — `add_event` answers with it and `describe` lists it, marked with whether this caller may delete it unasked
+         title?: string — The event's exact title, given with `date`, when the id is not known
+  act: update_event(id, date?, duration_min?, notes?, reminder_minutes?, time?, title?)  [sensitive, settles on return]
+       Move or rename any event that is already on the calendar
+         id: string — The id the store gave the event
+         date?: string — Move it to this day, YYYY-MM-DD
+         duration_min?: integer — How long it runs, in minutes; unchanged when not given
+         notes?: string
+         reminder_minutes?: integer — How many minutes before it starts to announce it; unchanged when not given
+         time?: string — Move it to this time, HH:MM
+         title?: string — A new title
+  act: update_own_event(id, date?, duration_min?, notes?, reminder_minutes?, time?, title?)  [standard, settles on return]
+       Move or rename an event this caller created itself. Anything else is `update_event`, which asks a person first
+         id: string — The id the store gave the event
+         date?: string — Move it to this day, YYYY-MM-DD
+         duration_min?: integer — How long it runs, in minutes; unchanged when not given
+         notes?: string
+         reminder_minutes?: integer — How many minutes before it starts to announce it; unchanged when not given
+         time?: string — Move it to this time, HH:MM
+         title?: string — A new title
+  act: set_view(view)  [standard, settles on return]
+       Switch between the month, week and day views
+         view: string — month | week | day

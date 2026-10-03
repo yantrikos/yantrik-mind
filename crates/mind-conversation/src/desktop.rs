@@ -907,6 +907,17 @@ pub(crate) fn repeated_action_note(
     let app = act_target(tool, args).map(|(a, _)| a).unwrap_or_default();
     let save = if app == TWIN_HOST { "editor_save_as" } else { "save_as" };
     Some(match path {
+        // E.ARENA1-F51: the request named a FOLDER (~/longtask/recipes). VM 520, E.LONG1 L2c: this
+        // note said save_as {"path": "~/longtask/recipes"}, the model would not save a page as a
+        // folder, and told the person save_as "takes a file path, not a folder". The file goes inside.
+        Some(p) if looks_like_folder(p) => format!(
+            "(that action already ran; its result is above. Do not repeat it. What you wrote is still \
+             only in the editor, unsaved. Save it as a file inside {p}: its full path, the file's name \
+             included. The next call is: os_act {{\"app\": \"{app}\", \"action\": \"{save}\", \"args\": \
+             {{\"path\": \"{p}/<file name>\"}}}} with <file name> filled in -- or say plainly that it is \
+             not saved.)",
+            p = p.trim_end_matches('/')
+        ),
         Some(p) => format!(
             "(that action already ran; its result is above. Do not repeat it. What you wrote is still \
              only in the editor, unsaved. The next call is: os_act {{\"app\": \"{app}\", \"action\": \
@@ -1362,6 +1373,12 @@ pub(crate) fn parse_files_stat(obs: &str) -> Option<Stat> {
 }
 
 /// E.ARENA1-F21: said once, before a turn ends with the requested path still missing.
+/// E.ARENA1-F50/F51: does a path name a folder rather than a file? Its last segment has no extension.
+pub(crate) fn looks_like_folder(p: &str) -> bool {
+    let last = p.trim_end_matches('/').rsplit('/').next().unwrap_or(p);
+    !last.is_empty() && !last.contains('.')
+}
+
 /// E.ARENA1-F50: a path as `files_go` takes it -- absolute, `~` resolved by the home -- or None.
 fn files_path(p: &str, home: Option<&str>) -> Option<String> {
     let home = home.map(str::trim).filter(|h| !h.is_empty()).map(|h| h.trim_end_matches('/'));
@@ -1379,7 +1396,7 @@ fn files_path(p: &str, home: Option<&str>) -> Option<String> {
 /// parent, was refused as a repeat, and went there again until the turn ended at 15 s of 180.
 /// None when nothing here is a folder to make (a file whose folder exists keeps its editor steps).
 pub(crate) fn folder_steps(asked: &str, missing_folder: Option<&str>, home: Option<&str>) -> Option<String> {
-    let is_folder = |p: &str| !p.rsplit('/').next().unwrap_or(p).contains('.');
+    let is_folder = looks_like_folder;
     let first = match missing_folder {
         Some(f) => f,
         None if is_folder(asked) => asked,
@@ -2290,6 +2307,20 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F51, E.LONG1 L2c: a request that names a folder gets a save into it, never a save as it.
+    #[test]
+    fn the_save_hint_never_names_a_folder_as_the_file() {
+        let new = serde_json::json!({"app": "editor", "action": "new", "args": {"text": "<!DOCTYPE html>"}});
+        let folder = repeated_action_note(ACT, &new, true, Some("~/longtask/recipes")).unwrap();
+        assert!(folder.contains(r#""path": "~/longtask/recipes/<file name>""#), "{folder}");
+        assert!(!folder.contains(r#""path": "~/longtask/recipes"}"#), "a folder named as the file: {folder}");
+        assert!(folder.contains("a file inside ~/longtask/recipes"), "{folder}");
+        let file = repeated_action_note(ACT, &new, true, Some("~/x.txt")).unwrap();
+        assert!(file.contains(r#""path": "~/x.txt""#) && !file.contains("<file name>"), "{file}");
+        assert!(looks_like_folder("~/longtask/recipes") && looks_like_folder("/home/yantrik/"));
+        assert!(!looks_like_folder("~/x.txt") && looks_like_folder("~/"), "the home folder is a folder");
     }
 
     /// E.ARENA1-F50, E.LONG1 L2b's request: the calls that make ~/longtask, then recipes in it.

@@ -17845,6 +17845,21 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.ARENA1-F51 through the loop, E.LONG1 L2c's shape: a page written into the editor for a
+    /// request that names a folder; the second `new` is told to save a file INSIDE the folder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_page_for_a_folder_is_saved_inside_it() {
+        let new = || Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "<!DOCTYPE html><title>Recipes</title>"));
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 35 lines, unsaved \u{b7} tab 3 of 3";
+        let prompt = "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes.";
+        let r = run_with(prompt, vec![new(), new()], vec![EDITOR, EDITOR], vec![wrote, wrote]).await;
+        assert!(
+            r.prompts.iter().any(|p| p.contains(r#""path": "~/longtask/recipes/<file name>""#)),
+            "the model was not told to save a file inside the folder"
+        );
+        assert!(!r.prompts.iter().any(|p| p.contains(r#""path": "~/longtask/recipes"}"#)), "the folder was named as the file");
+    }
+
     /// E.ARENA1-F50 through the loop, E.LONG1 L2b's shape: the request's folder is missing, the
     /// model goes home and then goes home again. The repeat is answered with the next calls.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

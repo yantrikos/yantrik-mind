@@ -12479,3 +12479,28 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **In the editor, not on disk:** about 930 characters of page text in an untitled tab.
 - **The reply:** true about the state (folder made, text unsaved, links unchecked), but it ends on a **false capability claim**: "I have no tool to write files into ~/longtask/recipes. The editor's save_as takes a file path, not a folder". `save_as ~/longtask/recipes/index.html` is that tool.
 - **No card.** Step lines requested.
+
+## E.ARENA1-F51 — PREREG: the save hint never names a folder as the file to save
+
+**From L2c's step lines (turn 580, via 4c):**
+- s8: `editor new` with the page, "unsaved · tab 3 of 3".
+- s9: another `new`, met F20 and F19's note: **"The next call is: os_act {"app": "editor", "action": "save_as", "args": {"path": "~/longtask/recipes"}}"**. That is the request's first path, which is the folder.
+- s10: `set_content` steered away (F7).
+- s11, s12: `new` again, then barren and compose.
+- **The reply then said "save_as takes a file path, not a folder".** The Mind's own hint had told it to save a page *as a folder*; the model, rightly, did not, and then explained why it could not.
+- `save_as` was never called and nothing refused it.
+
+**Plan:** in F19's note, when the path the request named is a folder (its last segment has no extension), the call becomes `{"path": "<folder>/<file name>"}`, with "a file inside <folder>: its full path, the file's name included". A request whose path is a file keeps today's call.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `repeated_action_note` (unsaved), with the request path `~/longtask/recipes`, carries `"path": "~/longtask/recipes/<file name>"` and never `"path": "~/longtask/recipes"}`.
+2. With `~/x.txt`, the call is unchanged: `"path": "~/x.txt"`.
+3. Loop, L2c's shape (`editor new` twice on a folder request): the model's prompt carries the file-inside-folder call.
+
+**E.ARENA1-F51 — RESULT: built, every kill criterion held.** Suite 2220/0.
+- **The rule:** `desktop::looks_like_folder` is true when a path's last segment has no extension; `~/`, the home, counts as a folder. When F19's request path is a folder, the call is `save_as {"path": "<folder>/<file name>"}` "with <file name> filled in", after "Save it as a file inside <folder>". `folder_steps` now uses the same test.
+- **Tests:**
+  - `the_save_hint_never_names_a_folder_as_the_file`: criteria 1 and 2. My first assertion called `~/` not a folder; that was wrong, and the code was right.
+  - `a_page_for_a_folder_is_saved_inside_it` (loop, L2c's shape): criterion 3.
+- **Mutants, each watched to fail on an assertion:** K1, a folder named as the file; K2, a file path also given the placeholder.
+- **Flaky, recorded:** `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it` failed once in a full parallel run. It passed alone three times and on the next full run. It writes a shared "trunc-cut" file set, and the likely cause is a race with another test in parallel. It is unrelated to F51 and noted for a later look.

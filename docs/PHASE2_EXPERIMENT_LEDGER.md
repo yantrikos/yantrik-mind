@@ -12337,3 +12337,37 @@ The command came first; no app action was tried before it. Earlier gates passed 
   - G5: held back every time.
   - G6: a wait held back too.
   - G7: a half field counts as kept. It first survived, because the real shell's line lies wholly past the cut; the straddling case was added and G7 then failed.
+
+## E.LONG1 — PREREG (driving): long-running tasks with the Mind on VM 520
+
+**Pranab, directly (2026-10-03):** "I feel like there are a lot of issues in the mind. Can you please try to accomplish long running tasks in 520?" His answers:
+- **Cards:** he answers approval cards himself; 520 stays in `auto`.
+- **Build:** Mind d392c82 (F48) first, installed by yantrik-os-4c.
+- **Apps:** the open editor and Notes are leftovers the Mind may use.
+
+**Method:**
+- Each task is sent through the shell's `send_message`, as the arena's `ask()` does, and the reply is read from `describe shell`'s conversation. The time limit per turn is 15 minutes.
+- Afterwards I check what is on disk and in the apps myself.
+- When a task goes wrong, its `[agent] step` lines come from the Mind's journal via 4c (root only).
+- No arena reset, and nothing of Pranab's is touched.
+
+**Recorded for every task:**
+- whether it finished;
+- wall time;
+- cards raised;
+- **whether the reply is true to what is on disk**, both claimed-but-not-done and done-but-denied (the arena misses the second);
+- every defect seen, with the step lines that show it.
+
+**The tasks.** Each needs many steps and has an outcome I can check without the Mind's word for it:
+- **L1, plan a week:** from the calendar for 28 September to 4 October, write `~/longtask/week-plan.md`, one section per day, each event with one preparation step.
+  *Check:* every event of those days appears under its day, and no invented ones.
+- **L2, a small website:** `~/longtask/recipes/` with `index.html` linking three recipe pages and a shared `style.css`, and the Mind checking the links work.
+  *Check:* every link resolves; headless Chromium loads each page without errors.
+- **L3, data and a script:** 50 rows of made-up monthly expenses as a CSV, a Python script that totals by category into `report.md`, run, then the top category named.
+  *Check:* I recompute the totals from the CSV, and the named category is the real top one.
+- **L4, notes to a list:** `~/longtask/deadlines.md` listing every note that mentions a date or deadline, with the date and a one-line summary. Read-only on Notes.
+  *Check:* against the notes themselves.
+- **L5, a follow-up turn on L2:** "add a search box to the recipes index that filters by name".
+  *Check:* the page still loads without errors; the filter element and script are present; L2's files still exist.
+
+**What counts as a finding:** any wrong or untrue reply, stall, loop, needless card, or lost answer. Each finding gets its own preregistered fix, built in the usual way and never folded into this drive.

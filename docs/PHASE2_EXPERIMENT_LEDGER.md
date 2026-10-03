@@ -12566,3 +12566,39 @@ The command came first; no app action was tried before it. Earlier gates passed 
 - **The reply was the fixed compose-failure line** `COMPOSE_LANE_UNAVAILABLE`: "my own hardware is unreachable, so composing it would mean sending that to a cloud model". **On 520 that is false:** there is no local lane, and the cloud model is the cleared private provider. `private_lane_configured()` is true because the cloud is cleared, so a compose failure picks a sentence written for a local lane.
 - **It also hides the work done:** the folders exist, and the reply says nothing of them.
 - **The compose error itself is requested from 4c** before any rewording.
+- **L2e is VOID.** The compose call's "Connection refused" (to ollama.com) came at 16:55:59, the second 4c restarted the stale egress filter. Before it, #596 worked: one `files_new_folder {"name": "~/longtask/recipes"}` made both folders, settled.
+
+## E.ARENA1-F53 — PREREG: a compose that fails says the true reason, and what was already done
+
+**From L2e:**
+- **The cause:** the compose model call failed with the cloud provider refusing the connection (a transient, caused by an egress restart).
+- **What the person got:** `COMPOSE_LANE_UNAVAILABLE`, "my own hardware is unreachable, so composing it would mean sending that to a cloud model". That sentence is right only when the private lane is a local machine. On 520 the private lane **is** the cloud model, cleared in YM_PRIVATE_PROVIDERS, so the reply blamed hardware that does not exist.
+- **The reply also hid the work done:** the folders had been made.
+
+**Plan:**
+- The compose-failure reply is chosen by what the private lane is:
+  - a dedicated local backend: `COMPOSE_LANE_UNAVAILABLE`, as today;
+  - a cleared cloud provider: a new `COMPOSE_MODEL_DID_NOT_ANSWER`, "the model I use did not answer, so I couldn't write my reply; ask me again in a moment";
+  - neither: `COMPOSE_NO_PRIVATE_LANE`, as today.
+- After it, a line written by code lists the desktop actions that ran this turn (app.action, plus a path, name or title argument when there is one). Only actions are named, never what a tool returned.
+- **Still fail-closed:** nothing is sent to any model.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `compose_failure_reply(dedicated=true, cleared=true)` is the local-hardware sentence; `(false, true)` is the did-not-answer sentence and never mentions hardware; `(false, false)` is the not-cleared sentence.
+2. `actions_done_line` on `[shell.files_new_folder {name: "~/longtask/recipes"}]` names `shell.files_new_folder` and `~/longtask/recipes`; on no actions it is empty.
+
+**E.ARENA1-F53 — RESULT: built, every kill criterion held.** Suite 2222/0.
+- **The rule:**
+  - `compose_failure_reply(has_private_lane, private_lane_configured)` picks one of three sentences: local hardware unreachable / the model did not answer (the connection failed) / no lane cleared.
+  - `actions_done_line(&made)` appends "What I had already done this turn: shell.files_new_folder (~/longtask/recipes), …". It names actions and their path, name, title or date only, never text or tool output.
+- **Test:** `a_failed_compose_says_the_true_reason_and_what_was_done`.
+- **Mutants, each watched to fail on an assertion:** P1, a cloud lane blamed on hardware; P2, contents named; P3', no actions listed (P3's first anchor did not match and was redone).
+- **Residual, stated:** the two lines at the compose-failure exit that call these are not exercised by a loop test, because the harness cannot make compose fail.
+
+**E.LONG1, L1c (L1 on the restarted Calendar, Mind bc5410b): FAIL in 28 s; the facts are right now, but nothing was written.** Turn 586 (via 4c):
+- s1: `events_between {2026-09-28, 2026-10-04}`, settled, **count 1**;
+- s2–s5: the same call ×4, nudged; the goal note at s3;
+- the turn ended after 2 steps in 26 s. The editor was never opened.
+- The reply named the 30 September events correctly.
+- **`count 1` is suspect:** all 12 events were in the store at 15:10. Raised with 4c as a possible `events_between` defect.
+- **Fifth instance** of a long turn ending 15–30 s into 180 s with the goal missing (L1, L2, L2b, L2d, L1c).

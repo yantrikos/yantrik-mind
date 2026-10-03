@@ -18481,3 +18481,22 @@ fn the_erase_reply_never_claims_gone_while_a_copy_remains() {
         assert!(!reply.contains("no copy is left") && reply.contains("NOT fully gone"), "{why}: {reply}");
     }
 }
+
+/// E.ARENA1-F53, VM 520's L2e: a compose that fails says what is true of this lane, and what ran.
+#[test]
+fn a_failed_compose_says_the_true_reason_and_what_was_done() {
+    let local = crate::compose_failure_reply(true, true);
+    let cloud = crate::compose_failure_reply(false, true);
+    let none = crate::compose_failure_reply(false, false);
+    assert!(local.contains("my own hardware is unreachable"), "{local}");
+    assert!(cloud.contains("did not answer") && !cloud.contains("hardware"), "{cloud}");
+    assert!(none.contains("YM_PRIVATE_PROVIDERS"), "{none}");
+    let made = vec![
+        (serde_json::json!({"app": "shell", "action": "files_new_folder", "args": {"name": "~/longtask/recipes"}}), "Done".to_string()),
+        (serde_json::json!({"app": "editor", "action": "new", "args": {"text": "<!DOCTYPE html>secret body"}}), "Done".to_string()),
+    ];
+    let line = crate::actions_done_line(&made);
+    assert!(line.contains("shell.files_new_folder (~/longtask/recipes)"), "{line}");
+    assert!(line.contains("editor.new") && !line.contains("secret body"), "names actions, never contents: {line}");
+    assert_eq!(crate::actions_done_line(&[]), "");
+}

@@ -4354,6 +4354,45 @@ draws on your private context, and my own hardware is unreachable, so composing 
 sending that to a cloud model. Ask again in a moment, or tell me explicitly to answer without your \
 private context and I'll work from what's public.";
 
+/// E.ARENA1-F53: what compose says when the private lane IS a cleared cloud model and it did not
+/// answer. VM 520, E.LONG1 L2e: the connection to ollama.com was refused, and the person was told
+/// "my own hardware is unreachable" -- on a machine with no local model at all.
+const COMPOSE_MODEL_DID_NOT_ANSWER: &str = "I couldn't write my reply \u{2014} the model I use \
+did not answer just now (the connection to it failed). Ask me again in a moment.";
+
+/// E.ARENA1-F53: the compose-failure sentence that is true of this machine's private lane: a model
+/// on its own hardware that could not be reached, a cleared cloud model that did not answer, or no
+/// lane cleared at all.
+pub(crate) fn compose_failure_reply(dedicated_local: bool, cleared: bool) -> &'static str {
+    match (dedicated_local, cleared) {
+        (true, _) => COMPOSE_LANE_UNAVAILABLE,
+        (false, true) => COMPOSE_MODEL_DID_NOT_ANSWER,
+        (false, false) => COMPOSE_NO_PRIVATE_LANE,
+    }
+}
+
+/// E.ARENA1-F53: the desktop actions that ran this turn, by name and target only -- never what a
+/// tool returned -- so a reply that could not be composed still says what was done.
+pub(crate) fn actions_done_line(made: &[(serde_json::Value, String)]) -> String {
+    let done: Vec<String> = made
+        .iter()
+        .filter_map(|(args, _)| {
+            let (app, action) = desktop::act_target(desktop::ACT, args)?;
+            let inner = args.get("args");
+            let target = ["path", "name", "title", "date"]
+                .iter()
+                .find_map(|k| inner.and_then(|a| a.get(*k)).and_then(|v| v.as_str()))
+                .map(|t| format!(" ({})", t.chars().take(80).collect::<String>()))
+                .unwrap_or_default();
+            Some(format!("{app}.{action}{target}"))
+        })
+        .collect();
+    if done.is_empty() {
+        return String::new();
+    }
+    format!("\n\nWhat I had already done this turn: {}.", done.join(", "))
+}
+
 /// What compose says when it may not use the cloud and NO lane was ever cleared for private context
 /// (E.CFG2). The constant above says "my own hardware is unreachable", which is true when a private
 /// lane exists and has failed, and false for an owner who followed first run's advice to add a
@@ -14344,12 +14383,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // The public-lane case keeps the old behaviour: an empty string falls through to
                 // the honest-line handling below, since nothing needed protecting.
                 // E.CFG2: "unreachable" only when there is something to reach.
-                let reply = if self.inference.private_lane_configured() {
-                    COMPOSE_LANE_UNAVAILABLE
-                } else {
-                    COMPOSE_NO_PRIVATE_LANE
-                }
+                // E.ARENA1-F53: the sentence that is true of THIS lane, then what was already done.
+                let mut reply = compose_failure_reply(
+                    self.inference.has_private_lane(),
+                    self.inference.private_lane_configured(),
+                )
                 .to_string();
+                reply.push_str(&actions_done_line(&made));
                 let _ = self
                     .memory
                     .append_message_scoped("user", user_text, id.write_scope())

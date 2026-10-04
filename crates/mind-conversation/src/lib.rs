@@ -7323,16 +7323,18 @@ impl ConversationEngine {
 
     /// E.ARENA1-F50: the note for a repeated `files_go` while the request's folder is still missing:
     /// the screen is already there, and the exact next calls. None for anything else.
+    /// E.ARENA1-F57: and for ANY repeated call while the goal is missing -- VM 520, E.LONG1 L1c and
+    /// L1-r2 re-read a settled `events_between` 4 and 6 times with ~/week-plan.md unwritten, each repeat
+    /// meeting the generic "already ran" note.
     async fn folder_repeat_note(&self, tool: &str, args: &serde_json::Value, user_text: &str, id: &TurnIdentity) -> Option<String> {
-        let (_, action) = desktop::act_target(tool, args)?;
-        if action != "files_go" {
-            return None;
-        }
         let (path, folder) = self.missing_goal_now(user_text, id).await?;
-        let steps = desktop::folder_steps(&path, folder.as_deref(), self.person_home().as_deref())?;
-        Some(format!(
-            "(that files_go already ran -- the Files screen is already there, and going again changes nothing. {steps})"
-        ))
+        let steps = desktop::goal_steps(&path, folder.as_deref(), self.person_home().as_deref());
+        let going = desktop::act_target(tool, args).is_some_and(|(_, action)| action == "files_go");
+        Some(if going {
+            format!("(that files_go already ran -- the Files screen is already there, and going again changes nothing. {steps})")
+        } else {
+            format!("(that call already ran and its result is above -- calling it again changes nothing. {steps})")
+        })
     }
 
     /// E.HOME3: ask the desktop about one path.
@@ -13195,7 +13197,8 @@ Open reminders you're carrying for them:",
             std::collections::HashMap::new();
         // E.ARENA1-F12: a document written this turn is still unsaved (the desktop's own word).
         let mut unsaved_doc = false;
-        let mut unsaved_nudged = false;
+        // E.ARENA1-F58: how many times this turn was told its document is still unsaved.
+        let mut unsaved_nudges: usize = 0;
         // E.ARENA1-F21: the one reminder that the path the request asked for is still missing.
         // E.ARENA1-F54: how many times this turn was told its goal is still missing.
         let mut goal_nudges: usize = 0;
@@ -13254,6 +13257,9 @@ Open reminders you're carrying for them:",
         // the two paths cannot drift guard-by-guard again.
         let guard_state = std::sync::Mutex::new(guards::GuardState::default());
         for step in 0..max_steps {
+            // E.ARENA1-F57: every model call is a step, repeats included -- the turn-done line said "9
+            // steps" for 11 calls, hiding exactly the repeats that ended long turns.
+            cost.steps = step + 1;
             emit_progress(if step == 0 {
                 "thinking…"
             } else {
@@ -13665,10 +13671,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // Before this counts as the answer: was part of what was asked never attempted?
                 // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
                 if unsaved_doc {
-                    if !unsaved_nudged {
-                        unsaved_nudged = true;
+                    if desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                        unsaved_nudges += 1;
                         eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
-                        scratch.push_str(&desktop::unsaved_nudge(step));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
@@ -13904,10 +13910,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     // E.ARENA1-F17: repeats would end the turn with a document still unsaved --
                     // tell it once and give it the step (VM 520, 0f3e733: `new{text}` three times,
                     // never `save_as`).
-                    if unsaved_doc && !unsaved_nudged {
-                        unsaved_nudged = true;
+                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                        unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
@@ -13949,10 +13955,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     // E.ARENA1-F17: repeats would end the turn with a document still unsaved --
                     // tell it once and give it the step (VM 520, 0f3e733: `new{text}` three times,
                     // never `save_as`).
-                    if unsaved_doc && !unsaved_nudged {
-                        unsaved_nudged = true;
+                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                        unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say

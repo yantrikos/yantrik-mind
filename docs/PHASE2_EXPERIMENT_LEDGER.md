@@ -12791,3 +12791,69 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Never-ask:** switched on by `shell set_approvals_off_for_test state=on minutes=15` before the run (confirmed `"on": true`), and off by an EXIT trap (confirmed `"on": false`). The current arena (the repo's, installed by 4c during the run) also turns it on itself.
 - **Results, ending 01:21 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.8 s. **T7 passed with no card possible**, the case that failed on adfcc32f.
 - **OS oddity, reported:** the new arena's own off-switch at the end was refused ("A mind or an agent cannot do that. Only the person's own account or root can switch approval"), while the same call from my wrapper, under the same account, succeeded.
+
+**E.LONG1 repeats (first batch, all in one chat, a method flaw since corrected):**
+- **L1:** r2 found all 13 events and wrote no file; r3 passed (13/13 events, 7/7 days).
+- **L2:** r2 passed. r3 failed, partly through my method: same chat as r2, whose files my cleanup had moved aside, so the model saw its own earlier "done" and an empty folder.
+- **L4:** r2 wrote 7 entries with **misattributions**: Overnight's Thu/Fri mapped to 1/2 Oct, Northwind's date credited to Overnight, the audit date put on "Desktop smoke test". The reply said 8, the second reply-count mismatch in two L4 runs.
+- **Method fix:** `shell new_chat` before every run, and stricter checks (every listed date must appear in its note; L1's count is taken from the calendar store).
+
+**L1-r2's step lines (turn 599, via 4c):**
+- s1: `events_between`, settled, count 13;
+- s2–s7: the same call ×6, nudged; **F54's goal note at s3, s5 and s7**;
+- s8: `open_app editor` (the model turned to write), answered **unsettled with the shell's Files-screen summary**;
+- s9–s10: back to `events_between`, then compose.
+- **OS:** 4c will make `open_app` settle once the app answers, and reply with the app's own state and its next actions.
+
+## E.ARENA1-F57 — PREREG: any repeat while the goal is missing is answered with the goal's next calls
+
+**Evidence:** L1c and L1-r2 repeated a settled read (`events_between`) 4 and 6 times with `~/week-plan.md` missing. Each repeat met the generic "already ran… take the next step or say plainly what is left undone". F54's goal note (with the calls) came only every second repeat. F50 answers a repeat with the goal's calls, but only for `files_go`.
+
+**Plan:**
+- `folder_repeat_note` becomes `goal_repeat_note`, for **any** repeated call (both repeat branches) while the request's goal is missing: "(that call already ran and its result is above -- calling it again changes nothing. <the goal's next calls>)".
+- The calls come from `folder_steps` or, for a file whose folder exists, `file_steps`.
+- `files_go` keeps its wording ("the Files screen is already there").
+- **Also:** the turn-done step count counts repeated calls, which it now leaves out ("9 steps" for 11 calls).
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. Loop, L1c's shape: `events_between` repeated with `~/week-plan.md` missing under a real temporary home. The first repeat's note contains the `save_as` call with that path.
+2. F50's `files_go` test holds unchanged.
+3. A repeat when nothing asked for is missing keeps today's note.
+
+**E.LONG1 fresh-chat repeats (batch 2):**
+- **L1-ra: PASS** (27 s; 7/7 days, 13/13 events, nothing invented).
+- **L2-ra: FAIL** (28 s). The folder was made (my cleanup for the next task moved it aside, then stopped on the modified tab). The page was written into the editor, unsaved. The reply said "no tool in this session writes files to disk… the nearest thing I can do is… new… then save_as to a path inside ~/longtask/recipes". It names the method and denies it in the same breath.
+- **Script fix:** check the editor *before* moving outputs.
+
+## E.ARENA1-F58 — PREREG: the unsaved note gives the save call, and may come back while time remains
+
+**From L2-ra, and L2-r3 before it:** the turn ends with a page written into the editor and unsaved.
+- F12's `unsaved_nudge` says in words: "Save it now with **the path the request named**… or say plainly that it is not saved".
+- **Here that path is the folder** `~/longtask/recipes`. That is F51's mistake, in a second note F51 did not touch.
+- It is also **one-shot** (`unsaved_nudged`, at three exits), the shape F54 removed from the goal note.
+
+**Plan:**
+1. `unsaved_nudge(step, requested)` carries the exact call: `editor save_as {"path": "<folder>/<file name>"}` "with <file name> filled in" when the request names a folder (F51's rule), or `{"path": "<file>"}` when it names a file. It keeps the honest exit after the call.
+2. `unsaved_nudged` becomes a count under `may_nudge_goal` (first always; again up to 3 under 60% of the wall budget), at all three exits.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `unsaved_nudge(3, Some("~/longtask/recipes"))` contains `"path": "~/longtask/recipes/<file name>"` and not `"path": "~/longtask/recipes"}`; with `~/x.txt`, `"path": "~/x.txt"`.
+2. Loop, L2-ra's shape (`editor new` with a page, then the model answering, repeatedly, with the request naming a folder): the unsaved note appears at least twice, and the save call names a file inside the folder.
+
+**E.ARENA1-F57 + F58 — RESULT: built, every kill criterion held.** Suite 2232/0.
+- **F57:**
+  - `folder_repeat_note` now answers **any** repeated call while the request's goal is missing: "that call already ran… calling it again changes nothing", plus `desktop::goal_steps`, which is folder_steps or else file_steps. `files_go` keeps its own wording.
+  - The turn's step count is set at the top of every iteration, so repeats count.
+- **F58:**
+  - `unsaved_nudge(step, requested)` gives `save_as {"path": "<folder>/<file name>"}` when the request names a folder (F51's rule), or the file's own path.
+  - `unsaved_nudged` became a count under `may_nudge_goal` at all three exits.
+  - One older test (`an_unsaved_document_is_said_even_when_compose_ends_the_turn`) no longer requires compose as the exit; it still requires the reply to say the document is unsaved.
+- **Tests:**
+  - `any_repeat_while_the_goal_is_missing_is_answered_with_its_next_calls` (loop, a real temporary home; the goal present means today's note);
+  - `the_unsaved_note_gives_the_save_call_and_never_a_folder`;
+  - `the_unsaved_note_comes_back_with_a_file_inside_the_folder` (loop: the model answers "can't" three times; the note comes back with the file-inside-folder call);
+  - F50's test holds.
+- **Mutants, each watched to fail on an assertion:**
+  - S1: only `files_go` gets the calls.
+  - S2: the folder named as the file.
+  - S3: the unsaved note once only.

@@ -840,11 +840,25 @@ pub(crate) fn update_unsaved(tool: &str, args: &serde_json::Value, obs: &str, un
 }
 
 /// E.ARENA1-F12: said once, before a turn ends with the document unsaved.
-pub(crate) fn unsaved_nudge(step: usize) -> String {
+pub(crate) fn unsaved_nudge(step: usize, requested: Option<&str>) -> String {
+    // E.ARENA1-F58: the call to copy, and never a folder as the file (F51's rule). VM 520, E.LONG1
+    // L2-ra: this note said "save it with the path the request named" -- ~/longtask/recipes, a folder
+    // -- once, with an exit; the model took the exit, saying no tool could write files.
+    let call = |p: String| format!("os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{p}\"}}}}");
+    let next = match requested {
+        Some(p) if looks_like_folder(p) => {
+            let f = p.trim_end_matches('/');
+            format!(
+                " Save it as a file inside {f}, its name included: {} with <file name> filled in.",
+                call(format!("{f}/<file name>"))
+            )
+        }
+        Some(p) => format!(" The next call is: {}.", call(p.to_string())),
+        None => " Save it now with the path the request named (the editor's save_as).".to_string(),
+    };
     format!(
-        "\n[{step}] (what you wrote is still only in the editor \u{2014} the desktop says it is unsaved. \
-         Save it now with the path the request named (the shell's editor_save_as, or the editor's \
-         save_as), or say plainly that it is not saved.)"
+        "\n[{step}] (what you wrote is still only in the editor \u{2014} the desktop says it is unsaved.{next} \
+         Or say plainly that it is not saved.)"
     )
 }
 
@@ -1535,6 +1549,11 @@ pub(crate) const MAX_GOAL_NUDGES: usize = 3;
 /// on one stuck call, the single goal note already spent and the file never written.
 pub(crate) fn may_nudge_goal(given: usize, elapsed_ms: u64, wall_ms: u64) -> bool {
     given == 0 || (given < MAX_GOAL_NUDGES && elapsed_ms.saturating_mul(10) < wall_ms.saturating_mul(6))
+}
+
+/// E.ARENA1-F57: the next calls toward a missing goal -- the folders to make, or the file to write.
+pub(crate) fn goal_steps(path: &str, missing_folder: Option<&str>, home: Option<&str>) -> String {
+    folder_steps(path, missing_folder, home).unwrap_or_else(|| file_steps(path, home))
 }
 
 /// E.ARENA1-F54: the exact calls that write a file whose folder exists.
@@ -2460,6 +2479,17 @@ mod tests {
         assert!(note.contains("a CSS stylesheet") && note.contains("an HTML page"), "{note}");
         assert_eq!(kind_mismatch_note("~/longtask/recipes/index.html", html), None);
         assert_eq!(kind_mismatch_note("~/plan.md", css), None, "a kind the path does not name is not judged");
+    }
+
+    /// E.ARENA1-F58: the unsaved note gives the save call, a file inside a folder the request named.
+    #[test]
+    fn the_unsaved_note_gives_the_save_call_and_never_a_folder() {
+        let folder = unsaved_nudge(3, Some("~/longtask/recipes"));
+        assert!(folder.contains(r#""path": "~/longtask/recipes/<file name>""#), "{folder}");
+        assert!(!folder.contains(r#""path": "~/longtask/recipes"}"#), "a folder named as the file: {folder}");
+        let file = unsaved_nudge(3, Some("~/x.txt"));
+        assert!(file.contains(r#""path": "~/x.txt""#) && !file.contains("<file name>"), "{file}");
+        assert!(unsaved_nudge(3, None).contains("save_as"));
     }
 
     /// E.ARENA1-F54: the goal note may come back while time remains, and gives a file's calls.

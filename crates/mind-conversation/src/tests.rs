@@ -17227,7 +17227,8 @@ mod desktop_consent_and_stall_wiring {
             vec![NEW_DOC, WROTE],
         )
         .await;
-        assert!(r.reply.contains(COMPOSED), "the turn was meant to end in compose: {}", r.reply);
+        // E.ARENA1-F58: the unsaved note now comes back while time remains, so the turn need not end
+        // in compose -- whichever exit ends it, the reply says the document is unsaved.
         assert!(r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
     }
 
@@ -17845,6 +17846,49 @@ mod desktop_consent_and_stall_wiring {
         let composed = run_with(prompt, vec![check(), cat(), cat(), cat(), cat()], vec![sb, sb], vec![&failed, &plan]).await;
         assert!(composed.reply.starts_with(COMPOSED), "{}", composed.reply);
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
+    }
+
+    /// E.ARENA1-F58 through the loop, L2-ra's shape: a page written into the editor for a request
+    /// that names a folder, and the model answering with it unsaved, more than once. The unsaved note
+    /// comes back, and its save call names a file inside the folder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_unsaved_note_comes_back_with_a_file_inside_the_folder() {
+        let page = "<!DOCTYPE html><title>Recipes</title>";
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 26 lines, unsaved \u{b7} tab 3 of 3";
+        let say = || Step::Say("I can't write files to disk.");
+        let r = run_with(
+            "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes.",
+            vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", page)), say(), say(), say()],
+            vec![EDITOR, EDITOR],
+            vec![wrote],
+        )
+        .await;
+        let last = r.prompts.last().cloned().unwrap_or_default();
+        assert!(last.matches("the desktop says it is unsaved").count() >= 2, "the unsaved note was given once");
+        assert!(last.contains(r#""path": "~/longtask/recipes/<file name>""#), "the save call did not name a file inside the folder");
+    }
+
+    /// E.ARENA1-F57 through the loop, L1c's shape: a settled read repeated while ~/week-plan.md is
+    /// missing. The first repeat is answered with the file's next calls, not the generic note.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn any_repeat_while_the_goal_is_missing_is_answered_with_its_next_calls() {
+        let home = std::env::temp_dir().join(format!("ym-f57-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let h = home.to_string_lossy().replace('\\', "/");
+        let read = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "calendar", "action": "events_between", "args": {"from": "2026-09-28", "to": "2026-10-04"}}));
+        let answer = "Done \u{2014} Calendar\naccepted: True, settled: True\n{\"count\": 0, \"events\": []}";
+        let prompt = "Look at my calendar for the week of 28 September and write a plan to ~/week-plan.md.";
+        let r = run_at(prompt, Some(h.clone()), vec![read(), read()], vec![SHELL, SHELL], vec![answer]).await;
+        let want = format!(r#""action": "save_as", "args": {{"path": "{h}/week-plan.md"}}"#);
+        assert!(
+            r.prompts.iter().any(|p| p.contains("calling it again changes nothing") && p.contains(&want)),
+            "the first repeat was not answered with the file's calls"
+        );
+        // Nothing the request asked for is missing: today's note.
+        std::fs::write(home.join("week-plan.md"), "plan").unwrap();
+        let fine = run_at(prompt, Some(h), vec![read(), read()], vec![SHELL, SHELL], vec![answer]).await;
+        assert!(!fine.prompts.iter().any(|p| p.contains("calling it again changes nothing")), "a goal that exists was pushed");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     /// E.ARENA1-F56 through the loop, L2f's s8-s9: a stylesheet written with `new`, then saved as a

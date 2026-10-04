@@ -13267,3 +13267,12 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - CONTROL OK and PREFLIGHT OK. The run without --keep-events cleared the 14 old 30 Sep arena events (0 left).
 - The arena's own never-ask switch was off afterwards, with no pending card.
 - **The first launch was refused** because the editor was open, holding 4c's two saved MDG tabs. Both were checked unmodified, closed with `editor close`, and the empty window closed with the arena's own `close_editor()`. The files are untouched.
+
+**The two legacy junk beliefs on VM 520 were erased (4 Oct ~06:05 CDT), on Pranab's direct word in this session.**
+- He answered "Delete both", then "erase all copies" once the erase proved to be literal-text-everywhere.
+- It went through the Mind's own forget route:
+  - the town-model "hobby": 1 belief removed, 11 places rewritten;
+  - the hand-over "key dates", targeted by the belief-only prefix "The user's key dates: [From the desktop": 1 belief removed, 7 places rewritten.
+- The Mind verified no copy is left. `:beliefs the user` gives "(no beliefs stored)".
+- **Seen on the way:** the forget flow has no belief-only scope. A person asking to forget a stored fact also erases every conversation entry that quotes it. That is not a defect here (he chose it), but it is worth a note if someone asks for a narrower forget.
+- iso/nightly-a4126551 was published by 4c after the 7/7 gate.

@@ -13363,3 +13363,8 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Mind fix:** the question now says when it was asked ("(Asked at HH:MM.)", on the person's clock). Tested; the compiling mutant that drops the time fails. Workspace: 0 failures.
 - **Shell fix (4c, a PR):** a turn that settles closes its unanswered questions ("No longer waiting…"), and cards may show "asked HH:MM".
 - **The next try waits for that build.**
+
+**Mind gate on OS 1195807d (#629, #631–#636) + Mind 3416dda (VM 520, 4 Oct ~18:55 CDT): 7/7, 0 false claims, median 5.0 s. This is a gate.**
+- `pending_questions` was 0 before and after: the two stale erase cards closed on the shell restart (#636).
+- Calendar notice empty, own-events file absent after, 0 arena events left, approvals back on, no pending card.
+- **Nit, passed to 4c:** the gate's turns added "Yantrik Mind finished · made N calls" notifications (942 → 950) to the person's list.

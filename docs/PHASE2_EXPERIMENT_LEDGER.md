@@ -13346,3 +13346,12 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Mutants:** four compiling mutants, all killed. Linux `cargo check -p mind-core --tests` passes on staging (target/debug removed). Workspace: 0 failures.
 - **Nit, the shell's to fix:** a click after the 110 s window but before the turn ends is accepted on screen and ignored by the Mind. The Mind's reply already says nothing was erased. 4c is logging a shell follow-up.
 - **4c asked that the first real forget on 520 erase a throwaway belief.**
+
+**E.ERASE2 on VM 520 (b20e21c, OS 530d645e, 15:49 CDT): the no-answer path works end to end.** The throwaway was "my test token is THROWAWAY-ERASE2-7731", stored as two beliefs.
+- "Forget THROWAWAY-ERASE2-7731" logged `[harness] turn 725: question erase-1791146978956 answered: (nothing)` at 15:51:29, about 110 s after asking.
+- The reply was "Nothing was erased: the question went unanswered. …", and both beliefs are still stored afterwards.
+- The stage trail logged at 120 s, so the turn was still alive. Nobody clicked the card.
+- **Defect, now fixed:** the model called `forget` twice more after the settled reply (both stopped by the repeat guard, so no second card).
+  - **The fix:** `terminal_delivery` ends the turn on every settled forget (`ERASE_SETTLED`: erased, partly erased, could not erase, kept, unanswered), as it already did for E.ERASE1's typed question.
+  - **Tested:** every desktop outcome is now asserted terminal. A compiling mutant that drops the rule fails. Workspace: 0 failures.
+- **Still needed:** the "Erase" click path on the box. It needs a person's click, which only Pranab can give.

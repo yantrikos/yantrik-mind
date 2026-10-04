@@ -1547,6 +1547,15 @@ pub(crate) fn erase_question(places: usize) -> String {
     )
 }
 
+/// E.ERASE2: the replies when the person kept it, or did not answer.
+pub(crate) const ERASE_KEPT: &str = "Kept \u{2014} nothing was erased.";
+pub(crate) const ERASE_UNANSWERED: &str =
+    "Nothing was erased: the question went unanswered. Ask me again if you still want it gone.";
+
+/// E.ERASE2: how every settled forget begins -- `erase_reply`'s three outcomes, kept, unanswered.
+pub(crate) const ERASE_SETTLED: [&str; 5] =
+    ["Erased (", "I erased what I could", "I couldn't erase it", ERASE_KEPT, ERASE_UNANSWERED];
+
 /// E.ERASE2: the two answers, in the order the person sees them. Only the second erases.
 pub(crate) const ERASE_OPTIONS: [&str; 2] = ["Keep", "Erase"];
 
@@ -11598,7 +11607,9 @@ WINDOW: all-time, latest 200
         // the reply. Letting the loop go on, staging's model called again with a whole sentence
         // (replacing the held text) and then composed "nothing to delete" over the question.
         if matches!(tool, "forget" | "erase") {
-            return obs.starts_with(FORGET_ASK);
+            // E.ERASE2: and on the desktop, what the person's Keep / Erase (or silence) settled is the
+            // reply too. On VM 520 the model called `forget` twice more after "Nothing was erased".
+            return obs.starts_with(FORGET_ASK) || ERASE_SETTLED.iter().any(|p| obs.starts_with(p));
         }
         if matches!(tool, "remember" | "add_reminder")
             && crate::tool_outcome::Outcome::classify(tool, obs)
@@ -12442,8 +12453,8 @@ WINDOW: all-time, latest 200
                         let options = ERASE_OPTIONS.iter().map(|o| o.to_string()).collect();
                         match ask_person(request_id, erase_question(r.remaining_cells.max(1)), options).await.as_deref() {
                             Some("Erase") => self.erase_everywhere(&what).await,
-                            Some("Keep") => "Kept \u{2014} nothing was erased.".to_string(),
-                            _ => "Nothing was erased: the question went unanswered. Ask me again if you still want it gone.".to_string(),
+                            Some("Keep") => ERASE_KEPT.to_string(),
+                            _ => ERASE_UNANSWERED.to_string(),
                         }
                     }
                     Ok(r) => {

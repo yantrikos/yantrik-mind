@@ -18895,6 +18895,7 @@ async fn on_the_desktop_forget_asks_keep_or_erase() {
         assert_eq!(options, &vec!["Keep".to_string(), "Erase".to_string()], "[{tag}]");
         assert!(prompt.contains("can't be undone") && !prompt.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "[{tag}] {prompt}");
         assert!(conv.pending_erase.lock().unwrap().is_none(), "[{tag}] a typed yes is still armed");
+        assert!(conv.terminal_delivery("forget", &reply), "[{tag}] the settled forget is not the reply: {reply}");
         let left = conv.memory.erase_literal(ERASE_SECRET, false).await.unwrap();
         if answer == Some("Erase") {
             assert!(reply.starts_with("Erased"), "[{tag}] {reply}");

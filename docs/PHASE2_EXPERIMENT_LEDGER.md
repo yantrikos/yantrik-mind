@@ -12961,3 +12961,48 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **rf60c (68 s): fail.** soup.html holds a second index page ("Three Dinners", a link list, no recipe), saved last at 23:14:22. The reply listed four files without soup.
 - **The checker was too weak:** it passed rf60c, since every link resolved. It now also requires ingredients and steps on each recipe page. Preflighted on all three outputs, it passes rf60a/rf60b and flags rf60c `soup.html:not-a-recipe`.
 - **Whether F60 fired in any run is not yet known.** The step lines have been asked of 4c. Not claimed until seen.
+
+**L2 on f20cfef: the step lines (from 4c).**
+- **F60 fired in both passing runs:** rf60a at step 17, rf60b at step 23. It did not fire in rf60c.
+- **rf60c:**
+  - s16 was a fresh `editor new` whose text was a second index page ("Three Dinners", a link list).
+  - s17 saved it as soup.html.
+  - Nothing was missing on disk, so F60 had nothing to say.
+- **Cause: the model wrote the wrong page.** The editor did not re-save old text.
+
+## E.ARENA1-F61 — PREREG: a page whose title and heading repeat another page saved this turn is held once
+
+**Plan:**
+1. At a save (where F56 holds a save whose kind is wrong), `desktop::duplicate_page_note(path, text, saved)` is checked.
+2. **The page's identity:** an HTML text's `<title>` and first `<h1>`, trimmed, with whitespace collapsed and case ignored.
+3. **The hold applies when** the identity is equal to that of a page saved this turn at another path. Both must match when both are present; one is enough when it is the only one present.
+4. The save is then not sent, with a note naming the earlier page and the file this one is meant to be. It is held once per path, and sent again it goes through.
+
+**Why both title and h1:** a site that puts its name in every page's `<h1>` gives each page its own `<title>`, and must not be held. rf60c's own tacos page has `<title>Tacos - Three Dinners</title>` with `<h1>Tacos`.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **The real texts:** soup.html (rf60c's actual second index) is saved with index.html saved this turn. It is held, and the note names index.html.
+2. **Not held:**
+   - rf60c's real tacos.html, after index.html;
+   - a page sharing only the site `<h1>`, with its own `<title>`;
+   - a re-save of index.html itself.
+3. **Through the loop:** index saved, then the duplicate text saved as soup.html. No save is reached the first time and the note is in the prompt; sent again, it is saved.
+
+**E.ARENA1-F61: built. All three kill criteria pass.**
+- **The change:**
+  - `desktop::duplicate_page_note` and `first_tag_text`.
+  - The loop's `dup_held` holds the save once, beside F56's hold. Each hold now logs its own line.
+- **The fixtures are real:** rf60c's actual index.html, soup.html and tacos.html.
+  - The second index saved as soup.html is held, and the note names index.html.
+  - Not held: the real tacos page, a page sharing only the site's `<h1>`, and a re-save of the index.
+  - Through the loop, it is held once and saved when sent again.
+- **Seven compiling mutants, all killed:**
+  1. Never held.
+  2. `<h1>` only.
+  3. A re-save of the same file is held.
+  4. Held forever.
+  5. Inner tags are kept.
+  6. Case is kept.
+  7. The loop wiring is off.
+- **Workspace:** 0 failures. Clippy: nothing new.
+- **Not covered:** f60c's pasta page is titled "Pasta Pomodoro" while the index link says "Garlic Butter Pasta". The site is inconsistent, but each page is a real page, so the change does not hold it.

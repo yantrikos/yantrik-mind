@@ -1236,6 +1236,55 @@ pub(crate) fn kind_mismatch_note(path: &str, text: &str) -> Option<String> {
     })
 }
 
+/// E.ARENA1-F61: the text of an HTML page's first `<tag>…</tag>`, inner tags removed, whitespace
+/// collapsed, lower case. None when the tag is absent or empty.
+fn first_tag_text(html: &str, tag: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let open = lower.find(&format!("<{tag}"))?;
+    let start = open + lower[open..].find('>')? + 1;
+    let end = start + lower[start..].find(&format!("</{tag}"))?;
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in html[start..end].chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    (!words.is_empty()).then(|| words.join(" ").to_lowercase())
+}
+
+/// E.ARENA1-F61: the note for a save whose page repeats one already saved this turn -- the same
+/// `<title>` and first `<h1>` (both, where both are present) as a page at another path. VM 520,
+/// E.LONG1 L2-rf60c: the model wrote a second index ("Three Dinners", a link list) and saved it as
+/// soup.html; every link resolved, and the site had no soup recipe. A site whose `<h1>` is its name
+/// on every page gives each page its own `<title>`, and is not held.
+pub(crate) fn duplicate_page_note(path: &str, text: &str, saved: &[(String, String)]) -> Option<String> {
+    if path_kind(path) != Some(TextKind::Html) || text_kind(text) != Some(TextKind::Html) {
+        return None;
+    }
+    let ident = |t: &str| (first_tag_text(t, "title"), first_tag_text(t, "h1"));
+    let mine = ident(text);
+    if mine == (None, None) {
+        return None;
+    }
+    let name = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
+    let (earlier, _) = saved
+        .iter()
+        .find(|(p, t)| name(p) != name(path) && text_kind(t) == Some(TextKind::Html) && ident(t) == mine)?;
+    let heading = mine.1.or(mine.0).unwrap_or_default();
+    Some(format!(
+        "(not sent: this page has the same title and heading (\"{heading}\") as {}, saved this turn -- it \
+         is that page again, not {}. Write what belongs in {path} with editor `new` and save that there. \
+         Sent again unchanged, it will be saved as it is.)",
+        name(earlier),
+        name(path)
+    ))
+}
+
 /// E.ARENA1-F48: is this call `shell.agent_run` -- a new command, not a wait on one?
 pub(crate) fn is_agent_run(tool: &str, args: &serde_json::Value) -> bool {
     act_target(tool, args).is_some_and(|(app, action)| app == TWIN_HOST && action == "agent_run")
@@ -2562,6 +2611,26 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F61, on L2-rf60c's real pages: the second index saved as soup.html is held; the
+    /// real tacos page, a page sharing only the site's `<h1>`, and a re-save of the index are not.
+    #[test]
+    fn a_page_that_repeats_one_saved_this_turn_is_held() {
+        const INDEX: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_index_f20cfef.html");
+        const SOUP: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_soup_f20cfef.html");
+        const TACOS: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_tacos_f20cfef.html");
+        let saved = vec![
+            ("~/longtask/recipes/index.html".to_string(), INDEX.to_string()),
+            ("~/longtask/recipes/style.css".to_string(), "h1 { color: #333; }".to_string()),
+        ];
+        let note = duplicate_page_note("~/longtask/recipes/soup.html", SOUP, &saved).expect("the second index is held");
+        assert!(note.contains("as index.html") && note.contains("\"three dinners\"") && note.contains("not soup.html"), "{note}");
+        assert_eq!(duplicate_page_note("~/longtask/recipes/tacos.html", TACOS, &saved), None, "the real tacos page");
+        let site_h1 = INDEX.replace("<title>Three Dinners</title>", "<title>Soup - Three Dinners</title>");
+        assert_eq!(duplicate_page_note("~/longtask/recipes/soup.html", &site_h1, &saved), None, "only the site's h1 is shared");
+        assert_eq!(duplicate_page_note("/home/yantrik/longtask/recipes/index.html", INDEX, &saved), None, "a re-save of the index");
+        assert_eq!(first_tag_text("<h1 class=\"x\">Three  <em>Dinners</em>\n</h1>", "h1").as_deref(), Some("three dinners"));
     }
 
     /// E.ARENA1-F60, on L2-rx's real index.html: its local links, exactly, and nothing that is not a

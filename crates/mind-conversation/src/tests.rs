@@ -17928,6 +17928,29 @@ mod desktop_consent_and_stall_wiring {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// E.ARENA1-F61 through the loop, L2-rf60c's s16-s17: the index saved, then a second index written
+    /// and saved as soup.html. That save is held once with the reason; sent again, it goes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_save_that_repeats_a_page_saved_this_turn_is_held_once() {
+        const INDEX: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_index_f20cfef.html");
+        const SOUP: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_soup_f20cfef.html");
+        let new = |text: &str| Step::Call("mcp.yantrik-os.os_act", act("editor", "new", text));
+        let save = |f: &str| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": format!("~/longtask/recipes/{f}")}}));
+        let acts = [
+            "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 19 lines, unsaved \u{b7} tab 2 of 2",
+            "Done \u{2014} Text Editor \u{2014} index.html, 19 lines, saved \u{b7} tab 2 of 2",
+            "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 20 lines, unsaved \u{b7} tab 3 of 3",
+            "Done \u{2014} Text Editor \u{2014} soup.html, 20 lines, saved \u{b7} tab 3 of 3",
+        ];
+        let saved_soup = |r: &Run| acts_reached(r).iter().filter(|a| a["args"]["path"].as_str().is_some_and(|p| p.ends_with("soup.html"))).count();
+        let prompt = "Make a small static recipe website in ~/longtask/recipes.";
+        let once = run_with(prompt, vec![new(INDEX), save("index.html"), new(SOUP), save("soup.html")], vec![EDITOR, EDITOR], acts.to_vec()).await;
+        assert_eq!(saved_soup(&once), 0, "the second index went to soup.html: {:?}", once.reached);
+        assert!(once.prompts.iter().any(|p| p.contains("it is that page again, not soup.html")), "the model was not told why");
+        let twice = run_with(prompt, vec![new(INDEX), save("index.html"), new(SOUP), save("soup.html"), save("soup.html")], vec![EDITOR, EDITOR], acts.to_vec()).await;
+        assert_eq!(saved_soup(&twice), 1, "sent again, it is saved: {:?}", twice.reached);
+    }
+
     /// E.ARENA1-F58 through the loop, L2-ra's shape: a page written into the editor for a request
     /// that names a folder, and the model answering with it unsaved, more than once. The unsaved note
     /// comes back, and its save call names a file inside the folder.

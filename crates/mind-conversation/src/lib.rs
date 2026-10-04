@@ -13213,6 +13213,8 @@ Open reminders you're carrying for them:",
         let mut last_save_target: Option<String> = None;
         // E.ARENA1-F60: each file saved this turn, with the text the Mind wrote into it (when known).
         let mut saved_files: Vec<(String, String)> = Vec::new();
+        // E.ARENA1-F61: saves already held once for repeating a page saved this turn.
+        let mut dup_held: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
         let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
@@ -14114,10 +14116,21 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.ARENA1-F56: a save that would give the file the wrong kind of text, held once.
                 let kind_note = desktop::save_path(&tool, &args).and_then(|path| {
                     let note = desktop::kind_mismatch_note(&path, last_new_text.as_deref()?)?;
-                    kind_held.insert(path).then_some(note)
+                    kind_held.insert(path).then(|| {
+                        eprintln!("[agent] step {step}: a save would give the file the wrong kind of text \u{2014} held once");
+                        note
+                    })
+                });
+                // E.ARENA1-F61: a save that would make this file a copy of a page saved this turn, held once.
+                let kind_note = kind_note.or_else(|| {
+                    let path = desktop::save_path(&tool, &args)?;
+                    let note = desktop::duplicate_page_note(&path, last_new_text.as_deref()?, &saved_files)?;
+                    dup_held.insert(path).then(|| {
+                        eprintln!("[agent] step {step}: a save would repeat a page saved this turn \u{2014} held once");
+                        note
+                    })
                 });
                 if let Some(note) = kind_note {
-                    eprintln!("[agent] step {step}: a save would give the file the wrong kind of text \u{2014} held once");
                     Some(note)
                 } else if desktop::is_agent_run(&tool, &args) && commands_ask == Some(true) && !command_steered {
                     // E.ARENA1-F48: once per turn, an app before a card. Sent again, it goes through.

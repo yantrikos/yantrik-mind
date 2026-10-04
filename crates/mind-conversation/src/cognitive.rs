@@ -938,8 +938,10 @@ impl ConversationEngine {
         // overwrites it. Primary lane only: a correction is graded against the answer its own
         // conversation produced, and another member's message must not grade the owner's.
         if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            crate::stage("grade previous");
             self.grade_previous_turn(user_text).await;
         }
+        crate::stage("handle turn");
         let answer = self.handle_turn_as(user_text, id.clone()).await;
         if let Ok(a) = &answer {
             if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {

@@ -17948,6 +17948,30 @@ mod desktop_consent_and_stall_wiring {
         assert!(long.chars().count() > 300 && crate::mail_lookup_intent(&long).is_none(), "a long message is not a lookup");
     }
 
+    /// E.STALL3 through the turn seam: the trail a mail question and an ordinary turn leave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_leaves_a_trail_of_its_stages() {
+        let script: Arc<dyn LLMBackend> = Arc::new(Script { at: AtomicUsize::new(0), steps: (0..10).map(|_| Step::Say("ok")).collect(), seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) });
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let conv = Arc::new(ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM"));
+        let trail_of = |text: &'static str| {
+            let conv = conv.clone();
+            async move {
+                let trail: crate::StageTrail = Default::default();
+                let _ = crate::TURN_STAGE.scope(trail.clone(), conv.turn(text, TurnIdentity::primary())).await;
+                let t = trail.lock().unwrap().clone();
+                t
+            }
+        };
+        let mail = trail_of("check my email for the Lisbon dates").await;
+        assert_eq!(mail.first(), Some(&"grade previous"), "{mail:?}");
+        assert_eq!(mail.last(), Some(&"mail"), "{mail:?}");
+        assert!(mail.contains(&"episode") && mail.contains(&"knock"), "{mail:?}");
+        let plain = trail_of("What should I cook tonight with rice and lentils?").await;
+        assert_eq!(plain.last(), Some(&"route"), "{plain:?}");
+        assert!(plain.contains(&"sandbox") && plain.contains(&"handle turn"), "{plain:?}");
+    }
+
     /// E.STALL2 through the turn: a mail question whose answer never comes ends the turn within the
     /// bound, plainly, instead of waiting (VM 520: a turn sat in here 9 minutes with no log line).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

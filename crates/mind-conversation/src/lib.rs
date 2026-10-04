@@ -1498,6 +1498,26 @@ tokio::task_local! {
     pub static TURN_STATUS: tokio::sync::mpsc::UnboundedSender<String>;
 }
 
+/// E.STALL3: the steps a turn has passed, in order, as the harness's heartbeat reads them. On VM 520
+/// every long message wedged between the harness line and `route=` with nothing logged, and two
+/// guesses at where were each disproved; a turn that runs long now says where it is.
+pub type StageTrail = std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>;
+
+tokio::task_local! {
+    pub static TURN_STAGE: StageTrail;
+}
+
+/// E.STALL3: mark the step this turn is entering. No listener, no effect.
+pub(crate) fn stage(s: &'static str) {
+    let _ = TURN_STAGE.try_with(|t| {
+        if let Ok(mut t) = t.lock() {
+            if t.len() < 64 {
+                t.push(s);
+            }
+        }
+    });
+}
+
 /// Marks a progress message as REASONING rather than a status line, so the transport can route it
 /// to its own channel. A sentinel on the existing channel rather than a second channel: progress is
 /// already scoped per turn and ordered, and a parallel path would have to re-solve both.
@@ -15123,6 +15143,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // touching operation (episode recording, proactive resolution, ledger) runs. A matched
         // question returns the typed claim VERBATIM; only the transcript appends follow the
         // decision. Unmatched questions flow through untouched.
+        stage("claim");
         if let Some(claim) = self_claims::match_claim(user_text) {
             let reply = self_claims::render(claim);
             let _ = self
@@ -15145,6 +15166,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // (Take the slot first so the lock is released before the await in capture_onboard.)
         // Feed the temporal layer: every turn is a life-event episode (rhythm/periodicity/bursts),
         // labeled by life-bucket so the causal/motif miners have event TYPES to work with.
+        stage("episode");
         let _ = self.memory.record_episode(episode_label(user_text)).await;
         // Resolve any outstanding proactive send: replying now (within the window) counts as
         // ENGAGED — the world model learns when pings actually land.
@@ -15154,6 +15176,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Intercepted here so the pre-committed engagement prediction gets GRADED (a knock the user
         // deferred or muted must cost the ledger, not quietly vanish). Parsing is tight, so ordinary
         // conversation that merely contains "later" flows straight through to the normal path.
+        stage("knock");
         if let Some(reply) = self.knock_reply(user_text).await {
             let _ = self
                 .memory
@@ -15206,6 +15229,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // FUTURE-SELF COURIER: close any thread the user just finished, and capture an EXPLICIT new
         // commitment ("when the renewal arrives, compare it with last year"). Capture does not
         // short-circuit the turn — the promise is recorded and the message still gets a real reply.
+        stage("courier");
         let _ = self.courier_retire(user_text).await;
         // A message that IS the delegation gets the acknowledgement as its whole reply — "noted,
         // I'll do that when X happens" is the complete and correct response to a promise. Bounded by
@@ -15316,6 +15340,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Primer is identity-aware and sits before the primary/member split: every learner gets a
         // separate dial, active topic, and record while the rest of each conversation remains on
         // its existing privacy-scoped path.
+        stage("primer");
         if let Some(reply) = self.primer_turn(user_text, &id).await {
             let _ = self
                 .memory
@@ -15344,12 +15369,14 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // NIGHT SHIFT regret baseline: classify this ask against the forward spine (deterministic,
         // a few KV reads). Week 1 measures the untreated world; the kernel is judged by the drop.
+        stage("regret");
         self.regret_classify(user_text).await;
         // Emotional-continuity ledger: infer coarse valence from the message, persist a rolling
         // 14-day baseline per person, and record a wellbeing Tension when a 3-day flat-or-negative
         // deviation is detected (surfaced by proactive_digest; rate-limited to once per 3 days).
         // E.ERASE1: an answer to "erase it permanently?" is settled before anything else reads this
         // message -- a "yes, erase <the code>" must not be recorded on the way to erasing the code.
+        stage("erase");
         if let Some((reply, needle)) = self.handle_pending_erase(user_text).await {
             let said = mind_types::erase_text::replace_ci(
                 user_text,
@@ -15360,9 +15387,11 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
             return Ok(reply);
         }
+        stage("emotion");
         let _ = emotion::record_turn(self.memory.as_ref(), &id.owner, user_text).await;
         // Outward actions take priority: a pending confirmation, or a new gated proposal (send email).
         // This path never touches the LLM — the gate + confirmation are deterministic.
+        stage("action");
         if let Some(reply) = self.handle_action(user_text).await {
             let _ = self
                 .memory
@@ -15383,6 +15412,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // the turn away from the tools it explicitly asked for. The stateful interceptors above
         // are NOT gated — a bare "yes" answering a pending confirmation names no tool and must
         // still reach handle_action.
+        stage("news");
         let names_tool = self.names_a_held_tool(user_text);
         if let Some(topic) = self.interest_in_recent_news(user_text).filter(|_| !names_tool) {
             let brief = self.news_brief(&topic).await;
@@ -15443,6 +15473,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Deterministic mail-lookup: "find/search my mail for X", "what's my booking/reservation/
         // confirmation" — the small model sometimes confabulates a search instead of running one, so
         // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
+        stage("mail check");
         if let Some(mq) = mail_lookup_intent(user_text).filter(|_| !self.names_a_held_tool(user_text)) {
             // ARCH-3A: this deterministic fast-path bypasses run_agent_tool_as, so it must broker its
             // own egress — otherwise a "search my mail for <credential>" would reach IMAP unmediated.
@@ -15466,6 +15497,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 }
             }
             // E.STALL2: taken visibly, and bounded -- on VM 520 a turn in here logged nothing for 9 min.
+            stage("mail");
             eprintln!("[agent] route=mail_fastpath query={mq:?}");
             let answered = tokio::time::timeout(std::time::Duration::from_millis(MAIL_FASTPATH_MS), async {
             let raw = self.mail_search_all(&mq).await;
@@ -15513,6 +15545,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         // RESEARCHOPS: reviewer-2 / related-work / next-experiments as durable, citation-validated
         // research jobs. Deterministic intercept — a research ask should never be free-composed.
+        stage("research");
         if let Some((mode, subject)) = Self::wants_researchops(user_text).filter(|_| !names_tool) {
             let reply = self.research_ops_run(mode, &subject).await;
             let _ = self
@@ -15528,6 +15561,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // HARD-GROUNDED DRAFTING: "draft me an X plan about Y" composes STRICTLY from the complete
         // stored fact set about Y (no blending, no ranking lottery). Deterministic intercept ahead of
         // the agent loop's free composition — the small model confabulates a draft otherwise (SDF bug).
+        stage("draft");
         if let Some((kind, subject)) = Self::wants_draft(user_text).filter(|_| !names_tool) {
             let reply = self.draft_grounded(&kind, &subject, &turn_ctx).await?;
             let _ = self
@@ -15544,6 +15578,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // ahead of the agent loop — otherwise "save that as skill X" / "run skill X" get swallowed by
         // build_capability and only a description is stored, never the runnable code. This is the
         // memory-backed reuse loop over YantrikDB's skill store; the sandbox runs every reuse.
+        stage("skills");
         if let Some(reply) = self.handle_skills(user_text).await.filter(|_| !names_tool) {
             let _ = self
                 .memory
@@ -15558,6 +15593,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Raw "run python/shell/rust: …" executes in the local no-network sandbox (deterministic,
         // free, auth-free) and records last_run so the very next "save that as skill" banks the exact
         // code — must be ahead of the agent loop so it isn't routed to the (auth'd, network) coder.
+        stage("sandbox");
         if let Some(sb) = &self.sandbox {
             if let Some((lang, code)) = Self::parse_code_request(user_text) {
                 let res = match lang {
@@ -15701,6 +15737,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             } else {
                 "arithmetic"
             };
+            stage("route");
             eprintln!("[agent] route=direct_known_command kind={kind} steps=0");
             let scope = id.write_scope();
             let _ = self
@@ -15714,6 +15751,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             return Ok(answer);
         }
         if self.agent_primary {
+            stage("route");
             eprintln!("[agent] route=agentic");
             if self.cognition_on() {
                 let arc = self.self_ref.lock().unwrap().upgrade();

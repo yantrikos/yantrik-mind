@@ -13172,3 +13172,31 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - Staging answers both: 665 via the mail path, 676 normally in 29 s.
   - So the 520 stall needs something only the desktop service has. That 665 took the mail path on 520 was inferred, not seen: no line was logged.
   - E.STALL2 stands on its own, since a task brief must not be a mail lookup, but it is not claimed to fix the wedge.
+
+## E.STALL3 — PREREG: a turn that runs long says where it is
+
+**Seen on VM 520 (4c, dff5773):** every MDG message over about 2,200 characters wedged before `route=`, and every one under about 1,300 routed (10 turns, same chats). There was no log line, no TCP connection in the root namespace, and all 12 threads were asleep. The same texts route at once locally and on staging. My two guesses (the mail fast-path, a memory socket) were each disproved by the next evidence.
+
+**Plan:**
+1. A task-local turn-stage trail, `TURN_STAGE`, records each step a turn passes before routing. The harness scopes it per turn.
+   - In `turn()`: grade the previous turn, then hand over.
+   - In `handle_turn_as`, a marker before each pre-route step that awaits: claim, episode, knock, sweep, courier, onboarding, primer, member, regret, erase, emotion, action, news, creative, photo, mail, research, draft, skills, sandbox, then route.
+2. Once a turn passes 60 s, the harness heartbeat (every 30 s) logs `[harness] turn N still running after S s; last stage: X (trail: …)`.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `stalled_line` is None under 60 s, and names the turn, the seconds and the last stage from 60 s on.
+2. Through the turn:
+   - a mail question's trail ends at "mail";
+   - an ordinary turn's trail reaches "route";
+   - both trails pass "grade previous" first.
+3. No stage marker means no task-local, and nothing fails: the trail is optional.
+
+**E.STALL3: built.**
+- **The change:**
+  - `TURN_STAGE` and `stage()` in mind-conversation.
+  - 18 markers: 2 in `turn()`, 16 pre-route in `handle_turn_as`, and `route` before both route lines.
+  - The harness scopes a trail per turn, and its heartbeat logs `stalled_line` from 60 s on.
+- **Tests:** `a_long_turn_says_where_it_is` (harness) and `a_turn_leaves_a_trail_of_its_stages` (through `turn()`: a mail question ends at "mail", an ordinary turn ends at "route", both start at "grade previous").
+- **Six compiling mutants, all killed:** no quiet minute, no mail stage, no grade stage, no route stage, nothing recorded, trail not shown.
+- **Workspace:** 0 failures.
+- **Not tested:** the heartbeat's call to `stalled_line` inside the harness loop, which is one line. The first wedge on 520 with this build is its test.

@@ -578,12 +578,18 @@ async fn serve(
                     latest.clone(),
                 ))
             };
+            // E.STALL3: where the turn is, for the heartbeat to say when it runs long.
+            let trail: mind_conversation::StageTrail = Default::default();
+            let watched = trail.clone();
             let mut thinking = tokio::spawn(async move {
-                mind_conversation::TURN_STATUS
+                mind_conversation::TURN_STAGE
                     .scope(
-                        status_tx,
-                        mind_conversation::TURN_CALLS
-                            .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                        trail,
+                        mind_conversation::TURN_STATUS.scope(
+                            status_tx,
+                            mind_conversation::TURN_CALLS
+                                .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                        ),
                     )
                     .await
             });
@@ -597,6 +603,9 @@ async fn serve(
                 tokio::select! {
                     done = &mut thinking => break done,
                     _ = beat.tick() => {
+                        if let Some(line) = stalled_line(turn_id, started.elapsed(), &watched) {
+                            eprintln!("{line}");
+                        }
                         let _ = call(
                             address.to_string(),
                             CHUNK,
@@ -671,6 +680,24 @@ pub(crate) fn status_event(line: &str) -> Option<serde_json::Value> {
 }
 
 /// E.STATUS1: the latest status, with how long the turn has run, to the heartbeat's 30 seconds.
+/// E.STALL3: from 60 s on, the line that says where a running turn is -- its last stage and the
+/// trail that led there. None before then, so ordinary long turns stay quiet for their first minute.
+pub(crate) fn stalled_line(turn_id: u64, elapsed: Duration, trail: &mind_conversation::StageTrail) -> Option<String> {
+    if elapsed < STALL_REPORT_AFTER {
+        return None;
+    }
+    let t = trail.lock().ok()?.clone();
+    let last = t.last().copied().unwrap_or("(none yet: before the turn engine)");
+    Some(format!(
+        "[harness] turn {turn_id} still running after {} s; last stage: {last} (trail: {})",
+        elapsed.as_secs(),
+        t.join(" > ")
+    ))
+}
+
+/// E.STALL3: how long a turn runs before the heartbeat says where it is.
+const STALL_REPORT_AFTER: Duration = Duration::from_secs(60);
+
 pub(crate) fn heartbeat_status(text: &str, elapsed: Duration) -> String {
     let secs = elapsed.as_secs() / 30 * 30;
     format!("{text} ({secs} s)")
@@ -722,6 +749,22 @@ mod status_tests {
             assert_eq!(status_event(&format!("{mark}the model's own words")), None, "{mark:?}");
         }
         assert_eq!(heartbeat_status("Thinking…", Duration::from_secs(61)), "Thinking… (60 s)");
+    }
+
+    /// E.STALL3: quiet for the first minute; then the turn, its seconds, its last stage and trail.
+    #[test]
+    fn a_long_turn_says_where_it_is() {
+        let trail: mind_conversation::StageTrail = Default::default();
+        assert_eq!(stalled_line(676, Duration::from_secs(59), &trail), None);
+        assert_eq!(
+            stalled_line(676, Duration::from_secs(90), &trail).as_deref(),
+            Some("[harness] turn 676 still running after 90 s; last stage: (none yet: before the turn engine) (trail: )")
+        );
+        trail.lock().unwrap().extend(["grade previous", "handle turn", "claim", "episode"]);
+        assert_eq!(
+            stalled_line(676, Duration::from_secs(60), &trail).as_deref(),
+            Some("[harness] turn 676 still running after 60 s; last stage: episode (trail: grade previous > handle turn > claim > episode)")
+        );
     }
 
     #[tokio::test]

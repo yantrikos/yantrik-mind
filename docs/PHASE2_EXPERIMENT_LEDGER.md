@@ -13256,3 +13256,9 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - Nothing was lost, but **the Mind closed a tab it did not open**, to make room under the editor's 8-tab limit.
 - **No Mind-side guard yet, deliberately.** The Mind knows only this turn's opens; enc-1..3 were opened by the Mind in earlier turns, so a turn-local rule would misjudge. Ownership belongs to the editor.
 - 4c will look at `tabs[].opened_by` and a refusal that names the caller's own saved tab. The Mind side (hold a close of a tab not its own once, and name its own) waits for that field and a real capture.
+
+**Memory-quality finding (4c, MDG on 520): two junk durable beliefs, both legacy.**
+- **"Key dates"** holds a desktop hand-over preamble from arena run R4 (27 Sep, 05:13–07:22 CDT). F28 (a10ae06, which splits a hand-over off the person's text) was committed at 16:43 CDT that day.
+- **"Hobbies"** holds "Ok, create a small town model…", the very entry F13 (b6e9079, 23 Sep 21:30 CDT) cites.
+- **No code change.** Deleting the two beliefs is Pranab's call, since 520's store is his test data. They are the only two durable beliefs there.
+- **Unmeasured residual:** after an interest question, any next message that is not a request, question or instruction is stored as a 0.70 belief, with no check that it answers. To act on only with a fresh junk belief from a current build.

@@ -13283,3 +13283,39 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - the own-events file held two arena ids during the run and was gone after;
   - 0 arena events left.
 - **Slower than a4126551** (median 6.6 s): T6 52.5 s, T7 67.3 s. The Mind is the same, so the cause (model latency or OS) is not yet known; 4c has been asked for describe timings.
+
+## E.ERASE2 — PREREG: on the desktop, forget asks with a Keep / Erase question, not a typed "yes"
+
+**Asked by:** Fable's design sign-off, condition 2 (via 4c): an irreversible action confirms with an action-specific card (Keep, Erase), not a typed reply.
+
+**Read from yantrik-os origin/main 530d645e:**
+- `request_approval` cannot raise a card for the Mind's own action. It settles only actions a desktop app publishes.
+- The harness `request` event (event.rs:119-131) draws a QuestionCard with the harness's own options, and the answer comes back on a later `poll` as `answers: [{turn_id, request_id, answer}]`.
+- The answer is accepted only while that run is in flight (host.rs `answer`).
+- A poll during a turn can hand out a turn of another conversation, or a `/stop` (`next_waiting`).
+
+**Plan:**
+1. In mind-conversation, a task-local `TURN_ASK` sender and `ask_person(prompt, options, wait)`, which gives the chosen option, or None when nobody can be asked or nothing came back.
+2. The `forget` tool, when `ask_person` is available and the desktop's approvals are not off for a test, counts the places and asks.
+   - The prompt is "Erase the text you asked me to forget? It is in N place(s) in my memory, and this can't be undone." It never contains the text.
+   - It erases only on exactly "Erase".
+   - "Keep", a timeout, a cancel or anything else erases nothing and says so.
+   - Off the desktop, or under never-ask, the typed "yes" flow stays as it is.
+3. In the harness: on an ask, send the `request` event, then poll every 2 s while waiting (up to 110 s), keeping the heartbeat.
+   - An answer for that `request_id` resolves the ask.
+   - `cancelled` holding this turn, or the deadline, resolves None.
+   - A turn handed out meanwhile is held and run right after this one.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **Harness, with a scripted desktop:**
+   - an ask sends one `request` event with the options;
+   - an answer to another request id is ignored;
+   - the matching answer resolves the ask;
+   - a turn handed out while waiting is run next, not dropped;
+   - a cancel resolves None.
+2. **Through the forget tool:**
+   - "Erase" erases;
+   - "Keep" and None erase nothing;
+   - the prompt never holds the text;
+   - with no ask listener, the typed flow is unchanged (the existing E.ERASE1 tests pass).
+3. **Workspace:** 0 failures. A security review by 4c before it reaches 520.

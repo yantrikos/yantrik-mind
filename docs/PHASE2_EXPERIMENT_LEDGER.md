@@ -13249,3 +13249,10 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - s6 was `save_as ~/mdg/encoded.mdg`, and the file has all 30 blocks (6,514 bytes).
 - The repeated-`new` loop did not occur. **n=1.**
 - **Open:** s4 was an `editor close` between the two `new`s. Whose tab, and whether it held unsaved text, has been asked of 4c before this is called clean.
+
+**Turn 694's s4 `close`: harmless, but a known gap.** From 4c's lines:
+- s1 `new` was refused: "Eight tabs are already open; close one…".
+- s4 closed the active tab, encoded-onepass.mdg. It was saved and unmodified, and had been opened by 4c (as the person) to rescue turn 692's text. It is still on disk.
+- Nothing was lost, but **the Mind closed a tab it did not open**, to make room under the editor's 8-tab limit.
+- **No Mind-side guard yet, deliberately.** The Mind knows only this turn's opens; enc-1..3 were opened by the Mind in earlier turns, so a turn-local rule would misjudge. Ownership belongs to the editor.
+- 4c will look at `tabs[].opened_by` and a refusal that names the caller's own saved tab. The Mind side (hold a close of a tab not its own once, and name its own) waits for that field and a real capture.

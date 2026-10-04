@@ -840,9 +840,10 @@ pub(crate) fn update_unsaved(tool: &str, args: &serde_json::Value, obs: &str, un
 }
 
 /// E.ARENA1-F62: did this save take? The desktop's own words, read as `update_unsaved` reads them:
-/// the editor's result line, without `, unsaved`. A refusal ("editor.app.act refused: the folder …
-/// does not exist") is scored Ok by the outcome classifier -- no gate word in it -- so F60's record of
-/// saved files counted it saved.
+/// the editor's result line, without `, unsaved`. On the desktop a refused save reaches the loop as
+/// "That didn't go through: execution failed: failed (exit 1) yos: … refused: …" and is already scored
+/// Failed (VM 520, L2-rf61c's s1, 4c's capture); only this crate's test wrapper, "({tool}: {error})",
+/// scores Ok. The save's own result is the direct evidence either way.
 pub(crate) fn save_took(obs: &str) -> bool {
     let head = obs.lines().next().unwrap_or("");
     let head = head.split(" accepted:").next().unwrap_or(head);

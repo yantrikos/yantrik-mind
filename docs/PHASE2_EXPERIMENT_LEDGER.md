@@ -13084,3 +13084,13 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   | dff5773 (F62) | 3/3 | none |
 
 - **n=3 per build.** F60 is the only one whose firing was seen in the passing runs. That F61 and F62 helped here is not measured: neither failure they target recurred, and neither fix was seen to fire.
+
+**Correction to F62's record (and to its commit message, dff5773):** "the outcome classifier scores the desktop's refusal Ok" is **false for the desktop**.
+- **What the real refusal looks like** (4c's capture of rf61c s1 from the journal): `That didn't go through: execution failed: failed (exit 1) yos: shell.app.act refused: there is no folder at ~/longtask/r…`. It contains "failed", so it is scored Failed, and `ran` was already false.
+- **Only the test harness's error wrapper scores Ok:** `({tool}: {error})`, for a tool marked read-only. My fixture text (`yos: editor.app.act refused: …`) was written by me, not captured, and it shared my misconception.
+- **What this means for F62:**
+  - `save_took` stays. It reads the save's own result, which is correct either way.
+  - Its kill by P3 rests on that test-only scoring.
+  - Nothing in production changed for refused saves.
+- **The candidate F63 is dropped:** a refusal held in done_calls and in `made` does not happen on the desktop, for the same reason.
+- **Lesson, as a rule:** a test's error path must use the desktop's own wording. The wrapper difference (read-only tool versus action runtime) is where the fixture diverged.

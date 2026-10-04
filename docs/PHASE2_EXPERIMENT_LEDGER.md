@@ -13243,3 +13243,9 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - **U5 first survived:** no case had two paths and no save wording. The case was added.
 - **Workspace:** 0 failures.
 - **Not claimed:** that this ends the repeated-`new` loop. 680's note had no path at all and 692's named grammar.md, and both are now right. Whether the model then saves is for 520 to show.
+
+**F65 on VM 520 (23421f1, 4c, 03:31 CDT):** turn 692's prompt in a fresh chat (turn 694) **saved, unaided**.
+- 8 steps in 67 s, with 0 barren.
+- s6 was `save_as ~/mdg/encoded.mdg`, and the file has all 30 blocks (6,514 bytes).
+- The repeated-`new` loop did not occur. **n=1.**
+- **Open:** s4 was an `editor close` between the two `new`s. Whose tab, and whether it held unsaved text, has been asked of 4c before this is called clean.

@@ -13006,3 +13006,12 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   7. The loop wiring is off.
 - **Workspace:** 0 failures. Clippy: nothing new.
 - **Not covered:** f60c's pasta page is titled "Pasta Pomodoro" while the index link says "Garlic Butter Pasta". The site is inconsistent, but each page is a real page, so the change does not hold it.
+
+**E.LONG1, L2 ×3 fresh chats on Mind c047ab7 (F61), OS 8f98462a, stricter checker: 2/3. Exploration, not a gate.**
+- **rf61a (34 s) and rf61b (45 s): pass.** Each has three real recipe pages with distinct titles and headings, and every link resolves.
+  - rf61a's reply quotes a stale one-entry listing and says no link check ran. The files are right; the reply undersells them.
+- **rf61c (30 s): fail, a new shape.** Only index.html is saved.
+  - Its reply: a stylesheet was written, and its save to index.html was refused by F56's kind check.
+  - The turn ended with the unsaved note appended, at 30 s of 180, with all four linked files missing.
+  - The exit is not yet known; the step lines have been asked of 4c.
+- **No repeat so far of the rf60c duplicate-index failure.** n=3, so no claim on F61's effect is made.

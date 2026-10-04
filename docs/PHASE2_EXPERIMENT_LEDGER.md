@@ -12903,3 +12903,11 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - Its "off" at the end was refused too, even with #604's retries: "A mind or an agent cannot do that".
   - The same calls from my wrapper, under the same account, succeed.
 - **A second `pgrep -f` self-match:** the arena's editor probe (`pgrep -f /opt/yantrik/bin/yantrik-text-editor`) matches an ssh command line that contains that path.
+
+**E.ARENA1-F59 — RESULT: built, every kill criterion held.** Suite 2233/0.
+- **The rule:**
+  - At the nothing-new limit, before composing, the loop gives `unsaved_nudge` (document unsaved) or `goal_nudge` (goal missing) under `may_nudge_goal` with the same counters, and resets the consecutive count.
+  - `last_save_target` holds the last `save_as` path sent, refused or not. All five unsaved hints (F20's, the two repeat branches, the three unsaved exits) prefer it over the request's path.
+- **Test:** `nothing_new_does_not_end_a_turn_with_a_page_unsaved` (loop, turn 611's shape). Each `new` carries different text, so F20's unsent note answers it and only the nothing-new counter sees the stall. The first version used identical texts, was caught by the repeat branch, and let T1 survive; it was corrected.
+- **Mutants, each watched to fail on an assertion:** T1, the break ignores an unsaved page (killed after the correction); T2, the save path forgotten.
+- **Build note:** a full `cargo test --workspace` on Windows failed to link (LNK1171) from parallel test-binary links. With `-j 4` it builds; `target/debug` had grown to 73 GB and was cleared.

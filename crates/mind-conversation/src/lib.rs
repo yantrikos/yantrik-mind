@@ -13190,6 +13190,8 @@ Open reminders you're carrying for them:",
         // E.ARENA1-F56: the text of the last `editor new` that ran, and the saves already held once.
         let mut last_new_text: Option<String> = None;
         let mut kind_held: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.ARENA1-F59: the path of the last save the Mind sent, refused or not -- the notes name it.
+        let mut last_save_target: Option<String> = None;
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
         let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
@@ -13674,7 +13676,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
-                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
@@ -13896,7 +13898,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
                 let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
                 let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or(folder_note).or_else(|| {
-                    desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref())
+                    desktop::repeated_action_note(&tool, &args, unsaved_doc, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref())
                 });
                 match note {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
@@ -13913,7 +13915,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
@@ -13943,7 +13945,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if done_calls.contains(&call_sig) && !moved_since {
                 eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
                 let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
-                match folder_note.or_else(|| desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::requested_path(user_text).as_deref())) {
+                match folder_note.or_else(|| desktop::repeated_action_note(&tool, &args, unsaved_doc, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref())) {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
                     None => scratch.push_str(&format!(
                     "
@@ -13958,7 +13960,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::requested_path(user_text).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
@@ -14023,7 +14025,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     &tool,
                     &args,
                     true,
-                    desktop::requested_path(user_text).as_deref(),
+                    last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref(),
                 )
             } else if let Some(note) = desktop::same_change_again(&tool, &args, &{
                 // E.ARENA1-F36: only changes their app has not moved past since.
@@ -14218,6 +14220,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if desktop::retry_after_failure(&tool, ran) {
                 done_calls.remove(&call_sig);
             }
+            // E.ARENA1-F59: the save path the model chose, whether or not the desktop took it.
+            if sent {
+                if let Some(p) = desktop::save_path(&tool, &args) {
+                    last_save_target = Some(p);
+                }
+            }
             // E.ARENA1-F56: what the editor now holds, as the Mind wrote it.
             if sent && ran {
                 if let Some(text) = desktop::new_text(&tool, &args) {
@@ -14308,6 +14316,26 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 barren += 1;
                 eprintln!("[agent] step {step}: {tool} returned nothing new ({barren}/{MAX_BARREN_STEPS} barren)");
                 if barren >= MAX_BARREN_STEPS || barren_total >= MAX_TOTAL_BARREN {
+                    // E.ARENA1-F59: this break went straight to compose with a page unsaved or the goal
+                    // missing and most of the budget left (VM 520, L2-ra: 44 s of 180). It now gives the
+                    // same bounded notes as the repeat counter's exits first.
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, elapsed_ms, budget.max_wall_ms) {
+                        unsaved_nudges += 1;
+                        barren = 0;
+                        eprintln!("[agent] step {step}: nothing new, with the document unsaved \u{2014} asking for the save");
+                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
+                        continue;
+                    }
+                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, elapsed_ms, budget.max_wall_ms) {
+                        if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
+                            goal_nudges += 1;
+                            barren = 0;
+                            eprintln!("[agent] step {step}: nothing new, with {path} missing \u{2014} saying so");
+                            scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
+                            continue;
+                        }
+                    }
                     eprintln!("[agent] step {step}: barren limit reached ({barren} consecutive, {barren_total} total) — composing from the work log");
                     scratch.push_str(&format!(
                         "

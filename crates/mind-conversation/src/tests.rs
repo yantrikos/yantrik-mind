@@ -17848,6 +17848,31 @@ mod desktop_consent_and_stall_wiring {
         assert!(composed.reply.contains("(exit code 127"), "the compose exit carries it: {}", composed.reply);
     }
 
+    /// E.ARENA1-F59 through the loop, turn 611's shape: a page written, its save refused for a missing
+    /// folder, then `new` repeated until nothing is new. The turn does not compose at that limit with
+    /// the page unsaved; the unsaved note names the exact path the model already chose.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_new_does_not_end_a_turn_with_a_page_unsaved() {
+        let page = "<!DOCTYPE html><title>Recipes</title>";
+        // Each `new` carries different text, as in turn 611: not a repeat of an earlier call, so F20's
+        // unsent note answers it and only the nothing-new counter sees the turn going nowhere.
+        let new = |i: usize| Step::Call("mcp.yantrik-os.os_act", act("editor", "new", &format!("{page}<!-- {i} -->")));
+        let save = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": "~/longtask/recipes/index.html"}}));
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 33 lines, unsaved \u{b7} tab 2 of 2";
+        let refused = "ERR:yos: editor.app.act refused: the folder /home/yantrik/longtask/recipes does not exist";
+        let r = run_with(
+            "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes.",
+            vec![new(0), save, new(1), new(2), new(3), new(4)],
+            vec![EDITOR, EDITOR],
+            vec![wrote, refused],
+        )
+        .await;
+        let named = r.prompts.iter().any(|p| {
+            p.contains("the desktop says it is unsaved") && p.contains(r#""path": "~/longtask/recipes/index.html""#)
+        });
+        assert!(named, "the turn composed at the nothing-new limit, or the note forgot the path chosen");
+    }
+
     /// E.ARENA1-F58 through the loop, L2-ra's shape: a page written into the editor for a request
     /// that names a folder, and the model answering with it unsaved, more than once. The unsaved note
     /// comes back, and its save call names a file inside the folder.

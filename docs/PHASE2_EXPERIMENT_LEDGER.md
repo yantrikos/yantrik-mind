@@ -13262,3 +13262,8 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **"Hobbies"** holds "Ok, create a small town model…", the very entry F13 (b6e9079, 23 Sep 21:30 CDT) cites.
 - **No code change.** Deleting the two beliefs is Pranab's call, since 520's store is his test data. They are the only two durable beliefs there.
 - **Unmeasured residual:** after an interest question, any next message that is not a request, question or instruction is stored as a 0.70 belief, with no check that it answers. To act on only with a fresh junk belief from a current build.
+
+**Mind gate on OS a4126551 (#617–#620 on ace075fd) + Mind 23421f1 (VM 520, 4 Oct ~06:00 CDT): 7/7, 0 false claims, median 6.6 s. This is a gate.**
+- CONTROL OK and PREFLIGHT OK. The run without --keep-events cleared the 14 old 30 Sep arena events (0 left).
+- The arena's own never-ask switch was off afterwards, with no pending card.
+- **The first launch was refused** because the editor was open, holding 4c's two saved MDG tabs. Both were checked unmodified, closed with `editor close`, and the empty window closed with the arena's own `close_editor()`. The files are untouched.

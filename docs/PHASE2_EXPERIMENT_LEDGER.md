@@ -13066,3 +13066,21 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **P6 and P7's first kills were void:** the loop test's s14 half failed at baseline, since an identical save is answered as a repeat before F56. It now uses the absolute path, and both were rerun.
 - **Workspace:** 0 failures in two full runs.
   - `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it` failed once, in an earlier full run. It passed alone and in both later runs. That failure is unexplained.
+
+**E.LONG1, L2 ×3 fresh chats on Mind dff5773 (F62), OS 8f98462a, stricter checker: 3/3. Exploration, not a gate.**
+- **The first attempt stopped at clean():** an editor tab was modified. It was rf61c's unsaved stylesheet, as 4c's s6 describes it. It was saved to ~/.longtask-stale/L2-rf61c-unsaved.css, and the runs restarted.
+- **rf62a (31 s), rf62b (35 s), rf62c (51 s):** each has index, style.css and three recipe pages.
+  - Each page has its own title and heading, with ingredients and steps.
+  - Every link resolves.
+  - The editor was left saved.
+  - The replies name the five files truly, and none claims a link check it did not do.
+- **The L2 sequence across builds:**
+
+  | Build | Result | Failure |
+  |---|---|---|
+  | 31bc3f3 | 0/3 | a page missing |
+  | f20cfef (F60) | 2/3 | duplicate index |
+  | c047ab7 (F61) | 2/3 | F59's note named the saved index |
+  | dff5773 (F62) | 3/3 | none |
+
+- **n=3 per build.** F60 is the only one whose firing was seen in the passing runs. That F61 and F62 helped here is not measured: neither failure they target recurred, and neither fix was seen to fire.

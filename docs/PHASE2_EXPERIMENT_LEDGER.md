@@ -13094,3 +13094,10 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - Nothing in production changed for refused saves.
 - **The candidate F63 is dropped:** a refusal held in done_calls and in `made` does not happen on the desktop, for the same reason.
 - **Lesson, as a rule:** a test's error path must use the desktop's own wording. The wrapper difference (read-only tool versus action runtime) is where the fixture diverged.
+
+**Mind gate on OS ace075fd + Mind dff5773 (VM 520, 4 Oct ~01:28 CDT): 7/7, 0 false claims, median 14.1 s. This is a gate.**
+- CONTROL OK and PREFLIGHT OK.
+- **The arena switched never-ask itself, with no wrapper, for the first time (#612).**
+  - It started, so the switch took: its `__enter__` refuses to start otherwise.
+  - Afterwards the shell shows `approvals_off_for_test.on: False` and `pending_approvals: []`, and there was no "still off" warning.
+- 4c holds the public nightly for an OS-side Memory-screen regression (#611's listing behind the companion queue). So this result applies to the build after it.

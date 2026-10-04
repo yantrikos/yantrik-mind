@@ -12784,3 +12784,10 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - L4c's reply miscount;
   - L3 needs a person at the card;
   - 520's guest agent is wedged (awaiting Pranab, via proxmox-93).
+
+## Mind gate with Mind 4d3c5e1 (F48–F56b) on yantrik-os c17fcad3 on VM 520: PASS 7/7, with never-ask on
+
+- **Context:** yantrik-os-4c had published `iso/nightly-c17fcad3` on the strength of the E.LONG1 passes, which are not the gate. I flagged it; 4c cancelled the ISO run and deleted the branch, pending this gate.
+- **Never-ask:** switched on by `shell set_approvals_off_for_test state=on minutes=15` before the run (confirmed `"on": true`), and off by an EXIT trap (confirmed `"on": false`). The current arena (the repo's, installed by 4c during the run) also turns it on itself.
+- **Results, ending 01:21 UTC:** control OK, preflight OK. T1–T7 at one rep: 7/7, 0 false claims, median 6.8 s. **T7 passed with no card possible**, the case that failed on adfcc32f.
+- **OS oddity, reported:** the new arena's own off-switch at the end was refused ("A mind or an agent cannot do that. Only the person's own account or root can switch approval"), while the same call from my wrapper, under the same account, succeeded.

@@ -12743,3 +12743,44 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Nothing invented.** It flagged the two stamp-only dates honestly. No card.
 - **The mismatch:** the reply says "6 notes" and lists Standup among the undated, but the file has **7** entries, Standup included. A small untrue statement about its own artifact, of the "reply contradicts the work" kind already seen in T5. Recorded, not yet fixed.
 - **What changed since L4/L4b, both of which failed:** `read_notes` graded `safe` and paged (#600), F55 (whole read answers), and F56b (a page is not a change already made).
+
+**E.LONG1, L2g (L2 on OS c17fcad3, Mind 4d3c5e1): PASS in 45 s.** Clean start: L2f's output moved aside, and the editor's old tabs closed.
+- **On disk:** `~/longtask/recipes` holds `index.html`, three recipe pages and `style.css`.
+- **Checked independently:**
+  - all 4 pages are HTML;
+  - every page links `style.css`;
+  - every link resolves (index to the three pages, and each page back to index);
+  - `style.css` is CSS;
+  - headless Chromium loads every page with 0 errors;
+  - the recipe pages have ingredients and steps.
+- **The reply is true,** including its own caveat that it checked links by file existence, not by rendering. No card.
+
+**E.LONG1, standing after this drive (OS c17fcad3 + Mind 4d3c5e1):**
+
+| Task | Result |
+|---|---|
+| L1 (a week plan from the calendar) | PASS, exact, 21 s |
+| L2 (a 5-file website) | PASS, 45 s |
+| L3 (CSV, script, report, run it) | Blocked on the one unavoidable command card, unanswered; not a Mind defect |
+| L4 (deadlines from 17 notes) | PASS, 33 s, with one reply miscount (6 said, 7 written) |
+
+- **Mind fixes from this drive:**
+  - F48: a command that would ask is not the first resort.
+  - F49: an asked family's explanations survive condensing.
+  - F50: a repeat on the way to a missing folder names the next call.
+  - F51: the save hint never names a folder.
+  - F52: an open document is kept whole.
+  - F53: a compose failure gives the true reason and what was done.
+  - F54: the goal note comes back while time remains.
+  - F55: a read's answer is whole.
+  - F56/56b: a save of the wrong kind is held once; a page of a read is not a change.
+- **OS fixes it drove (4c):**
+  - #593 `events_between` and week start;
+  - #596 settled `files_go` and nested `new_folder`;
+  - #597/#600 `read_notes`, graded safe and paged;
+  - #599 the updater restarting stale services, after it was found leaving six on old binaries, the egress filter among them.
+- **Open:**
+  - each pass is n=1; repeats are needed before calling any task reliable;
+  - L4c's reply miscount;
+  - L3 needs a person at the card;
+  - 520's guest agent is wedged (awaiting Pranab, via proxmox-93).

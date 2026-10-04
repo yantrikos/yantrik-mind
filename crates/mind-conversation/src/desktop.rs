@@ -1585,6 +1585,107 @@ pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>, 
     )
 }
 
+/// E.ARENA1-F60: an HTML page's local link targets -- quoted `href` and `src` values -- in order,
+/// each once, without a `?query` or `#anchor`. Web addresses, `mailto:`/`data:` and every other
+/// scheme, `//host` and site-root `/` paths, and bare `#…` anchors are not files beside the page.
+pub(crate) fn local_links(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for attr in ["href=", "src="] {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(attr) {
+            let at = from + i + attr.len();
+            from = at;
+            // `data-src=` and the like are not this attribute.
+            let before = lower[..at - attr.len()].chars().next_back();
+            if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                continue;
+            }
+            let Some(q) = html[at..].chars().next().filter(|c| *c == '"' || *c == '\'') else { continue };
+            let Some(end) = html[at + 1..].find(q) else { continue };
+            let raw = html[at + 1..at + 1 + end].trim();
+            let link = raw.split(['?', '#']).next().unwrap_or("").trim();
+            if link.is_empty() || link.contains(':') || link.starts_with('/') {
+                continue;
+            }
+            if !out.iter().any(|l| l == link) {
+                out.push(link.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// E.ARENA1-F60: where a link on the page saved at `page` points: the page's folder joined with the
+/// link, `.` and `..` resolved. None when the page has no folder or the link climbs out of `~` or `/`.
+pub(crate) fn link_target(page: &str, link: &str) -> Option<String> {
+    let (dir, _) = page.rsplit_once('/')?;
+    let mut parts: Vec<&str> = dir.split('/').collect();
+    for seg in link.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.len() <= 1 {
+                    return None;
+                }
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// E.ARENA1-F60: the local links of the HTML pages saved this turn whose targets were not saved this
+/// turn, as (target, the page that links to it) -- each target once, written as its page's path was.
+/// Whether they exist is the caller's to ask.
+pub(crate) fn unsaved_link_targets(saved: &[(String, String)], home: Option<&str>) -> Vec<(String, String)> {
+    let norm = |p: &str| files_path(p, home).unwrap_or_else(|| p.to_string());
+    let have: Vec<String> = saved.iter().map(|(p, _)| norm(p)).collect();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (page, text) in saved {
+        if path_kind(page) != Some(TextKind::Html) || text_kind(text) != Some(TextKind::Html) {
+            continue;
+        }
+        let name = page.rsplit('/').next().unwrap_or(page).to_string();
+        for link in local_links(text) {
+            let Some(target) = link_target(page, &link) else { continue };
+            if have.contains(&norm(&target)) || out.iter().any(|(t, _)| norm(t) == norm(&target)) {
+                continue;
+            }
+            out.push((target, name.clone()));
+        }
+    }
+    out
+}
+
+/// E.ARENA1-F60: the note for pages saved this turn that link to files nothing has written. VM 520,
+/// E.LONG1 L2 on 31bc3f3: three runs saved an index and two of three recipe pages, the third linked
+/// from every page, and ended 54-86 s into 180 s with no link checked.
+pub(crate) fn link_nudge(step: usize, missing: &[(String, String)], home: Option<&str>) -> String {
+    let named: Vec<String> = missing
+        .iter()
+        .map(|(t, from)| format!("{} (linked from {from})", t.rsplit('/').next().unwrap_or(t)))
+        .collect();
+    let calls: Vec<String> = missing
+        .iter()
+        .map(|(t, _)| {
+            let t = files_path(t, home).unwrap_or_else(|| t.clone());
+            format!(
+                "os_act {{\"app\": \"editor\", \"action\": \"new\", \"args\": {{\"text\": \"<its text>\"}}}}, then \
+                 os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{t}\"}}}}"
+            )
+        })
+        .collect();
+    format!(
+        "\n[{step}] (the pages saved this turn link to files that do not exist: {}. Those links are broken \
+         until each file is written. The next calls are, in order: {}. Write them now, or say plainly which \
+         links are broken.)",
+        named.join(", "),
+        calls.join(", then ")
+    )
+}
+
 /// E.ARENA1-F33: the requested path's folder, as the person wrote it, when it is not there.
 pub(crate) fn missing_folder_of(path: &str, home: Option<&str>) -> Option<String> {
     let (parent, _) = path.rsplit_once('/')?;
@@ -2461,6 +2562,35 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F60, on L2-rx's real index.html: its local links, exactly, and nothing that is not a
+    /// file beside the page.
+    #[test]
+    fn a_pages_local_links_are_the_files_beside_it() {
+        const INDEX: &str = include_str!("../fixtures/desktop/longtask_l2rx_index_31bc3f3.html");
+        assert_eq!(local_links(INDEX), vec!["style.css", "pasta.html", "tacos.html", "soup.html", "index.html"]);
+        let mixed = r##"<a href="https://example.com/x.html">w</a><a href="#top">t</a><a href='mailto:a@b.c'>m</a>
+            <img src="data:image/png;base64,AA"><a href="//cdn.x/y.js">c</a><a href="/root.html">r</a>
+            <img data-src="lazy.png"><a href="soup.html#steps">s</a><a href="soup.html?x=1">s</a>
+            <script src="js/app.js"></script><a HREF="../up.html">u</a>"##;
+        assert_eq!(local_links(mixed), vec!["soup.html", "../up.html", "js/app.js"]);
+        assert_eq!(link_target("~/longtask/recipes/index.html", "soup.html").as_deref(), Some("~/longtask/recipes/soup.html"));
+        assert_eq!(link_target("/home/y/site/a/b.html", "../c.html").as_deref(), Some("/home/y/site/c.html"));
+        assert_eq!(link_target("~/index.html", "../x.html"), None, "out of the home is not a file the page wrote");
+        // A page whose links are all saved this turn has none to ask about; a stylesheet has no links.
+        let saved = vec![
+            ("~/r/index.html".to_string(), INDEX.to_string()),
+            ("~/r/pasta.html".to_string(), "<!DOCTYPE html><a href=\"index.html\">b</a>".to_string()),
+            ("~/r/style.css".to_string(), "a { color: red; }".to_string()),
+        ];
+        assert_eq!(
+            unsaved_link_targets(&saved, Some("/home/y")),
+            vec![
+                ("~/r/tacos.html".to_string(), "index.html".to_string()),
+                ("~/r/soup.html".to_string(), "index.html".to_string()),
+            ]
+        );
     }
 
     /// E.ARENA1-F56, on L2f's real text: the stylesheet the model saved as lemon-garlic-pasta.html.

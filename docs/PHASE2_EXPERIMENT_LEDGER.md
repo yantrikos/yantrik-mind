@@ -12911,3 +12911,47 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Test:** `nothing_new_does_not_end_a_turn_with_a_page_unsaved` (loop, turn 611's shape). Each `new` carries different text, so F20's unsent note answers it and only the nothing-new counter sees the stall. The first version used identical texts, was caught by the repeat branch, and let T1 survive; it was corrected.
 - **Mutants, each watched to fail on an assertion:** T1, the break ignores an unsaved page (killed after the correction); T2, the save path forgotten.
 - **Build note:** a full `cargo test --workspace` on Windows failed to link (LNK1171) from parallel test-binary links. With `-j 4` it builds; `target/debug` had grown to 73 GB and was cleared.
+
+**E.LONG1, L2 ×3 fresh chats on Mind 31bc3f3 (F59), OS 8f98462a: 0/3, one consistent failure.**
+- **rx (78 s):** index, style.css, pasta, tacos; **soup.html missing**, linked from 3 pages.
+- **ry (54 s):** index, style.css, pasta; **tacos.html and soup.html missing**.
+- **rz (86 s):** index, style.css, tacos, soup; **pasta.html missing**.
+- **Names are consistent now, and every reply honestly names what is unconfirmed.**
+- **Each turn stopped early, with half its budget left and pages its own index links to not yet written.** The goal check sees only the folder the request names, which exists, so nothing tells the loop that work remains.
+
+## E.ARENA1-F60 — PREREG: a page saved this turn whose local links point nowhere is unfinished work
+
+**Plan:**
+1. The loop keeps the text of each file it saved this turn (`save_as` that ran, from `last_new_text`).
+2. `desktop::local_links(text)` gives an HTML file's relative `href`/`src` targets, without `http(s):`, `mailto:`, `#…` or `data:`.
+3. Before an in-loop answer, at the nothing-new limit and at the repeat limits: each saved HTML file's local links are resolved against its folder. A target that was **not saved this turn and is missing** (the same existence check as F21/E.HOME3: the filesystem as the person, the desktop's `files_stat` as the minds' account) is a dangling link.
+4. If any are dangling, under `may_nudge_goal` with the goal counter, the note names them and gives each one's calls (`editor new` with its text, then `save_as` at its full path). The turn goes on.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `local_links` on rx's real index.html gives the recipe pages and style.css, and not `https://…` or `#top`.
+2. Loop, rx's shape under a real temporary home: index.html saved (linking pasta, tacos, soup and style.css) with pasta, tacos and style.css saved and soup.html absent. The model answers; the note names `soup.html` with its `save_as` call, and the turn does not end there.
+3. The same with every linked file present: no note.
+
+**E.ARENA1-F60: built. All three kill criteria pass.**
+- **The change:**
+  - The loop keeps `saved_files` (each save that ran, with the last `editor new` text).
+  - `desktop::local_links`, `link_target`, `unsaved_link_targets`, `link_nudge`.
+  - `link_nudge_now` checks existence as E.HOME3 does.
+  - It is wired in at the answer exit, at both repeat limits, and at the nothing-new limit, all under `may_nudge_goal` with the goal counter.
+- **The fixture is real:** `fixtures/desktop/longtask_l2rx_index_31bc3f3.html`, L2-rx's index.html copied from 520.
+- **The loop test, L2-rx's shape, under a real temporary home:**
+  - The model answers at step 8 with soup.html missing.
+  - The note names `soup.html (linked from index.html)` with its absolute `save_as`, and the turn goes on to write it.
+  - With soup.html present, there is no note.
+- **Seven compiling mutants, all killed:**
+  1. A scheme is kept.
+  2. `data-src` counts as `src`.
+  3. Files saved this turn are not excluded.
+  4. Saves are not recorded.
+  5. The answer site is off.
+  6. A present file counts as gone.
+  7. `..` is not resolved.
+- **Workspace:** 0 failures. Clippy: nothing new.
+- **Residual: no test covers the note at the repeat and nothing-new limits.** No mutant there would be watched to fail. An early draft of the test (identical fake replies) did take the nothing-new site three times.
+- **Residual: the text recorded for a save is the last `editor new`.** A save after `editor open` would carry the wrong text. Only an HTML path holding HTML text is read.
+- **The real measure is L2 ×3 on 520 with this build.**

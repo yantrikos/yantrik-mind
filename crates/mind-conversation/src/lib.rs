@@ -7343,6 +7343,25 @@ impl ConversationEngine {
         desktop::parse_files_stat(&self.run_agent_tool_as(desktop::ACT, &args, id).await)
     }
 
+    /// E.ARENA1-F60: the note for pages saved this turn that link to files still missing -- missing as
+    /// E.HOME3 says it: the filesystem as the person, the desktop's `files_stat` as the minds' account.
+    /// None when every link resolves, or nothing can be said.
+    async fn link_nudge_now(&self, step: usize, saved: &[(String, String)], id: &TurnIdentity) -> Option<String> {
+        let home = self.person_home();
+        let mut missing = Vec::new();
+        for (target, from) in desktop::unsaved_link_targets(saved, home.as_deref()) {
+            let gone = if self.mind_account {
+                self.desktop_stat(&target, id).await == Some(desktop::Stat::Missing)
+            } else {
+                desktop::on_this_machine(&target, home.as_deref()).and_then(|at| desktop::is_there(&at)) == Some(false)
+            };
+            if gone {
+                missing.push((target, from));
+            }
+        }
+        (!missing.is_empty()).then(|| desktop::link_nudge(step, &missing, home.as_deref()))
+    }
+
     /// E.HOME1: the person's home -- the desktop's word for this turn, else this process's $HOME.
     fn person_home(&self) -> Option<String> {
         let told = PERSON_HOME.try_with(|h| h.clone()).ok();
@@ -13192,6 +13211,8 @@ Open reminders you're carrying for them:",
         let mut kind_held: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F59: the path of the last save the Mind sent, refused or not -- the notes name it.
         let mut last_save_target: Option<String> = None;
+        // E.ARENA1-F60: each file saved this turn, with the text the Mind wrote into it (when known).
+        let mut saved_files: Vec<(String, String)> = Vec::new();
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
         let mut twin_looked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
@@ -13689,6 +13710,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::goal_missing_note(&path));
+                } else if desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    // E.ARENA1-F60: the pages it saved link to files it never wrote.
+                    if let Some(note) = self.link_nudge_now(step, &saved_files, id).await {
+                        goal_nudges += 1;
+                        eprintln!("[agent] step {step}: answering with saved pages linking to missing files \u{2014} naming them");
+                        scratch.push_str(&note);
+                        continue;
+                    }
                 }
                 if let Some(clause) = unattempted_side_effect(user_text, &cost.calls) {
                     // E.ARENA1-F5: a turn that never looked at the desktop is sent to look, not
@@ -13928,6 +13957,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                             continue;
                         }
+                        if let Some(note) = self.link_nudge_now(step, &saved_files, id).await {
+                            goal_nudges += 1;
+                            barren = 0;
+                            eprintln!("[agent] step {step}: the turn would end with saved pages linking to missing files \u{2014} naming them");
+                            scratch.push_str(&note);
+                            continue;
+                        }
                     }
                     break;
                 }
@@ -13971,6 +14007,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             barren = 0;
                             eprintln!("[agent] step {step}: repeats would end the turn with {path} missing \u{2014} saying so");
                             scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
+                            continue;
+                        }
+                        if let Some(note) = self.link_nudge_now(step, &saved_files, id).await {
+                            goal_nudges += 1;
+                            barren = 0;
+                            eprintln!("[agent] step {step}: the turn would end with saved pages linking to missing files \u{2014} naming them");
+                            scratch.push_str(&note);
                             continue;
                         }
                     }
@@ -14223,6 +14266,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.ARENA1-F59: the save path the model chose, whether or not the desktop took it.
             if sent {
                 if let Some(p) = desktop::save_path(&tool, &args) {
+                    if ran {
+                        saved_files.retain(|(q, _)| *q != p);
+                        saved_files.push((p.clone(), last_new_text.clone().unwrap_or_default()));
+                    }
                     last_save_target = Some(p);
                 }
             }
@@ -14333,6 +14380,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             barren = 0;
                             eprintln!("[agent] step {step}: nothing new, with {path} missing \u{2014} saying so");
                             scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
+                            continue;
+                        }
+                        if let Some(note) = self.link_nudge_now(step, &saved_files, id).await {
+                            goal_nudges += 1;
+                            barren = 0;
+                            eprintln!("[agent] step {step}: the turn would end with saved pages linking to missing files \u{2014} naming them");
+                            scratch.push_str(&note);
                             continue;
                         }
                     }

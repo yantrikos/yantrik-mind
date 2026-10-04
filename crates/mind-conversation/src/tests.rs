@@ -17873,6 +17873,61 @@ mod desktop_consent_and_stall_wiring {
         assert!(named, "the turn composed at the nothing-new limit, or the note forgot the path chosen");
     }
 
+    /// E.ARENA1-F60 through the loop, L2-rx's shape on 31bc3f3: the real index.html saved with pasta,
+    /// tacos and the stylesheet, soup.html never written, and the model answering. The note names
+    /// soup.html with its save call, and the turn goes on to write it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_page_linking_to_a_missing_file_is_unfinished() {
+        const INDEX: &str = include_str!("../fixtures/desktop/longtask_l2rx_index_31bc3f3.html");
+        let home = std::env::temp_dir().join(format!("ym-f60-{}", std::process::id()));
+        let dir = home.join("longtask/recipes");
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["index.html", "pasta.html", "tacos.html", "style.css"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let h = home.to_string_lossy().replace('\\', "/");
+        let recipe = |t: &str| format!("<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"style.css\"></head><body><h1>{t}</h1><a href=\"index.html\">Back</a></body></html>");
+        let new = |text: &str| Step::Call("mcp.yantrik-os.os_act", act("editor", "new", text));
+        let save = |f: &str| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": format!("~/longtask/recipes/{f}")}}));
+        let css = "body { font-family: Georgia, serif; }";
+        // As the editor answers: each reply names its file and its size, so none is "nothing new".
+        let replies: Vec<String> = ["index.html", "pasta.html", "tacos.html", "style.css", "soup.html"]
+            .iter()
+            .enumerate()
+            .flat_map(|(i, f)| {
+                [
+                    format!("Done \u{2014} Text Editor \u{2014} Untitled (no file yet), {} lines, unsaved \u{b7} tab {} of {}", 20 + i, i + 2, i + 2),
+                    format!("Done \u{2014} Text Editor \u{2014} {f}, {} lines, saved \u{b7} tab {} of {}", 20 + i, i + 2, i + 2),
+                ]
+            })
+            .collect();
+        let acts: Vec<&str> = replies.iter().map(String::as_str).collect();
+        let site = || vec![
+            new(INDEX), save("index.html"),
+            new(&recipe("Pasta")), save("pasta.html"),
+            new(&recipe("Tacos")), save("tacos.html"),
+            new(css), save("style.css"),
+        ];
+        let prompt = "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes, one page per recipe, and a shared style.css.";
+        let mut steps = site();
+        steps.extend([Step::Say("Done, the site is made."), new(&recipe("Soup")), save("soup.html"), Step::Say("Done, all four pages.")]);
+        let r = run_at(prompt, Some(h.clone()), steps, vec![EDITOR, EDITOR], acts.clone()).await;
+        let want = format!(r#""action": "save_as", "args": {{"path": "{h}/longtask/recipes/soup.html"}}"#);
+        assert!(
+            r.prompts.iter().any(|p| p.contains("link to files that do not exist: soup.html (linked from index.html)") && p.contains(&want)),
+            "the turn was not told soup.html is missing, with its save call"
+        );
+        let saves: Vec<String> = acts_reached(&r).iter().filter_map(|a| a["args"]["path"].as_str().map(str::to_string)).collect();
+        assert!(saves.iter().any(|p| p.ends_with("soup.html")), "the turn ended at the first answer: {saves:?}");
+        // Every linked file there: no note.
+        std::fs::write(dir.join("soup.html"), "x").unwrap();
+        let mut steps = site();
+        steps.push(Step::Say("Done, the site is made."));
+        let fine = run_at(prompt, Some(h), steps, vec![EDITOR, EDITOR], acts).await;
+        assert!(!fine.prompts.iter().any(|p| p.contains("link to files that do not exist")), "a whole site was pushed");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     /// E.ARENA1-F58 through the loop, L2-ra's shape: a page written into the editor for a request
     /// that names a folder, and the model answering with it unsaved, more than once. The unsaved note
     /// comes back, and its save call names a file inside the folder.

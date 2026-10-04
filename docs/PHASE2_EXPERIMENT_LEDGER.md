@@ -13355,3 +13355,11 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - **The fix:** `terminal_delivery` ends the turn on every settled forget (`ERASE_SETTLED`: erased, partly erased, could not erase, kept, unanswered), as it already did for E.ERASE1's typed question.
   - **Tested:** every desktop outcome is now asserted terminal. A compiling mutant that drops the rule fails. Workspace: 0 failures.
 - **Still needed:** the "Erase" click path on the box. It needs a person's click, which only Pranab can give.
+
+**E.ERASE2: first Erase-click try on VM 520 (5761bbe, 16:16 CDT) produced no click.**
+- **The card:** "remember … THROWAWAY-ERASE2-9142", then "forget THROWAWAY-ERASE2" raised erase-1791148607348 ("16 place(s)"). Pranab was on the Agents screen to click.
+- **The result:** `answered: (nothing)` at 16:18:37, nothing erased, both throwaways still stored. The turn ended in 1 step (5761bbe's fix confirmed).
+- **What `describe shell` showed:** BOTH cards still pending, the stale erase-1791146978956 and the expired new one, with identical text. So he could not tell them apart, and the desktop recorded a click on neither.
+- **Mind fix:** the question now says when it was asked ("(Asked at HH:MM.)", on the person's clock). Tested; the compiling mutant that drops the time fails. Workspace: 0 failures.
+- **Shell fix (4c, a PR):** a turn that settles closes its unanswered questions ("No longer waiting…"), and cards may show "asked HH:MM".
+- **The next try waits for that build.**

@@ -1541,10 +1541,19 @@ pub(crate) async fn ask_person(request_id: String, prompt: String, options: Vec<
 
 /// E.ERASE2: what the person is asked before an erase. Never the text itself: E.ERASE1 does not
 /// repeat it back, and it may be a credential.
-pub(crate) fn erase_question(places: usize) -> String {
+/// It says when it was asked: on VM 520 a stale card and a live one read the same, word for word.
+pub(crate) fn erase_question(places: usize, asked_at: &str) -> String {
     format!(
-        "Erase the text you asked me to forget? It is in {places} place(s) in my memory, and this can't be undone."
+        "Erase the text you asked me to forget? It is in {places} place(s) in my memory, and this can't be undone. (Asked at {asked_at}.)"
     )
+}
+
+/// E.ERASE2: the time now on the person's clock, as HH:MM.
+pub(crate) fn person_clock_now() -> String {
+    match person_zone() {
+        Some(tz) => chrono::Utc::now().with_timezone(&tz).format("%H:%M").to_string(),
+        None => chrono::Local::now().format("%H:%M").to_string(),
+    }
 }
 
 /// E.ERASE2: the replies when the person kept it, or did not answer.
@@ -12451,7 +12460,7 @@ WINDOW: all-time, latest 200
                     Ok(r) if can_ask() && !self.approvals_off_for_test(id).await => {
                         let request_id = format!("erase-{}", Self::now_ms());
                         let options = ERASE_OPTIONS.iter().map(|o| o.to_string()).collect();
-                        match ask_person(request_id, erase_question(r.remaining_cells.max(1)), options).await.as_deref() {
+                        match ask_person(request_id, erase_question(r.remaining_cells.max(1), &person_clock_now()), options).await.as_deref() {
                             Some("Erase") => self.erase_everywhere(&what).await,
                             Some("Keep") => ERASE_KEPT.to_string(),
                             _ => ERASE_UNANSWERED.to_string(),

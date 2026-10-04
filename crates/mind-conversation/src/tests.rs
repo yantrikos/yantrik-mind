@@ -18894,6 +18894,9 @@ async fn on_the_desktop_forget_asks_keep_or_erase() {
         let (prompt, options) = &asked[0];
         assert_eq!(options, &vec!["Keep".to_string(), "Erase".to_string()], "[{tag}]");
         assert!(prompt.contains("can't be undone") && !prompt.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "[{tag}] {prompt}");
+        // On VM 520 a stale card read the same as the live one: the prompt says when it was asked.
+        let at = prompt.split("(Asked at ").nth(1).and_then(|r| r.strip_suffix(".)")).unwrap_or("");
+        assert!(at.len() == 5 && at.as_bytes()[2] == b':' && at.chars().filter(|c| c.is_ascii_digit()).count() == 4, "[{tag}] no HH:MM: {prompt}");
         assert!(conv.pending_erase.lock().unwrap().is_none(), "[{tag}] a typed yes is still armed");
         assert!(conv.terminal_delivery("forget", &reply), "[{tag}] the settled forget is not the reply: {reply}");
         let left = conv.memory.erase_literal(ERASE_SECRET, false).await.unwrap();

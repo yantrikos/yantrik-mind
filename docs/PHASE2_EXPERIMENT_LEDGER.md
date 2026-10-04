@@ -13200,3 +13200,12 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Six compiling mutants, all killed:** no quiet minute, no mail stage, no grade stage, no route stage, nothing recorded, trail not shown.
 - **Workspace:** 0 failures.
 - **Not tested:** the heartbeat's call to `stalled_line` inside the harness loop, which is one line. The first wedge on 520 with this build is its test.
+
+**E.STALL3 on VM 520 (302cf79, 4c, 03:08 CDT):** turn 676's 2,690-character prompt, resent in a fresh chat as turn 692, **did not wedge**.
+- The heartbeat logged `last stage: route (trail: grade previous > … > sandbox > route)` at 60, 90, 120 and 150 s while the loop worked. The turn took 158 s and 8 steps.
+- **The wedge is not reproduced, and its cause is unknown.** E.STALL2 is not credited: 676's text never matched the mail detector.
+- The stage-trail logging is confirmed live.
+- **F64 confirmed live:** "opened ~/mdg/grammar.md — its text added from the editor's description".
+- **New blocker (turns 680–682, 692):**
+  - The model repeats an identical long `editor new` (217 lines, about 30 s per step) instead of `save_as`, until the wall budget is spent, and no file is made.
+  - The note it got is being reconstructed from the real prompt before any fix.

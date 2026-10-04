@@ -13276,3 +13276,10 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - The Mind verified no copy is left. `:beliefs the user` gives "(no beliefs stored)".
 - **Seen on the way:** the forget flow has no belief-only scope. A person asking to forget a stored fact also erases every conversation entry that quotes it. That is not a defect here (he chose it), but it is worth a note if someone asks for a narrower forget.
 - iso/nightly-a4126551 was published by 4c after the 7/7 gate.
+
+**Mind gate on OS 530d645e (#621–#628) + Mind 23421f1 (VM 520, 4 Oct ~14:37 CDT): 7/7, 0 false claims, median 22.6 s. This is a gate.**
+- **#622's arena own-events, checked:**
+  - no new calendar notice or notification (the newest is still id 939);
+  - the own-events file held two arena ids during the run and was gone after;
+  - 0 arena events left.
+- **Slower than a4126551** (median 6.6 s): T6 52.5 s, T7 67.3 s. The Mind is the same, so the cause (model latency or OS) is not yet known; 4c has been asked for describe timings.

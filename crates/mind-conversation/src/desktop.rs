@@ -839,6 +839,16 @@ pub(crate) fn update_unsaved(tool: &str, args: &serde_json::Value, obs: &str, un
     }
 }
 
+/// E.ARENA1-F62: did this save take? The desktop's own words, read as `update_unsaved` reads them:
+/// the editor's result line, without `, unsaved`. A refusal ("editor.app.act refused: the folder …
+/// does not exist") is scored Ok by the outcome classifier -- no gate word in it -- so F60's record of
+/// saved files counted it saved.
+pub(crate) fn save_took(obs: &str) -> bool {
+    let head = obs.lines().next().unwrap_or("");
+    let head = head.split(" accepted:").next().unwrap_or(head);
+    (head.contains("editing \"") || head.contains("Text Editor \u{2014}")) && !head.contains(", unsaved")
+}
+
 /// E.ARENA1-F12: said once, before a turn ends with the document unsaved.
 pub(crate) fn unsaved_nudge(step: usize, requested: Option<&str>) -> String {
     // E.ARENA1-F58: the call to copy, and never a folder as the file (F51's rule). VM 520, E.LONG1
@@ -1223,17 +1233,70 @@ pub(crate) fn save_path(tool: &str, args: &serde_json::Value) -> Option<String> 
 /// E.LONG1 L2f: the model wrote a stylesheet with `editor new` and saved it as
 /// lemon-garlic-pasta.html; the recipe page was never written, and the reply said every page used
 /// the stylesheet.
-pub(crate) fn kind_mismatch_note(path: &str, text: &str) -> Option<String> {
+/// E.ARENA1-F62: `fits` -- a file the request names for this kind of text -- is given as the call.
+pub(crate) fn kind_mismatch_note(path: &str, text: &str, fits: Option<&str>) -> Option<String> {
     let (have, want) = (text_kind(text)?, path_kind(path)?);
+    let elsewhere = match fits {
+        Some(f) => format!(
+            "or save this text where the request wants it: os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{f}\"}}}}"
+        ),
+        None => "or save this text under a name that fits it".to_string(),
+    };
     (have != want).then(|| {
         format!(
             "(not sent: the text in this tab is {}, but {path} is meant to hold {}. Write what belongs in \
-             {path} with editor `new` and save that there, or save this text under a name that fits it. \
+             {path} with editor `new` and save that there, {elsewhere}. \
              Sent again unchanged, it will be saved as it is.)",
             have.words(),
             want.words()
         )
     })
+}
+
+/// E.ARENA1-F62: a file the request names, of this kind and not saved this turn -- written as the
+/// request wrote it, or inside the request's folder when it is a bare name ("a shared style.css"
+/// for ~/longtask/recipes). Never for HTML: a site's pages are many and the request names few ("an
+/// index.html … one page per recipe"), so a recipe page would be sent to the index.
+pub(crate) fn requested_file_of_kind(user_text: &str, kind: TextKind, saved: &[(String, String)]) -> Option<String> {
+    if kind == TextKind::Html {
+        return None;
+    }
+    let folder = requested_path(user_text).filter(|p| looks_like_folder(p));
+    let name_of = |p: &str| p.trim_end_matches('/').rsplit('/').next().unwrap_or(p).to_string();
+    let saved_names: Vec<String> = saved.iter().map(|(p, _)| name_of(p)).collect();
+    user_text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | ')' | '(' | '"' | '\'' | '`')))
+        .map(|w| w.trim_end_matches('.'))
+        .find_map(|w| {
+            if !w.contains('.') || path_kind(w) != Some(kind) {
+                return None;
+            }
+            let full = if w.starts_with("~/") || w.starts_with('/') {
+                w.to_string()
+            } else if !w.contains('/') {
+                format!("{}/{w}", folder.as_deref()?.trim_end_matches('/'))
+            } else {
+                return None;
+            };
+            (!saved_names.contains(&name_of(&full))).then_some(full)
+        })
+}
+
+/// E.ARENA1-F62: the path the unsaved note gives. The last save's path only while that save has not
+/// gone through (F59: refused, its folder missing); then a requested file that fits the tab's kind;
+/// then the requested path, unless it was already saved. VM 520, E.LONG1 L2-rf61c: index.html was
+/// saved, a stylesheet was written in a new tab, and the note said to save it as index.html -- F56
+/// held that, and the turn ended with no stylesheet and no recipe pages.
+pub(crate) fn unsaved_save_path(last_target: Option<&str>, saved: &[(String, String)], tab: Option<&str>, user_text: &str) -> Option<String> {
+    let was_saved = |p: &str| saved.iter().any(|(s, _)| s == p);
+    if let Some(t) = last_target.filter(|t| !was_saved(t)) {
+        return Some(t.to_string());
+    }
+    if let Some(f) = tab.and_then(text_kind).and_then(|k| requested_file_of_kind(user_text, k, saved)) {
+        return Some(f);
+    }
+    requested_path(user_text).filter(|p| !was_saved(p))
 }
 
 /// E.ARENA1-F61: the text of an HTML page's first `<tag>…</tag>`, inner tags removed, whitespace
@@ -2613,6 +2676,32 @@ mod tests {
         assert_eq!(command_first(other), None, "a result that is not a command's");
     }
 
+    /// E.ARENA1-F62, L2-rf61c's shape: index.html saved, a stylesheet in the new tab. The unsaved note's
+    /// path is the requested style.css, never the index already saved; F59's and F58's cases keep theirs.
+    #[test]
+    fn the_unsaved_path_fits_the_tab_and_was_not_saved() {
+        const L2: &str = "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes, one page per recipe (ingredients and steps), and a shared style.css that every page uses. When it is done, check that every link on every page works, and tell me what you made.";
+        let index = "~/longtask/recipes/index.html";
+        let css = "body { font-family: Georgia, serif; max-width: 40rem; }";
+        let saved = vec![(index.to_string(), "<!DOCTYPE html><title>Three Dinners</title>".to_string())];
+        assert_eq!(unsaved_save_path(Some(index), &saved, Some(css), L2).as_deref(), Some("~/longtask/recipes/style.css"));
+        assert_eq!(unsaved_save_path(Some(index), &[], Some(css), L2).as_deref(), Some(index), "F59: a save that did not go through");
+        let page = "<!DOCTYPE html><title>Soup</title>";
+        assert_eq!(unsaved_save_path(Some(index), &saved, Some(page), L2).as_deref(), Some("~/longtask/recipes"), "F58: the folder");
+        assert_eq!(unsaved_save_path(None, &[], Some("plain words"), "Write a plan to ~/week-plan.md.").as_deref(), Some("~/week-plan.md"));
+        let plan = vec![("~/week-plan.md".to_string(), "# plan".to_string())];
+        assert_eq!(unsaved_save_path(Some("~/week-plan.md"), &plan, Some("# more"), "Write a plan to ~/week-plan.md."), None, "a saved goal is not named again");
+        assert_eq!(requested_file_of_kind("Write a css stylesheet in ~/site", TextKind::Css, &[]), None, "a word without a dot is not a file");
+        assert_eq!(requested_file_of_kind(L2, TextKind::Html, &[]), None, "a recipe page is not sent to index.html");
+        assert!(save_took("Done \u{2014} Text Editor \u{2014} index.html, 19 lines, saved \u{b7} tab 2 of 2"));
+        assert!(!save_took("(mcp.yantrik-os.os_act: yos: editor.app.act refused: the folder /home/yantrik/longtask/recipes does not exist)"));
+        assert!(!save_took("Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 7 lines, unsaved \u{b7} tab 3 of 3"));
+        let styled = vec![("~/longtask/recipes/style.css".to_string(), css.to_string())];
+        assert_eq!(requested_file_of_kind(L2, TextKind::Css, &styled), None, "style.css already saved");
+        let note = kind_mismatch_note(index, css, requested_file_of_kind(L2, TextKind::Css, &saved).as_deref()).expect("CSS as the index");
+        assert!(note.contains(r#""action": "save_as", "args": {"path": "~/longtask/recipes/style.css"}"#), "{note}");
+    }
+
     /// E.ARENA1-F61, on L2-rf60c's real pages: the second index saved as soup.html is held; the
     /// real tacos page, a page sharing only the site's `<h1>`, and a re-save of the index are not.
     #[test]
@@ -2674,10 +2763,10 @@ mod tests {
         assert_eq!(text_kind("Remember: {braces} are fine in notes"), None, "a colon and a brace are not CSS");
         assert_eq!(path_kind("~/longtask/recipes/lemon-garlic-pasta.html"), Some(TextKind::Html));
         assert_eq!(path_kind("~/notes.txt"), None);
-        let note = kind_mismatch_note("~/longtask/recipes/lemon-garlic-pasta.html", css).expect("CSS as a page");
+        let note = kind_mismatch_note("~/longtask/recipes/lemon-garlic-pasta.html", css, None).expect("CSS as a page");
         assert!(note.contains("a CSS stylesheet") && note.contains("an HTML page"), "{note}");
-        assert_eq!(kind_mismatch_note("~/longtask/recipes/index.html", html), None);
-        assert_eq!(kind_mismatch_note("~/plan.md", css), None, "a kind the path does not name is not judged");
+        assert_eq!(kind_mismatch_note("~/longtask/recipes/index.html", html, None), None);
+        assert_eq!(kind_mismatch_note("~/plan.md", css, None), None, "a kind the path does not name is not judged");
     }
 
     /// E.ARENA1-F58: the unsaved note gives the save call, a file inside a folder the request named.

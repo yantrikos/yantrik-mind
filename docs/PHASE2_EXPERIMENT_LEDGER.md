@@ -13015,3 +13015,54 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - The turn ended with the unsaved note appended, at 30 s of 180, with all four linked files missing.
   - The exit is not yet known; the step lines have been asked of 4c.
 - **No repeat so far of the rf60c duplicate-index failure.** n=3, so no claim on F61's effect is made.
+
+**rf61c's step lines (from 4c).** My guess, the refusal-resend stop, was wrong. The held save was never resent.
+- **What happened:**
+  - s5 saved index.html.
+  - s6 wrote a stylesheet into a new tab.
+  - At s12 and s16, the unsaved note gave the save call with **`last_save_target`, which was index.html, already saved** (F59's rule).
+  - s14 followed it, `save_as index.html`, and F56 held it.
+  - Every later `new` met "already ran … unsaved", and the turn composed after three reused `files_go` calls.
+- **Cause: F59's own note named the wrong file.** F59 was right for a save the desktop refused. It is wrong once that save went through, because the open tab is then a different document.
+
+## E.ARENA1-F62 — PREREG: the unsaved note names a save path that fits, never a file already saved this turn
+
+**Plan:**
+1. `desktop::unsaved_save_path(last_target, saved, tab_text, user_text)` chooses the path, in this order:
+   - the last save target, if it was **not** saved (F59's case: refused, folder missing);
+   - else a file the request names whose extension fits the tab's kind and that was not saved this turn ("a shared style.css" with ~/longtask/recipes gives ~/longtask/recipes/style.css);
+   - else the requested path, unless it was already saved (a folder keeps F58's `<file name>`).
+2. All seven unsaved-hint sites use it.
+3. F56's kind note also names the fitting requested file, when there is one, as its save call.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **Unit test, rf61c's shape:** index.html saved, a CSS tab, the L2 request. The path is `~/longtask/recipes/style.css`.
+   - A refused target (not saved) is still returned (F59).
+   - With no requested file of the kind, a folder request gives the folder (F58).
+   - A word without a dot ("html") is not a file.
+2. **The F56 note** for a CSS tab sent to index.html names `~/longtask/recipes/style.css`.
+3. **Loop, rf61c's shape:** new index, save index, new CSS, answer. The unsaved note's call is `save_as ~/longtask/recipes/style.css`, and no unsaved note names index.html.
+4. **F58's and F59's loop tests still pass.**
+
+**E.ARENA1-F62: built. All four kill criteria pass.**
+- **The change:**
+  - `desktop::unsaved_save_path`, `requested_file_of_kind` and `save_took`.
+  - All seven unsaved-hint sites go through `unsaved_save_path`.
+  - F56's note gives the requested file's save call when one fits.
+- **Found on the way: F60's record of saved files counted a refused save as saved.** The outcome classifier scores "editor.app.act refused: the folder … does not exist" as Ok, since no gate word is in it. A save now counts only when the desktop's result line shows the document saved (`save_took`, the same reading as `update_unsaved`).
+- **Design change from the prereg: a requested file is never named for HTML.**
+  - The first draft named index.html for any HTML tab, which broke F58's case.
+  - A site has many pages and the request names few, so a recipe page would be sent to the index.
+  - CSS and JSON keep the rule.
+- **Seven compiling mutants, all killed:**
+  1. A saved target is kept.
+  2. HTML is named.
+  3. A refused save counts as saved.
+  4. An unsaved result counts as saved.
+  5. A saved style.css is named again.
+  6. The answer site uses the old expression.
+  7. F56's note has no fitting file.
+- **P7 first survived**, because its assertion matched style.css from the unsaved note in the same prompt. The assertion now reads F56's own words.
+- **P6 and P7's first kills were void:** the loop test's s14 half failed at baseline, since an identical save is answered as a repeat before F56. It now uses the absolute path, and both were rerun.
+- **Workspace:** 0 failures in two full runs.
+  - `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it` failed once, in an earlier full run. It passed alone and in both later runs. That failure is unexplained.

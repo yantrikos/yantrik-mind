@@ -13699,7 +13699,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
-                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
@@ -13929,7 +13929,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.ARENA1-F12: a repeated desktop ACTION is sent to its next step, not to answer.
                 let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
                 let note = last_refusal.as_deref().map(desktop::repeated_refusal_note).or(folder_note).or_else(|| {
-                    desktop::repeated_action_note(&tool, &args, unsaved_doc, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref())
+                    desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref())
                 });
                 match note {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
@@ -13946,7 +13946,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
@@ -13983,7 +13983,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if done_calls.contains(&call_sig) && !moved_since {
                 eprintln!("[agent] step {step}: {tool} already called with these args — reusing the work log");
                 let folder_note = self.folder_repeat_note(&tool, &args, user_text, id).await;
-                match folder_note.or_else(|| desktop::repeated_action_note(&tool, &args, unsaved_doc, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref())) {
+                match folder_note.or_else(|| desktop::repeated_action_note(&tool, &args, unsaved_doc, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref())) {
                     Some(note) => scratch.push_str(&format!("\n[{step}] {tool} -> {note}")),
                     None => scratch.push_str(&format!(
                     "
@@ -13998,7 +13998,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
-                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
                         continue;
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
@@ -14070,7 +14070,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     &tool,
                     &args,
                     true,
-                    last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref(),
+                    desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref(),
                 )
             } else if let Some(note) = desktop::same_change_again(&tool, &args, &{
                 // E.ARENA1-F36: only changes their app has not moved past since.
@@ -14115,7 +14115,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 let sig = call_sig_for_twin(&tool, &args);
                 // E.ARENA1-F56: a save that would give the file the wrong kind of text, held once.
                 let kind_note = desktop::save_path(&tool, &args).and_then(|path| {
-                    let note = desktop::kind_mismatch_note(&path, last_new_text.as_deref()?)?;
+                    let text = last_new_text.as_deref()?;
+                    // E.ARENA1-F62: with the save call for where the request wants this kind of text.
+                    let fits = desktop::text_kind(text).and_then(|k| desktop::requested_file_of_kind(user_text, k, &saved_files));
+                    let note = desktop::kind_mismatch_note(&path, text, fits.as_deref())?;
                     kind_held.insert(path).then(|| {
                         eprintln!("[agent] step {step}: a save would give the file the wrong kind of text \u{2014} held once");
                         note
@@ -14279,7 +14282,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.ARENA1-F59: the save path the model chose, whether or not the desktop took it.
             if sent {
                 if let Some(p) = desktop::save_path(&tool, &args) {
-                    if ran {
+                    if ran && desktop::save_took(&obs) {
                         saved_files.retain(|(q, _)| *q != p);
                         saved_files.push((p.clone(), last_new_text.clone().unwrap_or_default()));
                     }
@@ -14384,7 +14387,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         unsaved_nudges += 1;
                         barren = 0;
                         eprintln!("[agent] step {step}: nothing new, with the document unsaved \u{2014} asking for the save");
-                        scratch.push_str(&desktop::unsaved_nudge(step, last_save_target.clone().or_else(|| desktop::requested_path(user_text)).as_deref()));
+                        scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
                         continue;
                     }
                     if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, elapsed_ms, budget.max_wall_ms) {

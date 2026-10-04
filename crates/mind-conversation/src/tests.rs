@@ -17928,6 +17928,47 @@ mod desktop_consent_and_stall_wiring {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// E.ARENA1-F62 through the loop, L2-rf61c's s4-s12: index.html saved, a stylesheet written in a new
+    /// tab, and the model answering. The unsaved note's call saves to the requested style.css; no unsaved
+    /// note sends the stylesheet to the index already saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_unsaved_note_never_names_a_file_already_saved() {
+        const INDEX: &str = include_str!("../fixtures/desktop/longtask_l2rf60c_index_f20cfef.html");
+        let new = |text: &str| Step::Call("mcp.yantrik-os.os_act", act("editor", "new", text));
+        let save = |f: &str| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": format!("~/longtask/recipes/{f}")}}));
+        let acts = [
+            "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 19 lines, unsaved \u{b7} tab 2 of 2",
+            "Done \u{2014} Text Editor \u{2014} index.html, 19 lines, saved \u{b7} tab 2 of 2",
+            "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 7 lines, unsaved \u{b7} tab 3 of 3",
+        ];
+        let prompt = "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes, one page per recipe (ingredients and steps), and a shared style.css that every page uses.";
+        let r = run_with(
+            prompt,
+            vec![new(INDEX), save("index.html"), new("body { font-family: Georgia, serif; max-width: 40rem; }"), Step::Say("Done.")],
+            vec![EDITOR, EDITOR],
+            acts.to_vec(),
+        )
+        .await;
+        let last = r.prompts.last().cloned().unwrap_or_default();
+        assert!(last.contains("the desktop says it is unsaved"), "no unsaved note");
+        assert!(last.contains(r#""action": "save_as", "args": {"path": "~/longtask/recipes/style.css"}"#), "the note did not give style.css");
+        assert!(!last.contains(r#""args": {"path": "~/longtask/recipes/index.html"}}."#), "a note sent the stylesheet to the saved index");
+        // s14: the stylesheet sent to the index anyway. F56 holds it, and its note gives style.css. (On
+        // 520 the editor had moved on, so s14 was not a repeat of s5; here the path is spelled out.)
+        let again = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save_as", "args": {"path": "/home/yantrik/longtask/recipes/index.html"}}));
+        let held = run_with(
+            prompt,
+            vec![new(INDEX), save("index.html"), new("body { font-family: Georgia, serif; max-width: 40rem; }"), again],
+            vec![EDITOR, EDITOR],
+            acts.to_vec(),
+        )
+        .await;
+        assert!(
+            held.prompts.iter().any(|p| p.contains(r#"or save this text where the request wants it: os_act {"app": "editor", "action": "save_as", "args": {"path": "~/longtask/recipes/style.css"}}"#)),
+            "the kind note did not give style.css"
+        );
+    }
+
     /// E.ARENA1-F61 through the loop, L2-rf60c's s16-s17: the index saved, then a second index written
     /// and saved as soup.html. That save is held once with the reason; sent again, it goes through.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

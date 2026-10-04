@@ -12857,3 +12857,49 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - S1: only `files_go` gets the calls.
   - S2: the folder named as the file.
   - S3: the unsaved note once only.
+
+**E.LONG1 repeats on OS 8f98462a + Mind fa2e4fe:** L1-ra PASS (13/13 events, 7/7 days, 30 s). L2-ra FAIL (46 s). Turn 611, via 4c:
+- s2: `editor new` with the index page; s3: the same `new`, nudged.
+- **s4: `save_as {"path": "~/longtask/recipes/index.html"}`, refused: "the folder … does not exist".**
+- **s6: `files_new_folder {"name": "~/longtask/recipes"}`, settled; the folders were made.**
+- s7: `set_content`, steered (sensitive).
+- s8, s9: `new` again. The unsaved note came back as the repeat answer, with the generic `<folder>/<file name>`, **and the "nothing new" counter broke to compose** at 2/2.
+- `save_as` was never sent again. The reply was true.
+
+## E.ARENA1-F59 — PREREG: the nothing-new break gives the unsaved or goal note, and the notes name the save path already chosen
+
+**Two gaps, from turn 611:**
+1. **The turn ended on the "nothing new" counter** (observations bringing no new lines), whose break goes straight to compose. F54 and F58 bound only the repeat-call counter's exits, so with a document unsaved and 134 s of budget left, the turn ended.
+2. **The model had already chosen the exact path** (`~/longtask/recipes/index.html`, s4). Once the folder existed, the notes offered only `<folder>/<file name>`, never "send that `save_as` again".
+
+**Plan:**
+1. At the nothing-new break, before composing: if the document is unsaved, give `unsaved_nudge` under `may_nudge_goal(unsaved_nudges, …)`; else, if the request's goal is missing, give `goal_nudge` under `may_nudge_goal(goal_nudges, …)`. Reset the consecutive count and continue. Otherwise break as today.
+2. The loop keeps `last_save_target`, the path of the last `save_as` it sent, refused or not. The unsaved notes (`unsaved_nudge`, and `repeated_action_note` while unsaved) use it ahead of the request's path, so a refused save to the right path is named exactly once its folder exists.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. Loop, turn 611's shape: `new` (unsaved); `save_as …/index.html`, refused; then `new` repeated until nothing is new. The unsaved note is given at the nothing-new break (the turn does not compose there), and it names `"path": "~/longtask/recipes/index.html"`.
+2. A turn with nothing unsaved and no goal still breaks to compose at the nothing-new limit.
+
+**E.LONG1 three fresh-chat repeats on OS 8f98462a + Mind fa2e4fe:**
+- **L1: 3/3 PASS.** 7/7 days and 13/13 events every run, nothing invented (30–54 s).
+- **L2: 0/3.**
+  - ra: page unsaved after a refused save. This is F59's case, built since, not yet installed.
+  - rb: three pages whose names do not match their own links, and no valid style.css.
+  - rc: index.html and style.css only. F56 held a stylesheet saved as pasta.html, and the model never wrote that page.
+  - The replies were honest about what was missing. The weakness is the model planning a multi-file set.
+- **L4: 2 runs; all 4 clear-dated notes every time.**
+  - rb's file also lists undated notes, and again credits Overnight with Northwind's "effective 1 October". My date check (day number only) was too weak to catch it, which is a checker weakness.
+  - The reply/file count mismatch recurs (8 said, 13 listed).
+
+## Mind gate with Mind fa2e4fe on yantrik-os 8f98462a on VM 520: PASS 7/7
+
+- **Setup:**
+  - v0.1.0-1159-g8f98462a, BUILD commit=fa2e4fe;
+  - the editor (my saved test files only, 0 modified) and Notes (nothing open) were closed first, because the arena refuses to start with either running.
+- **Never-ask:** switched on from the person account before the run (`"on": true`), and off by an EXIT trap (`"on": false`).
+- **Results, ending 03:01 UTC:** T1–T7 at 7/7, 0 false claims, median 11.6 s.
+- **An OS issue, reported to 4c: the arena cannot operate the never-ask mode itself.**
+  - Its own "on" at the start was refused ("not starting"); a first attempt therefore never ran, which my filtered output hid.
+  - Its "off" at the end was refused too, even with #604's retries: "A mind or an agent cannot do that".
+  - The same calls from my wrapper, under the same account, succeed.
+- **A second `pgrep -f` self-match:** the arena's editor probe (`pgrep -f /opt/yantrik/bin/yantrik-text-editor`) matches an ssh command line that contains that path.

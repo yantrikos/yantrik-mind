@@ -12955,3 +12955,9 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Residual: no test covers the note at the repeat and nothing-new limits.** No mutant there would be watched to fail. An early draft of the test (identical fake replies) did take the nothing-new site three times.
 - **Residual: the text recorded for a save is the last `editor new`.** A save after `editor open` would carry the wrong text. Only an HTML path holding HTML text is read.
 - **The real measure is L2 ×3 on 520 with this build.**
+
+**E.LONG1, L2 ×3 fresh chats on Mind f20cfef (F60), OS 8f98462a: 2/3. Exploration, not a gate.**
+- **rf60a (102 s) and rf60b (70 s): pass.** Each has index, style.css and three recipe pages. Every link resolves, and each page has ingredients and steps. The replies name the five files truly.
+- **rf60c (68 s): fail.** soup.html holds a second index page ("Three Dinners", a link list, no recipe), saved last at 23:14:22. The reply listed four files without soup.
+- **The checker was too weak:** it passed rf60c, since every link resolved. It now also requires ingredients and steps on each recipe page. Preflighted on all three outputs, it passes rf60a/rf60b and flags rf60c `soup.html:not-a-recipe`.
+- **Whether F60 fired in any run is not yet known.** The step lines have been asked of 4c. Not claimed until seen.

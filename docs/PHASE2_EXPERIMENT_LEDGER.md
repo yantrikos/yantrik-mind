@@ -13209,3 +13209,37 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **New blocker (turns 680–682, 692):**
   - The model repeats an identical long `editor new` (217 lines, about 30 s per step) instead of `save_as`, until the wall budget is spent, and no file is made.
   - The note it got is being reconstructed from the real prompt before any fix.
+
+## E.ARENA1-F65 — PREREG: the request's save path is found where the request says to save, JSON-shaped or not
+
+**Seen on VM 520, MDG turns 680–682 and 692 (4c; prompts are fixtures `mdg_prompt_680.txt` and `_692.txt`):** the model resent an identical long `editor new` until the budget ran out, and never called `save_as`.
+- **Found by reading the real prompts against the code:** `requested_path` splits on whitespace and trims quotes and brackets only at the ends of a word. So `{"path":"~/mdg/enc-1.mdg"}.` is never a path.
+  - **680:** its only path is written that way, so the request has no path. The unsaved note gives no call, and the goal check (F21) never runs.
+  - **692:** the one path found is "the grammar you wrote in ~/mdg/grammar.md" (to read). So the note's save call names grammar.md, not `~/mdg/encoded.mdg`.
+- **Not seen:** the notes as the model got them. Criterion 3 reconstructs them from the real prompts.
+
+**Plan:**
+1. `requested_path` reads words split also at quotes, braces, brackets and commas, so a JSON-shaped path is a path.
+2. When a path follows "save" or `"path"` within 30 characters (`save_as {"path":"…"}`, "save it as …", "save to …"), it is the request's path. Otherwise the first path, as today.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **Real prompts:**
+   - 680 gives `~/mdg/enc-1.mdg`;
+   - 692 gives `~/mdg/encoded.mdg`;
+   - L1's request still gives `~/week-plan.md`, L2's `~/longtask/recipes`;
+   - "… to ~/a.txt." still drops the full stop.
+2. `goal_path` on 692 gives `~/mdg/encoded.mdg`.
+3. **Loop, 692's shape:** `new` with the text, then the same `new` twice. A note gives `save_as` with `~/mdg/encoded.mdg`, and no note gives a save call to grammar.md.
+
+**F65: built. All three kill criteria pass.**
+- **The change:** `requested_path` reads words cut at quotes, braces, brackets, commas and semicolons too, and prefers a path that follows "save" or `"path"` within 30 characters. Otherwise it takes the first path.
+- **Tests on the real 680 and 692 prompts:**
+  - L1 and L2 keep their paths;
+  - "save it as" picks the saved file;
+  - with no save wording, the first of two paths is taken;
+  - a web address is not a path.
+- **Loop, 692's shape:** a note gives `save_as ~/mdg/encoded.mdg`, and none names grammar.md.
+- **Five compiling mutants, all killed:** whitespace only, never save, `"path"` only, no window, last path.
+  - **U5 first survived:** no case had two paths and no save wording. The case was added.
+- **Workspace:** 0 failures.
+- **Not claimed:** that this ends the repeated-`new` loop. 680's note had no path at all and 692's named grammar.md, and both are now right. Whether the model then saves is for 520 to show.

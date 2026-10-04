@@ -1023,13 +1023,28 @@ pub(crate) fn another_new_while_unsaved(tool: &str, args: &serde_json::Value, un
 
 /// E.ARENA1-F19: the file path a request names -- `~/…` or an absolute path -- as the person wrote
 /// it, trailing punctuation dropped.
+/// E.ARENA1-F65: words are cut at quotes, braces, brackets and commas too, so a path written as a
+/// call's argument (`save_as {"path":"~/mdg/encoded.mdg"}`) is a path; and a path the request says
+/// to SAVE to is the request's path, before one it only mentions. VM 520, MDG turns 680-682 and
+/// 692: the only path of 680 was JSON-shaped and never found; 692's one found path was "the grammar
+/// you wrote in ~/mdg/grammar.md", so the unsaved note's save call named the file to read.
 pub(crate) fn requested_path(user_text: &str) -> Option<String> {
-    user_text
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | ')' | '(' | '"' | '\'' | '`')))
-        .map(|w| w.trim_end_matches('.'))
-        .find(|w| (w.starts_with("~/") || w.starts_with('/')) && w.len() > 2)
-        .map(str::to_string)
+    let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | ',' | ';');
+    let paths: Vec<(usize, &str)> = user_text
+        .split(delim)
+        .map(|w| (w.as_ptr() as usize - user_text.as_ptr() as usize, w.trim_matches(':').trim_end_matches('.')))
+        .filter(|(_, w)| (w.starts_with("~/") || w.starts_with('/')) && w.len() > 2)
+        .collect();
+    let says_save = |at: usize| {
+        let before: String = user_text[..at].chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
+        let before = before.to_ascii_lowercase();
+        before.contains("save") || before.contains("\"path\"")
+    };
+    paths
+        .iter()
+        .find(|(at, _)| says_save(*at))
+        .or_else(|| paths.first())
+        .map(|(_, w)| w.to_string())
 }
 
 /// E.ARENA1-F23: how long to wait before looking again at an unsettled action. yantrik-os-f4:
@@ -2711,6 +2726,25 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F65, on the real MDG prompts and the E.LONG1 requests: the save path is found where
+    /// the request says to save, JSON-shaped or not; requests without one keep their first path.
+    #[test]
+    fn the_requested_path_is_where_the_request_says_to_save() {
+        const P680: &str = include_str!("../fixtures/desktop/mdg_prompt_680.txt");
+        const P692: &str = include_str!("../fixtures/desktop/mdg_prompt_692.txt");
+        assert_eq!(requested_path(P680).as_deref(), Some("~/mdg/enc-1.mdg"));
+        assert_eq!(requested_path(P692).as_deref(), Some("~/mdg/encoded.mdg"));
+        assert_eq!(goal_path(P692).as_deref(), Some("~/mdg/encoded.mdg"));
+        let l1 = "Look at my calendar for the week of 28 September to 4 October 2026 and write a plan to ~/week-plan.md: one section per day";
+        let l2 = "Make a small static recipe website in ~/longtask/recipes: an index.html that lists three dinner recipes";
+        assert_eq!(requested_path(l1).as_deref(), Some("~/week-plan.md"));
+        assert_eq!(requested_path(l2).as_deref(), Some("~/longtask/recipes"));
+        assert_eq!(requested_path("Put the summary in ~/a.txt.").as_deref(), Some("~/a.txt"));
+        assert_eq!(requested_path("Summarise ~/notes.md and save it as ~/out.md").as_deref(), Some("~/out.md"));
+        assert_eq!(requested_path("Compare ~/a.md and ~/b.md for me").as_deref(), Some("~/a.md"), "no save named: the first");
+        assert_eq!(requested_path("Read https://example.com/a and tell me"), None, "a web address is not a path");
     }
 
     /// E.ARENA1-F64, on the real pair from VM 520 (MDG): `open` carries no text; with the description's

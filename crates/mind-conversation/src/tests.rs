@@ -17948,6 +17948,21 @@ mod desktop_consent_and_stall_wiring {
         assert!(long.chars().count() > 300 && crate::mail_lookup_intent(&long).is_none(), "a long message is not a lookup");
     }
 
+    /// E.ARENA1-F65 through the loop, turn 692's shape: the encodings written with `new`, then the
+    /// same `new` again and again. The notes' save call names ~/mdg/encoded.mdg -- never the grammar
+    /// the request said to read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_unsaved_note_names_the_file_the_request_saves_to() {
+        const P692: &str = include_str!("../fixtures/desktop/mdg_prompt_692.txt");
+        let text = "ENT e1 PERSON name=Pranab\nREL r1 CREATED e1 e2\nENT e2 SOFTWARE name=YantrikDB";
+        let new = || Step::Call("mcp.yantrik-os.os_act", act("editor", "new", text));
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 217 lines, unsaved \u{b7} tab 8 of 8";
+        let r = run_with(P692.trim(), vec![new(), new(), new(), new(), Step::Say("Done.")], vec![EDITOR, EDITOR], vec![wrote]).await;
+        let all = r.prompts.join("\n");
+        assert!(all.contains(r#""action": "save_as", "args": {"path": "~/mdg/encoded.mdg"}"#), "no note gave the save to encoded.mdg");
+        assert!(!all.contains(r#""args": {"path": "~/mdg/grammar.md"}"#), "a note sent the encodings to grammar.md");
+    }
+
     /// E.STALL3 through the turn seam: the trail a mail question and an ordinary turn leave.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_turn_leaves_a_trail_of_its_stages() {

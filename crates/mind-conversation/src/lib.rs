@@ -1507,6 +1507,49 @@ tokio::task_local! {
     pub static TURN_STAGE: StageTrail;
 }
 
+/// E.ERASE2: a question for the person, asked through whatever channel the turn arrived on, and the
+/// answer it gets back: one of `options`, or None when nothing came (declined, cancelled, expired).
+pub struct Ask {
+    pub request_id: String,
+    pub prompt: String,
+    pub options: Vec<String>,
+    pub reply: tokio::sync::oneshot::Sender<Option<String>>,
+}
+
+tokio::task_local! {
+    /// E.ERASE2: set by a channel that can put a question in front of the person and wait for the
+    /// answer within the turn -- the desktop harness's `request` event. Unset everywhere else.
+    pub static TURN_ASK: tokio::sync::mpsc::UnboundedSender<Ask>;
+}
+
+/// E.ERASE2: can this turn ask the person a question and wait for the answer?
+pub(crate) fn can_ask() -> bool {
+    TURN_ASK.try_with(|_| ()).is_ok()
+}
+
+/// E.ERASE2: ask, and wait for the answer. None when nobody can be asked or no answer came.
+pub(crate) async fn ask_person(request_id: String, prompt: String, options: Vec<String>) -> Option<String> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let sent = TURN_ASK
+        .try_with(|tx| tx.send(Ask { request_id, prompt, options, reply }).is_ok())
+        .unwrap_or(false);
+    if !sent {
+        return None;
+    }
+    answer.await.ok().flatten()
+}
+
+/// E.ERASE2: what the person is asked before an erase. Never the text itself: E.ERASE1 does not
+/// repeat it back, and it may be a credential.
+pub(crate) fn erase_question(places: usize) -> String {
+    format!(
+        "Erase the text you asked me to forget? It is in {places} place(s) in my memory, and this can't be undone."
+    )
+}
+
+/// E.ERASE2: the two answers, in the order the person sees them. Only the second erases.
+pub(crate) const ERASE_OPTIONS: [&str; 2] = ["Keep", "Erase"];
+
 /// E.STALL3: mark the step this turn is entering. No listener, no effect.
 pub(crate) fn stage(s: &'static str) {
     let _ = TURN_STAGE.try_with(|t| {
@@ -7375,6 +7418,18 @@ impl ConversationEngine {
         })
     }
 
+    /// E.ERASE2: may a question be put in front of the person now? Not while a test run has the
+    /// desktop's approvals off, and not when that cannot be read: unsure means the typed flow, which
+    /// puts nothing on screen.
+    async fn approvals_off_for_test(&self, id: &TurnIdentity) -> bool {
+        if !self.desktop_attached() {
+            return true;
+        }
+        let look = serde_json::json!({"app": "shell", "actions": "set_approvals"});
+        let seen = Box::pin(self.run_agent_tool_as(desktop::DESCRIBE, &look, id)).await;
+        !desktop::approvals_plainly_on(&seen)
+    }
+
     /// E.HOME3: ask the desktop about one path.
     async fn desktop_stat(&self, path: &str, id: &TurnIdentity) -> Option<desktop::Stat> {
         let args = serde_json::json!({"app": "shell", "action": "files_stat", "args": {"path": path}});
@@ -12379,6 +12434,17 @@ WINDOW: all-time, latest 200
                     Err(e) => format!("(can't erase that: {e})"),
                     Ok(r) if r.remaining_cells == 0 && r.remaining_bytes.unwrap_or(0) == 0 => {
                         "(nothing in my memory holds that exact text — ask them for the exact words to erase, or recall first to find them)".to_string()
+                    }
+                    // E.ERASE2: on the desktop, a Keep / Erase question in the turn, not a typed "yes".
+                    // Not while a test run has approvals off: nothing is put in front of the person then.
+                    Ok(r) if can_ask() && !self.approvals_off_for_test(id).await => {
+                        let request_id = format!("erase-{}", Self::now_ms());
+                        let options = ERASE_OPTIONS.iter().map(|o| o.to_string()).collect();
+                        match ask_person(request_id, erase_question(r.remaining_cells.max(1)), options).await.as_deref() {
+                            Some("Erase") => self.erase_everywhere(&what).await,
+                            Some("Keep") => "Kept \u{2014} nothing was erased.".to_string(),
+                            _ => "Nothing was erased: the question went unanswered. Ask me again if you still want it gone.".to_string(),
+                        }
                     }
                     Ok(r) => {
                         *self.pending_erase.lock().unwrap() = Some(what);

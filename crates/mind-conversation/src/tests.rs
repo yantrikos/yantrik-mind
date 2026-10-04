@@ -18843,6 +18843,80 @@ async fn a_no_or_a_new_subject_erases_nothing() {
     }
 }
 
+/// E.ERASE2: the erase engine on a desktop whose shell description is the real one from VM 520
+/// (530d645e), approvals as `on` says.
+async fn erase_engine_on_desktop(tag: &str, approvals_off: bool) -> (mind_types::scratch::Scratch, mind_types::scratch::Scratch, ConversationEngine) {
+    const SHELL: &str = include_str!("../fixtures/desktop/describe_shell_approvals_530d645e.txt");
+    let shell = if approvals_off { SHELL.replacen("\"on\": false}", "\"on\": true}", 1) } else { SHELL.to_string() };
+    assert_eq!(shell.contains("A test run turns this on so that nothing is ever put in front of the person.\", \"on\": true}"), approvals_off);
+    let (db, log, conv) = erase_engine(tag).await;
+    let hub = Arc::new(mind_tools::McpHub::new());
+    let tool = mind_tools::McpTool {
+        server: "yantrik-os".into(),
+        name: "os_describe".into(),
+        description: "os_describe on this computer".into(),
+        read_only: true,
+        open_world: false,
+        destructive: false,
+        input_schema: serde_json::json!({"type": "object"}),
+    };
+    hub.add_scripted_tool(tool, vec![Ok(shell); 4]).unwrap();
+    (db, log, conv.with_mcp(hub))
+}
+
+/// E.ERASE2: run `forget` in a turn that can ask, answering each question with `answer`. The
+/// questions asked come back with the reply.
+async fn forget_when_asked(conv: &ConversationEngine, answer: Option<&'static str>) -> (String, Vec<(String, Vec<String>)>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::Ask>();
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = asked.clone();
+    let answerer = tokio::spawn(async move {
+        while let Some(a) = rx.recv().await {
+            seen.lock().unwrap().push((a.prompt, a.options));
+            let _ = a.reply.send(answer.map(str::to_string));
+        }
+    });
+    let reply = crate::TURN_ASK.scope(tx, conv.run_agent_tool("forget", &serde_json::json!({ "what": ERASE_SECRET }))).await;
+    answerer.await.unwrap();
+    let asked = asked.lock().unwrap().clone();
+    (reply, asked)
+}
+
+/// E.ERASE2 (Fable's sign-off, condition 2): on the desktop, forget asks Keep / Erase in the turn.
+/// "Erase" erases every copy; "Keep" and no answer erase nothing and hold nothing for a later yes;
+/// the question never carries the text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_the_desktop_forget_asks_keep_or_erase() {
+    for (tag, answer) in [("ask-erase", Some("Erase")), ("ask-keep", Some("Keep")), ("ask-none", None), ("ask-other", Some("erase"))] {
+        let (_db, _log, conv) = erase_engine_on_desktop(tag, false).await;
+        let (reply, asked) = forget_when_asked(&conv, answer).await;
+        assert_eq!(asked.len(), 1, "[{tag}] {asked:?}");
+        let (prompt, options) = &asked[0];
+        assert_eq!(options, &vec!["Keep".to_string(), "Erase".to_string()], "[{tag}]");
+        assert!(prompt.contains("can't be undone") && !prompt.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "[{tag}] {prompt}");
+        assert!(conv.pending_erase.lock().unwrap().is_none(), "[{tag}] a typed yes is still armed");
+        let left = conv.memory.erase_literal(ERASE_SECRET, false).await.unwrap();
+        if answer == Some("Erase") {
+            assert!(reply.starts_with("Erased"), "[{tag}] {reply}");
+            assert_eq!(left.remaining_cells, 0, "[{tag}] the secret is still there");
+        } else {
+            assert!(reply.contains("nothing was erased") || reply.contains("Nothing was erased"), "[{tag}] {reply}");
+            assert!(left.remaining_cells > 0, "[{tag}] erased without an Erase");
+        }
+    }
+}
+
+/// E.ERASE2: with a test run's approvals off, nothing is put in front of the person -- the typed
+/// question as before, and no card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn with_approvals_off_forget_asks_in_words() {
+    let (_db, _log, conv) = erase_engine_on_desktop("ask-off", true).await;
+    let (reply, asked) = forget_when_asked(&conv, Some("Erase")).await;
+    assert!(asked.is_empty(), "a question went on screen during a test run: {asked:?}");
+    assert!(reply.starts_with(crate::FORGET_ASK), "{reply}");
+    assert!(conv.memory.erase_literal(ERASE_SECRET, false).await.unwrap().remaining_cells > 0);
+}
+
 /// Nothing to erase is said plainly, and nothing is held for a yes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forgetting_what_isnt_there_says_so() {

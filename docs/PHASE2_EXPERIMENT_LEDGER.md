@@ -13319,3 +13319,22 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
    - the prompt never holds the text;
    - with no ask listener, the typed flow is unchanged (the existing E.ERASE1 tests pass).
 3. **Workspace:** 0 failures. A security review by 4c before it reaches 520.
+
+**E.ERASE2: built. All three kill criteria pass.**
+- **mind-conversation:**
+  - `Ask`, `TURN_ASK`, `can_ask`, `ask_person`, `erase_question` and `ERASE_OPTIONS`.
+  - The forget tool asks ["Keep","Erase"] when it can ask and the shell plainly says approvals are on (`approvals_off_for_test` with `"on": false`, which is now in ALWAYS_KEPT). Otherwise the typed flow is unchanged.
+  - It erases only on exactly "Erase". 4c: the QuestionCard always allows free text, so a typed "erase" must not count.
+- **mind-core harness:**
+  - `held` turns are run after the current one, and `read_while_asking` reads answers and cancels from the poll REPLY. A turn in the same reply is held without them (4c's point).
+  - `/stop` counts as no answer.
+  - `ask_the_person` sends the `request` event, then a "waiting for your answer" status at the start and every 60 s (the shell's stuck check ignores open questions until 4c's fix), and polls every 2 s for up to 110 s.
+- **Linux:** `cargo check -p mind-core --tests` passes on staging, with the files copied onto 967d789. That covers the Unix-only `serve` wiring. Its target/debug was removed afterwards.
+- **Tests:**
+  - in mind-conversation: `on_the_desktop_forget_asks_keep_or_erase` (Erase, Keep, None, typed "erase", on the real 530d645e shell description), `with_approvals_off_forget_asks_in_words`, and `approvals_are_on_only_when_the_shell_plainly_says_so`;
+  - in the harness: `a_poll_while_asking_is_read_strictly` and `a_question_is_asked_and_its_answer_read`;
+  - the three E.ERASE1 tests are unchanged and pass.
+- **Nine compiling mutants, all killed:** any answer erases, text in the prompt, asks during a test run, unreadable means on, another request counts, handed turn dropped, cancel ignored, `/stop` ignored, no status.
+  - **Three needed a second try:** V1 first failed to compile (an unreachable arm); V2 first was a no-op; V4 survived until a shell lacking the field was a test case.
+- **Workspace:** 0 failures.
+- **Not tested:** the `serve` loop's select arm and the `held` pop are compiled on Linux but not run. The first desktop forget on 520 tests them, after 4c's security review.

@@ -850,6 +850,15 @@ pub(crate) fn save_took(obs: &str) -> bool {
     (head.contains("editing \"") || head.contains("Text Editor \u{2014}")) && !head.contains(", unsaved")
 }
 
+/// E.ERASE2: does the shell plainly say its approvals work as usual (`approvals_off_for_test` with
+/// `"on": false`)? Anything else -- on, missing, unreadable -- is not plainly on.
+pub(crate) fn approvals_plainly_on(description: &str) -> bool {
+    description
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"approvals_off_for_test\": "))
+        .is_some_and(|l| l.contains("\"on\": false"))
+}
+
 /// E.ARENA1-F64: is this call an editor `open` of a file (the editor's own, or the shell's twin)?
 pub(crate) fn opens_a_file(tool: &str, args: &serde_json::Value) -> bool {
     act_target(tool, args).is_some_and(|(app, action)| {
@@ -2048,7 +2057,8 @@ const CONDENSED_MARK: &str = "\nACTIONS:";
 /// `content` (E.ARENA1-F52): the open note or file -- what a reading or writing task is about. A
 /// long note (3,545 characters) reached the model only to the 900-character head; its later
 /// sections were gone with no sign they existed.
-const ALWAYS_KEPT: [&str; 3] = ["clock", "mind_mode", "content"];
+// E.ERASE2: `approvals_off_for_test` too -- whether a question may be put in front of the person.
+const ALWAYS_KEPT: [&str; 4] = ["clock", "mind_mode", "content", "approvals_off_for_test"];
 
 /// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
 /// value is taken to its matching bracket when it is an object or a list (however it was
@@ -2726,6 +2736,20 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ERASE2, on the real 530d645e shell description: approvals are plainly on only when the shell
+    /// says `"on": false`; on, or missing, or unreadable, is not.
+    #[test]
+    fn approvals_are_on_only_when_the_shell_plainly_says_so() {
+        const SHELL: &str = include_str!("../fixtures/desktop/describe_shell_approvals_530d645e.txt");
+        assert!(approvals_plainly_on(SHELL));
+        assert!(approvals_plainly_on(&condense_description(SHELL).expect("a description")), "lost when condensed");
+        assert!(!approvals_plainly_on(&SHELL.replacen("\"on\": false}", "\"on\": true}", 1)));
+        let without: String = SHELL.lines().filter(|l| !l.contains("\"approvals_off_for_test\"")).collect::<Vec<_>>().join("
+");
+        assert!(!approvals_plainly_on(&without), "a shell that does not say is not plainly on");
+        assert!(!approvals_plainly_on("(mcp.yantrik-os.os_describe: no socket)"));
     }
 
     /// E.ARENA1-F65, on the real MDG prompts and the E.LONG1 requests: the save path is found where

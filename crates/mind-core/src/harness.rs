@@ -52,7 +52,7 @@ const NAME: &str = "Yantrik Mind";
 /// The six methods. Spelled out rather than imported — see the module doc.
 #[cfg(unix)]
 const ATTACH: &str = "harness.attach";
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(dead_code))]
 const POLL: &str = "harness.poll";
 #[cfg_attr(not(unix), allow(dead_code))]
 const CHUNK: &str = "harness.chunk";
@@ -70,7 +70,7 @@ const IDLE: Duration = Duration::from_millis(200);
 
 /// How often a turn still being thought about tells the desktop it is present. Well inside the
 /// desktop's 90-second presence window.
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(dead_code))]
 const HEARTBEAT: Duration = Duration::from_secs(30);
 
 /// How long to wait before looking for the desktop again.
@@ -479,14 +479,15 @@ async fn serve(
         )))
     });
 
+    // E.ERASE2: turns the desktop handed over while this mind waited on a question mid-turn, run
+    // next, in the order they came.
+    let mut held: std::collections::VecDeque<serde_json::Value> = std::collections::VecDeque::new();
     loop {
-        let turn = match call(
-            address.to_string(),
-            POLL,
-            serde_json::json!({ "session": session }),
-            timeout,
-        )
-        .await
+        let polled = match held.pop_front() {
+            Some(t) => Ok(t),
+            None => call(address.to_string(), POLL, serde_json::json!({ "session": session }), timeout).await,
+        };
+        let turn = match polled
         {
             Ok(turn) => turn,
             // The shell restarted, or this session aged out. Either way the recovery is to attach
@@ -581,14 +582,19 @@ async fn serve(
             // E.STALL3: where the turn is, for the heartbeat to say when it runs long.
             let trail: mind_conversation::StageTrail = Default::default();
             let watched = trail.clone();
+            // E.ERASE2: a question the turn asks the person, put on the desktop and answered here.
+            let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::Ask>();
             let mut thinking = tokio::spawn(async move {
-                mind_conversation::TURN_STAGE
+                mind_conversation::TURN_ASK
                     .scope(
-                        trail,
-                        mind_conversation::TURN_STATUS.scope(
-                            status_tx,
-                            mind_conversation::TURN_CALLS
-                                .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                        ask_tx,
+                        mind_conversation::TURN_STAGE.scope(
+                            trail,
+                            mind_conversation::TURN_STATUS.scope(
+                                status_tx,
+                                mind_conversation::TURN_CALLS
+                                    .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                            ),
                         ),
                     )
                     .await
@@ -602,6 +608,12 @@ async fn serve(
             let done = loop {
                 tokio::select! {
                     done = &mut thinking => break done,
+                    Some(ask) = ask_rx.recv() => {
+                        let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
+                        let answer = ask_the_person(send, session, turn_id, &ask.request_id, &ask.prompt, &ask.options, ASK_WAIT, &mut held).await;
+                        eprintln!("[harness] turn {turn_id}: question {} answered: {}", ask.request_id, answer.as_deref().unwrap_or("(nothing)"));
+                        let _ = ask.reply.send(answer);
+                    }
                     _ = beat.tick() => {
                         if let Some(line) = stalled_line(turn_id, started.elapsed(), &watched) {
                             eprintln!("{line}");
@@ -680,6 +692,105 @@ pub(crate) fn status_event(line: &str) -> Option<serde_json::Value> {
 }
 
 /// E.STATUS1: the latest status, with how long the turn has run, to the heartbeat's 30 seconds.
+/// E.ERASE2: how long a question waits for the person -- under the desktop's own 120 s for a
+/// pending request -- and how often the desktop is asked whether it has been answered.
+#[cfg_attr(not(unix), allow(dead_code))]
+const ASK_WAIT: Duration = Duration::from_secs(110);
+const ASK_POLL: Duration = if cfg!(test) { Duration::from_millis(1) } else { Duration::from_secs(2) };
+/// E.ERASE2: the status line while a question waits, and how often it is said again.
+const ASK_STATUS: &str = "waiting for your answer";
+const ASK_STATUS_EVERY: Duration = Duration::from_secs(60);
+
+/// E.ERASE2: what one poll said about the question this turn asked.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Heard {
+    Nothing,
+    /// The person chose; the label, when the answer carries one.
+    Answer(Option<String>),
+    /// The desktop stopped waiting for this turn.
+    Cancelled,
+}
+
+/// E.ERASE2: read a poll made while waiting on a question. A turn the desktop hands over meanwhile
+/// is kept for after this one, never dropped. Only an answer for THIS turn and THIS request counts
+/// -- the host refuses a second answer and one to a question never asked, and this side checks too.
+pub(crate) fn read_while_asking(
+    reply: &serde_json::Value,
+    turn_id: u64,
+    request_id: &str,
+    held: &mut std::collections::VecDeque<serde_json::Value>,
+) -> Heard {
+    if reply["turn_id"].as_u64().is_some() {
+        let mut turn = reply.clone();
+        if let Some(o) = turn.as_object_mut() {
+            o.remove("answers");
+            o.remove("cancelled");
+        }
+        held.push_back(turn);
+    }
+    if reply["cancelled"].as_array().is_some_and(|c| c.iter().any(|t| t.as_u64() == Some(turn_id))) {
+        return Heard::Cancelled;
+    }
+    // `/stop` is its own turn, held above and closed after this one; the question it interrupts
+    // is not answered.
+    if reply["text"].as_str().is_some_and(|t| t.trim().to_ascii_lowercase().starts_with("/stop")) {
+        return Heard::Cancelled;
+    }
+    for a in reply["answers"].as_array().into_iter().flatten() {
+        if a["turn_id"].as_u64() == Some(turn_id) && a["request_id"].as_str() == Some(request_id) {
+            return Heard::Answer(a["answer"].as_str().map(str::to_string));
+        }
+    }
+    Heard::Nothing
+}
+
+/// E.ERASE2: put a question in front of the person (the harness `request` event: a card in this
+/// agent's pane with these options as buttons) and wait within the turn for the answer, which the
+/// desktop gives only on a poll and only while the turn is in flight. None for no answer: declined
+/// to send, cancelled, or the wait ran out.
+pub(crate) async fn ask_the_person<C, F>(
+    send: C,
+    session: &str,
+    turn_id: u64,
+    request_id: &str,
+    prompt: &str,
+    options: &[String],
+    wait: Duration,
+    held: &mut std::collections::VecDeque<serde_json::Value>,
+) -> Option<String>
+where
+    C: Fn(&'static str, serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let ev = serde_json::json!({ "kind": "request", "request_id": request_id, "prompt": prompt, "options": options });
+    if send(EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev })).await.is_err() {
+        return None;
+    }
+    // A poll keeps the session present; a status line keeps the agent from being shown as stuck,
+    // which the shell does after 90 quiet seconds -- it does not yet count an open question as
+    // waiting on the person (4c, agents/progress.rs:68-71).
+    let waiting = |s: &str| send(EVENT, serde_json::json!({ "session": s, "turn_id": turn_id, "event": { "kind": "status", "text": ASK_STATUS } }));
+    let _ = waiting(session).await;
+    let started = std::time::Instant::now();
+    let mut beat = std::time::Instant::now();
+    while started.elapsed() < wait {
+        tokio::time::sleep(ASK_POLL).await;
+        if beat.elapsed() >= ASK_STATUS_EVERY {
+            let _ = waiting(session).await;
+            beat = std::time::Instant::now();
+        }
+        let Ok(reply) = send(POLL, serde_json::json!({ "session": session })).await else {
+            return None;
+        };
+        match read_while_asking(&reply, turn_id, request_id, held) {
+            Heard::Nothing => {}
+            Heard::Answer(a) => return a,
+            Heard::Cancelled => return None,
+        }
+    }
+    None
+}
+
 /// E.STALL3: from 60 s on, the line that says where a running turn is -- its last stage and the
 /// trail that led there. None before then, so ordinary long turns stay quiet for their first minute.
 pub(crate) fn stalled_line(turn_id: u64, elapsed: Duration, trail: &mind_conversation::StageTrail) -> Option<String> {
@@ -749,6 +860,75 @@ mod status_tests {
             assert_eq!(status_event(&format!("{mark}the model's own words")), None, "{mark:?}");
         }
         assert_eq!(heartbeat_status("Thinking…", Duration::from_secs(61)), "Thinking… (60 s)");
+    }
+
+    /// E.ERASE2: only this turn's answer to this request counts; a turn handed over meanwhile is kept;
+    /// a cancel of this turn, or a `/stop`, is no answer.
+    #[test]
+    fn a_poll_while_asking_is_read_strictly() {
+        let mut held = std::collections::VecDeque::new();
+        let ans = |turn: u64, req: &str, a: &str| serde_json::json!({ "answers": [{ "turn_id": turn, "request_id": req, "answer": a }] });
+        assert_eq!(read_while_asking(&serde_json::json!({}), 5, "erase-1", &mut held), Heard::Nothing);
+        assert_eq!(read_while_asking(&ans(5, "erase-0", "Erase"), 5, "erase-1", &mut held), Heard::Nothing, "another request");
+        assert_eq!(read_while_asking(&ans(6, "erase-1", "Erase"), 5, "erase-1", &mut held), Heard::Nothing, "another turn");
+        assert_eq!(read_while_asking(&ans(5, "erase-1", "Erase"), 5, "erase-1", &mut held), Heard::Answer(Some("Erase".into())));
+        assert!(held.is_empty());
+        let mut other = ans(5, "erase-0", "Erase");
+        other["turn_id"] = serde_json::json!(99);
+        other["text"] = serde_json::json!("what's the weather");
+        assert_eq!(read_while_asking(&other, 5, "erase-1", &mut held), Heard::Nothing);
+        assert_eq!(held.len(), 1, "the handed-over turn was dropped");
+        assert_eq!(held[0]["turn_id"], 99);
+        assert!(held[0].get("answers").is_none(), "the held turn carries the answers along");
+        // 4c: answers ride the poll reply, not the turn in it -- one reply can carry both.
+        let both = serde_json::json!({ "turn_id": 101, "text": "hello", "answers": [{ "turn_id": 5, "request_id": "erase-1", "answer": "Erase" }] });
+        let before = held.len();
+        assert_eq!(read_while_asking(&both, 5, "erase-1", &mut held), Heard::Answer(Some("Erase".into())), "the answer beside a turn was lost");
+        assert_eq!(held.len(), before + 1, "the turn beside the answer was lost");
+        assert!(held.back().unwrap().get("answers").is_none());
+        assert_eq!(read_while_asking(&serde_json::json!({ "cancelled": [4, 5] }), 5, "erase-1", &mut held), Heard::Cancelled);
+        let stop = serde_json::json!({ "turn_id": 100, "text": "/stop" });
+        assert_eq!(read_while_asking(&stop, 5, "erase-1", &mut held), Heard::Cancelled);
+        assert_eq!(held.back().map(|t| t["turn_id"].clone()), Some(serde_json::json!(100)), "the /stop turn is closed after this one");
+    }
+
+    /// E.ERASE2: the question goes out as one `request` event with its options, a status line says
+    /// the agent is waiting, and the answer is read off later polls; with none, the wait ends empty.
+    #[tokio::test]
+    async fn a_question_is_asked_and_its_answer_read() {
+        type Calls = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, serde_json::Value)>>>;
+        let run = |polls: Vec<serde_json::Value>, wait: Duration| async move {
+            let calls: Calls = Default::default();
+            let polls = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(polls)));
+            let (c, p) = (calls.clone(), polls.clone());
+            let send = move |m: &'static str, params: serde_json::Value| {
+                let (c, p) = (c.clone(), p.clone());
+                async move {
+                    c.lock().unwrap().push((m, params));
+                    Ok(if m == POLL { p.lock().unwrap().pop_front().unwrap_or_else(|| serde_json::json!({})) } else { serde_json::json!({}) })
+                }
+            };
+            let mut held = std::collections::VecDeque::new();
+            let options = vec!["Keep".to_string(), "Erase".to_string()];
+            let got = ask_the_person(send, "s1", 5, "erase-1", "Erase the text?", &options, wait, &mut held).await;
+            let calls = calls.lock().unwrap().clone();
+            (got, calls, held)
+        };
+        let answered = vec![
+            serde_json::json!({}),
+            serde_json::json!({ "turn_id": 99, "text": "hi", "answers": [{ "turn_id": 5, "request_id": "erase-0", "answer": "Erase" }] }),
+            serde_json::json!({ "answers": [{ "turn_id": 5, "request_id": "erase-1", "answer": "Keep" }] }),
+        ];
+        let (got, calls, held) = run(answered, Duration::from_secs(5)).await;
+        assert_eq!(got.as_deref(), Some("Keep"));
+        assert_eq!(held.len(), 1);
+        let (m, first) = &calls[0];
+        assert_eq!(*m, EVENT);
+        assert_eq!(first["event"], serde_json::json!({ "kind": "request", "request_id": "erase-1", "prompt": "Erase the text?", "options": ["Keep", "Erase"] }));
+        assert!(calls.iter().any(|(m, p)| *m == EVENT && p["event"]["kind"] == "status"), "no waiting status: {calls:?}");
+        assert_eq!(calls.iter().filter(|(m, _)| *m == POLL).count(), 3);
+        let (none, _, _) = run(vec![], Duration::from_millis(20)).await;
+        assert_eq!(none, None, "no answer, no answer");
     }
 
     /// E.STALL3: quiet for the first minute; then the turn, its seconds, its last stage and trail.

@@ -13338,3 +13338,11 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - **Three needed a second try:** V1 first failed to compile (an unreachable arm); V2 first was a no-op; V4 survived until a shell lacking the field was a test case.
 - **Workspace:** 0 failures.
 - **Not tested:** the `serve` loop's select arm and the `held` pop are compiled on Linux but not run. The first desktop forget on 520 tests them, after 4c's security review.
+
+**E.ERASE2: security review by 4c of c77364d: APPROVE, no blockers.** Three should-fixes, each failing toward erasing nothing, are now done:
+1. A `cancelled` id drops a HELD turn, so it is not run afterwards.
+2. `ended` naming this turn's conversation ends the wait, and `ended` is stripped from held turns.
+3. A `/stop` ends the question only when it is for this turn's conversation (`read_while_asking` and `ask_the_person` now take the conversation).
+- **Mutants:** four compiling mutants, all killed. Linux `cargo check -p mind-core --tests` passes on staging (target/debug removed). Workspace: 0 failures.
+- **Nit, the shell's to fix:** a click after the 110 s window but before the turn ends is accepted on screen and ignored by the Mind. The Mind's reply already says nothing was erased. 4c is logging a shell follow-up.
+- **4c asked that the first real forget on 520 erase a throwaway belief.**

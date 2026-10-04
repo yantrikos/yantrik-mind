@@ -610,7 +610,8 @@ async fn serve(
                     done = &mut thinking => break done,
                     Some(ask) = ask_rx.recv() => {
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
-                        let answer = ask_the_person(send, session, turn_id, &ask.request_id, &ask.prompt, &ask.options, ASK_WAIT, &mut held).await;
+                        let conversation = turn["conversation"].as_str().unwrap_or_default();
+                        let answer = ask_the_person(send, session, turn_id, conversation, &ask.request_id, &ask.prompt, &ask.options, ASK_WAIT, &mut held).await;
                         eprintln!("[harness] turn {turn_id}: question {} answered: {}", ask.request_id, answer.as_deref().unwrap_or("(nothing)"));
                         let _ = ask.reply.send(answer);
                     }
@@ -717,6 +718,7 @@ pub(crate) enum Heard {
 pub(crate) fn read_while_asking(
     reply: &serde_json::Value,
     turn_id: u64,
+    conversation: &str,
     request_id: &str,
     held: &mut std::collections::VecDeque<serde_json::Value>,
 ) -> Heard {
@@ -725,15 +727,25 @@ pub(crate) fn read_while_asking(
         if let Some(o) = turn.as_object_mut() {
             o.remove("answers");
             o.remove("cancelled");
+            o.remove("ended");
         }
         held.push_back(turn);
     }
-    if reply["cancelled"].as_array().is_some_and(|c| c.iter().any(|t| t.as_u64() == Some(turn_id))) {
+    // A turn the desktop stopped while it was held here is not run afterwards (4c's review).
+    let cancelled: Vec<u64> = reply["cancelled"].as_array().into_iter().flatten().filter_map(|t| t.as_u64()).collect();
+    held.retain(|t| !t["turn_id"].as_u64().is_some_and(|id| cancelled.contains(&id)));
+    if cancelled.contains(&turn_id) {
         return Heard::Cancelled;
     }
-    // `/stop` is its own turn, held above and closed after this one; the question it interrupts
-    // is not answered.
-    if reply["text"].as_str().is_some_and(|t| t.trim().to_ascii_lowercase().starts_with("/stop")) {
+    // `stop_agent` ends this turn's conversation: no answer is coming.
+    if reply["ended"].as_array().is_some_and(|e| e.iter().any(|c| c.as_str() == Some(conversation))) {
+        return Heard::Cancelled;
+    }
+    // `/stop` for THIS conversation is its own turn, held above and closed after this one; the
+    // question it interrupts is not answered. A `/stop` for another conversation is only held.
+    if reply["text"].as_str().is_some_and(|t| t.trim().to_ascii_lowercase().starts_with("/stop"))
+        && reply["conversation"].as_str() == Some(conversation)
+    {
         return Heard::Cancelled;
     }
     for a in reply["answers"].as_array().into_iter().flatten() {
@@ -752,6 +764,7 @@ pub(crate) async fn ask_the_person<C, F>(
     send: C,
     session: &str,
     turn_id: u64,
+    conversation: &str,
     request_id: &str,
     prompt: &str,
     options: &[String],
@@ -782,7 +795,7 @@ where
         let Ok(reply) = send(POLL, serde_json::json!({ "session": session })).await else {
             return None;
         };
-        match read_while_asking(&reply, turn_id, request_id, held) {
+        match read_while_asking(&reply, turn_id, conversation, request_id, held) {
             Heard::Nothing => {}
             Heard::Answer(a) => return a,
             Heard::Cancelled => return None,
@@ -868,27 +881,37 @@ mod status_tests {
     fn a_poll_while_asking_is_read_strictly() {
         let mut held = std::collections::VecDeque::new();
         let ans = |turn: u64, req: &str, a: &str| serde_json::json!({ "answers": [{ "turn_id": turn, "request_id": req, "answer": a }] });
-        assert_eq!(read_while_asking(&serde_json::json!({}), 5, "erase-1", &mut held), Heard::Nothing);
-        assert_eq!(read_while_asking(&ans(5, "erase-0", "Erase"), 5, "erase-1", &mut held), Heard::Nothing, "another request");
-        assert_eq!(read_while_asking(&ans(6, "erase-1", "Erase"), 5, "erase-1", &mut held), Heard::Nothing, "another turn");
-        assert_eq!(read_while_asking(&ans(5, "erase-1", "Erase"), 5, "erase-1", &mut held), Heard::Answer(Some("Erase".into())));
+        assert_eq!(read_while_asking(&serde_json::json!({}), 5, "c-main", "erase-1", &mut held), Heard::Nothing);
+        assert_eq!(read_while_asking(&ans(5, "erase-0", "Erase"), 5, "c-main", "erase-1", &mut held), Heard::Nothing, "another request");
+        assert_eq!(read_while_asking(&ans(6, "erase-1", "Erase"), 5, "c-main", "erase-1", &mut held), Heard::Nothing, "another turn");
+        assert_eq!(read_while_asking(&ans(5, "erase-1", "Erase"), 5, "c-main", "erase-1", &mut held), Heard::Answer(Some("Erase".into())));
         assert!(held.is_empty());
         let mut other = ans(5, "erase-0", "Erase");
         other["turn_id"] = serde_json::json!(99);
         other["text"] = serde_json::json!("what's the weather");
-        assert_eq!(read_while_asking(&other, 5, "erase-1", &mut held), Heard::Nothing);
+        assert_eq!(read_while_asking(&other, 5, "c-main", "erase-1", &mut held), Heard::Nothing);
         assert_eq!(held.len(), 1, "the handed-over turn was dropped");
         assert_eq!(held[0]["turn_id"], 99);
         assert!(held[0].get("answers").is_none(), "the held turn carries the answers along");
         // 4c: answers ride the poll reply, not the turn in it -- one reply can carry both.
         let both = serde_json::json!({ "turn_id": 101, "text": "hello", "answers": [{ "turn_id": 5, "request_id": "erase-1", "answer": "Erase" }] });
         let before = held.len();
-        assert_eq!(read_while_asking(&both, 5, "erase-1", &mut held), Heard::Answer(Some("Erase".into())), "the answer beside a turn was lost");
+        assert_eq!(read_while_asking(&both, 5, "c-main", "erase-1", &mut held), Heard::Answer(Some("Erase".into())), "the answer beside a turn was lost");
         assert_eq!(held.len(), before + 1, "the turn beside the answer was lost");
         assert!(held.back().unwrap().get("answers").is_none());
-        assert_eq!(read_while_asking(&serde_json::json!({ "cancelled": [4, 5] }), 5, "erase-1", &mut held), Heard::Cancelled);
-        let stop = serde_json::json!({ "turn_id": 100, "text": "/stop" });
-        assert_eq!(read_while_asking(&stop, 5, "erase-1", &mut held), Heard::Cancelled);
+        // 4c's review: a cancel of a HELD turn drops it; `ended` for this conversation ends the wait;
+        // a /stop counts only for this conversation.
+        assert!(held.iter().any(|t| t["turn_id"] == 99));
+        assert_eq!(read_while_asking(&serde_json::json!({ "cancelled": [99] }), 5, "c-main", "erase-1", &mut held), Heard::Nothing);
+        assert!(!held.iter().any(|t| t["turn_id"] == 99), "a cancelled held turn would still run");
+        assert_eq!(read_while_asking(&serde_json::json!({ "cancelled": [4, 5] }), 5, "c-main", "erase-1", &mut held), Heard::Cancelled);
+        assert_eq!(read_while_asking(&serde_json::json!({ "ended": ["c-other"] }), 5, "c-main", "erase-1", &mut held), Heard::Nothing);
+        assert_eq!(read_while_asking(&serde_json::json!({ "ended": ["c-main"] }), 5, "c-main", "erase-1", &mut held), Heard::Cancelled);
+        let elsewhere = serde_json::json!({ "turn_id": 102, "text": "/stop", "conversation": "c-other", "ended": ["c-x"] });
+        assert_eq!(read_while_asking(&elsewhere, 5, "c-main", "erase-1", &mut held), Heard::Nothing, "another conversation's /stop");
+        assert!(held.back().is_some_and(|t| t["turn_id"] == 102 && t.get("ended").is_none()));
+        let stop = serde_json::json!({ "turn_id": 100, "text": "/stop", "conversation": "c-main" });
+        assert_eq!(read_while_asking(&stop, 5, "c-main", "erase-1", &mut held), Heard::Cancelled);
         assert_eq!(held.back().map(|t| t["turn_id"].clone()), Some(serde_json::json!(100)), "the /stop turn is closed after this one");
     }
 
@@ -910,7 +933,7 @@ mod status_tests {
             };
             let mut held = std::collections::VecDeque::new();
             let options = vec!["Keep".to_string(), "Erase".to_string()];
-            let got = ask_the_person(send, "s1", 5, "erase-1", "Erase the text?", &options, wait, &mut held).await;
+            let got = ask_the_person(send, "s1", 5, "c-main", "erase-1", "Erase the text?", &options, wait, &mut held).await;
             let calls = calls.lock().unwrap().clone();
             (got, calls, held)
         };

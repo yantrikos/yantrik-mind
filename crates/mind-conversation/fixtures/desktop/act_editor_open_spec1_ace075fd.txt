@@ -1,0 +1,20 @@
+Text Editor — spec-1.md, 19 lines, saved · tab 2 of 2
+accepted: True, settled: True
+revision: 44f4a6afd899c14b
+{
+  "bytes": 2117,
+  "characters": 2083,
+  "language": "Markdown",
+  "lines": 19,
+  "matches_disk": true,
+  "modified": false,
+  "notice": "",
+  "on_disk": true,
+  "path": "/home/yantrik/mdg/spec-1.md",
+  "tab": 1,
+  "tabs": 2,
+  "title": "spec-1.md",
+  "view_status": ""
+}
+state: {"active_tab":1,"busy":false,"bytes":2117,"characters":2083,"content_hidden":null,"cursor_column":1,"cursor_line":1,"dialog":0,"dialog_is":"","find_count":0,"find_query":"","language":"Markdown","lines":19,"modified":false,"notice":"","path":"/home/yantrik/mdg/spec-1.md","recovery":"Draft recovery ready","replacement":"","tabs":[{"modified":false,"name":"MDG-spec.md","path":"/home/yantrik/mdg/MDG-spec.md"},{"modified":false,"name":"spec-1.md","path":"/home/yantrik/mdg/spec-1.md"}],"title":"spec-1.md"}
+(more state: `yos describe editor`)

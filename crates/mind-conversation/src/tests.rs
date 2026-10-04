@@ -17928,6 +17928,76 @@ mod desktop_consent_and_stall_wiring {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// E.STALL2, on turn 665's real prompt (VM 520, MDG): "e.g." is not a mailbox, and a task brief
+    /// is not a mail lookup; real mail questions still are.
+    #[test]
+    fn a_task_brief_with_e_g_is_not_a_mail_lookup() {
+        const P: &str = include_str!("../fixtures/desktop/mdg_prompt_665.txt");
+        let one = P.replace('\n', " ");
+        // Its own two triggers, short enough for the fast path: the first sentence ("what") and the
+        // CONSTRAINT clause ("e.g."), both verbatim.
+        let first = &one[..one.find('.').unwrap() + 1];
+        let eg = &one[one.find(" CONSTRAINT (e.g.").unwrap()..one.find(" QUANTITY").unwrap()];
+        let short = format!("{first}{eg}");
+        assert!(short.chars().count() < 300, "{short}");
+        assert_eq!(crate::mail_lookup_intent(&one), None, "the whole brief");
+        assert_eq!(crate::mail_lookup_intent(&short), None, "e.g. is not e mail: {short}");
+        assert!(crate::mail_lookup_intent("find the hotel e mail from Marriott").is_some());
+        assert!(crate::mail_lookup_intent("check my email for the Lisbon dates").is_some());
+        let long = format!("check my email for the Lisbon dates. {}", "Some more words about the trip. ".repeat(12));
+        assert!(long.chars().count() > 300 && crate::mail_lookup_intent(&long).is_none(), "a long message is not a lookup");
+    }
+
+    /// E.STALL2 through the turn: a mail question whose answer never comes ends the turn within the
+    /// bound, plainly, instead of waiting (VM 520: a turn sat in here 9 minutes with no log line).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_mail_fast_path_cannot_wedge_a_turn() {
+        struct Slow;
+        impl LLMBackend for Slow {
+            fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                anyhow::bail!("too late")
+            }
+            fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                self.chat(m, c, t)
+            }
+            fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+                Ok(t.len() / 4)
+            }
+            fn backend_name(&self) -> &str {
+                "slow"
+            }
+        }
+        let slow: Arc<dyn LLMBackend> = Arc::new(Slow);
+        let pool = InferencePool::new(Arc::clone(&slow), 1).with_provider("slow").with_private_backend(slow, "slow");
+        let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM");
+        let t0 = std::time::Instant::now();
+        let r = tokio::time::timeout(std::time::Duration::from_secs(2), conv.handle_turn_as("check my email for the Lisbon dates", TurnIdentity::primary())).await;
+        let reply = r.expect("the turn waited past the bound").unwrap();
+        assert_eq!(reply, crate::MAIL_TOOK_TOO_LONG, "after {:?}", t0.elapsed());
+    }
+
+    /// E.ARENA1-F64 through the loop, the MDG turn's shape: the spec opened, then an answer. The model's
+    /// next prompt holds the spec's text, read by the one description the loop asked for itself; a
+    /// refused open and an editor `new` are not followed by a look.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_editor_open_brings_the_files_text() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let describes = |r: &Run| r.reached.iter().filter(|(n, _)| n.ends_with("os_describe")).count();
+        let prompt = "Read ~/mdg/spec-1.md and tell me what MDG is.";
+        let r = run_with(prompt, vec![open(), Step::Say("MDG is a semantic language.")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        assert!(r.prompts.iter().any(|p| p.contains("not the semantic definition.")), "the spec's text never reached the model");
+        // The shape of a desktop refusal as it reaches the loop (4c's capture of rf61c s1).
+        let refused = "That didn't go through: execution failed: failed (exit 1) yos: editor.app.act refused: there is no file at /home/yantrik/mdg/spec-1.md";
+        let no = run_with(prompt, vec![open(), Step::Say("It is not there.")], vec![DESC, DESC, DESC], vec![refused]).await;
+        assert_eq!(describes(&r), describes(&no) + 1, "one look of its own after the open that went through: {:?}", r.reached);
+        let wrote = "Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 1 line, unsaved \u{b7} tab 2 of 2";
+        let new = run_with(prompt, vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "x")), Step::Say("ok")], vec![DESC, DESC, DESC], vec![wrote]).await;
+        assert_eq!(describes(&new), describes(&no), "an editor new was followed by a look");
+    }
+
     /// E.ARENA1-F62 through the loop, L2-rf61c's s4-s12: index.html saved, a stylesheet written in a new
     /// tab, and the model answering. The unsaved note's call saves to the requested style.css; no unsaved
     /// note sends the stylesheet to the index already saved.

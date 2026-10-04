@@ -13101,3 +13101,74 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
   - It started, so the switch took: its `__enter__` refuses to start otherwise.
   - Afterwards the shell shows `approvals_off_for_test.on: False` and `pending_approvals: []`, and there was no "still off" warning.
 - 4c holds the public nightly for an OS-side Memory-screen regression (#611's listing behind the companion queue). So this result applies to the build after it.
+
+## E.ARENA1-F64 — PREREG: an editor `open` brings the file's text into the work log
+
+**Seen on VM 520, MDG turns 406 and 01:39:31 (4c, Mind dff5773, OS ace075fd):** asked to read a spec and write ~/mdg/grammar.md, the model opened the file again and again and never described the editor. The second time it was told to "open, then describe the editor". Nothing was read and nothing was written.
+- **The captures** (fixtures `act_editor_open_spec1_ace075fd.txt`, `describe_editor_spec1_ace075fd.txt`):
+  - `editor.open`'s result carries no `content`. It ends with "(more state: `yos describe editor`)".
+  - The description carries `content` whole: 2,083 characters, which F52 keeps up to 8,000.
+- **Not the 900-character work-log cut** that 4c and I first supposed: the text was never in the result at all.
+- **Why the model did not describe is not seen.** Candidate: F57's repeat note, given while the goal is missing, names the write calls, not the read.
+
+**Plan:**
+1. After an editor `open` (or the shell's `editor_open`) that was sent and ran, the loop describes the editor itself, as F23 looks again after an unsettled action.
+2. It appends the description's `content` to the open's observation, introduced as the file's text.
+3. That step's work-log entry gets `CONTENT_KEPT` room.
+4. If the description says the content was cut (`content_cut`, from #617), its `read_with` hint is passed on.
+5. No extra look when the description has no `content`.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **Unit test on the real pair:**
+   - the open observation plus the description gives a text whose work-log entry holds the spec's last line ("…per computational unit.") and its first heading;
+   - the plain open alone does not.
+2. **Loop:** open spec-1.md, then answer. The model's next prompt holds the spec's last line, and the scripted desktop saw exactly one `os_describe {"app":"editor"}` the model did not ask for.
+3. **Not looked:**
+   - an `open` that failed (refused);
+   - an editor `new`;
+   - a description without `content`, which leaves the observation unchanged.
+
+**F64: built.**
+- **The change:** `desktop::opens_a_file` and `with_opened_text`, plus the loop's own look after an `open` that went through, with `CONTENT_KEPT + 1000` work-log room.
+- **Two defects found in my own first draft, before any box saw it:**
+  1. The loop gets the CONDENSED description: a cut head, then `content` re-added on its own line. So the first draft's whole-JSON parse returned None in the loop while the unit test, fed the raw capture, passed. The unit test now runs both forms, and fields are read line by line.
+  2. The scripted desktop had one description, already used by an earlier look. The loop test now compares against the refused-open run: exactly one extra look.
+- **Prereg correction:** kill criterion 1 named "…per computational unit." as the spec's last line. That sentence is in section 2; the last line is "…not the semantic definition.", which is what the tests use.
+- **Six compiling mutants:** five killed (look off, no room, any file, refused looked, no cut hint).
+  - **The sixth survived and was equivalent:** reading the field from the last line instead of the first. `find_map` skips the half line that does not parse, so `.rev()` is removed.
+  - A meaningful replacement, "take the first content line even if it does not parse", is killed.
+- **Tooling note: the mutant script's restore kept the backup's older mtime.** So the first plain test run after a mutant run reused the last mutant's binary: Q4b's failure showed up as a "baseline" failure. Mutant runs themselves rebuild from the current files, so their kills stand. The restore now refreshes the mtime.
+
+## E.STALL2 — PREREG: a task message is not a mail lookup, and the mail fast-path cannot wedge a turn
+
+**Seen on VM 520, MDG turns 665 and 667 (4c, dff5773):** the harness line was logged, then nothing (no `route=`) for over 9 minutes. 665 ended only when a `new_chat` arrived.
+- **Cause found:** `mail_lookup_intent` counts the word "e" as naming a mailbox (meant for "e mail"). The prompt's "(e.g. VRAM<24GB)" plus "here is what you need" sent the whole 1,757-character task down the mail fast-path.
+  - A probe on the real prompt: the mail detector matches the whole, the head and the tail; no other pre-route detector matches.
+  - Staging answered the prompt's first 900 characters with "No mail accounts are configured…".
+  - An 1,800-character neutral prompt routes fine, so length is not the trigger.
+- **Where inside the fast path 520 waited is unknown:** `mail_search_all`, or the grounded chat. No TCP was open, and every thread was parked.
+
+**Plan:**
+1. "e" names a mailbox only when the next word is "mail".
+2. The mail fast-path takes only a question under 300 characters.
+3. The fast path, from search to grounded answer, is bounded at 90 s. Past that, the turn says so plainly instead of waiting. It logs a line when it is taken and when it times out.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. `mail_lookup_intent` on the real 665 prompt gives None. "find the hotel e mail from Marriott" and "check my email for the Lisbon dates" still match.
+2. A 400-character message that names email and asks "what" gives None.
+3. A fast path whose search never returns ends the turn within the bound, with the plain reply. Tested with a paused clock or a short test bound.
+
+**E.STALL2: built.**
+- **The change:**
+  - "e" names a mailbox only as "e mail".
+  - The mail fast-path takes messages of 300 characters or fewer.
+  - It logs `route=mail_fastpath`, and search plus answer are bounded at 90 s (300 ms under test), ending with a plain "didn't answer in time" reply.
+- **Tests:** the real 665 prompt, and a verbatim excerpt that has its two triggers under 300 characters; real mail questions still match; a fast path whose model sleeps past the bound ends with the plain reply.
+- **Four compiling mutants:** all killed (e alone, no length guard, no bound, empty reply).
+  - **S1 first survived:** the test's 290-character head did not contain the "e.g.". The excerpt now does.
+- **Workspace:** 0 failures.
+- **But E.STALL2 may not be what wedged 520.** A second stall, turn 676 at 02:31:53 (2,690 characters, no mail words), also logged nothing before `route=`.
+  - Locally, through the whole pipeline with a scripted model, BOTH 665 and 676 route at once (676 as `route=agentic`).
+  - Staging answers both: 665 via the mail path, 676 normally in 29 s.
+  - So the 520 stall needs something only the desktop service has. That 665 took the mail path on 520 was inferred, not seen: no line was logged.
+  - E.STALL2 stands on its own, since a task brief must not be a mail lookup, but it is not claimed to fix the wedge.

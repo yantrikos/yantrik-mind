@@ -1,0 +1,72 @@
+Text Editor — spec-1.md, 19 lines, saved · tab 2 of 2
+revision: 44f4a6afd899c14b
+{
+  "active_tab": 1,
+  "busy": false,
+  "bytes": 2117,
+  "characters": 2083,
+  "content": "# Multidimensional Grammar (MDG) — A Machine-Native Universal Semantic Language\n\nStatus: Conceptual research specification · Version 0.1 · Author: Pranab Sarkar\nPurpose: Explore a representation and grammar designed specifically for AI systems rather than human languages.\n\n## 1. Vision\nMDG is a proposed machine-native language in which information is not primarily represented as a sequence of human-readable words. Central idea: represent meaning as a multidimensional, compositional structure and only serialize it into tokens when required by a computational architecture. MDG does not replace English, Bengali, programming languages or JSON; those become front ends to MDG.\n\nArchitecture: Human language / code / image / audio / tools → Semantic Encoder → Multidimensional Grammar → Semantic Structure → Learned Discrete Encoding → LLM → Learned Discrete Encoding → MDG → Semantic Decoder → Human language / code / image / audio / actions.\n\n## 2. Core design principle\nOptimized for: semantic density, compositionality, precision, machine reasoning, temporal reasoning, causal reasoning, uncertainty, provenance, multimodality, compression, efficient transformer processing. The objective is not fewer words; it is more recoverable information and useful meaning per computational unit.\n\n## 3. Why not a better tokenizer?\nA tokenizer still represents language as a sequence (\"The | database | remembers | the | user | 's | preference\"). MDG asks what if the underlying representation did not need to resemble language at all: ENTITY(user) RELATION(prefers) OBJECT(database) STATE(memory), eventually compressed into learned machine codes.\n\n## 4. MDG is not primarily a sequence\nThe fundamental object is a semantic structure (a graph: TIME; ENTITY–RELATION–ENTITY; STATE→PROPERTY; CAUSE→EVENT→ACTION→GOAL). It may contain entities, relations, states, events, actions, properties, goals, constraints, time, space, quantities, causality, uncertainty, provenance, modality, conflict. Serialization order for a transformer is an implementation detail, not the semantic definition.\n",
+  "content_hidden": null,
+  "cursor_column": 1,
+  "cursor_line": 1,
+  "dialog": 0,
+  "dialog_is": "",
+  "find_count": 0,
+  "find_query": "",
+  "language": "Markdown",
+  "lines": 19,
+  "modified": false,
+  "notice": "",
+  "path": "/home/yantrik/mdg/spec-1.md",
+  "recovery": "Draft recovery ready",
+  "replacement": "",
+  "tabs": [{"modified": false, "name": "MDG-spec.md", "path": "/home/yantrik/mdg/MDG-spec.md"}, {"modified": false, "name": "spec-1.md", "path": "/home/yantrik/mdg/spec-1.md"}],
+  "title": "spec-1.md"
+}
+  act: new(text?)  [standard, settles on return]
+       Open a new tab and make it the active one, empty or holding the text given. Nothing is written to disk until `save_as` gives it a path; up to eight tabs can be open.
+         text?: string — What the new tab holds, up to 1 MiB and 20,000 lines of UTF-8 with no control characters. Leave it out for an empty tab.
+  act: open(path)  [standard, settles on return]
+       Open the UTF-8 text file at this path in a tab and make it active; a file already open is brought forward instead of opened twice. The file is not changed.
+         path: string — Absolute path to the file, or one starting `~/`. Up to 1 MiB of UTF-8 text; a binary or larger file is refused and nothing is opened.
+  act: save()  [standard, settles on return]
+       Write the active tab back to the file it was opened from and check the bytes on disk. A tab with no file is refused — give `save_as` a path. When the editor is asking about unsaved changes, this is the answer that writes the tab and closes it.
+  act: save_as(path, overwrite?)  [standard, settles on return]
+       Write the active tab to this path and keep the tab on it from now on. A file already at that path is refused unless `overwrite` says to replace it.
+         path: string — Absolute path of the file to write, or one starting `~/`. Its folder must exist; a file already at the path needs `overwrite=true`.
+         overwrite?: boolean — Replace a file that is already at that path. Leave it out and an existing file is refused rather than overwritten.
+  act: show()  [standard, settles on return]
+       Bring the Editor window to the front. Nothing in any tab is read or changed.
+  act: close()  [standard, settles on return]
+       Close the active tab. A tab with unsaved changes is not closed: the window asks, and `save`, `discard` or `cancel` answers it. The last tab closed leaves an empty one.
+  act: cancel()  [standard, settles on return]
+       Dismiss whichever dialog is open and leave every tab exactly as it was. Nothing is closed, saved or discarded.
+  act: discard()  [sensitive, settles on return]
+       Throw away the unsaved changes in the tab the window is asking about and close it. The text that was never saved is gone and is not recoverable.
+  act: find(text)  [standard, settles on return]
+       Search the active tab for this text, open the find bar, and select the first match. It reads the document and changes nothing in it.
+         text: string — The text to look for, matched literally. Case is ignored unless the find bar's match-case box is ticked; an empty query clears the matches.
+  act: find-next()  [standard, settles on return]
+       Move the selection to the next match of the current `find` query, wrapping round at the end of the document. Nothing is changed.
+  act: find-prev()  [standard, settles on return]
+       Move the selection to the previous match of the current `find` query, wrapping round at the start of the document. Nothing is changed.
+  act: replace_text(text)  [standard, settles on return]
+       Set the text that `replace` and `replace-all` will put in place of a match. By itself it changes nothing in the document.
+         text: string — What each match becomes. An empty string is allowed and deletes the match instead.
+  act: replace()  [standard, settles on return]
+       Replace the one match the selection is on with the `replace_text` text. The tab is changed in the window; nothing is written until `save`.
+  act: replace-all()  [standard, settles on return]
+       Replace every match of the current `find` query in the active tab at once. The tab is changed in the window; nothing is written until `save`.
+  act: set_content(text)  [sensitive, settles on return]
+       Replace everything in the active tab with this text. The file on disk is untouched until `save`; whatever was in the tab and unsaved is gone. To start a document with text, `new` with `text` does it without replacing anything.
+         text: string — The tab's entire new text, up to 1 MiB and 20,000 lines of UTF-8 with no control characters. An empty string empties the tab.
+  act: append(text)  [standard, settles on return]
+       Add this text to the end of the active tab; on a new, empty tab it is the whole text. Nothing already in the tab is changed, and the file on disk is untouched until `save`.
+         text: string — The text to add, exactly as given: start it with a newline to begin a new line. The whole tab has to stay within 1 MiB and 20,000 lines.
+  act: undo()  [standard, settles on return]
+       Take back the last change to the active tab, including a whole-tab `set_content` or `replace-all`. Up to 64 steps are kept per tab and none of it touches the file.
+  act: redo()  [standard, settles on return]
+       Put back the change `undo` took off the active tab. Editing the tab in any other way discards what redo was holding.
+  act: select_tab(index)  [standard, settles on return]
+       Make one of the open tabs the active one, by its position in `describe.tabs`. Nothing is saved, closed or changed.
+         index: number — Which tab, counting from 0 in the order `describe.tabs` lists them; `describe.active_tab` is the one in front now.

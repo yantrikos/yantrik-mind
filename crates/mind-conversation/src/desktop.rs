@@ -850,6 +850,42 @@ pub(crate) fn save_took(obs: &str) -> bool {
     (head.contains("editing \"") || head.contains("Text Editor \u{2014}")) && !head.contains(", unsaved")
 }
 
+/// E.ARENA1-F64: is this call an editor `open` of a file (the editor's own, or the shell's twin)?
+pub(crate) fn opens_a_file(tool: &str, args: &serde_json::Value) -> bool {
+    act_target(tool, args).is_some_and(|(app, action)| {
+        (app == "editor" && action == "open") || (app == TWIN_HOST && action == "editor_open")
+    })
+}
+
+/// E.ARENA1-F64: the open's answer with the file's text added from the editor's description. The
+/// open itself carries none -- "(more state: `yos describe editor`)" -- and on VM 520 (MDG, 4 Oct)
+/// the model opened the spec again and again and never described, so nothing was read. Read field
+/// by field, because what reaches the loop is the CONDENSED description (a cut head, then `content`
+/// re-added on its own line) -- not one JSON object -- and its `path` is past the cut; the file is
+/// named by the header line instead. None when there is no text, or the active file is another.
+pub(crate) fn with_opened_text(obs: &str, opened: &str, description: &str) -> Option<String> {
+    // The head's cut can leave a half `"content": "…` line before the whole one re-added after it:
+    // the first line that parses is the field.
+    let field = |key: &str| -> Option<serde_json::Value> {
+        let marker = format!("\"{key}\": ");
+        description
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&marker))
+            .find_map(|l| serde_json::from_str(l.trim_start()[marker.len()..].trim_end().trim_end_matches(',')).ok())
+    };
+    let content = field("content")?.as_str().filter(|c| !c.trim().is_empty())?.to_string();
+    let name = opened.trim_end_matches('/').rsplit('/').next().unwrap_or(opened);
+    if !description.lines().next()?.contains(&format!("\u{2014} {name},")) {
+        return None;
+    }
+    let cut = match (field("content_cut").and_then(|c| c.as_bool()), field("read_with")) {
+        (Some(true), Some(serde_json::Value::String(how))) => format!("\n(the text above is cut there; for the rest: editor {how})"),
+        (Some(true), _) => "\n(the text above is cut there)".to_string(),
+        _ => String::new(),
+    };
+    Some(format!("{obs}\n(the text of {opened}, from the editor's description:)\n{content}{cut}"))
+}
+
 /// E.ARENA1-F12: said once, before a turn ends with the document unsaved.
 pub(crate) fn unsaved_nudge(step: usize, requested: Option<&str>) -> String {
     // E.ARENA1-F58: the call to copy, and never a folder as the file (F51's rule). VM 520, E.LONG1
@@ -2675,6 +2711,33 @@ mod tests {
         assert_eq!(command_first(plain), None, "no result JSON: used as it came");
         let other = "Done \u{2014} x\naccepted: True, settled: True\n{\n  \"path\": \"/home\"\n}";
         assert_eq!(command_first(other), None, "a result that is not a command's");
+    }
+
+    /// E.ARENA1-F64, on the real pair from VM 520 (MDG): `open` carries no text; with the description's
+    /// `content` added, the work-log entry holds the spec's first heading and its last line.
+    #[test]
+    fn an_opened_file_brings_its_text() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let (first, last) = ("# Multidimensional Grammar (MDG)", "not the semantic definition.");
+        let plain = work_log_entry(1, ACT, OPEN, true, 900, "");
+        assert!(!plain.contains(last) && !plain.contains(first), "the open alone has no text");
+        // As the loop gets it: condensed at the MCP boundary (the head cut, `content` kept on its line).
+        let condensed = bound_mcp_output_for(DESC, true, None);
+        assert!(condensed.contains(CONDENSED_MARK), "the fixture is condensed on the way in");
+        for d in [DESC, condensed.as_str()] {
+            let with = with_opened_text(OPEN, "/home/yantrik/mdg/spec-1.md", d).expect("the description has content");
+            let entry = work_log_entry(1, ACT, &with, true, CONTENT_KEPT + 1000, "");
+            assert!(entry.contains(first) && entry.contains(last), "{entry}");
+        }
+        assert_eq!(with_opened_text(OPEN, "~/mdg/spec-2.md", DESC), None, "the active file is another one");
+        let no_content = DESC.replacen("\"content\": \"", "\"content_was\": \"", 1);
+        assert_eq!(with_opened_text(OPEN, "~/mdg/spec-1.md", &no_content), None);
+        let cut = DESC.replacen("\"busy\": false,", "\"busy\": false,\n  \"content_cut\": true,\n  \"read_with\": \"read from_line 62\",", 1);
+        assert!(with_opened_text(OPEN, "~/mdg/spec-1.md", &cut).unwrap().ends_with("for the rest: editor read from_line 62)"));
+        assert!(opens_a_file(ACT, &serde_json::json!({"app": "editor", "action": "open", "args": {"path": "~/a.md"}})));
+        assert!(opens_a_file(ACT, &serde_json::json!({"app": "shell", "action": "editor_open", "args": {"path": "~/a.md"}})));
+        assert!(!opens_a_file(ACT, &serde_json::json!({"app": "editor", "action": "new", "args": {"text": "x"}})));
     }
 
     /// E.ARENA1-F62, L2-rf61c's shape: index.html saved, a stylesheet in the new tab. The unsaved note's

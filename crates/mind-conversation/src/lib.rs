@@ -3820,10 +3820,24 @@ fn photo_followup_strong(text: &str) -> bool {
 /// Member-path photo intent, looser than photo_request: family members ask in event language
 /// ("get one from Aadrisha's last birthday") with no photo-noun at all. Verb + event/photo word →
 /// hand the WHOLE ask to retrieval (it stop-filters and resolves people itself).
+/// E.STALL2: the longest message the mail fast-path takes; anything longer goes to the agent.
+const MAIL_QUESTION_MAX: usize = 300;
+
+/// E.STALL2: how long the mail fast-path may take, search and answer together.
+const MAIL_FASTPATH_MS: u64 = if cfg!(test) { 300 } else { 90_000 };
+
+/// E.STALL2: what the person is told when the mail search did not answer in time.
+const MAIL_TOOK_TOO_LONG: &str =
+    "I started searching your mail, but it didn't answer in time, so I stopped rather than keep you waiting. Ask again in a moment.";
+
 /// "Find/search my mail for X", "what's my booking/reservation/confirmation" → the keyword to
 /// full-mailbox-search. Returns the most distinctive term (proper noun preferred) so the IMAP
 /// TEXT search matches. None when it's not a mail-lookup ask.
 fn mail_lookup_intent(text: &str) -> Option<String> {
+    // E.STALL2: a mail lookup is a question, not a task brief that happens to mention mail.
+    if text.trim().chars().count() > MAIL_QUESTION_MAX {
+        return None;
+    }
     let l = text.trim().to_lowercase();
 
     // Whole words, not substrings. `contains("order")` also fires on "border", "reorder",
@@ -3839,9 +3853,13 @@ fn mail_lookup_intent(text: &str) -> Option<String> {
     // mail, which is why they were here — but they are also ordinary words about the world.
     // "Click the Place order button" is not a question about mail, and reading it as one
     // took the mind off its tools entirely for every e-commerce page it was ever shown.
-    let names_a_mailbox = ["mail", "email", "e", "inbox", "mailbox", "gmail"]
-        .iter()
-        .any(|w| has(w));
+    // E.STALL2: "e" names a mailbox only as "e mail" -- alone it was every "e.g." (VM 520, MDG turn
+    // 665: "(e.g. VRAM<24GB)" with "here is what you need" took a 1,757-character task to mail).
+    let e_mail = words.windows(2).any(|p| p[0] == "e" && p[1] == "mail");
+    let names_a_mailbox = e_mail
+        || ["mail", "email", "inbox", "mailbox", "gmail"]
+            .iter()
+            .any(|w| has(w));
 
     let lookup_word = [
         "search", "find", "check", "read", "what", "when", "where", "which", "dates", "hotel",
@@ -14198,6 +14216,24 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 None => obs,
             };
+            // E.ARENA1-F64: an editor `open` that went through brings the file's text with it.
+            let mut opened_text = false;
+            let obs = match desktop::opens_a_file(&tool, &args).then(|| args.get("args")?.get("path")?.as_str()).flatten() {
+                Some(opened) if sent && !desktop::nothing_was_run(&obs) && obs.contains("Text Editor \u{2014}") => {
+                    let look = serde_json::json!({"app": "editor"});
+                    let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                    desktop::record_described(&look, &seen, &mut described);
+                    match desktop::with_opened_text(&obs, opened, &seen) {
+                        Some(with) => {
+                            eprintln!("[agent] step {step}: opened {opened} \u{2014} its text added from the editor's description");
+                            opened_text = true;
+                            with
+                        }
+                        None => obs,
+                    }
+                }
+                _ => obs,
+            };
             // E.ARENA1-F45: a command's answer leads with what the command did.
             let obs = match desktop::runs_a_command(&tool, &args).then(|| desktop::command_first(&obs)).flatten() {
                 Some(first) => first,
@@ -14442,7 +14478,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let head = if outcome == crate::tool_outcome::Outcome::Ok {
                 // E.ARENA1-F45: a command's output is what it was run for.
                 // E.ARENA1-F55: and a read's answer is the data the model asked for.
-                if desktop::runs_a_command(&tool, &args) || desktop::is_safe_read(&tool, &args, &described) {
+                if opened_text {
+                    // E.ARENA1-F64: the file's text is what the open was for.
+                    desktop::CONTENT_KEPT + 1000
+                } else if desktop::runs_a_command(&tool, &args) || desktop::is_safe_read(&tool, &args, &described) {
                     desktop::COMMAND_BUDGET
                 } else {
                     900
@@ -15426,6 +15465,9 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                     return Ok(msg);
                 }
             }
+            // E.STALL2: taken visibly, and bounded -- on VM 520 a turn in here logged nothing for 9 min.
+            eprintln!("[agent] route=mail_fastpath query={mq:?}");
+            let answered = tokio::time::timeout(std::time::Duration::from_millis(MAIL_FASTPATH_MS), async {
             let raw = self.mail_search_all(&mq).await;
             let prompt = format!(
                 "The user asked: \"{user_text}\"\nI searched their full mailboxes and found:\n\"\"\"\n{}\n\"\"\"\nAnswer their question directly from these results (dates, hotel, amounts, sender). If the results don't contain the answer, say so plainly — do NOT invent details.",
@@ -15452,6 +15494,13 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 Ok(r) => r.text.trim().to_string(),
                 Err(_) => raw,
             };
+            reply
+            })
+            .await;
+            let reply = answered.unwrap_or_else(|_| {
+                eprintln!("[agent] mail_fastpath: no answer in {MAIL_FASTPATH_MS} ms \u{2014} saying so");
+                MAIL_TOOK_TOO_LONG.to_string()
+            });
             let _ = self
                 .memory
                 .append_message_scoped("user", user_text, ws.clone())

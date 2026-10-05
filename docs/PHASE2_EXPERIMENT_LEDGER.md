@@ -14872,7 +14872,7 @@ The review is a commit comment on 0a3f519.
 - The rewritten query is checked with `has_path`; if it carries a path or a named file's name, the unrewritten span leaves instead.
 - A long form whose words hold anything but letters, digits and hyphens is not an acronym definition.
 
-**N4, LOW.** The research gradings and the ledger stop tying "bentonville" to the person: it becomes "a memory word". History keeps the old wording; rewriting pushed history needs Pranab's word.
+**N4, LOW.** The research gradings and the ledger stop tying a memory word from a test sentence to the person: it is called "a memory word". History keeps the old wording; rewriting pushed history needs Pranab's word.
 
 **Kill criteria**, each a mutant that must be killed:
 - each of the hand-split helpers restored;
@@ -14916,3 +14916,39 @@ The review is a commit comment on 0a3f519.
   - Linux staging: mind-net 11, mind-tools 263, mind-conversation 1142.
   - net_guard.test.js on Linux as root (trusted: true) and as nobody (trusted: false).
 - **For 520:** N1 was the enforce blocker; it is fixed here, and enforce still waits for this batch's review.
+
+## E.NET1i — PREREG: the review of 2b016bc..9f7149c (SAFE WITH CHANGES): P1–P6, plus a scope leak in compaction
+
+The review is a commit comment on 9f7149c.
+
+**P1, MEDIUM. The media path hands on the string it did not check: 520 does not go to enforce until this lands.**
+- `ssrf_check` judged the WHATWG reading, then `probe`, `captions`, `transcribe_segments_at`, `keyframes_at` and `checked_stream` handed the ORIGINAL string to yt-dlp and ffmpeg. ffmpeg and Python's `urlsplit` do not read `\` as `/`, so `http://news.example.org\@gpu.example.ts.net:11434/x.m3u8` was judged as news.example.org and fetched as the LAN name.
+- **Fix:** `ssrf_check` returns the canonical `Url::to_string()`, and only that string reaches a child (`http://news.example.org/@gpu.example.ts.net:11434/x.m3u8`, which ffmpeg reads as news.example.org).
+- **Tests:**
+  - `checked_stream` with the `\@` form returns the canonical string;
+  - a wiring test that every media entry rebinds its URL to what the check returned.
+- yt-dlp's own redirects and ffmpeg's HLS segment hops cannot be checked from the Mind. Those wait for the OS's public-only proxy door (4c, feat/egress-public-listener), preregistered when its format lands.
+
+**P2, LOW.** A shared-scope (group) `/new` writes no break: it would cut every viewer's window. A member's DM `/new` still breaks the member's own. Test: a group `/new` leaves the primary's window whole.
+
+**P3, LOW, and a leak found while reading it.** Compaction read `messages_since` across EVERY scope:
+- any member's or group's break moved the primary's cursor, so up to 36 primary rows were never summarised;
+- a member's private DM rows were summarised into the PRIMARY's rolling summary.
+**Fix:** a scoped read (`messages_since_scoped`: id, role, text, scope). Compaction summarises only the primary's own rows and shared rows, honours only the primary's breaks, and advances its cursor past rows of other scopes without reading them. Tests: a member's break and a member's private row change neither the primary's summary input nor its cursor stop.
+
+**P4, LOW.** The date comes FIRST, `- [noted 2026-10-05] …`, so text cannot put a forged date ahead of it.
+
+**P5, LOW.** N2's prereg said `LAUNCHING.exit`; the code is one-shot only. Amended here: one-shot alone closes the reviewed path (a callback finds the permit spent), and `exit` beside it would be redundant, so it was not built. Recorded in E.NET1h's result.
+
+**P6.** `leaves_to_proxy` is false for a URL that does not parse (fails closed).
+
+**Kill criteria**, each a mutant that must be killed:
+- `ssrf_check` returning the input;
+- a media entry using the unchecked string;
+- `checked_stream` returning the raw line;
+- a shared `/new` writing a break;
+- compaction honouring a member's break;
+- compaction reading a member's private row;
+- the date after the text;
+- P6 returning true.
+

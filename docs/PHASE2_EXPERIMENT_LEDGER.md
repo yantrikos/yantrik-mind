@@ -14075,3 +14075,11 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
 - a token not from the person passing;
 - inbox or recall back in the sub-agent;
 - the gender prepend back.
+
+## E.EGRESS5 phase 1a — RESULT: the outbound table and the boundary scan (no behaviour change)
+
+- **`mind_governance::egress::OUTBOUND`:** every outbound tool family by name, with its connector and the kind of each model-written outbound field (`FieldKind::{Query, Url, Token}`); `outbound(tool)` looks one up. `classify` does not read it yet; wiring waits on the reviewed scope.
+- **`every_tool_is_on_one_side_of_the_egress_boundary`:** it scans every top-level arm of `run_agent_tool_as`'s `match tool`, every arm of the recipe host's dispatcher, and every builtin plugin's tools (`PluginRegistry::all`). Each must be in `OUTBOUND` or on `LOCAL_TOOLS`, and never on both.
+- **What the scan found beyond the inventory:** 19 aliases (photo tools, `trip`/`trips`) and `browse`, a declared plugin with no agent arm. All are placed.
+- **Mutants:** a new dispatcher arm, and a table entry dropped. Both killed, with the failure naming the tools.
+- Full suite 2293 passed.

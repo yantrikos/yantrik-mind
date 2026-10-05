@@ -410,6 +410,11 @@ impl Default for PluginRegistry {
 impl PluginRegistry {
     /// The built-in native plugins (defaults; the manifest overlays enabled/security). Catalog text
     /// matches what the agent saw before — moving it here just makes the catalog registry-driven.
+    /// E.EGRESS5: every plugin, for the egress-boundary scan.
+    pub fn all(&self) -> &[PluginSpec] {
+        &self.plugins
+    }
+
     pub fn builtin() -> Self {
         use SecurityLevel::*;
         let plugins = vec![

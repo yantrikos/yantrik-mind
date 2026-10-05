@@ -19627,3 +19627,73 @@ async fn a_span_of_web_text_is_the_planners_to_write() {
     let own = conv.egress_clean_args_with("search", "research semantic graphs", serde_json::json!({"query": "semantic graphs"}), "", &web, &[], "").await;
     assert_eq!(own, Ok(serde_json::json!({"query": "semantic graphs"})), "a span of the person's words was rewritten");
 }
+
+/// E.EGRESS5: tools that never reach the network (beyond inference) -- the only names that may stay
+/// out of `mind_governance::egress::OUTBOUND`.
+const LOCAL_TOOLS: &[&str] = &[
+    "now", "date", "datetime", "time", "getcurrentdatetime", "myself", "my_config", "my_setup", "self_config",
+    "recall", "remember", "watches", "watchlist", "watching", "patterns", "insights", "family", "relationships",
+    "about_person", "person", "self_report", "week_review", "life_horizon", "horizon", "anticipate",
+    "festival_calendar", "festivals", "traditions", "tradition", "nightly_dream", "dream", "self_limits", "limits",
+    "capabilities", "plugin_registry", "plugin_search", "plugins", "family_book", "book", "event_ledger", "events",
+    "event", "bill_autopay", "autopay", "mail_rule", "mailrule", "enhance_photo", "ask_whois", "calendar_remove",
+    "remove_event", "forget_date", "remove_date", "calendar_add", "add_event", "calendar_view", "calendar", "sources",
+    "source_standing", "trust", "forget", "erase", "drop_reminder", "drop_thread", "stop_tracking", "add_reminder",
+    "discover_tools", "search_skills", "build_capability", "calc", "calculate", "math", "money", "subscriptions",
+    "finance", "bills", "budget", "budget_overview", "add_holding", "track_holding", "make_dashboard", "due_tasks",
+    "own_proposals", "own_jobs", "write_files", "publish_page", "answer",
+];
+
+/// E.EGRESS5: the tool names one dispatcher's top-level `match tool {` arms answer to.
+fn dispatcher_arms(src: &str, start_marker: &str) -> Vec<String> {
+    let start = src.find(start_marker).expect("dispatcher not found");
+    let body = &src[start..];
+    let m = body.find("match tool {").expect("no `match tool {`");
+    let line_start = body[..m].rfind('\n').map_or(0, |i| i + 1);
+    let indent = format!("{}    ", &body[line_start..m]);
+    let mut names = Vec::new();
+    for line in body[m..].lines().skip(1) {
+        // The catch-all arm (`_ =>`, or a binding like `other =>`) ends the match.
+        if let Some(rest) = line.strip_prefix(indent.as_str()) {
+            let head = rest.split("=>").next().unwrap_or("").trim();
+            if !rest.starts_with(' ') && rest.contains("=>") && !head.is_empty() && head.chars().all(|c| c == '_' || c.is_ascii_lowercase()) {
+                break;
+            }
+        }
+        let Some(rest) = line.strip_prefix(indent.as_str()) else { continue };
+        if !(rest.starts_with('"') || rest.starts_with("| \"")) {
+            continue;
+        }
+        let pattern = rest.split("=>").next().unwrap_or("");
+        let pattern = pattern.split(" if ").next().unwrap_or(pattern);
+        for part in pattern.split('"').skip(1).step_by(2) {
+            names.push(part.to_string());
+        }
+    }
+    names
+}
+
+/// E.EGRESS5 (the eighth review's HIGH): every tool a dispatcher answers to -- the agent tool
+/// dispatcher, the recipe host's, and every plugin's -- is either in the outbound table or LOCAL.
+/// A new tool fails here until it is placed on one side of the boundary on purpose.
+#[test]
+fn every_tool_is_on_one_side_of_the_egress_boundary() {
+    let src = include_str!("lib.rs");
+    let mut names = dispatcher_arms(src, "    async fn run_agent_tool_as(");
+    let host = dispatcher_arms(src, "impl RecipeHost for MindRecipeHost {");
+    assert!(names.len() > 100 && host.len() > 5, "the scan found too few arms: {} / {}", names.len(), host.len());
+    names.extend(host);
+    for p in crate::plugins::PluginRegistry::builtin().all() {
+        names.extend(p.tools.iter().cloned());
+    }
+    let mut unplaced: Vec<String> = names
+        .into_iter()
+        .filter(|n| mind_governance::egress::outbound(n).is_none() && !LOCAL_TOOLS.contains(&n.as_str()))
+        .collect();
+    unplaced.sort();
+    unplaced.dedup();
+    assert!(unplaced.is_empty(), "tools on neither side of the egress boundary: {unplaced:?}");
+    // And no name on both sides.
+    let both: Vec<&&str> = LOCAL_TOOLS.iter().filter(|n| mind_governance::egress::outbound(n).is_some()).collect();
+    assert!(both.is_empty(), "on both sides: {both:?}");
+}

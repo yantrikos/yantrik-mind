@@ -68,6 +68,102 @@ impl Connector {
     }
 }
 
+/// E.EGRESS5: what an outbound tool's argument carries out -- how the boundary must treat it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    /// Free text a service searches with: the person's words or a handed-over file's span, or the
+    /// clean planner's rewrite.
+    Query,
+    /// An address to fetch: the person's own, or the clean fetch planner's pick.
+    Url,
+    /// A short name (a city, a ticker, a repo, a handle): only as the person's words or a handed-over
+    /// file's span; otherwise the planner.
+    Token,
+}
+
+/// E.EGRESS5: one outbound tool family -- its names, where its bytes go, and which arguments carry
+/// model-written text out. `fields` empty means the tool sends no model-written text (its request is
+/// fixed, or goes only to the person's own account).
+pub struct Outbound {
+    pub names: &'static [&'static str],
+    pub connector: fn() -> Connector,
+    pub fields: &'static [(&'static str, FieldKind)],
+}
+
+use FieldKind::{Query, Token, Url};
+
+/// E.EGRESS5 (the eighth egress review's HIGH): EVERY tool that can reach the network, in one table.
+/// A source-scan test in mind-conversation holds the dispatchers to it: a tool not here and not on its
+/// LOCAL list fails the build. (Not yet read by `classify` -- that waits on the reviewed scope.)
+pub const OUTBOUND: &[Outbound] = &[
+    // ── the web: search, fetch, and the tools built on them ──
+    Outbound { names: &["search", "web_search", "google", "ddg"], connector: || Connector::Web, fields: &[("query", Query), ("q", Query)] },
+    Outbound { names: &["web_fetch", "fetch", "web"], connector: || Connector::Web, fields: &[("url", Url)] },
+    Outbound { names: &["research"], connector: || Connector::Web, fields: &[("query", Query)] },
+    Outbound { names: &["news", "headlines"], connector: || Connector::Web, fields: &[("topic", Query), ("query", Query)] },
+    Outbound { names: &["track_news", "follow_news"], connector: || Connector::Web, fields: &[("topic", Query)] },
+    Outbound { names: &["deals", "shop", "shopping", "find_deals", "deal"], connector: || Connector::Web, fields: &[("query", Query), ("item", Query), ("text", Query), ("budget", Token)] },
+    Outbound { names: &["watch_price", "track_price", "pricewatch", "watch_deal"], connector: || Connector::Web, fields: &[("query", Query), ("item", Query), ("target", Token)] },
+    Outbound { names: &["learn_about", "learn", "study"], connector: || Connector::Web, fields: &[("url", Url), ("query", Query)] },
+    Outbound { names: &["track_subject", "follow_subject"], connector: || Connector::Web, fields: &[("subject", Query), ("query", Query)] },
+    Outbound { names: &["see_page", "screenshot_page", "look_at_page"], connector: || Connector::Web, fields: &[("url", Url)] },
+    Outbound { names: &["set_monitor"], connector: || Connector::Web, fields: &[("url", Url), ("target", Token), ("source", Token)] },
+    Outbound { names: &["analyze", "analyze_stock", "stock_analysis"], connector: || Connector::Web, fields: &[("ticker", Token), ("symbol", Token)] },
+    Outbound { names: &["run_skill"], connector: || Connector::Web, fields: &[("target", Query), ("url", Url)] },
+    Outbound { names: &["work_radar", "radar"], connector: || Connector::Web, fields: &[] },
+    Outbound { names: &["code_digest"], connector: || Connector::Web, fields: &[("subject", Token)] },
+    Outbound { names: &["browse"], connector: || Connector::Web, fields: &[("goal", Query), ("url", Url)] },
+    // ── media sites ──
+    Outbound { names: &["watch", "watch_media", "listen"], connector: || Connector::Web, fields: &[("url", Url), ("query", Query)] },
+    Outbound { names: &["copy_trade", "copy_desk"], connector: || Connector::Web, fields: &[("url", Url)] },
+    Outbound { names: &["surf", "feeds"], connector: || Connector::Web, fields: &[("handles", Token)] },
+    // ── public APIs ──
+    Outbound { names: &["weather", "wx"], connector: || Connector::ThirdParty, fields: &[("place", Token), ("city", Token)] },
+    Outbound { names: &["crypto", "coin"], connector: || Connector::ThirdParty, fields: &[("coin", Token)] },
+    Outbound { names: &["stock", "ticker"], connector: || Connector::ThirdParty, fields: &[("symbol", Token)] },
+    Outbound { names: &["quote", "price", "get_quote", "market_price"], connector: || Connector::ThirdParty, fields: &[("symbols", Token), ("symbol", Token), ("ticker", Token)] },
+    Outbound { names: &["translate", "tr"], connector: || Connector::ThirdParty, fields: &[("text", Query), ("to", Token)] },
+    Outbound { names: &["wikipedia", "wiki"], connector: || Connector::ThirdParty, fields: &[("query", Query), ("topic", Query)] },
+    Outbound { names: &["github", "github_repo_items", "github_notifications"], connector: || Connector::Github, fields: &[("repo", Token)] },
+    // ── the person's own accounts and devices: their data, their servers ──
+    Outbound {
+        names: &[
+            "mail_search", "mailsearch", "search_mail", "findmail", "inbox", "mail", "check_mail", "inbox_analytics",
+            "mail_analytics", "inboxes", "mail_report", "mailreport", "mail_audit", "discover_subscriptions",
+            "find_subscriptions", "scan_email_subscriptions", "draft_email", "draft_reply",
+        ],
+        connector: || Connector::Imap,
+        fields: &[],
+    },
+    Outbound { names: &["home", "home_status", "house", "smart_home", "home_control"], connector: || Connector::HomeAssistant, fields: &[] },
+    Outbound {
+        names: &[
+            "photo_send", "send_photo", "find_photo", "photo_patterns", "growup_reel", "photo_create", "taste_profile",
+            "person_items", "gift_intel", "photo_cleanup", "family_frame", "then_and_now", "find_younger_self",
+            "on_this_day", "style_timeline", "trip_ledger", "onedrive", "photo_pattern", "reel", "timelapse", "collage",
+            "compose_photo", "tastes", "preference_profile", "inventory", "closet", "cleanup_photos", "gift_ideas",
+            "frame", "memory_photo", "thennow", "younger_self", "style", "trip", "trips",
+        ],
+        connector: || Connector::ThirdParty,
+        fields: &[],
+    },
+    Outbound {
+        names: &[
+            "paper", "paper_book", "trading_agent", "paper_desk", "day_trader", "pro_day_trader", "crypto_trader",
+            "crypto_agent", "trading_cockpit", "hunt", "scan_movers", "portfolio", "holdings", "my_stocks",
+        ],
+        connector: || Connector::ThirdParty,
+        fields: &[],
+    },
+    Outbound { names: &["share_with_member", "share"], connector: || Connector::ThirdParty, fields: &[] },
+    Outbound { names: &["code", "coder"], connector: || Connector::Coder, fields: &[] },
+];
+
+/// E.EGRESS5: the table entry for a tool, by any of its names.
+pub fn outbound(tool: &str) -> Option<&'static Outbound> {
+    OUTBOUND.iter().find(|o| o.names.contains(&tool))
+}
+
 /// A tool is either local (no bytes leave the process) or external (args reach a connector).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressClass {

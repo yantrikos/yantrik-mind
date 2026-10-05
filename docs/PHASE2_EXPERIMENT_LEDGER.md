@@ -14437,3 +14437,75 @@ Sent to 4c before the apply.
 The Unix-only checks are killed on Linux staging. A Node test with a loopback fake proxy shows a trusted fetch reaching the proxy and never calling lookup.
 
 **Not in scope:** applying to 520 (4c does that, after review); enforce-mode verification (4c's #662 run).
+
+## E.NET1e — RESULT: the Mind under the OS's kernel egress rules; 24 of 24 mutants killed (plus 3 on Linux); one prereg rule made stricter; a crash and a missed call site found on the way
+
+**The signal:** `mind_net::proxy_is_enforced` reads `/run/yantrik/mind-egress.json` through the same race-free root-file read as the person's file (`read_person_file` is now `read_root_file`). It is trusted only when ALL of these hold; anything else, a missing file included, means not trusted:
+- version 1;
+- enforced is true;
+- proxy_refuses_private is true;
+- proxy equal to the proxy the Mind routes through.
+
+`dns_allowed` is not used: a refused DNS fails fast, and the rule below needs no mode. The field names are 4c's proposal and await their merge.
+
+**The rule (stricter than the prereg).** The prereg said a trusted proxied hop is "not resolved locally". As built, the local check ALWAYS runs. Only a name that does not resolve here goes on, and only through a trusted proxy on the proxied path. Why: `localhost`, a hosts-file name and a literal resolve with no DNS, and NO_PROXY sends loopback direct, onto ports the kernel rules allow (7440 is the memory server). Skipping the check would have let `http://localhost:7440/` through.
+
+The rule is applied in:
+- `ssrf_resolve` (Rust): it now returns `None` when an unresolved name is left to the proxy;
+- `ssrf_check_routed`;
+- `fetch_direct_with`;
+- net_guard.js `fetchPinned`, where `checkedAddresses` marks a lookup failure `unresolved`.
+
+**Found while building:**
+1. **A missed call site.** The fetch tool, fetch_rendered, the image fetch, the page screenshot and four media-pipeline paths all call `ssrf_check` BEFORE `fetch_direct`. My first cut changed only the hop loop, so in enforce mode every fetch would still have died at that first check. `ssrf_check` now follows the same rule, through a routed form the tests drive.
+2. **A crash no unit test showed.** Over a real CONNECT tunnel (a local pipe to example.com: 200, no lookup), a certificate for another host (wrong.host.badssl.com) was refused correctly. But the TLS socket's 'error' had no listener and ended the whole Node process, so any bad-cert page would have killed the browser script. Fixed (`secure.on("error", reject)`) and tested without the network: a tunnel whose far end is not TLS. Its mutant is killed.
+3. **A fake that was kinder than the syscall.** The JS signal test's fake fs reported a followed link as "not a regular file", so removing O_NOFOLLOW SURVIVED. Opened without O_NOFOLLOW, a link is followed to its target. With the fake corrected, the mutant is killed.
+
+**Configured endpoints** (`goes_direct`, unchanged from the prereg):
+- direct only at loopback or a literal private or special address, judged by `mind_net::is_special_ip`;
+- a public address always takes the proxy;
+- a name goes direct only without trust.
+
+The shared ranges moved from mind-tools into mind-net, so routing and the SSRF check judge by one list; mind-tools' `is_blocked_ip` calls it.
+
+**The browser:** under trust, `launchGuarded` and `launchPersistentGuarded` give chromium `proxy: {server}`. Page requests still go through the guard and `fetchPinned`.
+
+**Tests:**
+- mind-net: `configured_endpoints_go_direct_only_where_the_os_rules_allow` and `the_egress_signal_is_trusted_only_when_whole` (on Unix also a link, a writable file and a writable folder).
+- mind-tools: `only_an_unresolvable_name_is_left_to_a_trusted_proxy` (the hop loop and `ssrf_check`; localhost, a hosts-file name and literals refused under trust).
+- net_guard.test.js:
+  - through a loopback fake proxy: absolute-form http, CONNECT for https, a refused CONNECT, a failed handshake, a hosts-file name and a literal refused before the proxy;
+  - the signal through a fake fs;
+  - the launchers' proxy.
+
+**Mutants, killed:**
+- Rust, 14:
+  - an unresolvable name refused while trusted;
+  - a resolvable name unchecked;
+  - a direct hop left to the proxy;
+  - `ssrf_check` ignoring trust;
+  - `ssrf_check` leaving a direct URL to the proxy;
+  - trusted with no file, not enforced, a proxy passing private ranges, another proxy, or an unknown version;
+  - a public literal endpoint direct;
+  - a named endpoint direct under trust.
+- JS, 10 + the handshake:
+  - unresolvable refused;
+  - resolving unchecked;
+  - lookup failure unmarked;
+  - direct while trusted;
+  - a link followed (after the fake was fixed);
+  - a writable file, a file not root's, or a writable folder trusted;
+  - not enforced trusted;
+  - another proxy trusted;
+  - the browser not proxied.
+- Linux staging, on the signal test: O_NOFOLLOW removed, the folder check removed, the handle check removed.
+
+**Runs:**
+- Full suite: 2319 passed, 0 failed.
+- Linux staging: mind-net 10, mind-tools 257, mind-core 139, mind-conversation 1134.
+
+**Residuals, named for the reviewer:**
+- (a) The production wiring passes `mind_net::proxy_is_enforced`, which reads the real file. A mutant replacing it with `|| false` in the wiring line would survive, as with every injected dependency.
+- (b) Staging has no node, so the JS signal read was tested only against a fake fs (Windows). Its real O_NOFOLLOW and uid behaviour on Linux is first exercised on 520.
+- (c) A downloader that did its own DNS (DoH) could resolve a name to a LAN-rule address and connect direct. yt-dlp does not.
+- (d) 520 stays in audit mode. 4c applies #662 there only after this is reviewed.

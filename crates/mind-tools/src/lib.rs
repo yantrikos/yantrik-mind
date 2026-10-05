@@ -172,61 +172,10 @@ fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
-/// E.NET1b: the private and special-use ranges, from the ONE list the browser guard reads too
-/// (`deploy/private_ranges.json`) -- (network, mask) pairs, parsed once.
-fn private_ranges() -> &'static (Vec<(u32, u32)>, Vec<(u128, u128)>) {
-    static RANGES: std::sync::OnceLock<(Vec<(u32, u32)>, Vec<(u128, u128)>)> = std::sync::OnceLock::new();
-    RANGES.get_or_init(|| {
-        let list: serde_json::Value =
-            serde_json::from_str(include_str!("../../../deploy/private_ranges.json")).expect("deploy/private_ranges.json parses");
-        let cidrs = |key: &str| -> Vec<(String, u32)> {
-            list[key]
-                .as_array()
-                .expect("a list of ranges")
-                .iter()
-                .map(|c| {
-                    let (net, bits) = c.as_str().expect("a range").split_once('/').expect("a /prefix");
-                    (net.to_string(), bits.parse().expect("a prefix length"))
-                })
-                .collect()
-        };
-        let v4 = cidrs("v4")
-            .into_iter()
-            .map(|(net, bits)| {
-                let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
-                (u32::from(net.parse::<std::net::Ipv4Addr>().expect("a v4 range")) & mask, mask)
-            })
-            .collect();
-        let v6 = cidrs("v6")
-            .into_iter()
-            .map(|(net, bits)| {
-                let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
-                (u128::from(net.parse::<std::net::Ipv6Addr>().expect("a v6 range")) & mask, mask)
-            })
-            .collect();
-        (v4, v6)
-    })
-}
-
-/// SSRF guard: is this resolved IP private/internal and therefore off-limits?
-/// E.NET1b (the ninth pass): judged against the shared list; an IPv4-mapped IPv6 address
-/// (`::ffff:192.168.4.7`) by the IPv4 it carries -- `is_loopback` alone let it through.
+/// SSRF guard: is this resolved IP private/internal and therefore off-limits? E.NET1e: judged in
+/// mind-net, against the one shared list.
 fn is_blocked_ip(ip: IpAddr) -> bool {
-    let (v4, v6) = private_ranges();
-    let blocked_v4 = |a: std::net::Ipv4Addr| {
-        let n = u32::from(a);
-        a.is_broadcast() || v4.iter().any(|(net, mask)| n & mask == *net)
-    };
-    match ip {
-        IpAddr::V4(a) => blocked_v4(a),
-        IpAddr::V6(a) => match a.to_ipv4_mapped() {
-            Some(inner) => blocked_v4(inner),
-            None => {
-                let n = u128::from(a);
-                v6.iter().any(|(net, mask)| n & mask == *net)
-            }
-        },
-    }
+    mind_net::is_special_ip(ip)
 }
 
 /// The SSRF guard, reachable from sibling modules (the media pipeline hands untrusted URLs to
@@ -239,8 +188,19 @@ pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<()> {
 /// points at a private IP is also blocked).
 fn ssrf_check(url: &str) -> anyhow::Result<()> {
     // E.NET1b: a host that does not resolve here is refused too -- a split-DNS name only a proxy
-    // knows (homeassistant.lan) or a rebinding name must not slip past the check.
-    ssrf_resolve(url, &system_resolve, &|a| is_blocked_ip(a.ip())).map(|_| ())
+    // knows (homeassistant.lan) or a rebinding name must not slip past the check. E.NET1e: unless the
+    // request takes a proxy the OS vouches for, which refuses private ranges itself.
+    ssrf_check_routed(url, &system_resolve, &mind_net::is_direct, &mind_net::proxy_is_enforced)
+}
+
+/// `ssrf_check` with its resolver and route given (for tests).
+fn ssrf_check_routed(
+    url: &str,
+    resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
+    is_direct: &dyn Fn(&str) -> bool,
+    proxy_enforced: &dyn Fn() -> bool,
+) -> anyhow::Result<()> {
+    ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), !is_direct(url) && proxy_enforced()).map(|_| ())
 }
 
 /// Remove every `<tag …>…</tag>` block (case-insensitive, boundary-checked so `<nav>` ≠ `<navbar>`).
@@ -548,21 +508,31 @@ fn redirect_target(base: &str, location: &str) -> Option<String> {
 }
 
 /// E.NET1: resolve a URL's host once and check every address; refused when any is private/internal.
+///
+/// E.NET1e (yantrik-os #662): the check always runs here -- `localhost`, a hosts-file name and a
+/// literal address resolve with no DNS and are judged as before. Only a name that does NOT resolve
+/// here may go on, and only when `unresolved_to_proxy` (the request takes the proxy, and the OS says
+/// that proxy is its own and refuses private ranges): under those rules the Mind may have no DNS, and
+/// the proxy is the check. Then the answer is `None` -- nothing to pin.
 fn ssrf_resolve(
     url: &str,
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
     blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
-) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    unresolved_to_proxy: bool,
+) -> anyhow::Result<Option<Vec<std::net::SocketAddr>>> {
     let host = host_of(url).ok_or_else(|| anyhow::anyhow!("bad url"))?;
-    let addrs = resolve(&host, port_of(url)).map_err(|e| anyhow::anyhow!("couldn't resolve {host}: {e}"))?;
-    if addrs.is_empty() {
-        anyhow::bail!("couldn't resolve {host}");
-    }
+    let addrs = match resolve(&host, port_of(url)) {
+        Ok(addrs) if !addrs.is_empty() => addrs,
+        _ if unresolved_to_proxy => return Ok(None),
+        Ok(_) => anyhow::bail!("couldn't resolve {host}"),
+        Err(e) => anyhow::bail!("couldn't resolve {host}: {e}"),
+    };
     if addrs.iter().any(|a| blocked(a)) {
         anyhow::bail!("refusing to fetch a private/internal address (SSRF guard): {host}");
     }
-    Ok(addrs)
+    Ok(Some(addrs))
 }
+
 
 /// Direct fetch with real browser headers → declutter → readable text.
 /// E.NET1 (the seventh pass's item 4): redirects are followed HERE, one hop at a time, each hop's host
@@ -570,7 +540,7 @@ fn ssrf_resolve(
 /// client's own redirect-following went to wherever a page pointed (a LAN address included), and a
 /// second DNS lookup let a rebinding name pass the check and then connect inside.
 fn fetch_direct(url: &str) -> anyhow::Result<String> {
-    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct)
+    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct, &mind_net::proxy_is_enforced)
 }
 
 fn fetch_direct_with(
@@ -578,6 +548,7 @@ fn fetch_direct_with(
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
     blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
     is_direct: &dyn Fn(&str) -> bool,
+    proxy_enforced: &dyn Fn() -> bool,
 ) -> anyhow::Result<String> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
@@ -588,12 +559,14 @@ fn fetch_direct_with(
         let direct = is_direct(&current);
         let mut builder = mind_net::builder().redirects(0).timeout(std::time::Duration::from_secs(20));
         // E.NET1b (the ninth pass): every hop resolves HERE or is refused -- also on the proxy path,
-        // where a name only the proxy could resolve (split DNS, rebinding) used to pass. The Mind has
-        // no sign the egress proxy enforces, so it fails closed.
-        let addrs = ssrf_resolve(&current, resolve, blocked)?;
-        if direct {
-            // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
-            builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
+        // where a name only the proxy could resolve (split DNS, rebinding) used to pass. E.NET1e: a
+        // name that does not resolve here goes on only through a proxy the OS vouches for (see
+        // `ssrf_resolve`); a direct hop always resolves and is pinned.
+        if let Some(addrs) = ssrf_resolve(&current, resolve, blocked, !direct && proxy_enforced())? {
+            if direct {
+                // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
+                builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
+            }
         }
         let agent = mind_net::route(builder, &current);
         let resp = agent
@@ -1014,7 +987,7 @@ mod tests {
         let (inside, reached) = serve_once(page("the router's admin page"));
         let (outside, _) = serve_once(redirect(&format!("http://127.0.0.1:{inside}/admin")));
         let blocked = move |a: &std::net::SocketAddr| a.port() == inside;
-        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked, &|_: &str| true);
+        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked, &|_: &str| true, &|| false);
         assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{out:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the internal server was reached");
         let text = "A long enough article body to read as the page's text. ".repeat(4);
@@ -1024,7 +997,7 @@ mod tests {
         // so point it at the allowed server with an absolute one too.
         let _ = hop;
         let (hop2, _) = serve_once(redirect(&format!("http://127.0.0.1:{fine}/article")));
-        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true).unwrap();
+        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true, &|| false).unwrap();
         assert!(got.contains("A long enough article body"), "{got}");
     }
 
@@ -1040,7 +1013,7 @@ mod tests {
                 system_resolve(host, p)
             }
         };
-        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true);
+        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true, &|| false);
         assert!(got.as_ref().is_ok_and(|t| t.contains("pinned and reached")), "{got:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_secs(1)).is_ok());
     }
@@ -1063,13 +1036,43 @@ mod tests {
         }
     }
 
+    /// E.NET1e: a name that does not resolve here goes on only through a proxy the OS vouches for, and
+    /// only on the proxied path; a name that DOES resolve here is checked as always -- also there.
+    #[test]
+    fn only_an_unresolvable_name_is_left_to_a_trusted_proxy() {
+        let unresolvable = |_: &str, _: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Err(std::io::Error::other("no DNS for the Mind")) };
+        let refused = |e: &anyhow::Error| e.to_string().contains("couldn't resolve");
+        // (direct, trusted) -> refused here?
+        for (direct, trusted, refused_here) in [(false, true, false), (true, true, true), (false, false, true)] {
+            let out = fetch_direct_with("http://news.invalid/a", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct, &|| trusted);
+            assert_eq!(out.as_ref().is_err_and(refused), refused_here, "direct={direct} trusted={trusted}: {out:?}");
+        }
+        // A name that resolves here (localhost, a hosts-file entry) and a literal are judged here even
+        // through a trusted proxy.
+        let to_loopback = |_: &str, port: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]) };
+        for url in ["http://localhost:7440/", "http://memory.lan/"] {
+            let out = fetch_direct_with(url, &to_loopback, &|a| is_blocked_ip(a.ip()), &|_: &str| false, &|| true);
+            assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{url} went to the proxy unchecked: {out:?}");
+        }
+        for url in ["http://192.168.4.1/admin", "http://[::ffff:127.0.0.1]:7440/"] {
+            let out = fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &|_: &str| false, &|| true);
+            assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{url} went to the proxy unchecked: {out:?}");
+        }
+        // The fetch tool's own first check (and the media pipeline's) follows the same rule.
+        for (direct, trusted, refused_here) in [(false, true, false), (true, true, true), (false, false, true)] {
+            let out = ssrf_check_routed("http://news.invalid/", &unresolvable, &|_: &str| direct, &|| trusted);
+            assert_eq!(out.is_err(), refused_here, "ssrf_check direct={direct} trusted={trusted}");
+        }
+        assert!(ssrf_check_routed("http://localhost/", &to_loopback, &|_: &str| false, &|| true).is_err(), "ssrf_check let localhost through");
+    }
+
     /// E.NET1b: through the egress proxy too, a host that does not resolve here is refused -- a name
     /// only the proxy knows (split DNS, rebinding) used to go straight through.
     #[test]
     fn an_unresolvable_host_is_refused_on_the_proxy_path_too() {
         let unresolvable = |_: &str, _: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Err(std::io::Error::other("no such host")) };
         for direct in [true, false] {
-            let out = fetch_direct_with("http://homeassistant.lan:8123/", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct);
+            let out = fetch_direct_with("http://homeassistant.lan:8123/", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct, &|| false);
             assert!(out.as_ref().is_err_and(|e| e.to_string().contains("couldn't resolve")), "direct={direct}: {out:?}");
         }
     }

@@ -6,6 +6,8 @@ description = "The one way the Mind reaches the network: through the machine's e
 
 [dependencies]
 ureq = { version = "2", features = ["json"] }
+# E.NET1e: the shared private ranges and the OS's egress signal are JSON.
+serde_json = { workspace = true }
 
 # E.EGRESS5d: open the person's settings file without following a link (O_NOFOLLOW).
 [target.'cfg(unix)'.dependencies]

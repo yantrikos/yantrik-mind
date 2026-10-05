@@ -54,6 +54,89 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   await assert.rejects(fetchPinned(`http://127.0.0.1:${port}/page`), /private/);
   server.close();
 
+  // E.NET1e (yantrik-os #662): under the OS's enforced rules a request goes THROUGH the proxy and
+  // nothing is looked up here; a literal private address is still refused here.
+  const { trustedProxy } = require("./net_guard");
+  const seen = [];
+  const proxyServer = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("via the proxy");
+  });
+  proxyServer.on("connect", (req, socket) => {
+    seen.push(`CONNECT ${req.url}`);
+    if (req.url === "garbled.invalid:443") {
+      // A tunnel whose far end does not speak TLS: the handshake fails.
+      return socket.end("HTTP/1.1 200 Connection Established\r\n\r\nthis is not TLS\r\n\r\n");
+    }
+    socket.end("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+  });
+  await new Promise((r) => proxyServer.listen(0, "127.0.0.1", r));
+  const proxyAt = `http://127.0.0.1:${proxyServer.address().port}`;
+  const viaProxy = {
+    lookup: async (h) => {
+      if (h === "inside.test") return [{ address: "127.0.0.1", family: 4 }]; // a hosts-file name
+      throw new Error(`ENOTFOUND ${h}`); // enforce mode: no DNS for the Mind
+    },
+    trustedProxy: () => proxyAt,
+  };
+  const got1e = await fetchPinned("http://news.invalid/a?b=1", {}, viaProxy);
+  assert.strictEqual(got1e.body.toString(), "via the proxy");
+  assert.deepStrictEqual(seen, ["GET http://news.invalid/a?b=1"], "the request did not go through the proxy");
+  await assert.rejects(fetchPinned("https://news.invalid/s", {}, viaProxy), /proxy refused news\.invalid:443/);
+  assert.strictEqual(seen[1], "CONNECT news.invalid:443", "https did not tunnel through the proxy");
+  await assert.rejects(fetchPinned("http://192.168.4.1/admin", {}, viaProxy), /private/, "a literal private address went to the proxy");
+  assert.strictEqual(seen.length, 2);
+  await assert.rejects(fetchPinned("http://inside.test/", {}, viaProxy), /private/, "a name resolving inside went to the proxy");
+  assert.strictEqual(seen.length, 2);
+  // A failed handshake refuses the request -- it does not end the process.
+  await assert.rejects(fetchPinned("https://garbled.invalid/", {}, viaProxy));
+  assert.strictEqual(seen[2], "CONNECT garbled.invalid:443");
+  proxyServer.close();
+
+  // E.NET1e: the signal is trusted only whole -- root's file, opened without following a link, in
+  // root's folder; version 1, enforced, the proxy refusing private ranges, and our own proxy.
+  const WHOLE = JSON.stringify({
+    enforced: true, table: "inet yantrik_mind_egress", proxy: "http://127.0.0.1:7450", proxy_refuses_private: true,
+    mode: "enforce", private: false, dns_allowed: false, loaded_at: 1790000000, version: 1,
+  });
+  const NOFOLLOW = 0o400000;
+  const signalFs = (o = {}) => {
+    const st = (s) => ({ isDirectory: () => !!s.dir, isFile: () => !!s.file, uid: s.uid, mode: s.mode });
+    return {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: NOFOLLOW },
+      lstatSync: () => st({ dir: true, uid: o.dirUid ?? 0, mode: o.dirMode ?? 0o755 }),
+      openSync: (_f, flags) => {
+        if (o.missing) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        if (o.link && flags & NOFOLLOW) throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
+        return 7;
+      },
+      // Opened without O_NOFOLLOW, a link is followed to its target: a regular file.
+      fstatSync: () => st({ file: true, uid: o.uid ?? 0, mode: o.mode ?? 0o644 }),
+      readFileSync: () => (o.text === undefined ? WHOLE : o.text),
+      closeSync: () => {},
+    };
+  };
+  const ourEnv = { HTTPS_PROXY: "http://127.0.0.1:7450" };
+  const trust = (o, env = ourEnv) => trustedProxy({ fs: signalFs(o), env, signal: "/run/yantrik/mind-egress.json" });
+  assert.strictEqual(trust({}), "http://127.0.0.1:7450", "the whole signal was not trusted");
+  for (const [o, why] of [
+    [{ missing: true }, "no file"],
+    [{ link: true }, "a link"],
+    [{ mode: 0o666 }, "a file others can write"],
+    [{ uid: 1000 }, "a file not root's"],
+    [{ dirMode: 0o777 }, "a folder others can write"],
+    [{ dirUid: 1000 }, "a folder not root's"],
+    [{ text: WHOLE.replace('"enforced":true', '"enforced":false') }, "not enforced"],
+    [{ text: WHOLE.replace('"proxy_refuses_private":true', '"proxy_refuses_private":false') }, "a proxy letting private ranges through"],
+    [{ text: WHOLE.replace('"version":1', '"version":2') }, "an unknown version"],
+    [{ text: "enforced: true" }, "not JSON"],
+  ]) {
+    assert.strictEqual(trust(o), null, `trusted: ${why}`);
+  }
+  assert.strictEqual(trust({}, {}), null, "trusted with no proxy configured");
+  assert.strictEqual(trust({}, { HTTPS_PROXY: "http://10.0.0.9:3128" }), null, "trusted for another proxy");
+
   // E.NET1c: without WebSocket routing the guard refuses to run at all; with it, it routes.
   const { guardContext } = require("./net_guard");
   const routed = [];
@@ -89,6 +172,15 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   const pg = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {});
   assert.strictEqual(pg.ctx.opts.serviceWorkers, "block");
   assert.ok(pg.ctx.routes.includes("**/*"), "the persistent context came back unguarded");
+  // E.NET1e: under the OS's enforced rules the browser itself is pointed at the proxy.
+  let launchedWith = null;
+  const proxiedChromium = { ...fakeChromium, launch: async (opts) => { launchedWith = opts; return fakeChromium.launch(); } };
+  await launchGuarded(proxiedChromium, {}, {}, { trustedProxy: () => "http://127.0.0.1:7450" });
+  assert.deepStrictEqual(launchedWith.proxy, { server: "http://127.0.0.1:7450" }, "the browser was not pointed at the proxy");
+  const pp = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {}, { trustedProxy: () => "http://127.0.0.1:7450" });
+  assert.deepStrictEqual(pp.ctx.opts.proxy, { server: "http://127.0.0.1:7450" }, "the persistent browser was not pointed at the proxy");
+  await launchGuarded(proxiedChromium, {}, {}, { trustedProxy: () => null });
+  assert.strictEqual(launchedWith.proxy, undefined, "a proxy was set without the OS's word");
   const noWs = { launch: async () => ({ newContext: async () => ({ route: async () => {} }), close: async function () { this.closed = true; } }) };
   await assert.rejects(launchGuarded(noWs), /WebSocket/, "a context that cannot be guarded was handed out");
 

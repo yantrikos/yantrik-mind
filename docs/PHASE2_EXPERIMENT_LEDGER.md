@@ -13475,3 +13475,22 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - Turn 0 (751) had already ended in 15 s, having failed to read the brief: `files_read` does not exist, and `editor.open` was refused because the editor was not running, so its grade could not be read.
 - No card reached the person (`pending_approvals` empty).
 - **R1b** was started clean from turn 0, detached with setsid (`~/start_R.sh`), at 02:04:43.
+
+**E.RES1: R1b (VM 520, Mind eb27c95, 5 Oct 02:04–02:11) is VOID by the prereg's rule.** Search was broken for a reason outside the Mind.
+- **The run:** 11 turns (the opening and 10 "Continue."), and the report was written (6,500 bytes; kept at `docs/research/R1b_report_eb27c95.md`).
+- **The search failure:** all six `search` calls returned "(no results)", including "Abstract Meaning Representation prior art … survey".
+  - DuckDuckGo was answering the Mind's client with its anti-bot page after the bursts of identical searches just before (probe2 sent the same query 4 times).
+  - A single search a few minutes later returned the AMR survey (2505.03229) again.
+  - curl from 520 gets 10 results throughout.
+- **Unofficial shadow grade, NOT a score, for information only: 7/12.**
+  - C1, 0: no citations; the report says so honestly.
+  - C2, 1: AMR and Coconut of the 5 families. It also names UMR, FrameNet, DRT, Conceptual Graphs, UNL and VSA, but not RDF/temporal KGs, LCM or VQ.
+  - C3, 1: H1 with a falsifier, but the "pre-registered margin" is not set.
+  - C4, 1: it matches token budgets and adds a readable-structure control arm, but does not address the encoder doing the reasoning.
+  - C5, 2: no unsupported numbers.
+  - C6, 2: delivered at the path, done in 10.
+- **Mind defects this run exposed** (each to be fixed before R1c):
+  1. **The search client reads DuckDuckGo's anti-bot page as "(no results)".** It should say the search is being blocked, so the model knows the tool is down, not that nothing exists.
+  2. **The model repeats an identical `search` in a turn** (seen in every probe), which is what trips the throttle. A repeated identical search should be answered from the work log.
+  3. **In turn 0 the model said "no web access" from memory of the earlier failure, without trying.** Stale tool-health beliefs; not yet designed.
+- **Infrastructure question for Pranab:** keyless DuckDuckGo scraping is the Mind's only search on 520, and it throttles. A self-hosted SearXNG (the Mind already supports `YM_SEARXNG`) or a search API would make R-tasks repeatable.

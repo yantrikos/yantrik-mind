@@ -15196,3 +15196,31 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
 - So the Mind asks the desktop only when `/run/yantrik-mind-egress/grants.json` passes the root-file read. #667's `mind-egress apply` writes that file at every boot, empty or not.
 - Without it there is no ask, and the planner writes the query.
 - **Kill criterion added:** an ask sent with no grants file.
+
+## E.ARENA1-F66 — PREREG: an unsaved editor document is known by the app, not by the wording (the T7 fail on OS fb2f27f3)
+
+**Seen:** gate on VM 520, OS fb2f27f3 with Mind 72b579d: 6/7, with T7 failing (`~/arena-min09n-friday.txt` never written, the reply honest that it was unsaved). T7 passed on every earlier gate. 4c's journal pull showed:
+- step 4: `os_act editor new {text}` answered "Done — Untitled (no file yet), 3 lines, unsaved · tab 3 of 3";
+- step 5: `set_content` was graded sensitive;
+- steps 6–13: `new` with the same args ×8, each answered "already called with these args — reusing the work log";
+- `save_as` was never called.
+
+**Cause (Mind side):**
+- `desktop::update_unsaved` (and `save_took`) read an editor result only when its first line holds `Text Editor —` or `editing "`. The new wording has neither, so `unsaved_doc` stayed false.
+- The repeat guard then gave its generic note instead of the one naming `os_act editor save_as {"path": "<the request's path>"}` (F19), and the unsaved nudge (F17) never fired.
+
+**Change:** both read ANY editor act result (`act_target` app `editor` or the shell's twin), or one holding the old markers:
+- a first line with ", unsaved" means unsaved;
+- a save whose first line lacks it means saved.
+
+**Tests:**
+- 4c's step-4 line verbatim, through `update_unsaved`: unsaved;
+- a save result line from fb2f27f3 (from 4c) through `save_took`: took;
+- a repeated `new` after that line now gets the save_as note with the request's path.
+
+**Kill criteria**, each a mutant that must be killed:
+- the app reading removed (old markers only);
+- ", unsaved" ignored;
+- a save without ", unsaved" not counted as taken.
+
+**Then:** a fix bundle on the 520 branch, installed by 4c, and the gate again: 7/7 is required before the enforce flip and anything public.

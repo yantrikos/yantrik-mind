@@ -386,7 +386,8 @@ fn public_door_of(said: &serde_json::Value, get: &dyn Fn(&str) -> Option<String>
             }
             let at = std::net::SocketAddr::new(ip, u.port()?);
             let endpoint = proxy_url(get).and_then(|p| url_host_port(&p));
-            if endpoint.is_some_and(|(h, p)| h.parse::<std::net::IpAddr>().is_ok_and(|eh| eh == ip) && p == at.port()) {
+            // (`localhost` in the proxy URL is this machine's loopback too.)
+            if endpoint.is_some_and(|(h, p)| p == at.port() && (h == "localhost" || h.parse::<std::net::IpAddr>().is_ok_and(|eh| eh == ip))) {
                 return None;
             }
             Some(Some(format!("http://{at}")))
@@ -451,6 +452,12 @@ const ROOT_FILE_MAX: u64 = 64 * 1024;
 
 /// E.GRANT1 (yantrik-os #667): the grants the person gave the Mind, written by root beside the signal.
 pub const GRANTS_FILE: &str = "/run/yantrik-mind-egress/grants.json";
+
+/// E.GRANT2: has the OS the grants side at all (yantrik-os #667)? Its `mind-egress apply` writes the
+/// grants file at every boot, empty or not; without it the host does not know `grant_request`.
+pub fn grants_file_present() -> bool {
+    read_root_file(std::path::Path::new(GRANTS_FILE)).is_ok()
+}
 
 /// E.GRANT1: the id of an `always` grant in force for the Mind's own search words. Off the desktop
 /// only an `always` grant can apply -- a session grant belongs to a harness session, and a run grant
@@ -533,7 +540,10 @@ fn read_root_file(file: &std::path::Path) -> std::io::Result<String> {
             return Err(unsafe_file("it is larger than 64 KiB"));
         }
         let mut text = String::new();
-        f.read_to_string(&mut text)?;
+        (&mut f).take(ROOT_FILE_MAX + 1).read_to_string(&mut text)?;
+        if text.len() as u64 > ROOT_FILE_MAX {
+            return Err(unsafe_file("it grew past 64 KiB while being read"));
+        }
         Ok(text)
     }
     #[cfg(not(unix))]

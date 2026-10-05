@@ -15240,3 +15240,35 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
 - **Run 2:** 7/7, 0 false claims, median 4.8 s.
 - **Reading:** T7 is 6/7 over the seven runs on this build. One failure is the model not taking an explicit instruction, not a code path, and is recorded rather than dropped. Recorded as "gate 7/7 on fb2f27f3 (run 2), run 1 6/7".
 - Pranab's windows (Calendar, Blender, a terminal) were open before and after.
+
+## E.GRANT2 — RESULT: a search grant covers top-level web searches only, the tripwire runs before the card, cards are limited, yt-dlp's own ffmpeg is held; 9 mutants killed, 1 dead check removed
+
+- **H1:**
+  - `egress_clean_args_with` never takes the grant path.
+  - Only `egress_clean_args_granted` (the guard's entry) passes a `Grantable`, and the grant block inside runs only under `web_query`, i.e. a plain web search as the TOP-level tool.
+  - So weather.city, github.repo, web_type.text and an os_act browser type go to the planner with no card, under a Granted desktop and under an `always` file grant. The test covers all four.
+  - `research` is not a plain search, which settles L2.
+- **M1:** the exact-value tripwire runs before the card or the file. The test plants a stored email; no GrantAsk is sent and the query does not leave as written. The guard's later run stays.
+- **M2:** every yt-dlp call gets `--ignore-config --downloader-args "ffmpeg_i:-protocol_whitelist http,https,tls,tcp,crypto,httpproxy"`.
+- **L1 (in the harness):** after a No, a refusal or no answer, nothing more is asked that turn; at most 2 cards a turn; at most 3 cards in 10 minutes Mind-wide. Over a limit, the request is denied before anything is sent. `request_grant` reports whether a card was shown.
+- **The amended gate:** the desktop ask only when #667's grants file passes the root-file read. Without it the planner writes the query, so an older host never sits on an unknown event.
+- **Info:**
+  - `read_root_file` reads at most 64 KiB + 1 from the handle;
+  - `localhost` in the proxy URL counts as loopback in the door-versus-proxy check (Rust and JS);
+  - the E.NET1k ledger's L4 test name is corrected.
+- **Mutants killed (9):**
+  - the recursive entry taking the grant path;
+  - the tripwire after the ask (SURVIVED first: its test used the production entry, whose real grants-file check is false on this machine, so nothing was ever asked; the test now says the OS has the grants side);
+  - an ask with no grants file;
+  - no yt-dlp downloader whitelist;
+  - the turn's No not remembered;
+  - no per-turn cap;
+  - no ten-minute cap;
+  - the window never expiring.
+  - The H1 desktop test had the same blind spot and was fixed the same way.
+- **Dead check removed:** `plans_from_handed(tool)` in the granted entry. The block already runs only under `web_query`, which is that same check on the top-level tool, so its mutant passed.
+- **Also in this commit:** `t7_replay_names_the_save_at_every_repeat` (E.ARENA1-F66, withdrawn): the gate's T7 replayed with the journal's own lines.
+- **Runs:**
+  - Full suite 2351 passed, 0 failed.
+  - Linux staging: mind-net 13, mind-tools 265, mind-core 141, mind-conversation 1153; net_guard ok.
+- **Pending:** #667's card-screening allowlist (its H1), mirrored as E.GRANT2b once FIXES #667's rule arrives verbatim.

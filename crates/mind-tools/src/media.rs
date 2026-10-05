@@ -146,6 +146,11 @@ fn bounded_command(bin: &str, args: &[&str], proxy: Option<&str>, ytdlp: &str, f
     if bin == ffmpeg {
         cmd.args(["-protocol_whitelist", "http,https,tls,tcp,crypto,httpproxy"]);
     }
+    // E.GRANT2 (M2): an ffmpeg that yt-dlp starts itself (captions over HLS it cannot do natively) is
+    // held to http(s) too, and no config file can undo any of this.
+    if bin == ytdlp {
+        cmd.args(["--ignore-config", "--downloader-args", "ffmpeg_i:-protocol_whitelist http,https,tls,tcp,crypto,httpproxy"]);
+    }
     if let Some(p) = proxy {
         cmd.env("HTTP_PROXY", p);
         cmd.env("http_proxy", p);
@@ -737,7 +742,11 @@ mod tests {
             c.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect::<Vec<_>>()
         };
         let y = super::bounded_command("yt-dlp", &["-g", "https://v.example/x"], Some(p), "yt-dlp", "ffmpeg");
-        assert_eq!(args_of(&y)[1..], ["yt-dlp", "--proxy", p, "-g", "https://v.example/x"], "yt-dlp was not given the proxy");
+        assert_eq!(
+            args_of(&y)[1..],
+            ["yt-dlp", "--ignore-config", "--downloader-args", "ffmpeg_i:-protocol_whitelist http,https,tls,tcp,crypto,httpproxy", "--proxy", p, "-g", "https://v.example/x"],
+            "yt-dlp was not given the proxy, or its own ffmpeg is not held to http(s)"
+        );
         // (Env names are case-insensitive on Windows, where both spellings are one variable.)
         let has = |envs: &[(String, Option<String>)], key: &str, val: Option<&str>| {
             envs.iter().any(|(k, v)| k.eq_ignore_ascii_case(key) && v.as_deref() == val)
@@ -757,7 +766,11 @@ mod tests {
         let w = super::bounded_command("whisper-cli", &["-m", "m.bin"], Some(p), "yt-dlp", "ffmpeg");
         assert_eq!(args_of(&w)[1..], ["whisper-cli", "-m", "m.bin"], "a local tool was given network flags");
         let none = super::bounded_command("yt-dlp", &["-g", "u"], None, "yt-dlp", "ffmpeg");
-        assert_eq!(args_of(&none)[1..], ["yt-dlp", "-g", "u"], "no proxy configured, yet one was passed");
+        assert_eq!(
+            args_of(&none)[1..],
+            ["yt-dlp", "--ignore-config", "--downloader-args", "ffmpeg_i:-protocol_whitelist http,https,tls,tcp,crypto,httpproxy", "-g", "u"],
+            "no proxy configured, yet one was passed -- or the whitelist went with it"
+        );
     }
 
     /// E.NET1i (P1): what ffmpeg is handed is the form that was judged -- the `\\@` form a WHATWG

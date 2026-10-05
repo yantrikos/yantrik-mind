@@ -586,6 +586,8 @@ async fn serve(
             let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::Ask>();
             // E.GRANT1: a search in the model's own words, granted (or not) through the desktop.
             let (grant_tx, mut grant_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::GrantAsk>();
+            // E.GRANT2 (L1): this turn's limits.
+            let mut grant_limits = GrantLimits::default();
             // E.GRANT1: the run the OS stamped on this turn, for the log only (it binds run grants itself).
             let run = turn["run"].as_str().map(|r| format!(" (run {r})")).unwrap_or_default();
             // E.ERASE4: after a pressed Erase, the desktop's own copies -- digests only.
@@ -632,7 +634,25 @@ async fn serve(
                     Some(g) = grant_rx.recv() => {
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
                         let conversation = turn["conversation"].as_str().unwrap_or_default();
-                        let outcome = request_grant(send, session, turn_id, conversation, &g.request_id, &g.query, ASK_WAIT, &mut held).await;
+                        let now = std::time::Instant::now();
+                        let blocked = RECENT_GRANT_CARDS.lock().ok().and_then(|r| grant_blocked(&grant_limits, &r, now));
+                        let outcome = match blocked {
+                            Some(why) => mind_conversation::GrantOutcome::Denied(format!("not asked: {why}")),
+                            None => {
+                                let (outcome, card) = request_grant(send, session, turn_id, conversation, &g.request_id, &g.query, ASK_WAIT, &mut held).await;
+                                if card {
+                                    grant_limits.cards += 1;
+                                    if let Ok(mut r) = RECENT_GRANT_CARDS.lock() {
+                                        r.retain(|t| now.duration_since(*t) < GRANT_CARD_WINDOW);
+                                        r.push_back(now);
+                                    }
+                                }
+                                if matches!(outcome, mind_conversation::GrantOutcome::Denied(_)) {
+                                    grant_limits.denied = true;
+                                }
+                                outcome
+                            }
+                        };
                         // The outcome only: the query itself is the search, logged where it leaves.
                         eprintln!("[harness] turn {turn_id}{run}: own-words search {}: {outcome:?}", g.request_id);
                         let _ = g.reply.send(outcome);
@@ -833,6 +853,37 @@ where
     None
 }
 
+/// E.GRANT2 (the review's L1): a grant card may not nag. Per turn: after a No, a refusal or no answer,
+/// nothing more is asked; at most two cards. Per Mind: at most three cards in ten minutes. A request
+/// over a limit is denied before anything is sent, and the planner writes the query.
+#[derive(Default)]
+pub(crate) struct GrantLimits {
+    pub(crate) denied: bool,
+    pub(crate) cards: u32,
+}
+
+pub(crate) const GRANT_CARDS_PER_TURN: u32 = 2;
+pub(crate) const GRANT_CARDS_PER_WINDOW: usize = 3;
+pub(crate) const GRANT_CARD_WINDOW: Duration = Duration::from_secs(600);
+
+/// The cards shown lately, Mind-wide.
+pub(crate) static RECENT_GRANT_CARDS: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Why this request may not be sent, if it may not.
+pub(crate) fn grant_blocked(turn: &GrantLimits, recent: &std::collections::VecDeque<std::time::Instant>, now: std::time::Instant) -> Option<&'static str> {
+    if turn.denied {
+        return Some("asked already this turn and not granted");
+    }
+    if turn.cards >= GRANT_CARDS_PER_TURN {
+        return Some("two cards this turn already");
+    }
+    if recent.iter().filter(|t| now.duration_since(**t) < GRANT_CARD_WINDOW).count() >= GRANT_CARDS_PER_WINDOW {
+        return Some("three cards in the last ten minutes");
+    }
+    None
+}
+
 /// E.GRANT1 (yantrik-os #667): one `grant_request` for the exact query, on the turn being answered,
 /// and what came of it. `{"granted":…}`: a grant in force. `{}`: the card is shown, and the answer
 /// comes on a later poll -- once / session / always let it leave; no, a typed answer, or nothing
@@ -847,7 +898,7 @@ pub(crate) async fn request_grant<C, F>(
     query: &str,
     wait: Duration,
     held: &mut std::collections::VecDeque<serde_json::Value>,
-) -> mind_conversation::GrantOutcome
+) -> (mind_conversation::GrantOutcome, bool)
 where
     C: Fn(&'static str, serde_json::Value) -> F,
     F: std::future::Future<Output = Result<serde_json::Value, String>>,
@@ -856,16 +907,16 @@ where
     let ev = serde_json::json!({ "kind": "grant_request", "request_id": request_id, "capability": "web_search_own_words", "query": query });
     let reply = match send(EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev })).await {
         Ok(reply) => reply,
-        Err(e) => return Denied(format!("not sent: {e}")),
+        Err(e) => return (Denied(format!("not sent: {e}")), false),
     };
     if let Some(g) = reply.get("granted") {
-        return Granted(format!("grant {}", g["id"].as_str().unwrap_or("(no id)")));
+        return (Granted(format!("grant {}", g["id"].as_str().unwrap_or("(no id)"))), false);
     }
     if let Some(why) = reply.get("refused") {
-        return Denied(format!("refused: {why}"));
+        return (Denied(format!("refused: {why}")), false);
     }
     if !reply.as_object().is_some_and(|o| o.is_empty()) {
-        return Denied(format!("an answer not in the format: {reply}"));
+        return (Denied(format!("an answer not in the format: {reply}")), false);
     }
     // The card is up. Keep the session present and the agent from looking stuck while it waits.
     let waiting = |s: &str| send(EVENT, serde_json::json!({ "session": s, "turn_id": turn_id, "event": { "kind": "status", "text": ASK_STATUS } }));
@@ -879,16 +930,16 @@ where
             beat = std::time::Instant::now();
         }
         let Ok(reply) = send(POLL, serde_json::json!({ "session": session })).await else {
-            return Denied("the desktop could not be asked".into());
+            return (Denied("the desktop could not be asked".into()), true);
         };
         match read_while_asking(&reply, turn_id, conversation, request_id, held) {
             Heard::Nothing => {}
-            Heard::Answer(Some(a)) if matches!(a.as_str(), "once" | "session" | "always") => return Granted(format!("the person's answer: {a}")),
-            Heard::Answer(a) => return Denied(format!("the person's answer: {}", a.as_deref().unwrap_or("(none)"))),
-            Heard::Cancelled => return Denied("the turn ended".into()),
+            Heard::Answer(Some(a)) if matches!(a.as_str(), "once" | "session" | "always") => return (Granted(format!("the person's answer: {a}")), true),
+            Heard::Answer(a) => return (Denied(format!("the person's answer: {}", a.as_deref().unwrap_or("(none)"))), true),
+            Heard::Cancelled => return (Denied("the turn ended".into()), true),
         }
     }
-    Denied("no answer in time".into())
+    (Denied("no answer in time".into()), true)
 }
 
 /// E.ERASE4: one `redact` event for the question `request_id` -- digests and lengths, never the
@@ -1131,7 +1182,7 @@ mod status_tests {
                 }
             };
             let mut held = std::collections::VecDeque::new();
-            let got = request_grant(send, "s1", 5, "main", "grant-0", "abstract meaning representation survey", wait, &mut held).await;
+            let (got, _card) = request_grant(send, "s1", 5, "main", "grant-0", "abstract meaning representation survey", wait, &mut held).await;
             let calls = calls.lock().unwrap().clone();
             (got, calls)
         };
@@ -1157,6 +1208,21 @@ mod status_tests {
         assert!(matches!(silent, Denied(_)), "no answer let it leave");
         let (odd, _) = run(serde_json::json!({ "maybe": true }), vec![], Duration::from_secs(5)).await;
         assert!(matches!(odd, Denied(_)), "a reply not in the format let it leave");
+    }
+
+    /// E.GRANT2 (L1): after a No nothing more is asked in the turn; two cards a turn; three in ten minutes.
+    #[test]
+    fn grant_cards_do_not_nag() {
+        let now = std::time::Instant::now();
+        let none = std::collections::VecDeque::new();
+        assert_eq!(grant_blocked(&GrantLimits::default(), &none, now), None);
+        assert!(grant_blocked(&GrantLimits { denied: true, cards: 0 }, &none, now).is_some(), "asked again after a No");
+        assert!(grant_blocked(&GrantLimits { denied: false, cards: 2 }, &none, now).is_some(), "a third card in one turn");
+        assert_eq!(grant_blocked(&GrantLimits { denied: false, cards: 1 }, &none, now), None);
+        let three: std::collections::VecDeque<_> = (0..3).map(|i| now - Duration::from_secs(60 * i)).collect();
+        assert!(grant_blocked(&GrantLimits::default(), &three, now).is_some(), "a fourth card within ten minutes");
+        let old: std::collections::VecDeque<_> = (0..3).map(|i| now - Duration::from_secs(700 + i)).collect();
+        assert_eq!(grant_blocked(&GrantLimits::default(), &old, now), None, "cards older than ten minutes still counted");
     }
 
     /// E.STALL3: quiet for the first minute; then the turn, its seconds, its last stage and trail.

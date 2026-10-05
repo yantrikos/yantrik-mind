@@ -459,6 +459,16 @@ pub(crate) fn write_out_acronyms(query: &str, acronyms: &[(String, String)]) -> 
     out.join(" ")
 }
 
+/// E.GRANT2: what lets a call take the grant path -- the turn's identity (for the tripwire) and the
+/// off-desktop grant reader. Only `egress_clean_args_granted` makes one.
+#[derive(Clone, Copy)]
+pub(crate) struct Grantable<'a> {
+    pub(crate) id: &'a crate::TurnIdentity,
+    pub(crate) offdesk: &'a (dyn Fn() -> Option<String> + Sync),
+    /// E.GRANT2: has the OS the grants side (#667)? Without it nothing is asked.
+    pub(crate) os_grants: &'a (dyn Fn() -> bool + Sync),
+}
+
 /// E.GRANT1: can this query be shown to the person exactly -- 1 to 300 characters, no control or
 /// bidirectional characters, no space at either end (#667)?
 pub(crate) fn query_can_be_shown(q: &str) -> bool {
@@ -1269,6 +1279,43 @@ impl ConversationEngine {
         fetched: &[String],
         key: &str,
     ) -> Result<serde_json::Value, CleanArgsFailure> {
+        // E.GRANT2 (the review's H1): this entry NEVER takes the grant path -- its recursive callers
+        // (`clean_outbound_fields`, `clean_desktop_browser`) reuse the name "search" for fields that
+        // are not searches (a city, a repo, text typed into a page).
+        self.egress_clean_args_inner(tool, user_text, grounded, external_provenance, web_obs, fetched, key, None).await
+    }
+
+    /// E.GRANT2: the guard's entry. The model's own words may go out under the person's grant only
+    /// when the TOP-level tool is a plain web search (`plans_from_handed`) -- never `research`, never a
+    /// field of another tool. Off the desktop, an `always` grant from the OS's file.
+    pub(crate) async fn egress_clean_args_granted(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: serde_json::Value,
+        external_provenance: &str,
+        web_obs: &[String],
+        fetched: &[String],
+        key: &str,
+        id: &crate::TurnIdentity,
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
+        // (Only a plain web search reaches the grant block: it runs under `web_query`, which is
+        // `plans_from_handed(tool)` -- the TOP-level tool, since only this entry passes a grant.)
+        let grant = Some(Grantable { id, offdesk: &mind_net::always_search_grant, os_grants: &mind_net::grants_file_present });
+        self.egress_clean_args_inner(tool, user_text, grounded, external_provenance, web_obs, fetched, key, grant).await
+    }
+
+    pub(crate) async fn egress_clean_args_inner(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: serde_json::Value,
+        external_provenance: &str,
+        web_obs: &[String],
+        fetched: &[String],
+        key: &str,
+        grant: Option<Grantable<'_>>,
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
         if self.egress.is_none() {
             return Ok(grounded);
@@ -1358,11 +1405,18 @@ impl ConversationEngine {
         }
         // E.GRANT1 (yantrik-os #667): not a span -- the model's own words may leave as written if the
         // person grants it; otherwise the planner writes the query as before.
-        if web_query {
+        if let (true, Some(g)) = (web_query, grant) {
             let q = ["query", "q", "topic"].iter().find_map(|k| grounded.get(*k).and_then(|v| v.as_str()));
             if let Some(own) = q {
-                if let Some(own) = own_words_under_grant(own, &named, &mind_net::always_search_grant).await {
-                    return Ok(serde_json::json!({ "query": own }));
+                // E.GRANT2 (M1): the exact-value tripwire BEFORE the card or the file -- a stored private
+                // value must not reach the card, the OS's journal, or a grant's log of uses.
+                let clean = self.model_injected_private_value(tool, &serde_json::json!({ "query": own.trim() }), user_text, g.id).await.is_none();
+                // E.GRANT2: and only on an OS that has the grants side -- an older host would leave a
+                // `grant_request` unanswered for the whole card wait.
+                if clean && (g.os_grants)() {
+                    if let Some(own) = own_words_under_grant(own, &named, g.offdesk).await {
+                        return Ok(serde_json::json!({ "query": own }));
+                    }
                 }
             }
         }

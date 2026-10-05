@@ -139,7 +139,7 @@ pub(crate) async fn pre(
         engine.recheck_handed(&ConversationEngine::handed_key(id), id).await;
     }
     let args = match engine
-        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance, &fetched, &ConversationEngine::handed_key(id))
+        .egress_clean_args_granted(tool, user_text, grounded, &provenance, &web_provenance, &fetched, &ConversationEngine::handed_key(id), id)
         .await
     {
         Ok(args) => {

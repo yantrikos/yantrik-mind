@@ -17421,6 +17421,35 @@ mod desktop_consent_and_stall_wiring {
         assert!(!r.reply.contains(crate::desktop::UNSAVED_NOTE), "{}", r.reply);
     }
 
+    /// E.ARENA1-F66 (withdrawn; the gate on OS fb2f27f3, T7 replayed with the journal's own lines): after
+    /// `new`, a refused `set_content` and the same `new` again, every repeat is answered with the exact
+    /// save the request needs -- the loop did its part; the model did not take it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn t7_replay_names_the_save_at_every_repeat() {
+        const EDITOR_253: &str = include_str!("../fixtures/desktop/describe_editor_253.txt");
+        let text = "Perception API review\nLunch with Sam\nDentist";
+        let new = act("editor", "new", text);
+        let r = run_with(
+            "Write the titles of everything on my calendar on 25 September into a new file ~/arena-min09n-friday.txt, one title per line.",
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", new.clone()),
+                Step::Call("mcp.yantrik-os.os_act", act("editor", "set_content", text)),
+                Step::Call("mcp.yantrik-os.os_act", new.clone()),
+                Step::Call("mcp.yantrik-os.os_act", new.clone()),
+                Step::Call("mcp.yantrik-os.os_act", new.clone()),
+                Step::Call("mcp.yantrik-os.os_act", new.clone()),
+            ],
+            vec![EDITOR_253],
+            vec!["Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 3 lines, unsaved \u{b7} tab 3 of 3 accepted: True, settled: True revision: 0445d"],
+        )
+        .await;
+        let save = r#""action": "save_as", "args": {"path": "~/arena-min09n-friday.txt"}"#;
+        let named = r.prompts.iter().filter(|p| p.contains(save)).count();
+        assert!(named >= 3, "the repeats were not answered with the save ({named} prompts named it)");
+        assert_eq!(acts_reached(&r).len(), 1, "a repeated new reached the desktop: {:?}", r.reached);
+        assert!(r.reply.contains("has not been saved"), "the reply claimed a save: {}", r.reply);
+    }
+
     /// E.ARENA1-F18 through the loop: the model never sees yos-mcp's "re-run with --full".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_model_never_reads_re_run_with_full() {
@@ -20386,10 +20415,118 @@ async fn the_planner_sends_the_models_words_under_a_grant() {
             let _ = g.reply.send(crate::GrantOutcome::Granted("the person's answer: session".into()));
         }
     });
-    let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_with("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1")).await.unwrap();
+    let me = TurnIdentity::primary();
+    // (On an OS with the grants side -- this machine has no grants file, so it is said here.)
+    let grant = Some(crate::egress_planning::Grantable { id: &me, offdesk: &|| None, os_grants: &|| true });
+    let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_inner("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1", grant)).await.unwrap();
     assert_eq!(out["query"], "Abstract Meaning Representation graph-to-text survey");
     // Without one, the planner writes it, as before.
     let planned = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], &[], "primary|c1").await.unwrap();
     assert_eq!(planned["query"], "MDG machine-native");
+}
+
+/// E.GRANT2 (the review's H1): a grant for web searches covers web searches only -- another tool's
+/// field (weather.city, github.repo) and text typed into a page go to the planner, and no card is
+/// asked for, under a Granted desktop and under an `always` file grant alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_grant_covers_searches_only() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let me = TurnIdentity::primary();
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls: [(&str, serde_json::Value, &str); 4] = [
+        ("weather", serde_json::json!({ "city": "model chosen words here" }), "city"),
+        ("github", serde_json::json!({ "repo": "model chosen repo words" }), "repo"),
+        ("mcp.yantrik-os.web_type", serde_json::json!({ "text": "model typed text into page" }), "text"),
+        (crate::desktop::ACT, serde_json::json!({ "app": "browser", "action": "type", "args": { "text": "model typed text into page" } }), "args"),
+    ];
+    for (tool, args, field) in calls {
+        // A desktop that grants everything it is asked.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        let counter = asked.clone();
+        tokio::spawn(async move {
+            while let Some(g) = rx.recv().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+            }
+        });
+        // (An OS with the grants side: the real check reads a file this machine does not have.)
+        let desk = Some(crate::egress_planning::Grantable { id: &me, offdesk: &|| None, os_grants: &|| true });
+        let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_inner(tool, "Continue.", args.clone(), "", &[], &[], "primary|c1", desk)).await;
+        assert!(out.as_ref().map_or(true, |o| o.get(field) != args.get(field)), "{tool}: the model's own words left under a search grant: {out:?}");
+        // And an `always` file grant, off the desktop.
+        let always = || Some("g-9b0d5e1a7c32".to_string());
+        let grant = Some(crate::egress_planning::Grantable { id: &me, offdesk: &always, os_grants: &|| true });
+        let off = conv.egress_clean_args_inner(tool, "Continue.", args.clone(), "", &[], &[], "primary|c1", grant).await;
+        assert!(off.as_ref().map_or(true, |o| o.get(field) != args.get(field)), "{tool}: an always grant let the model's words out: {off:?}");
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a card was asked for a non-search");
+}
+
+/// E.GRANT2 (M1): a stored private value in the model's query never reaches the card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_identifier_never_reaches_the_card() {
+    use mind_governance::egress::EgressBroker;
+    let mem = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    mem.remember_as_belief_scoped(
+        BeliefAssertion {
+            statement: "Alice's private email is alice.secret@example.com".into(),
+            polarity: 1.0,
+            weight: 2.0,
+            source_event: None,
+            provenance: "told".into(),
+        },
+        mind_types::Scope::primary(),
+    )
+    .await
+    .unwrap();
+    let memf: Arc<dyn MemoryFacade> = mem;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memf, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let me = TurnIdentity::primary();
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+    let counter = asked.clone();
+    tokio::spawn(async move {
+        while let Some(g) = rx.recv().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+        }
+    });
+    let ask = serde_json::json!({ "query": "alice.secret@example.com breach lookup" });
+    let desk = Some(crate::egress_planning::Grantable { id: &me, offdesk: &|| None, os_grants: &|| true });
+    let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_inner("search", "Continue.", ask, "", &[], &[], "primary|c1", desk)).await.unwrap();
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a stored identifier reached the card");
+    assert_ne!(out["query"], "alice.secret@example.com breach lookup", "a stored identifier left under a grant");
+}
+
+/// E.GRANT2: on an OS without the grants side (#667), nothing is asked and the planner writes the query.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_grant_is_asked_where_the_os_has_none() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let me = TurnIdentity::primary();
+    let ask = serde_json::json!({ "query": "abstract meaning representation survey" });
+    for (os_has_grants, asks_expected) in [(false, 0usize), (true, 1usize)] {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        let counter = asked.clone();
+        tokio::spawn(async move {
+            while let Some(g) = rx.recv().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+            }
+        });
+        let ready = move || os_has_grants;
+        let grant = Some(crate::egress_planning::Grantable { id: &me, offdesk: &|| None, os_grants: &ready });
+        let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_inner("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1", grant)).await.unwrap();
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), asks_expected, "os_has_grants={os_has_grants}");
+        let want = if os_has_grants { "abstract meaning representation survey" } else { "planner words" };
+        assert_eq!(out["query"], want, "os_has_grants={os_has_grants}");
+    }
 }
 

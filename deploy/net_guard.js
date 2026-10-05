@@ -183,7 +183,8 @@ function egressTrust(deps = {}) {
         const bare = !d.username && !d.password && !d.search && !d.hash && d.pathname === "/";
         if (d.protocol !== "http:" || !loop || !d.port || !bare) return null;
         // E.NET1k (L2): never the endpoint door itself.
-        if (new URL(ours).host === d.host) return null;
+        const theirs = new URL(ours);
+        if (theirs.port === d.port && (theirs.hostname === "localhost" || theirs.hostname === d.hostname)) return null;
         pub = `http://${d.host}`;
       }
     }

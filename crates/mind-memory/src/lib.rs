@@ -4545,7 +4545,8 @@ fn recent_messages(
     let mut v: Vec<(String, String)> = match viewer {
         Some(tag) => {
             let mut stmt = conn
-                .prepare("SELECT role, text FROM mind_transcript WHERE scope='shared' OR scope=?1 ORDER BY id DESC LIMIT ?2")
+                // E.NET1j (L3): a shared break (written before E.NET1i stopped it) cuts no one's window.
+                .prepare("SELECT role, text FROM mind_transcript WHERE (scope='shared' OR scope=?1) AND NOT (role='break' AND scope='shared') ORDER BY id DESC LIMIT ?2")
                 .map_err(|e| e.to_string())?;
             let rows = stmt
                 .query_map(rusqlite::params![tag, limit as i64], |r| {
@@ -4597,7 +4598,7 @@ fn messages_since_visible(
 ) -> std::result::Result<Vec<(i64, String, String)>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT id, role, text FROM mind_transcript WHERE id > ?1 AND (scope='shared' OR scope=?2) ORDER BY id ASC LIMIT ?3")
+        .prepare("SELECT id, role, text FROM mind_transcript WHERE id > ?1 AND (scope='shared' OR scope=?2) AND NOT (role='break' AND scope='shared') ORDER BY id ASC LIMIT ?3")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(rusqlite::params![after_id, viewer, limit as i64], |r| {

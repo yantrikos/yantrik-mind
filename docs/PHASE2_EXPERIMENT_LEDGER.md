@@ -15024,3 +15024,37 @@ Tests send a request to a local fake public door and read the request line it re
 - **#666's review L2:** `public_proxy` is a URL ("http://127.0.0.1:7451", like `proxy`). Only that form is read: http, a loopback address, an explicit port, nothing else. The "ip:port" form is refused.
 - **Optional, not built:** checking that the listener on 7450/7451 is owned by the egress uid (`/proc/net/tcp`). It is recorded as a residual: the OS's kernel rules allow the mind uid only these loopback ports, but another local process could still squat one before the proxy binds.
 - **Kill criteria added:** the default reading all scopes; an entry discarding the canonical URL; a shared break honoured; the group reply claiming a restart.
+
+## E.NET1j — RESULT: addresses from outside through the OS's public-only door; NET1i's lows; 18 mutants killed, 2 dead lines removed
+
+- **The signal (Rust and JS):**
+  - versions 2 and 3 are read;
+  - a v3 signal must carry `public_proxy`, either null or a URL (http, a loopback address, an explicit port, nothing else);
+  - "127.0.0.1:7451" without a scheme, a non-loopback host, a name, a missing port, or version 4 means no trust.
+  `EgressTrust::public_door()` holds it.
+- **Rust:**
+  - `mind_net::route_outside(builder, direct, trust)` sends a proxied request for an address from outside through the public door when there is one, and otherwise as `route_decided` did. `get_checked_with` uses it, which covers the fetch tool, search-result fetches, images and papers.
+  - `mind_net::outside_proxy()` is the public door or the configured proxy; yt-dlp and ffmpeg get it (env, `--proxy`, `-http_proxy`).
+  - Configured endpoints and model calls stay on 7450.
+- **JS:** `egressTrust` returns `public`; `fetchViaProxy` and chromium's proxy use it when it is set, and the endpoint proxy otherwise.
+- **NET1i's lows:**
+  - **L1:** `messages_since_visible` has NO default; every store must filter by scope. That is stronger than a fail-closed default, which no test could have reached (only `MemoryHandle` implements the trait).
+  - **L2:** the fetch tool, `fetch_rendered` and the screenshot rebind to `ssrf_check`'s canonical answer.
+  - **L3:** both transcript reads ignore an old shared break row.
+  - **L4:** a group `/new` answers "A group chat has no conversation of its own to restart, so nothing changed."
+- **Tests:**
+  - `an_outside_address_goes_through_the_public_door` (mind-net) and `the_fetch_goes_out_through_the_public_door` (mind-tools): a local fake door reads the request line. Each door now waits at most 5 s: the first version waited forever, and a mutant that sent the request elsewhere HUNG the mutation run.
+  - The signal cases (v3, null, the four refusals) in both languages.
+  - JS: a request and the browser through the public door.
+  - The wiring counts.
+  - `an_old_shared_break_cuts_no_window` and `a_group_new_chat_says_nothing_changed`.
+- **Mutants killed (18):**
+  - Rust: v3 refused; an unknown version; v3 without `public_proxy`; a non-loopback door; the outside route on the endpoint door; the fetch on `route_decided`; the media children on the endpoint door.
+  - JS: v3 refused; an unknown version; a non-loopback door; the fetch on the endpoint door; the browser on the endpoint door.
+  - The lows: the three canonical rebinds, the two shared-break reads, the group reply.
+- **Dead lines removed:** JS's `hasOwnProperty("public_proxy")`. The string check below it already refuses a missing field, and its mutant passed for that reason (the same as E.NET1g's `lan_hosts` line).
+- **Runs:**
+  - Full suite 2342 passed, 0 failed.
+  - Linux staging: mind-net 12, mind-tools 265, mind-memory 113, mind-conversation 1147.
+  - net_guard.test.js as root (trusted) and as nobody (not trusted).
+- **Residual, named:** the listener on 7450/7451 is not checked to be the egress uid's. That would mean reading `/proc/net/tcp`; it is optional per #666's review and not built.

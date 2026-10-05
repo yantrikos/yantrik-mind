@@ -291,12 +291,26 @@ pub struct EgressTrust {
     /// lets a request matching one reach the LAN by NAME. `None`: the OS could not list them (over
     /// its cap, or unreadable), so any name may be one.
     lan: Option<Vec<(String, Vec<u16>)>>,
+    /// E.NET1j (yantrik-os #666): the OS's PUBLIC-only door ("http://127.0.0.1:7451"), which never
+    /// honours a LAN rule and refuses every non-internet address. None: an older proxy without one.
+    public: Option<String>,
 }
 
 impl EgressTrust {
     /// A trust with these LAN rules (the signal reader's, and tests').
     pub fn with_lan_rules(lan: Option<Vec<(String, Vec<u16>)>>) -> EgressTrust {
-        EgressTrust { lan }
+        EgressTrust { lan, public: None }
+    }
+
+    /// E.NET1j: the same trust with the OS's public door (tests).
+    pub fn with_public_door(mut self, public: Option<String>) -> EgressTrust {
+        self.public = public;
+        self
+    }
+
+    /// E.NET1j: the public-only door, as a proxy URL, when the OS has one.
+    pub fn public_door(&self) -> Option<&str> {
+        self.public.as_deref()
     }
 
     /// E.NET1g (M1): may a request to `url`, whose host did not resolve here, be left to the proxy?
@@ -359,9 +373,34 @@ fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String
         (Some(theirs), Some(ours)) => theirs.trim().trim_end_matches('/') == ours.trim_end_matches('/'),
         _ => false,
     };
-    if !(said["version"] == 2 && said["enforced"] == true && said["proxy_refuses_private"] == true && same_proxy) {
+    // E.NET1j: version 3 adds the public door; 2 is still read. Any other version is not.
+    let version = said["version"].as_u64();
+    if !(matches!(version, Some(2) | Some(3)) && said["enforced"] == true && said["proxy_refuses_private"] == true && same_proxy) {
         return None;
     }
+    // A v3 signal must say whether there is a public door: a URL like `proxy` ("http://127.0.0.1:7451",
+    // per #666's review) on a loopback address with its port written and nothing else -- or null.
+    let public = if version == Some(3) {
+        match said.get("public_proxy")? {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(door) => {
+                let u = url::Url::parse(door.trim()).ok()?;
+                let ip: std::net::IpAddr = match u.host()? {
+                    url::Host::Ipv4(a) => a.into(),
+                    url::Host::Ipv6(a) => a.into(),
+                    url::Host::Domain(_) => return None,
+                };
+                let bare = u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() && u.path() == "/";
+                if u.scheme() != "http" || !ip.is_loopback() || !bare {
+                    return None;
+                }
+                Some(format!("http://{}", std::net::SocketAddr::new(ip, u.port()?)))
+            }
+            _ => return None,
+        }
+    } else {
+        None
+    };
     // `lan_hosts` must be there: a list of {host, ports}, or null when the OS could not list them.
     let lan = match said.get("lan_hosts")? {
         serde_json::Value::Null => None,
@@ -377,7 +416,7 @@ fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String
         ),
         _ => return None,
     };
-    Some(EgressTrust { lan })
+    Some(EgressTrust { lan, public })
 }
 
 /// E.EGRESS5d (the thirteenth pass): read a root-owned file without a race -- its folder must be a
@@ -479,6 +518,25 @@ pub fn builder() -> ureq::AgentBuilder {
 /// `builder` with the route to `url` applied: the proxy unless `url` goes direct.
 pub fn route(builder: ureq::AgentBuilder, url: &str) -> ureq::Agent {
     route_decided(builder, is_direct(url))
+}
+
+/// E.NET1j (yantrik-os #666): a request for an address from OUTSIDE -- a page, the model, a search
+/// result, a paper link -- goes through the OS's public-only door when it has one, which never lets a
+/// request into the LAN whatever its name; otherwise exactly as [`route_decided`].
+pub fn route_outside(builder: ureq::AgentBuilder, direct: bool, trust: Option<&EgressTrust>) -> ureq::Agent {
+    if direct {
+        return builder.build();
+    }
+    match trust.and_then(|t| t.public_door()).and_then(|p| ureq::Proxy::new(p).ok()) {
+        Some(p) => builder.proxy(p).build(),
+        None => route_decided(builder, false),
+    }
+}
+
+/// E.NET1j: the proxy a child fetching addresses from outside (yt-dlp, ffmpeg) must be given -- the
+/// public door when the OS has one, else the configured proxy.
+pub fn outside_proxy() -> Option<String> {
+    egress_trust().and_then(|t| t.public).or_else(configured_proxy)
 }
 
 /// E.NET1g (L1): `builder` on a route already decided -- direct, or through the proxy when one is set.
@@ -592,6 +650,11 @@ mod tests {
             Some(EgressTrust::with_lan_rules(Some(vec![("homeassistant.local".to_string(), vec![8123])]))),
             "the whole signal was not trusted, or its LAN rules were lost"
         );
+        // E.NET1j: v3 carries the public door; null is an older proxy without one.
+        say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1:7451""#));
+        assert_eq!(egress_trust_from(&file, &ours).and_then(|t| t.public_door().map(str::to_string)).as_deref(), Some("http://127.0.0.1:7451"));
+        say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":null"#));
+        assert_eq!(egress_trust_from(&file, &ours).map(|t| t.public_door().is_none()), Some(true), "a null public door");
         say(&whole.replace(r#"[{"host":"homeassistant.local","ports":[8123]}]"#, "null"));
         assert_eq!(egress_trust_from(&file, &ours), Some(EgressTrust::with_lan_rules(None)), "lan_hosts: null is a trust with no list");
         assert!(!egress_trust_from(&file, &env_of(&[])).is_some(), "trusted with no proxy configured");
@@ -600,7 +663,12 @@ mod tests {
             (r#""enforced":true"#, r#""enforced":false"#, "not enforced"),
             (r#""proxy_refuses_private":true"#, r#""proxy_refuses_private":false"#, "a proxy that lets private ranges through"),
             (r#""version":2"#, r#""version":1"#, "the version before lan_hosts"),
-            (r#""version":2"#, r#""version":3"#, "an unknown version"),
+            (r#""version":2"#, r#""version":4"#, "an unknown version"),
+            (r#""version":2"#, r#""version":3"#, "a v3 signal saying nothing of a public door"),
+            (r#""version":2"#, r#""version":3,"public_proxy":"http://10.0.0.5:7451""#, "a public door that is not this machine"),
+            (r#""version":2"#, r#""version":3,"public_proxy":"127.0.0.1:7451""#, "a public door that is not a URL"),
+            (r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1""#, "a public door without its port"),
+            (r#""version":2"#, r#""version":3,"public_proxy":"http://proxy.lan:7451""#, "a public door that is not an address"),
             (r#""lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],"#, "", "no lan_hosts"),
             (r#""ports":[8123]"#, r#""ports":["8123"]"#, "a malformed LAN rule"),
             (r#""proxy":"http://127.0.0.1:7450","#, "", "no proxy named"),
@@ -631,6 +699,37 @@ mod tests {
             assert!(egress_trust_from(&file, &ours).is_some());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.NET1j: an address from outside reaches the public door when the OS has one; with none, the
+    /// route is exactly the decided one.
+    #[test]
+    fn an_outside_address_goes_through_the_public_door() {
+        use std::io::{BufRead, Write};
+        let door = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = door.local_addr().unwrap().port();
+        door.set_nonblocking(true).unwrap();
+        // A door that waits at most 5 s: a request that goes elsewhere fails the test, never hangs it.
+        let seen = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match door.accept() {
+                    Ok((s, _)) => {
+                        s.set_nonblocking(false).unwrap();
+                        let mut line = String::new();
+                        std::io::BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                        let mut s = s;
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        return line;
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Err(_) => return String::new(),
+                }
+            }
+        });
+        let trust = EgressTrust::with_lan_rules(Some(vec![])).with_public_door(Some(format!("http://127.0.0.1:{port}")));
+        let _ = route_outside(builder().timeout(std::time::Duration::from_secs(3)), false, Some(&trust)).get("http://news.example.test/a").call();
+        assert_eq!(seen.join().unwrap().trim_end(), "GET http://news.example.test/a HTTP/1.1", "the outside address missed the public door");
     }
 
     /// E.EGRESS2: a plain `http` request to a proxy keeps the absolute-form request line the proxy

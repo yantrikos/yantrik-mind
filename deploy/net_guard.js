@@ -164,13 +164,33 @@ function egressTrust(deps = {}) {
     const ours = configuredProxy(deps.env || process.env);
     if (!ours || typeof said.proxy !== "string") return null;
     const same = said.proxy.trim().replace(/\/+$/, "") === ours.replace(/\/+$/, "");
-    if (!(said.version === 2 && said.enforced === true && said.proxy_refuses_private === true && same)) return null;
-    if (said.lan_hosts === null) return { proxy: ours, lan: null };
+    // E.NET1j (yantrik-os #666): version 3 adds the public-only door; 2 is still read.
+    if (!((said.version === 2 || said.version === 3) && said.enforced === true && said.proxy_refuses_private === true && same)) return null;
+    let pub = null;
+    if (said.version === 3) {
+      if (said.public_proxy !== null) {
+        // A URL like `proxy` (#666's review): http, a loopback address, its port written, nothing else.
+        // (A missing field is not a string either: a v3 signal must say.)
+        if (typeof said.public_proxy !== "string") return null;
+        let d;
+        try {
+          d = new URL(said.public_proxy.trim());
+        } catch (_) {
+          return null;
+        }
+        const h = d.hostname.replace(/^\[|\]$/g, "");
+        const loop = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) || h === "::1";
+        const bare = !d.username && !d.password && !d.search && !d.hash && d.pathname === "/";
+        if (d.protocol !== "http:" || !loop || !d.port || !bare) return null;
+        pub = `http://${d.host}`;
+      }
+    }
+    if (said.lan_hosts === null) return { proxy: ours, lan: null, public: pub };
     const port = (p) => Number.isInteger(p) && p > 0 && p < 65536;
     const rule = (r) => r && typeof r.host === "string" && Array.isArray(r.ports) && r.ports.every(port);
     if (!Array.isArray(said.lan_hosts) || !said.lan_hosts.every(rule)) return null;
     const lan = said.lan_hosts.map((r) => ({ host: r.host.trim().replace(/\.$/, "").toLowerCase(), ports: r.ports }));
-    return { proxy: ours, lan };
+    return { proxy: ours, lan, public: pub };
   } catch (_) {
     return null;
   }
@@ -287,7 +307,8 @@ async function fetchPinned(urlText, req = {}, deps = {}) {
     } catch (e) {
       if (!e.unresolved || !leavesToProxy(trust, host)) throw e;
     }
-    return fetchViaProxy(u, host, trust.proxy, req, deps);
+    // E.NET1j: through the public-only door when the OS has one.
+    return fetchViaProxy(u, host, trust.public || trust.proxy, req, deps);
   }
   const [pick] = await checkedAddresses(host, deps);
   const mod = u.protocol === "https:" ? https : http;
@@ -359,7 +380,7 @@ async function guardContext(ctx) {
 // carry) meets the proxy rather than a reset.
 function withProxy(options, deps = {}) {
   const trust = (deps.egressTrust || egressTrust)(deps);
-  return trust && !options.proxy ? { ...options, proxy: { server: trust.proxy } } : options;
+  return trust && !options.proxy ? { ...options, proxy: { server: trust.public || trust.proxy } } : options;
 }
 
 // E.NET1f (the fourteenth pass): the lock at RUN time. Playwright's browser types (chromium, firefox,

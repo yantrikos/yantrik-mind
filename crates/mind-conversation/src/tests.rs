@@ -20312,3 +20312,31 @@ fn a_memorys_date_comes_before_its_text() {
     assert_eq!(src.matches("noted(b.updated_ms), b.statement, b.confidence)").count(), 1, "a belief's date is not first in the agent loop");
 }
 
+/// E.NET1j (L3): a shared break row already in a store cuts no one's window, and compaction does
+/// not stop at it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_old_shared_break_cuts_no_window() {
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    mem.append_message("user", "PRIMARY-MARK plan the trip").await.unwrap();
+    mem.append_message_scoped("break", "— context break —", mind_types::Scope::Shared).await.unwrap();
+    mem.append_message("user", "after the old break").await.unwrap();
+    let ctx = mind_types::AccessContext::principal(mind_types::Scope::primary(), mind_types::Purpose::conversation(mind_types::PRIMARY));
+    let window = mem.recent_messages(50, &ctx).await.unwrap();
+    assert!(window.iter().any(|(_, t)| t.contains("PRIMARY-MARK")), "an old shared break cut the person's window");
+    let visible = mem.messages_since_visible(0, 50, &mind_types::Scope::primary()).await.unwrap();
+    assert!(visible.iter().all(|(_, role, _)| role != "break"), "compaction would stop at an old shared break");
+}
+
+/// E.NET1j (L4): a /new in a group is answered truthfully -- nothing restarted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_new_chat_says_nothing_changed() {
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "YM");
+    let group = TurnIdentity::new("kid", true, mind_types::OutputScope::HouseholdMember);
+    let reply = conv.handle_turn_as("/new@th_ym_bot", group).await.unwrap();
+    assert!(reply.starts_with("A group chat has no conversation of its own to restart"), "{reply}");
+    let mine = conv.handle_turn_as("/new", TurnIdentity::primary()).await.unwrap();
+    assert!(mine.starts_with("New conversation"), "{mine}");
+}
+

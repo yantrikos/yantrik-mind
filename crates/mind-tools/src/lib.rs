@@ -599,7 +599,8 @@ fn get_checked_with(
                 builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
             }
         }
-        let agent = mind_net::route_decided(builder, direct);
+        // E.NET1j: an address from outside, so through the OS's public-only door when it has one.
+        let agent = mind_net::route_outside(builder, direct, trust.as_ref());
         let mut req = agent.get(&current);
         for (k, v) in headers {
             req = req.set(k, v);
@@ -741,7 +742,8 @@ impl Fetcher for HttpFetcher {
         let text = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
             // SSRF guard FIRST: never let an (injected) URL pull from the local/internal network
             // (this also gates what we'd hand to the reader proxy).
-            ssrf_check(&url)?;
+            // E.NET1j (L2): everything below fetches the form that was judged.
+            let url = ssrf_check(&url)?;
             let reader_ok = reader_allowed(&|k| mind_net::person_var(k).ok());
             fetch_ladder(|| fetch_direct(&url), || fetch_headless(&url), reader_ok, || fetch_reader(&url))
         })
@@ -767,7 +769,8 @@ impl Fetcher for HttpFetcher {
         let u = url.to_string();
         let max = self.max_chars;
         let res = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-            ssrf_check(&u)?;
+            // E.NET1j (L2): the form that was judged.
+            let u = ssrf_check(&u)?;
             // Headless FIRST — with self-consistent headers (real UA + Sec-CH-UA, no stale spoof) it now
             // clears Amazon/Target and is far lighter/faster than headful. Escalate to headful only if
             // headless comes back thin (a block page is short; a real product grid is thousands of chars).
@@ -1138,6 +1141,38 @@ mod tests {
         }
     }
 
+    /// E.NET1j: a fetch of an address from outside reaches the OS's public door.
+    #[test]
+    fn the_fetch_goes_out_through_the_public_door() {
+        use std::io::{BufRead, Write};
+        let door = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = door.local_addr().unwrap().port();
+        door.set_nonblocking(true).unwrap();
+        // A door that waits at most 5 s: a request that goes elsewhere fails the test, never hangs it.
+        let seen = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match door.accept() {
+                    Ok((s, _)) => {
+                        s.set_nonblocking(false).unwrap();
+                        let mut line = String::new();
+                        std::io::BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+                        let mut s = s;
+                        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<p>public</p>");
+                        return line;
+                    }
+                    Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Err(_) => return String::new(),
+                }
+            }
+        });
+        let public = |_: &str, p: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], p))]) };
+        let trust = move || Some(mind_net::EgressTrust::with_lan_rules(Some(vec![])).with_public_door(Some(format!("http://127.0.0.1:{port}"))));
+        let out = fetch_direct_with("http://news.example.org/a", &public, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| false, &trust);
+        assert_eq!(seen.join().unwrap().trim_end(), "GET http://news.example.org/a HTTP/1.1", "the fetch missed the public door");
+        assert!(out.is_ok(), "{out:?}");
+    }
+
     /// E.NET1g (L1): the OS's word is read once per hop -- the route cannot be decided from one read
     /// and built from another.
     #[test]
@@ -1177,6 +1212,12 @@ mod tests {
             "ssrf_check_routed(url, &system_resolve, &mind_net::is_direct_under, &mind_net::egress_trust)",
             "fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust)",
             "get_checked_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust, timeout, headers)",
+            // E.NET1j: the hop goes out through the public door when there is one.
+            "let agent = mind_net::route_outside(builder, direct, trust.as_ref());",
+            // E.NET1j (L2): the fetch tool, fetch_rendered and the screenshot fetch the judged form.
+            "let url = ssrf_check(&url)?;",
+            "let u = ssrf_check(&u)?;",
+            "let url = ssrf_check(&url).ok()?;",
             // E.NET1g (L2): the image fetch takes the checked GET.
             "get_checked(&url, std::time::Duration::from_secs(30), &[])",
         ] {
@@ -1455,7 +1496,8 @@ pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
 pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-        ssrf_check(&url).ok()?;
+        // E.NET1j (L2): the form that was judged.
+        let url = ssrf_check(&url).ok()?;
         let script = mind_net::person_var("YM_SNAP_SCRIPT")
             .unwrap_or_else(|_| "/opt/yantrik-mind/snap_page.js".into());
         let dir = std::path::Path::new(&script).parent()?.to_path_buf();

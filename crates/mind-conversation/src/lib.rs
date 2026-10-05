@@ -15344,6 +15344,12 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             h.note_named(&handed_key, user_text, home.as_deref(), Self::now_ms());
         }
         if let Some(reply) = slash_reply(user_text) {
+            // E.NET1j (L4): a group has no window to restart (E.NET1i P2), so it is not told it did.
+            let reply = if is_fresh_start(user_text) && matches!(ws, mind_types::Scope::Shared) {
+                "A group chat has no conversation of its own to restart, so nothing changed. Nothing was run.".to_string()
+            } else {
+                reply
+            };
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws.clone()).await;
             // E.MEM1: the desktop's New chat is this `/new` turn (yantrik-os: no chat ids), so it is

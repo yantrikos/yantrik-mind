@@ -1241,15 +1241,14 @@ pub trait MemoryFacade: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(i64, String, String)>>;
     /// E.NET1i: [`messages_since`](Self::messages_since), only the rows `viewer` may see -- its own
-    /// scope and shared ones. OPERATOR-INTERNAL like it. Default (single-user stores): every row.
+    /// scope and shared ones. OPERATOR-INTERNAL like it. E.NET1j (L1): no default -- every store must
+    /// filter by scope itself, so none can hand one person's rows to another's summary by omission.
     async fn messages_since_visible(
         &self,
         after_id: i64,
         limit: usize,
-        _viewer: &Scope,
-    ) -> Result<Vec<(i64, String, String)>> {
-        self.messages_since(after_id, limit).await
-    }
+        viewer: &Scope,
+    ) -> Result<Vec<(i64, String, String)>>;
     /// Exact, read-only consolidation backlog at `cursor_id`, including per-scope starvation age.
     /// The default explicitly says its substrate is unspecified rather than borrowing statistics
     /// from some other store.

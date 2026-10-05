@@ -125,7 +125,8 @@ pub fn have(bin: &str) -> bool {
 /// Run a command under a hard wall-clock kill, so a hung download can never wedge the mind.
 /// Mirrors the headless-fetch pattern: `timeout` owns the deadline, argv owns the safety.
 fn run_bounded(bin: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
-    let out = bounded_command(bin, args, mind_net::configured_proxy().as_deref(), &ytdlp_bin(), &ffmpeg_bin())
+    // E.NET1j: the public door when the OS has one -- yt-dlp's and ffmpeg's own hops cannot be checked here.
+    let out = bounded_command(bin, args, mind_net::outside_proxy().as_deref(), &ytdlp_bin(), &ffmpeg_bin())
         .output()
         .map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))?;
     Ok(out)
@@ -767,6 +768,7 @@ mod tests {
         assert_eq!(handed, judged, "ffmpeg would have been handed the raw line");
         // Every media entry rebinds its URL to what the check returned.
         let src = include_str!("media.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(src.matches("bounded_command(bin, args, mind_net::outside_proxy().as_deref()").count(), 1, "the media children are not on the public door");
         assert_eq!(src.matches("let url = crate::ssrf_check_pub(url)?;").count(), 4, "a media entry hands on the unchecked string");
         assert_eq!(src.matches("crate::ssrf_check_pub(url)?;").count(), 4, "a check's answer is thrown away");
     }

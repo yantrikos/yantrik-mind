@@ -80,6 +80,11 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     },
     egressTrust: () => ({ proxy: proxyAt, lan: [] }),
   };
+  // E.NET1j: with a public door, the request goes there, not to the endpoint proxy.
+  const viaPublic = { ...viaProxy, egressTrust: () => ({ proxy: "http://127.0.0.1:9", lan: [], public: proxyAt }) };
+  const gotPublic = await fetchPinned("http://news.invalid/p", {}, viaPublic);
+  assert.strictEqual(gotPublic.body.toString(), "via the proxy", "the public door was not used");
+  seen.splice(0, seen.length);
   const got1e = await fetchPinned("http://news.invalid/a?b=1", {}, viaProxy);
   assert.strictEqual(got1e.body.toString(), "via the proxy");
   assert.deepStrictEqual(seen, ["GET http://news.invalid/a?b=1"], "the request did not go through the proxy");
@@ -187,8 +192,21 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   };
   const ourEnv = { HTTPS_PROXY: "http://127.0.0.1:7450" };
   const trust = (o, env = ourEnv) => egressTrust({ fs: signalFs(o), env, signal: "/run/yantrik/mind-egress.json" });
-  assert.deepStrictEqual(trust({}), { proxy: "http://127.0.0.1:7450", lan: [{ host: "homeassistant.local", ports: [8123] }] }, "the whole signal was not trusted");
-  assert.deepStrictEqual(trust({ text: WHOLE.replace('[{"host":"homeassistant.local","ports":[8123]}]', "null") }), { proxy: "http://127.0.0.1:7450", lan: null });
+  assert.deepStrictEqual(trust({}), { proxy: "http://127.0.0.1:7450", lan: [{ host: "homeassistant.local", ports: [8123] }], public: null }, "the whole signal was not trusted");
+  assert.deepStrictEqual(trust({ text: WHOLE.replace('[{"host":"homeassistant.local","ports":[8123]}]', "null") }), { proxy: "http://127.0.0.1:7450", lan: null, public: null });
+  // E.NET1j: version 3 and its public door.
+  assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":"http://127.0.0.1:7451"') }).public, "http://127.0.0.1:7451");
+  assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":null') }).public, null);
+  for (const [v, why] of [
+    ['"version":3', "a v3 signal saying nothing of a public door"],
+    ['"version":3,"public_proxy":"http://10.0.0.5:7451"', "a public door that is not this machine"],
+    ['"version":3,"public_proxy":"http://proxy.lan:7451"', "a public door that is not an address"],
+    ['"version":3,"public_proxy":"127.0.0.1:7451"', "a public door that is not a URL"],
+    ['"version":3,"public_proxy":"http://127.0.0.1"', "a public door without its port"],
+    ['"version":4', "an unknown version"],
+  ]) {
+    assert.strictEqual(trust({ text: WHOLE.replace('"version":2', v) }), null, `trusted: ${why}`);
+  }
   for (const [o, why] of [
     [{ missing: true }, "no file"],
     [{ link: true }, "a link"],
@@ -200,7 +218,7 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
     [{ text: WHOLE.replace('"enforced":true', '"enforced":false') }, "not enforced"],
     [{ text: WHOLE.replace('"proxy_refuses_private":true', '"proxy_refuses_private":false') }, "a proxy letting private ranges through"],
     [{ text: WHOLE.replace('"version":2', '"version":1') }, "the version before lan_hosts"],
-    [{ text: WHOLE.replace('"version":2', '"version":3') }, "an unknown version"],
+    [{ text: WHOLE.replace('"version":2', '"version":4') }, "an unknown version"],
     [{ text: WHOLE.replace('"lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],', "") }, "no lan_hosts"],
     [{ text: WHOLE.replace('"ports":[8123]', '"ports":["8123"]') }, "a malformed LAN rule"],
     [{ text: "enforced: true" }, "not JSON"],
@@ -282,6 +300,8 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   assert.deepStrictEqual(launchedWith.proxy, { server: "http://127.0.0.1:7450" }, "the browser was not pointed at the proxy");
   const pp = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {}, { egressTrust: () => ({ proxy: "http://127.0.0.1:7450", lan: [] }) });
   assert.deepStrictEqual(pp.ctx.opts.proxy, { server: "http://127.0.0.1:7450" }, "the persistent browser was not pointed at the proxy");
+  await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => ({ proxy: "http://127.0.0.1:7450", lan: [], public: "http://127.0.0.1:7451" }) });
+  assert.deepStrictEqual(launchedWith.proxy, { server: "http://127.0.0.1:7451" }, "the browser was not pointed at the public door");
   await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => null });
   assert.strictEqual(launchedWith.proxy, undefined, "a proxy was set without the OS's word");
   // E.NET1f: a persistent profile restores nothing (its saved session is removed first), and a page

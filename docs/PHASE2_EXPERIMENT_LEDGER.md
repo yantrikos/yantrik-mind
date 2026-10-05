@@ -15272,3 +15272,27 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
   - Full suite 2351 passed, 0 failed.
   - Linux staging: mind-net 13, mind-tools 265, mind-core 141, mind-conversation 1153; net_guard ok.
 - **Pending:** #667's card-screening allowlist (its H1), mirrored as E.GRANT2b once FIXES #667's rule arrives verbatim.
+
+## E.GRANT2b — PREREG: the Mind screens its own-words query by the OS card's own rule (FIXES #667's H1), before any card or grants file
+
+**Why:**
+- yantrik-os FIXES #667 (feat/mind-search-grants, b5c6394) refuses a `grant_request` whose query the card cannot show exactly: `screen()`, `unshowable()` and `mixed_script_word()` in crates/yantrik-harness/src/host/grant.rs.
+- The Mind's `query_can_be_shown` is narrower. It refuses Cc and the bidi marks only, so the Mind still asks for queries the OS refuses: U+200B, U+FEFF, tag characters, variation selectors, U+2029, quote marks, `раypal`.
+- On the desktop that costs a refused round trip. Off the desktop it is worse: an `always` grant from the file lets such a query leave, because no card is involved and so no screen runs.
+- So the Mind must hold its own words to the same rule, with the same Unicode tables, on both paths.
+
+**What is built:**
+1. `query_can_be_shown` becomes the OS's screen. The trim and length checks stay as they are (1..=300 chars, no space at either end). `unshowable` and `mixed_script_word` are copied from the OS source (`git show origin/feat/mind-search-grants:crates/yantrik-harness/src/host/grant.rs`, lines 78–170), not from the message.
+2. Dependencies are pinned to the OS's versions: `unicode-properties = "=0.1.4"` (default-features off, `general-category`) and `unicode-script = "=0.5.8"`.
+3. The screen runs before the card and before the grants file, as `query_can_be_shown` does now. A refused query is never asked or used; the planner writes the search.
+4. The OS's own screening cases are copied as one table test: the ordinary queries in any single script that pass, then each refused class. The "x" sent by another harness or capability is not ours to test.
+
+**Kill criteria (each one fails the build):**
+- K1: a query passing the OS's `ordinary_queries_in_any_one_script_pass` list is refused by the Mind.
+- K2: any refused case from the OS's tests reaches `ask_grant` or the off-desk grant: Cc, Cf (with the review's eleven), Zl/Zp, Co, Cn, the variation selectors, the tag characters, the non-U+0020 whitespace, the seven marks that draw as nothing, the three quote marks, mixed-script words.
+- K3: the lock file resolves either crate to a version other than the OS's.
+- K4: a mutant of each `unshowable` arm (the quote marks, the VS ranges, the tag range, the draws-as-nothing list, each category, the is_whitespace fallback) and of the mixed-script rule (the one-system exemption, Common/Inherited ignored) survives the test.
+
+**Also checked (no change expected):**
+- the Mind's `grant_request` carries no `run_id` key (harness.rs builds {kind, request_id, capability, query} only);
+- no Mind `request` offers the card's four labels.

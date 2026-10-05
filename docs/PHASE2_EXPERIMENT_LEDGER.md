@@ -13396,3 +13396,45 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 2. **Quarantine.** The reflection does not read beliefs that are marked, or look, sensitive. It narrows the leak but does not close it.
 
 Option 1 is the right one. The three hypotheses already on 520 predate any lineage and would need a one-time erase (Pranab's call).
+
+## E.RES1 — PREREG: a research-task benchmark (R-tasks), R1 = MDG
+
+**Asked by:** Pranab (relayed by 4c, 5 Oct): "lets ask our mind to figure things out and then we will have some research tasks benchmark". Run on VM 520, not through samsara-net, clear of the 7-task gate, and with nothing put in front of the person.
+
+**Protocol:**
+1. Each R-task is a folder `~/research/Rn/` on 520 holding `BRIEF.md` and its inputs.
+2. In a fresh chat, the opening message is fixed and short: "Read ~/research/Rn/BRIEF.md and carry out the research task it describes. Work in ~/research/Rn/. Say when the report is written."
+3. It is followed by up to 15 turns of the neutral "Continue." No other hints.
+4. The run stops when the Mind says the report is written and the file exists, or when the turns run out.
+5. Every turn is recorded (`~/.longtask-runs.jsonl` and the journal).
+
+**Rubric, fixed before any run: 6 criteria, 0–2 each, 12 points.** Graded by me against these anchors, each judgement written to `grading.json` with its evidence.
+- **C1, grounded citations.** Every cited source is fetched.
+  - 2: at least 5 citations, at least 90% resolve and say what they are cited for.
+  - 1: at least 60%, or fewer than 5.
+  - 0: below that. **Any fabricated (non-existent) source is 0.**
+- **C2, novelty stated honestly.** For R1, the reference families are AMR-style meaning graphs; RDF and temporal knowledge graphs; concept-level models (Meta LCM); latent / continuous reasoning (Coconut); and VQ codebooks and semantic tokens.
+  - 2: at least 4 of the 5 named and positioned correctly.
+  - 1: 2 or 3.
+  - 0: 1 or fewer, or novelty claimed for what prior work already does.
+- **C3, a falsifiable hypothesis with kill criteria written before results.**
+  - 2: a metric, a threshold and a kill condition.
+  - 1: vague.
+  - 0: none.
+- **C4, confounds anticipated.** For R1 the key trap is that the NL→MDG encoder can do the reasoning, so the baselines must get the same help.
+  - 2: named and a matched baseline designed.
+  - 1: named only.
+  - 0: missed.
+- **C5, evidence-to-claim.** Every quantitative claim is traced to a run output or a citation.
+  - 2: all.
+  - 1: one unsupported.
+  - 0: two or more, or numbers with no run.
+- **C6, delivery.**
+  - 2: the report is at the agreed path and the run finished within the turns.
+  - 1: partial.
+  - 0: none.
+
+**Validity:**
+- A run whose tools were broken (search or fetch failing for reasons outside the Mind) is VOID, not scored.
+- The first probe (turn 747, 05 Oct 01:36) found the Mind's search failing with HTTP 400 through the egress proxy. R1 waits for that.
+- **Not claimed:** a single R1 score says nothing across versions until R1 has been run at least twice on one build. The variance comes first.

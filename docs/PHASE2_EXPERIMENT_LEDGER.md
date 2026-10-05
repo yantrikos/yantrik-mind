@@ -14394,3 +14394,46 @@ The twin's own mutant is killed as well (above).
 - net_guard.js `fetchPinned`, which connects directly, and the launchers, which pass chromium no proxy.
 
 Sent to 4c before the apply.
+
+## E.NET1e — PREREG: the Mind under the OS's kernel egress rules (yantrik-os #662)
+
+**Why.** #662 confines the Mind's uid to loopback (7440, 7450, 8341, person-opened ports), the person's LAN rules with literal private IPs, and DNS in audit mode only. Everything else gets a TCP reset. Three things in the Mind break under that:
+- net_guard.js `fetchPinned` resolves with `dns.lookup` and connects DIRECTLY to the pinned IP. It breaks in every mode, and every browser page request goes through it via `guardContext`.
+- The Rust fetch resolves every hop itself, on the proxied path too, and fails closed (E.NET1b, ninth pass). It breaks in enforce mode, where DNS is refused.
+- A configured DIRECT endpoint (E.NET1c) that is public or named by hostname is reset. On 520 only YM_SEARXNG_URL is set, a covered literal IP, so this does not bite there.
+
+4c holds #662 off 520 until this lands. 520 stays in audit mode.
+
+**The signal** (built OS-side): `/run/yantrik/mind-egress.json`, written atomically by `yantrik-update mind-egress apply` only after the nft table has loaded. Its fields are enforced, table, proxy, proxy_refuses_private (from the egress binary's capability), mode, private, dns_allowed, loaded_at and version. Field names will be checked against 4c's merge before the code is final.
+
+**The change:**
+1. **Read the signal** (mind-net, generalising `read_person_file` into one safe root-file read). `/run/yantrik` must be a root-owned directory with no group or other write. The file is opened with O_NOFOLLOW and checked on the fd: a regular file, uid 0, no group or other write. It is TRUSTED only when all of these hold:
+   - version 1;
+   - enforced is true;
+   - proxy_refuses_private is true;
+   - proxy is the very proxy the Mind routes through (`proxy_url`).
+   Anything else, a missing file included, means not trusted, and today's fail-closed behaviour is unchanged.
+2. **The Rust fetch:** on a PROXIED hop with the signal trusted, the hop is not resolved locally; the proxy, which refuses private ranges, is the check. Direct hops still resolve here and are pinned. Without trust, nothing changes.
+3. **Configured endpoints:** one is DIRECT only when its host is loopback or a literal private or special IP from the shared list. A hostname endpoint stays direct only while the signal is NOT trusted, since no OS rules are in force and E.NET1c behaviour is kept. Under trusted enforcement it goes through the proxy, where the person's LAN rules decide. A public literal IP always goes through the proxy.
+4. **net_guard.js:** `fetchPinned` reads the same signal through the same checks (O_NOFOLLOW, fstat, folder). When it is trusted and the configured proxy matches, the request goes THROUGH the proxy: absolute-form for http, CONNECT plus TLS with the right servername for https. It makes no local lookup. Untrusted, it is pinned and direct as today.
+   The launchers pass chromium `proxy: {server}` when the signal is trusted. Chromium's own traffic (not routed through the page guard) then also meets the proxy rather than a reset.
+
+**Kill criteria**, each a compiling mutant that must be killed:
+- a proxied hop resolving locally while trusted;
+- trusted with no file;
+- trusted through a symlink;
+- trusted from a group-writable file;
+- trusted from a group-writable or non-root folder;
+- trusted with enforced false;
+- trusted with proxy_refuses_private false;
+- trusted with a different proxy;
+- trusted with an unknown version;
+- a public literal-IP endpoint going direct;
+- a hostname endpoint going direct under trust;
+- JS fetchPinned doing a lookup while trusted;
+- JS fetchPinned going direct while trusted;
+- JS trusting a symlinked or writable signal.
+
+The Unix-only checks are killed on Linux staging. A Node test with a loopback fake proxy shows a trusted fetch reaching the proxy and never calling lookup.
+
+**Not in scope:** applying to 520 (4c does that, after review); enforce-mode verification (4c's #662 run).

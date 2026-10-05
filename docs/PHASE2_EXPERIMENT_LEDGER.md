@@ -14509,3 +14509,38 @@ The shared ranges moved from mind-tools into mind-net, so routing and the SSRF c
 - (b) Staging has no node, so the JS signal read was tested only against a fake fs (Windows). Its real O_NOFOLLOW and uid behaviour on Linux is first exercised on 520.
 - (c) A downloader that did its own DNS (DoH) could resolve a name to a LAN-rule address and connect direct. yt-dlp does not.
 - (d) 520 stays in audit mode. 4c applies #662 there only after this is reviewed.
+
+## E.NET1f — PREREG: the fourteenth pass's items on E.NET1d (a runtime lock, a wider scan, a clean persistent profile)
+
+**Why.** The review of E.NET1d (45c8395) found three gaps:
+- The scan is textual: a computed name (`chromium[m]()`), firefox/webkit, or a non-literal `require` would pass.
+- Nothing at RUN time stops a script from launching around the guard.
+- A persistent profile can restore its last session, loading pages before the guard's routes are in place.
+
+**The change:**
+1. **A runtime lock** (net_guard.js). Loading net_guard wraps playwright-core's BrowserType prototype, which chromium, firefox and webkit share and playwright-extra calls into. The methods wrapped are launch, launchPersistentContext, launchServer, connect and connectOverCDP.
+   - Each wrapped method throws "blocked" unless it runs inside the launchers' own call. That call is scoped with AsyncLocalStorage, and names the one method it may use.
+   - The wrapped methods are non-writable and non-configurable.
+   - Where playwright-core cannot be resolved (a developer machine), nothing is wrapped, and nothing could launch anyway.
+2. **The wider scan** (net_guard.test.js). It now also catches:
+   - any `.launch*(` other than the two launchers;
+   - any `.connect*(`;
+   - `firefox` / `webkit` launches;
+   - bracket forms (`["launch"]`, `['connectOverCDP']`, `[\`newPage\`]`, …);
+   - any `require(` / `import(` whose argument is not a plain string literal (a template with `${` counts as not plain).
+
+   The CI-only list is unchanged.
+3. **A clean persistent profile** (`launchPersistentGuarded`). Before the launch, the profile's saved session (`Default/Sessions`, and the older `Current Session` / `Current Tabs` / `Last Session` / `Last Tabs`) is removed, so nothing is restored. After the guard is installed, any open page not at about:blank is sent to about:blank.
+
+**Kill criteria**, each a mutant that must be killed:
+- the lock not applied;
+- the lock allowing a call outside the launchers;
+- the launchers' own call blocked;
+- a launcher allowed a method other than its own;
+- the scan missing a bracket form, a firefox launch, a `.connectOverCDP(`-style call, or a non-literal require;
+- the session not cleared;
+- an open page left where it was.
+
+The lock is also checked once against the REAL playwright-core from the lockfile, in a scratch install with `--ignore-scripts`, so no browsers are downloaded:
+- a direct `chromium.launch()` throws "blocked";
+- through `launchGuarded`, it gets past the lock (to the missing-browser error).

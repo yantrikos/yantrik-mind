@@ -77,7 +77,7 @@ impl WeftAttestor {
     /// `YM_WEFT_URL` (e.g. http://127.0.0.1:8747) + `YM_WEFT_KEY` (64 hex chars = ed25519 seed).
     /// Absent or malformed → None, and the mind runs unattested.
     pub fn from_env() -> Option<Self> {
-        let base = std::env::var("YM_WEFT_URL").ok()?;
+        let base = mind_net::person_var("YM_WEFT_URL").ok()?;
         let key = std::env::var("YM_WEFT_KEY").ok()?;
         Self::new(&base, &key).ok()
     }

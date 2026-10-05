@@ -487,7 +487,7 @@ pub(crate) fn token_is_a_span(token: &str, sources: &[&str], named: &[String]) -
 /// config) -- as `kind: value, value; kind: value`, e.g. `weather: Bentonville`. The kind is the
 /// tool family's first name.
 pub(crate) fn shareable_facts() -> Vec<(String, String)> {
-    shareable_facts_from(&std::env::var("YM_SHAREABLE_FACTS").unwrap_or_default())
+    shareable_facts_from(&mind_net::person_var("YM_SHAREABLE_FACTS").unwrap_or_default())
 }
 
 /// E.EGRESS5: the shareable-facts setting, parsed.
@@ -504,13 +504,37 @@ pub(crate) fn shareable_facts_from(raw: &str) -> Vec<(String, String)> {
 
 /// E.EGRESS5: is `value` a fact the person marked shareable with tools of this `kind`?
 pub(crate) fn shareable_fact(kind: &str, value: &str) -> bool {
-    shareable_fact_in(&std::env::var("YM_SHAREABLE_FACTS").unwrap_or_default(), kind, value)
+    shareable_fact_in(&mind_net::person_var("YM_SHAREABLE_FACTS").unwrap_or_default(), kind, value)
 }
 
 /// E.EGRESS5: `shareable_fact` against a given setting.
 pub(crate) fn shareable_fact_in(raw: &str, kind: &str, value: &str) -> bool {
     let want = crate::erase_redact::canon(value.trim());
     shareable_facts_from(raw).iter().any(|(k, v)| k.eq_ignore_ascii_case(kind) && crate::erase_redact::canon(v) == want)
+}
+
+/// E.EGRESS5b: the addresses a call navigates to, as the turn's fetch budget counts them -- a fetch,
+/// the desktop browser's `web_go` or `os_act browser go`, and any outbound tool's url field.
+pub(crate) fn navigation_urls(tool: &str, args: &serde_json::Value) -> Vec<String> {
+    let s = |v: Option<&serde_json::Value>| v.and_then(|u| u.as_str()).filter(|u| !u.is_empty()).map(str::to_string);
+    if matches!(tool, "web_fetch" | "fetch" | "web" | "mcp.yantrik-os.web_go") {
+        return s(args.get("url")).into_iter().collect();
+    }
+    if tool == crate::desktop::ACT {
+        return match crate::desktop::act_target(tool, args) {
+            Some((app, action)) if app == "browser" && matches!(action.as_str(), "go" | "open" | "navigate") => {
+                s(args.get("args").and_then(|a| a.get("url"))).into_iter().collect()
+            }
+            _ => Vec::new(),
+        };
+    }
+    mind_governance::egress::outbound(tool).map_or_else(Vec::new, |o| {
+        o.fields
+            .iter()
+            .filter(|(_, k)| *k == mind_governance::egress::FieldKind::Url)
+            .filter_map(|(name, _)| s(args.get(*name)))
+            .collect()
+    })
 }
 
 /// E.EGRESS4: the http(s) addresses in a text, in order, without trailing punctuation.
@@ -850,6 +874,11 @@ impl ConversationEngine {
         fetched: &[String],
         key: &str,
     ) -> Result<serde_json::Value, CleanArgsFailure> {
+        // E.EGRESS5b (the eleventh pass): the desktop's own browser -- where it goes and what it types --
+        // under the same rules as a fetch and a query, whichever way it is driven.
+        if let Some(cleaned) = Box::pin(self.clean_desktop_browser(tool, user_text, &grounded, external_provenance, web_obs, fetched, key)).await {
+            return cleaned;
+        }
         if tool.starts_with("mcp.") {
             return Ok(grounded);
         }
@@ -897,6 +926,59 @@ impl ConversationEngine {
             out[*name] = serde_json::Value::String(cleaned);
         }
         Ok(out)
+    }
+
+    /// E.EGRESS5b (the eleventh pass): the desktop browser's navigation address (`web_go {url}`,
+    /// `os_act browser go|open|navigate {url}`) is cleaned as a fetch -- the person's own address, or
+    /// the fetch planner's pick within the turn budget -- and text typed into a page (`web_type {text}`,
+    /// `os_act browser type {text}`) as a query. None: not a browser call that sends anything.
+    #[allow(clippy::too_many_arguments)]
+    async fn clean_desktop_browser(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: &serde_json::Value,
+        external_provenance: &str,
+        web_obs: &[String],
+        fetched: &[String],
+        key: &str,
+    ) -> Option<Result<serde_json::Value, CleanArgsFailure>> {
+        let (path, is_url): (&[&str], bool) = match tool {
+            "mcp.yantrik-os.web_go" => (&["url"], true),
+            "mcp.yantrik-os.web_type" => (&["text"], false),
+            t if t == crate::desktop::ACT => match crate::desktop::act_target(t, grounded) {
+                Some((app, action)) if app == "browser" && matches!(action.as_str(), "go" | "open" | "navigate") => (&["args", "url"], true),
+                Some((app, action)) if app == "browser" && action == "type" => (&["args", "text"], false),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let mut at = grounded;
+        for p in path {
+            at = at.get(*p)?;
+        }
+        let value = at.as_str().filter(|v| !v.trim().is_empty())?.to_string();
+        let cleaned = if is_url {
+            match Box::pin(self.plan_fetch(tool, user_text, &serde_json::json!({ "url": value }), web_obs, fetched, key)).await {
+                Ok(r) => r.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string(),
+                Err(e) => return Some(Err(e)),
+            }
+        } else {
+            match Box::pin(self.egress_clean_args_with("search", user_text, serde_json::json!({ "query": value }), external_provenance, web_obs, fetched, key)).await {
+                Ok(r) => r.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string(),
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        if cleaned.trim().is_empty() {
+            return Some(Err(CleanArgsFailure::NoUsableArgs));
+        }
+        let mut out = grounded.clone();
+        let mut slot = &mut out;
+        for p in &path[..path.len() - 1] {
+            slot = slot.get_mut(*p)?;
+        }
+        slot[path[path.len() - 1]] = serde_json::Value::String(cleaned);
+        Some(Ok(out))
     }
 
     /// E.EGRESS4: where a fetch goes. An address in the person's own words of this turn leaves as

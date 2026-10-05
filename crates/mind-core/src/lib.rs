@@ -604,13 +604,13 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Web search backend: a self-hosted SearXNG instance (YM_SEARXNG_URL) when available — aggregates
     // many engines, no bot-challenge/rate-limit, indexes sites our direct fetch can't reach — with
     // keyless DuckDuckGo as the fallback. Falls back to plain DDG when no instance is configured.
-    let searcher: Arc<dyn mind_tools::WebSearch> = match std::env::var("YM_SEARXNG_URL")
+    let searcher: Arc<dyn mind_tools::WebSearch> = match mind_net::person_var("YM_SEARXNG_URL")
         .ok()
         .filter(|u| !u.trim().is_empty())
     {
         Some(url) => {
             // E.SEARCH2: the categories a general search asks for, when set (VM 520: general,science).
-            let categories = std::env::var("YM_SEARXNG_CATEGORIES").ok();
+            let categories = mind_net::person_var("YM_SEARXNG_CATEGORIES").ok();
             eprintln!("[search] using SearXNG at {url} (DDG fallback; categories: {})", categories.as_deref().unwrap_or("the instance's default"));
             Arc::new(
                 mind_tools::SearxngSearch::new(url)
@@ -693,7 +693,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // Smart-home awareness (Home Assistant): read-only entity states, when YM_HA_URL + YM_HA_TOKEN
     // are set. The first domain of the full-life world-model; control comes later, harm-gated.
     if let (Some(url), Some(tok)) = (
-        std::env::var("YM_HA_URL")
+        mind_net::person_var("YM_HA_URL")
             .ok()
             .filter(|u| !u.trim().is_empty()),
         std::env::var("YM_HA_TOKEN")
@@ -768,7 +768,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     // exist. No allowlist, no hand: the writer isn't even constructed, and the executor would
     // fail-closed anyway. Two layers, same policy.
     if let (Ok(url), Ok(tok), Ok(allow)) = (
-        std::env::var("YM_HA_URL"),
+        mind_net::person_var("YM_HA_URL"),
         std::env::var("YM_HA_TOKEN"),
         std::env::var("YM_HA_ACTIONS_ALLOW"),
     ) {
@@ -835,9 +835,10 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         // The ninth pass (f): no profile fact in its persona either -- not the person's name.
         RESEARCHER_PERSONA.to_string(),
         vec![
+            // E.EGRESS5b (the eleventh pass): not github either -- its notifications include private
+            // repositories, and an injected page could ask the sub-agent to search their titles.
             "web_search".into(),
             "fetch".into(),
-            "github".into(),
         ],
         6,
     );
@@ -1628,7 +1629,7 @@ mod mind_name_tests {
         let body = &body[..body.find(");").unwrap_or(body.len())];
         assert!(body.contains("RESEARCHER_PERSONA"), "the researcher runs with the Mind's persona (the person's name in it)");
         assert!(!body.contains("persona.clone()"), "the researcher runs with the Mind's persona");
-        for tool in ["\"inbox\"", "\"recall\"", "\"mail\"", "\"mail_search\""] {
+        for tool in ["\"inbox\"", "\"recall\"", "\"mail\"", "\"mail_search\"", "\"github\""] {
             assert!(!body.contains(tool), "the researcher can read {tool}");
         }
         assert!(!super::RESEARCHER_PERSONA.contains("Yantrik Live") && !super::RESEARCHER_PERSONA.contains("{"));

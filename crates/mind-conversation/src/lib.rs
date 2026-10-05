@@ -12710,7 +12710,9 @@ WINDOW: all-time, latest 200
                      (os_describe / os_act) for this.)"
                 ),
                 Some(hub) => match hub.lookup(name) {
-                    Some(t) if t.read_only => {
+                    // E.EGRESS5b (the eleventh pass): only the desktop's own read tools run unasked;
+                    // another server's reads go through the gate below with the rest.
+                    Some(t) if t.read_only && t.server == desktop::DESKTOP_SERVER => {
                         let (hub, q, a) = (hub.clone(), name.to_string(), args.clone());
                         match tokio::task::spawn_blocking(move || hub.call_blocking(&q, &a)).await {
                             // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
@@ -12766,6 +12768,11 @@ WINDOW: all-time, latest 200
                             // desktop's gate decides -- the Mind does not ask on top. A Deny stands.
                             let decision = match runtime.decide(&req, &ctx).await {
                                 ActionDecision::RequireConfirmation { .. } if desktop::the_desktop_gates(&t) => ActionDecision::Execute,
+                                // E.EGRESS5b (the eleventh pass): another server's call -- read or write --
+                                // waits for the person until its outbound fields are declared.
+                                ActionDecision::Execute if t.server != desktop::DESKTOP_SERVER => ActionDecision::RequireConfirmation {
+                                    reason: "an outside integration's call waits for your OK until its fields are declared".into(),
+                                },
                                 d => d,
                             };
                             match decision {

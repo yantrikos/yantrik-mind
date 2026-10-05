@@ -1090,7 +1090,7 @@ impl InferencePool {
                     // wrong place.
                     "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — this pool has NO private lane. Local URL set: {}. Allowlist (YM_PRIVATE_PROVIDERS): {}. If both look right, this is a ROLE pool (YM_ROLE_*) that did not inherit the default's lane.",
                     self.provider,
-                    if std::env::var("YM_LOCAL_OLLAMA_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) { "yes" } else { "NO" },
+                    if mind_net::person_var("YM_LOCAL_OLLAMA_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) { "yes" } else { "NO" },
                     match std::env::var("YM_PRIVATE_PROVIDERS") {
                         Ok(v) if !v.trim().is_empty() => v,
                         _ => "EMPTY".to_string(),

@@ -14,7 +14,7 @@ use std::io::Write;
 
 /// Where the OpenAI-compatible upstream lives. Overridable so containment can point it at a proxy.
 pub fn upstream_base() -> String {
-    std::env::var("YM_NIM_BASE_URL")
+    mind_net::person_var("YM_NIM_BASE_URL")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .filter(|s| !s.is_empty())

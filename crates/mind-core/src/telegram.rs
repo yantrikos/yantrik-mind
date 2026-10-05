@@ -1431,7 +1431,7 @@ fn spawn_ha_event_listener(conv: Arc<ConversationEngine>, rt: tokio::runtime::Ha
     {
         return;
     }
-    let (Ok(url), Ok(token)) = (std::env::var("YM_HA_URL"), std::env::var("YM_HA_TOKEN")) else {
+    let (Ok(url), Ok(token)) = (mind_net::person_var("YM_HA_URL"), std::env::var("YM_HA_TOKEN")) else {
         return;
     };
     if url.trim().is_empty() || token.trim().is_empty() {

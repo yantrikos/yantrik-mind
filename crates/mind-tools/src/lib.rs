@@ -622,12 +622,12 @@ fn fetch_direct_with(
 /// proxy. A no-op (bails) when the helper script isn't present, so non-box builds are unaffected.
 /// `timeout` hard-kills a hung chromium; the script also bounds its own navigation.
 fn fetch_headless(url: &str) -> anyhow::Result<String> {
-    let script = std::env::var("YM_HEADLESS_SCRIPT")
+    let script = mind_net::person_var("YM_HEADLESS_SCRIPT")
         .unwrap_or_else(|_| "/opt/yantrik-mind/headless_fetch.js".to_string());
     if !std::path::Path::new(&script).exists() {
         anyhow::bail!("headless fetch not available");
     }
-    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH")
+    let browsers = mind_net::person_var("PLAYWRIGHT_BROWSERS_PATH")
         .unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
     let dir = std::path::Path::new(&script)
         .parent()
@@ -656,7 +656,7 @@ fn fetch_headful(url: &str) -> anyhow::Result<String> {
     if !std::path::Path::new(&script).exists() {
         anyhow::bail!("headful fetch not available");
     }
-    let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH")
+    let browsers = mind_net::person_var("PLAYWRIGHT_BROWSERS_PATH")
         .unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".to_string());
     let dir = std::path::Path::new(&script)
         .parent()
@@ -744,7 +744,7 @@ impl Fetcher for HttpFetcher {
             // SSRF guard FIRST: never let an (injected) URL pull from the local/internal network
             // (this also gates what we'd hand to the reader proxy).
             ssrf_check(&url)?;
-            let reader_ok = reader_allowed(&|k| std::env::var(k).ok());
+            let reader_ok = reader_allowed(&|k| mind_net::person_var(k).ok());
             fetch_ladder(|| fetch_direct(&url), || fetch_headless(&url), reader_ok, || fetch_reader(&url))
         })
         .await??;
@@ -1147,8 +1147,8 @@ impl VisionClient {
             // E.URL2: no compiled default names a box. Absent means not configured — say so.
             // base = ollama root (a trailing /v1 is stripped) — native calls hit /api/chat.
             let Some(base) = vision_ollama_base(
-                std::env::var("YM_OLLAMA_LOCAL_URL").ok().as_deref(),
-                std::env::var("YM_LOCAL_OLLAMA_URL").ok().as_deref(),
+                mind_net::person_var("YM_OLLAMA_LOCAL_URL").ok().as_deref(),
+                mind_net::person_var("YM_LOCAL_OLLAMA_URL").ok().as_deref(),
             ) else {
                 eprintln!("[vision] no local Ollama configured — set YM_OLLAMA_LOCAL_URL (or YM_LOCAL_OLLAMA_URL); vision is off");
                 return None;
@@ -2537,7 +2537,7 @@ pub struct DetectedFace {
 
 impl FaceEngine {
     pub fn from_env() -> Option<FaceEngine> {
-        let url = std::env::var("YM_FACE_ML_URL")
+        let url = mind_net::person_var("YM_FACE_ML_URL")
             .ok()
             .filter(|u| !u.trim().is_empty())?;
         Some(FaceEngine {

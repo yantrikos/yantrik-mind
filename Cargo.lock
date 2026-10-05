@@ -2198,6 +2198,7 @@ dependencies = [
  "mind-governance",
  "mind-inference",
  "mind-memory",
+ "mind-net",
  "mind-observability",
  "mind-proactive",
  "mind-recipes",

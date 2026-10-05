@@ -14279,3 +14279,23 @@ Verdict on c6f9379: SAFE WITH CHANGES. (f) is accepted, with GitHub removed from
 - the recheck skipped for a token tool;
 - a memory-content share without a card;
 - an own-words share with a card.
+
+## E.EGRESS5b — RESULT: the eleventh pass's 1–4 built; 12 of 12 mutants killed; (b) split out to E.EGRESS5c
+
+1. **The researcher:** `web_search` and `fetch` only. The mind-core scan forbids `github` (plus inbox, recall, mail and mail_search). Its step limit of 6 caps its fetches.
+2. **MCP:**
+   - `clean_desktop_browser`: `mcp.yantrik-os.web_go {url}` and `os_act browser go|open|navigate {args.url}` go through the fetch planner and the turn budget; `web_type {text}` and `os_act browser type {args.text}` go through the query rule.
+   - `navigation_urls` counts every navigation in the turn's fetch budget (fetch, web_go, browser go, any table url field).
+   - Another server's calls, reads included, go through the gate and wait for the person: the desktop-only read shortcut, plus an Execute turned into a confirmation for non-desktop servers.
+   - Residual: `web_click` follows a link the model chooses on a page; it is not planned or counted. Named for the reviewer.
+3. **Person-only settings:** `mind_net::person_var` reads the 23 person-only keys only from root-owned `/etc/yantrik/mind-person.env` once it exists. Absent there means unset; a file writable by others, or unreadable, means unset. Until the file exists the env is read, logged once. Every runtime read in 9 files goes through it. A workspace scan in mind-net forbids `env::var("<person-only key>")` anywhere else (the eval CLI and the live Weft test excepted).
+4. **Recheck:** `recheck_handed` runs before any table tool with query or token fields.
+- **Adapted eval:** `unfamiliar_mcp_schema_repairs_after_one_32602_without_inventing_a_tool` used a third-party read that now waits for the person. Its tool moved to the desktop's own server (`web_lookup`); the schema repair it tests is unchanged.
+- **Tests:**
+  - `the_desktop_browser_goes_where_a_fetch_may_and_types_what_a_query_may`;
+  - `another_servers_read_waits_for_the_person` (including a server claiming its tool is local);
+  - `a_token_tool_rechecks_the_handed_over_files`;
+  - mind-net `person_only_settings_come_from_the_persons_file` and `person_only_keys_are_read_only_through_person_var`;
+  - mind-core's researcher scan, extended.
+- **Mutants:** github back; the desktop browser not cleaned; web_go unplanned; typed text unplanned; os_act browser go unplanned; browser go not counted; another server reading unasked; another server executing unasked (first SURVIVED: the harm gate already asks for open-world tools, so the override was untested; killed by a server claiming its tool local); the recheck skipped for token tools; a person key read from the env when the file exists; an unsafe person file trusted (Unix-only check: survives on Windows, KILLED on Linux staging); a raw env read slipping past the scan. All killed.
+- Full suite 2312 passed; on Linux staging mind-conversation 1131, mind-core 139, mind-tools 255, mind-net 8.

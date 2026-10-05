@@ -130,7 +130,12 @@ pub(crate) async fn pre(
     };
     let asked = grounded.clone();
     // E.EGRESS3e (A3): a handed-over file written since it was named stops being a source first.
-    if crate::egress_planning::plans_from_handed(tool) {
+    // E.EGRESS5b (the eleventh pass): and before any outbound tool whose query or token fields may
+    // draw on a handed-over file.
+    let reads_handed = mind_governance::egress::outbound(tool).is_some_and(|o| {
+        o.fields.iter().any(|(_, k)| matches!(k, mind_governance::egress::FieldKind::Query | mind_governance::egress::FieldKind::Token))
+    });
+    if crate::egress_planning::plans_from_handed(tool) || reads_handed {
         engine.recheck_handed(&ConversationEngine::handed_key(id), id).await;
     }
     let args = match engine
@@ -169,12 +174,11 @@ pub(crate) async fn pre(
         }
     }
     // E.EGRESS4: a fetch that goes out is one the next fetch planner knows of, and the cap counts.
-    if matches!(tool, "web_fetch" | "fetch" | "web") {
-        if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
-            let in_turn = crate::TURN_FETCHES.try_with(|f| f.lock().map(|mut v| v.push(url.to_string())).is_ok()).unwrap_or(false);
-            if !in_turn {
-                state.lock().unwrap().fetched.push(url.to_string());
-            }
+    // E.EGRESS5b: every navigation counts -- the desktop browser's and any outbound tool's url too.
+    for url in crate::egress_planning::navigation_urls(tool, &args) {
+        let in_turn = crate::TURN_FETCHES.try_with(|f| f.lock().map(|mut v| v.push(url.clone())).is_ok()).unwrap_or(false);
+        if !in_turn {
+            state.lock().unwrap().fetched.push(url);
         }
     }
     PreVerdict::Proceed(args)
@@ -528,6 +532,35 @@ mod tests {
         let state = Mutex::new(GuardState::default());
         let v = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "alice.private@example.com"}), "t").await;
         assert!(matches!(v, PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, .. }), "the task message exempted a stored private value");
+    }
+
+    /// E.EGRESS5b (the eleventh pass): a token tool re-checks the handed-over files too -- a file written
+    /// since it was named stops being where a token may come from.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_token_tool_rechecks_the_handed_over_files() {
+        use mind_governance::egress::EgressBroker;
+        let run = |changed: u64| async move {
+            let pool = mind_inference::InferencePool::new(
+                Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"planned"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+                1,
+            );
+            let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+            let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+                .with_home_dir(Some("/home/p".into()))
+                .with_mcp(desktop_answering(vec![stat("/home/p/trip.md", changed)]));
+            let id = TurnIdentity::primary();
+            let key = ConversationEngine::handed_key(&id);
+            eng.handed_over.lock().unwrap().note_named(&key, "Read ~/trip.md", Some("/home/p"), ConversationEngine::now_ms());
+            eng.note_handed_over(&key, "/home/p/trip.md", "We fly to Bentonville on Friday");
+            let state = Mutex::new(GuardState::default());
+            match pre(&eng, &state, &id, "what will the weather be there", "weather", serde_json::json!({"place": "Bentonville"}), "t").await {
+                PreVerdict::Proceed(a) => a,
+                PreVerdict::Refuse { msg, .. } => panic!("{msg}"),
+            }
+        };
+        assert_eq!(run(1_790_602_795).await, serde_json::json!({"place": "Bentonville"}), "an unchanged handed file's token was rewritten");
+        assert_eq!(run(4_102_444_800).await, serde_json::json!({"place": "planned"}), "a file written after it was named stayed a token source");
     }
 
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.

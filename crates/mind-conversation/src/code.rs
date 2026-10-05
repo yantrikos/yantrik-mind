@@ -2634,7 +2634,7 @@ impl super::ConversationEngine {
 
 /// E.EGRESS5 (Pranab, 5 Oct): the work radar runs only when the person turned it on (`YM_WORK_RADAR=on`).
 pub(crate) fn work_radar_opted_in() -> bool {
-    std::env::var("YM_WORK_RADAR").map(|v| v.trim().eq_ignore_ascii_case("on")).unwrap_or(false)
+    mind_net::person_var("YM_WORK_RADAR").map(|v| v.trim().eq_ignore_ascii_case("on")).unwrap_or(false)
 }
 
 /// E.EGRESS5: what the person is told when they ask for the radar and it is off.

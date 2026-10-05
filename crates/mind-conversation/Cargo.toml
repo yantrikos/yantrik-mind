@@ -14,6 +14,8 @@ mind-agents = { workspace = true }
 mind-observability = { workspace = true }
 mind-world = { path = "../mind-world" }
 mind-governance = { workspace = true }
+# E.EGRESS5b: person-only settings are read through mind_net::person_var.
+mind-net = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false }
 tokio = { workspace = true }
 async-trait = { workspace = true }

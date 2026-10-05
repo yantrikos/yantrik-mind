@@ -107,7 +107,103 @@ fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
 }
 
 fn env(k: &str) -> Option<String> {
-    std::env::var(k).ok()
+    person_var(k).ok()
+}
+
+/// E.EGRESS5b (the eleventh pass): the settings only the PERSON may set -- what may leave, where
+/// searches and models are, how traffic is routed, and which browser code runs. The Mind's own env
+/// file is inside the Mind's account, so the Mind (or a model driving a settings screen) could
+/// rewrite it; these are read from the root-owned [`PERSON_FILE`] instead, once it exists.
+pub const PERSON_ONLY_KEYS: &[&str] = &[
+    "YM_SHAREABLE_FACTS",
+    "YM_WORK_RADAR",
+    "YM_SEARXNG_URL",
+    "YM_SEARXNG_CATEGORIES",
+    "YM_HA_URL",
+    "YM_LOCAL_OLLAMA_URL",
+    "YM_OLLAMA_LOCAL_URL",
+    "YM_NIM_BASE_URL",
+    "YM_FACE_ML_URL",
+    "YM_CRITIC_URL",
+    "YM_WEFT_URL",
+    "YM_IMMICH_URL",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "no_proxy",
+    "YM_WEB_READER",
+    "YM_HEADLESS_SCRIPT",
+    "PLAYWRIGHT_BROWSERS_PATH",
+];
+
+/// E.EGRESS5b: where the OS writes the person's settings -- root:root 0644, made by a root helper from
+/// the person's own Settings, never writable by the Mind's account.
+pub const PERSON_FILE: &str = "/etc/yantrik/mind-person.env";
+
+/// E.EGRESS5b: `std::env::var` for every setting the Mind reads -- a person-only key comes ONLY from
+/// [`PERSON_FILE`] when that file exists (absent there = unset; a file the Mind's account could
+/// write, or cannot read, = unset); until the OS ships the file, from the environment, said once.
+pub fn person_var(key: &str) -> Result<String, std::env::VarError> {
+    person_var_from(key, std::path::Path::new(PERSON_FILE), &|k| std::env::var(k))
+}
+
+/// E.EGRESS5b: [`person_var`] against a given file and environment (for tests).
+pub fn person_var_from(
+    key: &str,
+    file: &std::path::Path,
+    env: &dyn Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<String, std::env::VarError> {
+    if !PERSON_ONLY_KEYS.contains(&key) {
+        return env(key);
+    }
+    match std::fs::read_to_string(file) {
+        Ok(text) => {
+            if !person_file_is_safe(file) {
+                eprintln!("[settings] {} is writable by others -- person-only settings are ignored", file.display());
+                return Err(std::env::VarError::NotPresent);
+            }
+            env_file_value(&text, key).ok_or(std::env::VarError::NotPresent)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!("[settings] {} is absent: person-only settings come from the Mind's own env for now", file.display())
+            });
+            env(key)
+        }
+        Err(_) => Err(std::env::VarError::NotPresent),
+    }
+}
+
+/// E.EGRESS5b: one `KEY=value` from an env file (comments, blank lines, `export ` and quotes allowed).
+fn env_file_value(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (k, v) = line.split_once('=')?;
+        if line.starts_with('#') || k.trim() != key {
+            return None;
+        }
+        let v = v.trim();
+        let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).or_else(|| v.strip_prefix('\'').and_then(|x| x.strip_suffix('\''))).unwrap_or(v);
+        Some(v.to_string())
+    })
+}
+
+/// E.EGRESS5b: the person file is owned by root and writable by nobody else.
+#[cfg(unix)]
+fn person_file_is_safe(file: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(file).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+}
+
+#[cfg(not(unix))]
+fn person_file_is_safe(_file: &std::path::Path) -> bool {
+    true
 }
 
 fn direct() -> &'static ureq::Agent {
@@ -216,6 +312,65 @@ mod tests {
         assert!(goes_direct("http://127.9.9.9/", &e), "all of 127/8 is loopback");
         assert!(goes_direct("http://gpu-box.lan:11434/", &e), "a NO_PROXY suffix");
         assert!(!goes_direct("http://gpu-box:11434/", &e), "a bare LAN name is not exempt unless listed");
+    }
+
+    /// E.EGRESS5b (the eleventh pass): a person-only key comes only from the person's file once it
+    /// exists -- the Mind's own env is ignored for it -- and from the env only while there is no file.
+    #[test]
+    fn person_only_settings_come_from_the_persons_file() {
+        let dir = std::env::temp_dir().join(format!("ym-person-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mind-person.env");
+        let env = |k: &str| match k {
+            "YM_SHAREABLE_FACTS" => Ok("weather: Attacker City".to_string()),
+            "YM_MAX_STEPS" => Ok("40".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env).as_deref(), Ok("weather: Attacker City"), "no file: the env stands in");
+        std::fs::write(&file, "# person settings\nexport YM_SHAREABLE_FACTS=\"weather: Bentonville\"\nYM_WORK_RADAR=on\n").unwrap();
+        assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env).as_deref(), Ok("weather: Bentonville"), "the Mind's env overrode the person");
+        assert_eq!(person_var_from("YM_SEARXNG_URL", &file, &env), Err(std::env::VarError::NotPresent), "a person-only key absent from the file came from elsewhere");
+        assert_eq!(person_var_from("YM_MAX_STEPS", &file, &env).as_deref(), Ok("40"), "an ordinary key stopped reading the env");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env), Err(std::env::VarError::NotPresent), "a file others can write was trusted");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.EGRESS5b: no code outside this crate reads a person-only key straight from the env -- every
+    /// read goes through `person_var`. (The eval CLI and a live test read their own config.)
+    #[test]
+    fn person_only_keys_are_read_only_through_person_var() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        const EXEMPT: [&str; 3] = ["mind-net", "mind-evals", "weft_live.rs"];
+        let mut stack = vec![crates.to_path_buf()];
+        let mut found = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if !p.ends_with("target") {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                let name = p.to_string_lossy().replace('\\', "/");
+                if !name.ends_with(".rs") || EXEMPT.iter().any(|e| name.contains(e)) || name.ends_with("tests.rs") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                for key in PERSON_ONLY_KEYS {
+                    if src.contains(&format!("env::var(\"{key}\")")) {
+                        found.push(format!("{name}: {key}"));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "person-only keys read around person_var: {found:?}");
     }
 
     /// E.NET1c (the tenth pass): the endpoints the person configured go direct -- the OS proxy refuses

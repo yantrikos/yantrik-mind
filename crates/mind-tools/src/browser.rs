@@ -168,7 +168,7 @@ impl BrowserSession {
         let dir = std::path::Path::new(&script)
             .parent()
             .map_or_else(|| ".".into(), |p| p.to_path_buf());
-        let browsers = std::env::var("PLAYWRIGHT_BROWSERS_PATH")
+        let browsers = mind_net::person_var("PLAYWRIGHT_BROWSERS_PATH")
             .unwrap_or_else(|_| "/opt/yantrik-mind/pw-browsers".into());
         let mut cmd = Command::new("node");
         cmd.arg(&script);

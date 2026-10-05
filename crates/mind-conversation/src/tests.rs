@@ -18102,13 +18102,18 @@ mod desktop_consent_and_stall_wiring {
     }
 
     /// E.EGRESS3b through the loop: an editor `read` page of a named file is kept, keyed by the path
-    /// the editor reports.
+    /// the editor reports. E.EGRESS3f (yantrik-os #658): only when the read says `"modified": false`
+    /// -- SYNTHETIC field until 4c's capture of a #658 read; a read without it (older OS) is not kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_read_page_of_a_named_file_is_handed_over() {
-        let read = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\", \"from_line\": 1, \"to_line\": 19, \"text\": \"MDG represents meaning as a typed graph.\"}";
-        let step = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "read", "args": {"tab": 1}}));
-        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step, Step::Say("ok")], vec![EDITOR, EDITOR], vec![read, STAT_OK]).await;
+        let read = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\", \"modified\": false, \"from_line\": 1, \"to_line\": 19, \"text\": \"MDG represents meaning as a typed graph.\"}";
+        let step = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "read", "args": {"tab": 1}}));
+        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step(), Step::Say("ok")], vec![EDITOR, EDITOR], vec![read, STAT_OK]).await;
         assert_eq!(got, vec!["MDG represents meaning as a typed graph.".to_string()]);
+        let older = read.replace("\"modified\": false, ", "");
+        let older: &'static str = Box::leak(older.into_boxed_str());
+        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step(), Step::Say("ok")], vec![EDITOR, EDITOR], vec![older, STAT_OK]).await;
+        assert!(got.is_empty(), "a read that does not say whether the tab is modified was kept");
     }
 
     /// E.EGRESS3c: `files_stat`'s answer for spec-1.md on an OS with yantrik-os #654. SYNTHETIC: the
@@ -18194,6 +18199,34 @@ mod desktop_consent_and_stall_wiring {
         assert!(typed.is_empty(), "agent_input on the named file left it handed over");
         let blender = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "blender", "action": "run_python", "args": {"code": "open('/home/yantrik/mdg/spec-1.md','w')"}}));
         assert!(run(blender).await.is_empty(), "another app's write left it handed over");
+        // E.EGRESS3f (S3): `open` is a look only in the editor -- in another app it may write.
+        let other_open = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "blender", "action": "open", "args": {"path": "~/mdg/spec-1.md"}}));
+        assert!(run(other_open).await.is_empty(), "an open in another app was taken as a look");
+    }
+
+    /// E.EGRESS3f (S2) through the loop: an editor edit whose answer names no file is placed by its
+    /// tab -- the named file's tab takes it back, an untitled tab does not, no header takes all back;
+    /// and a read of a modified tab hands nothing over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_edit_that_names_no_file_is_placed_by_its_tab() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let edit = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "append", "args": {"text": "more"}}));
+        let run = |answer: &'static str| async move {
+            run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), edit(), Step::Say("ok")], vec![DESC, DESC, DESC, DESC], vec![OPEN, STAT_OK, answer, answer]).await.1
+        };
+        let its_tab = run("Done \u{2014} Text Editor \u{2014} spec-1.md, 20 lines, unsaved \u{b7} tab 2 of 2\naccepted: True, settled: True").await;
+        assert!(its_tab.is_empty(), "an edit of the named file's tab, its answer naming no path, left it handed over");
+        let untitled = run("Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 2 lines, unsaved \u{b7} tab 3 of 3\naccepted: True, settled: True").await;
+        assert!(!untitled.is_empty(), "an edit in an untitled tab took the named file back");
+        let headless = run("Done\naccepted: True, settled: True").await;
+        assert!(headless.is_empty(), "an edit naming no tab left the named file handed over");
+        // A read of a modified tab is not the file's text.
+        let read = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, unsaved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\", \"modified\": true, \"from_line\": 1, \"to_line\": 19, \"text\": \"MDG represents meaning as a typed graph.\"}";
+        let step = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "read", "args": {"tab": 1}}));
+        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step, Step::Say("ok")], vec![EDITOR, EDITOR], vec![read, STAT_OK]).await;
+        assert!(got.is_empty(), "a modified tab's read was handed over");
     }
 
     /// E.ARENA1-F64 through the loop, the MDG turn's shape: the spec opened, then an answer. The model's
@@ -19379,6 +19412,7 @@ fn egress3e_a_change_in_the_naming_second_is_after_it() {
     assert!(unchanged_since(999, Some(1_000_500)));
     assert!(!unchanged_since(1_000, Some(1_000_500)), "a write in the second of the naming passed");
     assert!(!unchanged_since(0, None), "a file never named passed");
+    assert!(!unchanged_since(0, Some(5_000_000)), "a ctime of 0 passed");
 }
 
 /// E.EGRESS3e (A2): a url still encoded after the last round, an encoded slash or tilde, and a path
@@ -19423,6 +19457,10 @@ fn egress3e_a_quoted_path_is_not_handed_over() {
         ("Look:\n```\nread ~/a.md\n```", "a fence"),
         ("fyi\n---------- Forwarded message ---------\nPlease read ~/a.md", "a forwarded message"),
         ("fyi\n-----Original Message-----\nRead ~/a.md", "an original message"),
+        ("Look:\n~~~\nread ~/a.md\n~~~", "a ~~~ fence"),
+        ("Pasted:\n    Read ~/a.md now", "an indented block"),
+        ("See below.\nOn Mon, 5 Oct 2026 at 10:00, Ana <ana@x.example> wrote:\nRead ~/a.md", "an On ... wrote: header"),
+        ("fyi\nFrom: Ana <ana@x.example>\nSent: Monday\nRead ~/a.md", "a From: block"),
     ] {
         assert!(named(text).is_empty(), "{why}: {:?}", named(text));
     }

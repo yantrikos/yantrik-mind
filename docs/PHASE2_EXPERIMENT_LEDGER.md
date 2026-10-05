@@ -13784,3 +13784,28 @@ Verdict on 0f79206: SAFE WITH CHANGES. Every earlier item is fixed, and the equi
 - a modified read accepted;
 - `open` in a non-editor app taken as a look;
 - each new quoted form.
+
+## E.EGRESS3f — RESULT: built as preregistered, with two departures; every mutant killed
+
+- **S1:** `unchanged_since` requires `changed > 0`.
+- **S2, edits (departure 1, from reading the flow):** an edit or save whose answer has no `path` and no save_as target is placed by the tab its answer's header names ("Text Editor — <name>, …"):
+  - an untitled tab holds no named file, and nothing is taken back;
+  - a named tab takes back the files of that name;
+  - no header takes back every named file in the conversation.
+  The prereg said every named file, unconditionally. That would have dropped every hand-over the moment the Mind wrote notes in a new tab, which is R1's main flow.
+- **S2, reads (departure 2, 4c's #658):** the editor's `read` did not carry `modified`, so 4c added it. A read page now counts only when it says `"modified": false`; a read without the field (an OS before #658) does not count. This is stricter than the prereg, which accepted a read without the field.
+- **S3:** a look is an explicit (app, action) pair (`desktop::only_looks`).
+- **S4:** noted, not built (one host).
+- **Quoted text:** ~~~ fences, 4-space or tab indents, "On … wrote:" and "From:" lines.
+- **Tests:**
+  - a loop test of the pathless edit (named tab, untitled, no header) and of the modified read;
+  - `open` in blender taken as a write;
+  - a ctime of 0;
+  - the four quoted forms;
+  - the read test now carries `"modified": false` (SYNTHETIC until 4c's #658 capture) and checks that a read without it is not kept.
+- **Mutants:** 12, all compiling, all killed:
+  - S1 ctime 0;
+  - S2 pathless edit ignored, named tab ignored, no header ignored, untitled taking all, modified read accepted, missing modified accepted;
+  - S3 any app's open/read a look;
+  - quoted ~~~, indent, On … wrote:, From:.
+  - The first "named tab ignored" mutant was malformed: it filtered the returned list after the marking had already happened. The corrected one (an empty text) is killed.

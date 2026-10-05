@@ -91,12 +91,20 @@ fn in_quoted_text(text: &str, at: usize) -> bool {
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim_start();
         let lower = line.to_lowercase();
-        if lower.contains("forwarded message") || lower.contains("original message") {
+        let lower_trim = lower.trim();
+        // E.EGRESS3f: a mail client's reply header ("On Mon, … wrote:", "From: …") starts quoted text too.
+        if lower.contains("forwarded message")
+            || lower.contains("original message")
+            || (lower_trim.starts_with("on ") && lower_trim.ends_with("wrote:"))
+            || lower_trim.starts_with("from:")
+        {
             return at >= offset;
         }
-        let fence = trimmed.starts_with("```");
+        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        // E.EGRESS3f: an indented block (4 spaces or a tab) is pasted text, as markdown reads it.
+        let indented = line.starts_with("    ") || line.starts_with('\t');
         if at >= offset && at < offset + line.len() {
-            return fenced || fence || trimmed.starts_with('>');
+            return fenced || fence || trimmed.starts_with('>') || indented;
         }
         if fence {
             fenced = !fenced;
@@ -178,6 +186,15 @@ impl HandedOver {
             }
         }
         true
+    }
+
+    /// E.EGRESS3f (S2): every file named in this conversation is no longer the person's text.
+    pub(crate) fn note_all_written(&mut self, key: &str) {
+        if let Some(store) = self.stores.get_mut(key) {
+            store.texts.clear();
+            let named: Vec<String> = store.named.iter().map(|(p, _)| p.clone()).collect();
+            store.mind_written.extend(named);
+        }
     }
 
     /// E.EGRESS3d (N4): a terminal command or Files action whose text mentions a named file -- its
@@ -347,7 +364,8 @@ fn has_path(q: &str, named: &[String]) -> bool {
 /// E.EGRESS3e (A3): the file's ctime (unix seconds, `files_stat`'s `changed`) is before the second
 /// the person named it (ms). Strictly before: a write in that same second would pass otherwise.
 pub(crate) fn unchanged_since(changed: u64, named_at_ms: Option<u64>) -> bool {
-    named_at_ms.is_some_and(|at| changed < at / 1000)
+    // E.EGRESS3f (S1): and a ctime of 0 is not a time.
+    changed > 0 && named_at_ms.is_some_and(|at| changed < at / 1000)
 }
 
 /// E.EGRESS3e: the tools whose query may be planned from the handed-over text.
@@ -481,23 +499,38 @@ impl ConversationEngine {
     pub(crate) fn note_writes(&self, id: &TurnIdentity, tool: &str, args: &serde_json::Value, obs: &str) {
         let key = Self::handed_key(id);
         if crate::desktop::changes_editor_text(tool, args) {
-            if let Some(path) = crate::desktop::reported_path(obs) {
-                self.note_mind_written(&key, &path);
+            let reported = crate::desktop::reported_path(obs);
+            let saved_as = crate::desktop::save_path(tool, args);
+            if let Some(path) = &reported {
+                self.note_mind_written(&key, path);
             }
-            if let Some(p) = crate::desktop::save_path(tool, args) {
-                self.note_mind_written(&key, &p);
+            if let Some(p) = &saved_as {
+                self.note_mind_written(&key, p);
+            }
+            // E.EGRESS3f (S2): an edit that does not say which file it changed is placed by the tab its
+            // answer's header names -- an untitled tab holds no named file; a named tab takes back the
+            // files of that name; no header, and it may have changed any of them.
+            if reported.is_none() && saved_as.is_none() {
+                if let Ok(mut h) = self.handed_over.lock() {
+                    match crate::desktop::editor_tab_name(obs) {
+                        Some(name) if name.starts_with("Untitled") => {}
+                        Some(name) => {
+                            for p in h.note_written_if_mentioned(&key, &name) {
+                                eprintln!("[egress] {p}: its tab was edited -- no longer the person's text");
+                            }
+                        }
+                        None => {
+                            h.note_all_written(&key);
+                            eprintln!("[egress] an editor {tool} named no tab -- every named file is taken back");
+                        }
+                    }
+                }
             }
         }
         // E.EGRESS3e (A3): the backstop to the ctime check -- any call but a look whose arguments
         // mention a named file (a terminal's agent_run or agent_input, Files, blender's run_python...).
-        let a_look = tool == crate::desktop::DESCRIBE
-            || is_web_tool(tool)
-            || crate::desktop::act_target(tool, args).is_some_and(|(_, action)| {
-                matches!(
-                    action.trim_start_matches("editor_"),
-                    "open" | "read" | "show" | "find" | "find-next" | "find-prev" | "files_stat" | "files_go" | "files_view" | "files_list"
-                )
-            });
+        // E.EGRESS3f (S3): a look is an explicit (app, action) pair.
+        let a_look = tool == crate::desktop::DESCRIBE || is_web_tool(tool) || crate::desktop::only_looks(tool, args);
         if !a_look {
             if let Ok(mut h) = self.handed_over.lock() {
                 for p in h.note_written_if_mentioned(&key, &args.to_string()) {

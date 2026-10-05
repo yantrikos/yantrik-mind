@@ -1140,7 +1140,34 @@ pub(crate) fn read_result(obs: &str) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
     let path = v.get("path")?.as_str()?.to_string();
     let text = v.get("text")?.as_str()?.to_string();
+    // E.EGRESS3f (S2; yantrik-os #658): the page is the file's text only when the read says the tab
+    // is not modified. A read that does not say (an OS before #658) is not taken as the file's.
+    if v.get("modified").and_then(|m| m.as_bool()) != Some(false) {
+        return None;
+    }
     (!text.trim().is_empty()).then_some((path, text))
+}
+
+/// E.EGRESS3f (S2): the tab an editor answer's header names ("Text Editor — spec-1.md, 19 lines…",
+/// "Text Editor — Untitled (no file yet), 1 line…"). None when there is no such header.
+pub(crate) fn editor_tab_name(obs: &str) -> Option<String> {
+    let header = obs.lines().find(|l| l.contains("Text Editor \u{2014} "))?;
+    let after = header.split_once("Text Editor \u{2014} ")?.1;
+    let name = after.split(", ").next()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// E.EGRESS3f (S3): the calls that only look -- an explicit (app, action) list, never an action name
+/// alone (an `open` in another app may well write).
+pub(crate) fn only_looks(tool: &str, args: &serde_json::Value) -> bool {
+    act_target(tool, args).is_some_and(|(app, action)| match app.as_str() {
+        "editor" => matches!(action.as_str(), "open" | "read" | "show" | "find" | "find-next" | "find-prev"),
+        TWIN_HOST => matches!(
+            action.as_str(),
+            "editor_open" | "editor_read" | "files_stat" | "files_go" | "files_view" | "files_list"
+        ),
+        _ => false,
+    })
 }
 
 /// E.ARENA1-F23: how long to wait before looking again at an unsettled action. yantrik-os-f4:

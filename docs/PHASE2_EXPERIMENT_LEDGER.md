@@ -14173,3 +14173,39 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
   - JS: the same addresses as Node's URL parser writes them; a pinned fetch to a name only the check's lookup knows (exactly one lookup; a 302 returned, not followed); the loopback server refused with the real check.
 - **Mutants:** Rust mapped not unwrapped; NAT64, CGNAT and multicast dropped from the shared list (each killed in both Rust and JS); unresolved passing on the proxy path; JS v6 not parsed; JS mapped not unwrapped; JS fetch not pinned. All killed.
 - **Deploy:** net_guard.js and private_ranges.json go beside the browser scripts.
+
+## E.EGRESS5 phase 1 — PREREG AMENDMENT: the ninth pass's (a)–(h), Pranab's decisions, and the E.EGRESS4c fix
+
+**Decisions (Pranab, via 4c, 5 Oct):**
+- work_radar is opt-in (`YM_WORK_RADAR=on`, a settings toggle that says what it sends);
+- `ym` commands he types are his own words, sent as written;
+- **shareable facts:** a short list he sets (`YM_SHAREABLE_FACTS`, written only by the person through settings, never by the Mind). Each fact is bound to a tool kind, e.g. `weather: Bentonville`. A token from memory passes only if it is on the list for that tool. The list is shown in the settings description and in every refusal that names the policy.
+
+**In phase 1:**
+1. **The table and `classify`:** the classifier falls back to the table (done in the working tree). Trading tickers become token fields. Tools from audit (a) that reach the network move into the table.
+2. **Field cleaning:** a token passes as the person's words, the task message, a handed-over file, or a shareable fact for this tool; otherwise the planner rewrites it. Queries and urls as before.
+3. **The tripwire (g)** runs on every OUTBOUND tool (`model_injected_private_value` for each table tool, not only those `classify` named).
+4. **`mcp.*` (e):** every MCP tool counts as outbound whatever its hints say. Its output never joins `web_obs`. Its args are not yet rewritten (phase 2, with per-server field declarations); the desktop's own server is this machine.
+5. **Background re-sends (d):** watch_price, track_subject, track_news, set_monitor and surf store the CLEANED args, and their polls resend exactly those.
+6. **The research sub-agent (f):** no inbox and no recall (done in the working tree). Its persona carries no profile facts. Its own searches and fetches go through the same span, fetch-planner and budget rules.
+7. **deals:** no gender prepend (done in the working tree).
+8. **E.EGRESS4c fix (ninth pass):** the task message is the person message whose turn actually ran a search or fetch (the task run's origin), not just the latest long message.
+
+**Phase 1b (separate commit):**
+- **(c)** a scan over network CALL SITES outside the boundary module (`searcher.search`, `.fetch(`, `mind_net::get/post`, `ureq::`), with a justified allowlist.
+
+**Asked of Pranab, not built until he answers:**
+- **(b)** per-call approval for code/coder (model text to an outside coding model), share_with_member, photo_send and onedrive. It changes everyday sharing, so it is his decision.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- each field kind passing unplanned;
+- a shareable fact passing to the wrong tool;
+- an unlisted memory token passing;
+- the tripwire skipped for a table tool;
+- MCP output joining web_obs;
+- a background re-send using the raw args;
+- the sub-agent's persona with a profile fact;
+- inbox or recall back in the sub-agent;
+- the gender prepend back;
+- work_radar running when off;
+- the task message picked from a turn that did not search.

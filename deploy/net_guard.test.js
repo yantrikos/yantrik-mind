@@ -203,6 +203,7 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
     ['"version":3,"public_proxy":"http://proxy.lan:7451"', "a public door that is not an address"],
     ['"version":3,"public_proxy":"127.0.0.1:7451"', "a public door that is not a URL"],
     ['"version":3,"public_proxy":"http://127.0.0.1"', "a public door without its port"],
+    ['"version":3,"public_proxy":"http://127.0.0.1:7450"', "a public door that is the endpoint door"],
     ['"version":4', "an unknown version"],
   ]) {
     assert.strictEqual(trust({ text: WHOLE.replace('"version":2', v) }), null, `trusted: ${why}`);
@@ -302,6 +303,9 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   assert.deepStrictEqual(pp.ctx.opts.proxy, { server: "http://127.0.0.1:7450" }, "the persistent browser was not pointed at the proxy");
   await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => ({ proxy: "http://127.0.0.1:7450", lan: [], public: "http://127.0.0.1:7451" }) });
   assert.deepStrictEqual(launchedWith.proxy, { server: "http://127.0.0.1:7451" }, "the browser was not pointed at the public door");
+  assert.ok(launchedWith.args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"), "WebRTC may send UDP outside the proxy");
+  const pw = await launchPersistentGuarded(fakeChromium, "/tmp/profile", { args: ["--x"] }, { fs: recordingFs, egressTrust: () => null });
+  assert.ok(pw.ctx.opts.args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp") && pw.ctx.opts.args.includes("--x"), "the persistent browser's WebRTC is not held, or its own args were lost");
   await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => null });
   assert.strictEqual(launchedWith.proxy, undefined, "a proxy was set without the OS's word");
   // E.NET1f: a persistent profile restores nothing (its saved session is removed first), and a page

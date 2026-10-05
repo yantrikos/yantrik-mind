@@ -15144,3 +15144,20 @@ The review is a commit comment on 9308899. Its verdict: from this code's side, 5
   - a door equal to proxy trusted (Rust, JS);
   - no WebRTC flag;
   - the group reply removed.
+
+## E.NET1k — RESULT: M1, L1–L3 fixed; L4 was already covered; 8 mutants killed
+
+- **M1:** `bounded_command` gives ffmpeg `-protocol_whitelist http,https,tls,tcp,crypto,httpproxy` ahead of `-http_proxy` and its input, with or without a proxy. SDP over http now ends with "Protocol 'rtp' not on whitelist" instead of binding UDP (the reviewer's test). Both bounded ffmpeg calls read the remote stream (`src` from `checked_stream`), so no local input is affected.
+- **L1 (built):** `mind_net::public_door()` reads the signal with the same root-file checks: version 3, our own proxy, a well-formed loopback door that differs from it. It does not wait for `enforced`, and `outside_proxy()` takes it. So in audit mode too, yt-dlp and ffmpeg (and their unchecked hops) meet the public-only door. The ureq fetches still check for themselves whenever trust is missing.
+- **L2:** a door equal to the endpoint proxy (the same loopback address and port) makes the signal untrusted in Rust and JS, and gives no door for L1. `public_door_of` is now one parser for both readers.
+- **L3:** `hardened()` adds `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` to every guarded launch, both launchers, keeping a script's own args.
+- **L4:** already covered. `a_group_new_chat_says_nothing_changed` (E.NET1j) asserts the group reply through the real entry, and its mutant ("the group told it restarted") was killed there.
+- **Mutants killed (8):**
+  - no whitelist, and the whitelist missing before the input;
+  - the door waiting for enforce (SURVIVED first: `outside_proxy` reads the real signal; killed by a wiring check) and `public_door_from` requiring enforce;
+  - a door equal to the proxy trusted, in Rust and JS;
+  - no WebRTC flag, and the persistent launch not hardened.
+- **Runs:**
+  - Full suite 2346 passed, 0 failed.
+  - Linux staging: mind-net 13, mind-tools 265, mind-conversation 1149.
+  - net_guard.test.js as root (trusted) and as nobody (not trusted).

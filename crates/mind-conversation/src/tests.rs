@@ -16839,6 +16839,67 @@ mod desktop_consent_and_stall_wiring {
         Run { reply, prompts, timeouts, reached: hub.scripted_calls() }
     }
 
+    /// E.EGRESS3b: `run_as` that also gives back what the person handed over this turn.
+    async fn run_handed(
+        prompt: &str,
+        home: Option<String>,
+        mind_account: bool,
+        steps: Vec<Step>,
+        describes: Vec<&str>,
+        acts: Vec<&str>,
+    ) -> (Run, Vec<String>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let timeouts = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps,
+            seen: seen.clone(),
+            timeouts: timeouts.clone(),
+        };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        // The same scripted model serves the private lane too, so compose can run (a pool with no
+        // private lane refuses a private compose, by design: E.SEC14).
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1)
+            .with_provider("script")
+            .with_private_backend(script, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            // Read-only here as in the other desktop wiring tests: a mutating tool goes through the
+            // action runtime, which this engine does not have, and the loop logic under test sits
+            // in front of both paths.
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        // "ERR:" makes a scripted reply an MCP error, as the desktop's isError replies are.
+        let script_of = |v: Vec<&str>| {
+            v.into_iter()
+                .map(|s| match s.strip_prefix("ERR:") {
+                    Some(e) => Err(e.to_string()),
+                    None => Ok(s.to_string()),
+                })
+                .collect::<Vec<_>>()
+        };
+        hub.add_scripted_tool(tool("os_describe"), script_of(describes)).unwrap();
+        hub.add_scripted_tool(tool("os_act"), script_of(acts)).unwrap();
+        let conv = ConversationEngine::new(memarc, pool, "YM").with_mcp(hub.clone()).with_home_dir(home).with_mind_account(mind_account);
+        let reply = conv
+            .agent_loop_for_eval(prompt, &TurnIdentity::primary())
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"));
+        let prompts = seen.lock().unwrap().clone();
+        let timeouts = timeouts.lock().unwrap().clone();
+        let key = ConversationEngine::handed_key(&TurnIdentity::primary());
+        let handed = conv.handed_over.lock().unwrap().texts(&key, ConversationEngine::now_ms());
+        (Run { reply, prompts, timeouts, reached: hub.scripted_calls() }, handed)
+    }
+
     /// E.ARENA1-F41: a scripted desktop that also offers the browser's `web_*` tools (yantrik-os #480),
     /// each with its own replies.
     async fn run_web(prompt: &str, steps: Vec<Step>, web: Vec<(&str, Vec<&str>)>) -> Run {
@@ -18016,6 +18077,40 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(reply, crate::MAIL_TOOK_TOO_LONG, "after {:?}", t0.elapsed());
     }
 
+    /// E.EGRESS3b through the loop, on the real open/describe pair from VM 520: a file the person
+    /// named, opened, becomes a query source as the editor reports it; an unnamed one does not; a
+    /// named file the Mind then saves over stops being one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_named_file_the_mind_reads_is_handed_over_and_nothing_else() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let home = Some("/home/yantrik".to_string());
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let (_, named) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        assert!(named.iter().any(|t| t.contains("Multidimensional Grammar")), "the named file was not handed over: {named:?}");
+        // The path the EDITOR reports is what counts, not the model's argument (here one through `..`).
+        let crooked = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/x/../mdg/spec-1.md"}}));
+        let (_, via_editor) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![crooked, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        assert!(!via_editor.is_empty(), "the model's argument was used, not the editor's path");
+        let (_, unnamed) = run_handed("Tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        assert!(unnamed.is_empty(), "a file the person did not name was handed over");
+        // The Mind saves over it: no longer the person's text.
+        let saved = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\"}";
+        let save = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save", "args": {}}));
+        let (_, after) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home, false, vec![open(), save, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, saved]).await;
+        assert!(after.is_empty(), "a named file the Mind wrote stayed a source");
+    }
+
+    /// E.EGRESS3b through the loop: an editor `read` page of a named file is kept, keyed by the path
+    /// the editor reports.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_read_page_of_a_named_file_is_handed_over() {
+        let read = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\", \"from_line\": 1, \"to_line\": 19, \"text\": \"MDG represents meaning as a typed graph.\"}";
+        let step = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "read", "args": {"tab": 1}}));
+        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step, Step::Say("ok")], vec![EDITOR, EDITOR], vec![read]).await;
+        assert_eq!(got, vec!["MDG represents meaning as a typed graph.".to_string()]);
+    }
+
     /// E.ARENA1-F64 through the loop, the MDG turn's shape: the spec opened, then an answer. The model's
     /// next prompt holds the spec's text, read by the one description the loop asked for itself; a
     /// refused open and an editor `new` are not followed by a look.
@@ -18968,28 +19063,89 @@ fn a_failed_compose_says_the_true_reason_and_what_was_done() {
     assert_eq!(crate::actions_done_line(&[]), "");
 }
 
-/// E.EGRESS3 (Pranab, 5 Oct: "Your words + named files"): a web query may use the text of a file the
-/// person named, and what came back from outside this turn -- never another file's text, and never a
-/// local path. Lines quoted from his MDG spec (the spec itself is his, so it is not in the repo).
+/// E.EGRESS3b (the review's H1): a query leaves as written only as ONE contiguous run of whole words
+/// of ONE source; every word counts, short ones and digits included; a path or a named file never.
+#[test]
+fn egress3b_a_query_leaves_as_written_only_as_a_span_of_one_source() {
+    use crate::egress_planning::query_is_a_span_of_one as span;
+    let spec = "Represent meaning as a multidimensional, compositional structure (see the MS 18 appendix).";
+    let page = "1. Survey of Abstract Meaning Representation: Then, Now, Future -- arxiv.org/abs/2505.03229";
+    let none: Vec<String> = Vec::new();
+    assert!(span("multidimensional compositional structure", &[spec], &none));
+    assert!(span("Abstract Meaning Representation", &[spec, page], &none), "a span of the second source");
+    assert!(!span("compositional Representation", &[spec, page], &none), "one word from each of two sources");
+    assert!(!span("structure multidimensional", &[spec], &none), "the words, but not as a run");
+    assert!(!span("hiv", &["the archive"], &none), "a whole word, never part of one");
+    assert!(span("MS 18", &[spec], &none));
+    assert!(!span("MS 19", &[spec], &none), "a short word and a digit are checked too");
+    assert!(!span("~/research/R1/BRIEF.md", &["~/research/R1/BRIEF.md"], &none), "a path never leaves");
+    let named = vec!["/home/p/research/R1/MDG_spec.md".to_string(), "MDG_spec.md".to_string()];
+    assert!(!span("MDG_spec.md prior art", &["MDG_spec.md prior art"], &named), "a named file's name never leaves");
+}
+
+/// E.EGRESS3b (the review's M1): what counts as a path, in any argument.
+#[test]
+fn egress3b_every_path_form_is_taken_out() {
+    use crate::egress_planning::strip_local_paths as strip;
+    let none: Vec<String> = Vec::new();
+    for p in ["/etc/passwd", "file:///home/p/x", "C:\\Users\\p", "./notes.md", "../x.md", "research/R1/x.md", "research%2FR1", "~/x", "`~/x`", "[/opt/y]"] {
+        assert_eq!(strip(&format!("prior work {p} grammar"), &none), "prior work grammar", "{p}");
+    }
+    assert_eq!(strip("see https://arxiv.org/abs/2505.03229 now", &none), "see https://arxiv.org/abs/2505.03229 now", "a web address is not a path");
+    let named = vec!["BRIEF.md".to_string()];
+    assert_eq!(strip("BRIEF.md semantic grammar", &named), "semantic grammar");
+}
+
+/// E.EGRESS3b (H2, H3, L2; Pranab: "Exact files only"): only a file the person named by its own path,
+/// in this person's chat, read as the editor reports it, and not written by the Mind, is a source.
+#[test]
+fn egress3b_only_exact_named_files_of_this_chat_are_sources() {
+    use crate::egress_planning::{HandedOver, HANDED_OVER_MS};
+    let home = Some("/home/p");
+    let (me, other_chat, member) = ("primary|c1", "primary|c2", "member|c1");
+    let mut h = HandedOver::default();
+    h.note_named(me, "Read ~/research/R1/BRIEF.md and ~/research/R1/MDG_spec.md. Work in ~/research/R1/. Don't touch ~/.ssh/id_rsa or ~/a/../b.md", home, 0);
+    assert!(h.note_read(me, "/home/p/research/R1/MDG_spec.md", "spec text", home, 1));
+    assert!(!h.note_read(me, "/home/p/research/R1/notes.md", "my notes", home, 1), "a file in a named folder is not named");
+    assert!(!h.note_read(me, "/home/p/.ssh/id_rsa", "key", home, 1), "a negated path is not named");
+    assert!(!h.note_read(me, "/home/p/a/../b.md", "x", home, 1), "a path through .. is not named");
+    assert!(!h.note_read(other_chat, "/home/p/research/R1/MDG_spec.md", "spec text", home, 1), "another chat");
+    assert!(!h.note_read(member, "/home/p/research/R1/MDG_spec.md", "spec text", home, 1), "another person");
+    assert_eq!(h.texts(me, 2), vec!["spec text".to_string()]);
+    let names = h.named_names(me);
+    assert!(!names.iter().any(|n| n.contains("..") || n.ends_with("/R1") || n.contains(".ssh")), "a folder, a .. path or a negated one was named: {names:?}");
+    assert!(names.contains(&"/home/p/research/R1/BRIEF.md".to_string()));
+    assert!(h.texts(member, 2).is_empty() && h.texts(other_chat, 2).is_empty());
+    // The Mind wrote to it: no longer the person's text.
+    h.note_written(me, "~/research/R1/MDG_spec.md", home);
+    assert!(h.texts(me, 3).is_empty());
+    assert!(!h.note_read(me, "/home/p/research/R1/MDG_spec.md", "rewritten", home, 3));
+    // The lapse is fixed when the file is named; naming it again does not move it.
+    assert!(h.note_read(me, "/home/p/research/R1/BRIEF.md", "brief", home, 4));
+    h.note_named(me, "and again ~/research/R1/BRIEF.md", home, HANDED_OVER_MS - 10);
+    assert!(h.texts(me, HANDED_OVER_MS + 1).is_empty(), "the lapse slid, or never came");
+    // At most 8 files.
+    let mut many = HandedOver::default();
+    let names: Vec<String> = (0..10).map(|i| format!("~/f{i}.md")).collect();
+    many.note_named(me, &names.join(" "), home, 0);
+    let kept = (0..10).filter(|i| many.note_read(me, &format!("/home/p/f{i}.md"), "t", home, 1)).count();
+    assert_eq!(kept, 8);
+    many.clear(me);
+    assert!(many.texts(me, 2).is_empty());
+}
+
+/// E.EGRESS3b through `egress_clean_args_with`: a span of a handed-over file leaves as `{query}` only;
+/// anything else is written by the planner, which sees the file, this turn's web text and the
+/// keyword rule; a path in any argument is taken out, and a url holding one is refused; another
+/// person's chat gives nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn egress3_named_files_feed_web_queries_and_nothing_else() {
+async fn egress3b_the_planner_writes_what_is_not_a_span() {
     use mind_governance::egress::EgressBroker;
-    const SPEC: &str = "MDG is a proposed machine-native language in which information is not primarily \
-        represented as a sequence of human-readable words. Represent meaning as a multidimensional, \
-        compositional structure and only serialize it into tokens when required by a computational architecture.";
-    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>, &'static str);
     impl LLMBackend for Rec {
         fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
             self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
-            Ok(yantrik_ml::LLMResponse {
-                thinking: String::new(),
-                text: r#"{"query":"semantic grammar ~/research/R1/BRIEF.md"}"#.into(),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                tool_calls: vec![],
-                api_tool_calls: vec![],
-                stop_reason: "stop".into(),
-            })
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: self.1.into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
         }
         fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
             self.chat(m, c, t)
@@ -19001,68 +19157,45 @@ async fn egress3_named_files_feed_web_queries_and_nothing_else() {
             "rec"
         }
     }
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let pool = InferencePool::new(Arc::new(Rec(seen.clone())) as Arc<dyn LLMBackend>, 1);
-    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
-    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker).with_home_dir(Some("/home/p".into()));
-    let now = ConversationEngine::now_ms();
-    conv.handed_over.lock().unwrap().note_named("Read ~/research/R1/BRIEF.md and carry out the task. Work in ~/research/R1/.", now);
-    conv.note_handed_over("/home/p/research/R1/MDG_spec.md", SPEC);
-    conv.note_handed_over("/home/p/notes/clinic.md", "Alice oncology appointment July 18");
-    let ask = |q: &str| serde_json::json!({ "query": q });
-    let calls = || seen.lock().unwrap().len();
-
-    // Every word is in the named file: it leaves as the model wrote it, and no planner is asked.
-    let q = ask("multidimensional compositional structure tokens");
-    assert_eq!(conv.egress_clean_args("search", "Continue.", q.clone(), "").await.unwrap(), q);
-    assert_eq!(calls(), 0, "a sanctioned query went to the planner");
-
-    // A word from nowhere the person handed over: the planner writes it, seeing the named file's text
-    // and the no-path rule -- never the unnamed file's -- and the path it wrote is taken out.
-    let out = conv.egress_clean_args("search", "Continue.", ask("Abstract Meaning Representation survey"), "").await.unwrap();
-    assert_eq!(calls(), 1);
+    let engine = |reply: &'static str| {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pool = InferencePool::new(Arc::new(Rec(seen.clone(), reply)) as Arc<dyn LLMBackend>, 1);
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem, pool, "JARVIS")
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+            .with_home_dir(Some("/home/p".into()));
+        (conv, seen)
+    };
+    const SPEC: &str = "MDG is a proposed machine-native language. Represent meaning as a multidimensional, compositional structure.";
+    let key = "primary|c1";
+    let (conv, seen) = engine(r#"{"query":"semantic grammar ~/research/R1/BRIEF.md MDG_spec.md","q":"/etc/x grammar","topic":"./y grammar"}"#);
+    conv.handed_over.lock().unwrap().note_named(key, "Read ~/research/R1/MDG_spec.md", Some("/home/p"), ConversationEngine::now_ms());
+    conv.note_handed_over(key, "/home/p/research/R1/MDG_spec.md", SPEC);
+    let ask = serde_json::json!({ "query": "multidimensional, compositional structure", "extra": "anything" });
+    let out = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], key).await.unwrap();
+    assert_eq!(out, serde_json::json!({ "query": "multidimensional, compositional structure" }), "only the query leaves");
+    assert_eq!(seen.lock().unwrap().len(), 0);
+    let web = vec!["1. Survey of Abstract Meaning Representation -- arxiv.org/abs/2505.03229".to_string()];
+    let out = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional Representation" }), "", &web, key).await.unwrap();
     let prompt = seen.lock().unwrap()[0].clone();
-    assert!(prompt.contains("machine-native language") && prompt.contains("Never put a file path"), "{prompt}");
-    assert!(!prompt.contains("oncology"), "an unnamed file reached the planner");
-    assert_eq!(out, ask("semantic grammar"), "a local path left in a query");
-
-    // What came back from outside this turn is a source too.
-    let page = "1. Survey of Abstract Meaning Representation: Then, Now, Future -- https://arxiv.org/abs/2505.03229";
-    let amr = ask("Abstract Meaning Representation survey");
-    assert_eq!(conv.egress_clean_args_with("search", "Continue.", amr.clone(), page, page).await.unwrap(), amr);
-    assert_eq!(calls(), 1);
-    // ...but only what the WEB tools returned: the same words from another outside tool (mail) do not
-    // make a query safe to send.
-    let _ = conv.egress_clean_args_with("search", "Continue.", amr.clone(), page, "").await.unwrap();
-    assert_eq!(calls(), 2, "non-web provenance sanctioned a query");
-
-    // An unnamed file's words are not a source.
-    let leak = ask("Alice oncology appointment");
-    assert_ne!(conv.egress_clean_args("search", "Continue.", leak.clone(), "").await.unwrap(), leak);
-
-    // A new chat hands nothing over.
-    conv.handed_over.lock().unwrap().clear();
-    let before = calls();
-    let _ = conv.egress_clean_args("search", "Continue.", q.clone(), "").await.unwrap();
-    assert_eq!(calls(), before + 1, "a cleared conversation still sanctioned the spec's words");
+    assert!(prompt.contains("machine-native language") && prompt.contains("Survey of Abstract Meaning Representation") && prompt.contains("3 to 8 search keywords"), "{prompt}");
+    assert_eq!(out, serde_json::json!({ "query": "semantic grammar", "q": "grammar", "topic": "grammar" }), "a path or named file left");
+    // Another person's chat: none of this person's text.
+    let _ = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional structure" }), "", &[], "member|c1").await.unwrap();
+    assert!(!seen.lock().unwrap()[1].contains("machine-native"), "a member's turn saw the primary's file");
+    // A url holding a local path is refused, not trimmed.
+    let (conv, _) = engine(r#"{"url":"https://example.com/file:///home/p/notes"}"#);
+    assert!(conv.egress_clean_args_with("web_fetch", "fetch that", serde_json::json!({ "url": "https://x.example/" }), "", &[], key).await.is_err());
 }
 
-/// E.EGRESS3: the sanctioned-query check and the path helpers, on their own.
-#[test]
-fn egress3_sanctioned_query_and_named_paths() {
-    use crate::egress_planning::query_is_sanctioned as ok;
-    let spec = "Represent meaning as a multidimensional, compositional structure";
-    assert!(ok("multidimensional compositional structure", spec));
-    assert!(!ok("Abstract Meaning Representation survey", spec));
-    assert!(!ok("~/research/R1/BRIEF.md", "~/research/R1/BRIEF.md"), "a local path never passes");
-    assert!(!ok("the and for", "the and for"), "a query of stopwords is not a query");
-    assert_eq!(crate::egress_planning::strip_local_paths("prior work /home/p/x.md grammar"), "prior work grammar");
-    let named = crate::desktop::paths_named("Read ~/research/R1/BRIEF.md. Work in ~/research/R1/.");
-    assert_eq!(named, vec!["~/research/R1/BRIEF.md", "~/research/R1/"]);
-    assert!(crate::desktop::under_a_named_path("/home/p/research/R1/MDG_spec.md", &named, Some("/home/p")));
-    assert!(!crate::desktop::under_a_named_path("/home/p/research/R2/x.md", &named, Some("/home/p")));
-    assert!(!crate::desktop::under_a_named_path("/home/p/research/R1x/a.md", &named, Some("/home/p")), "a prefix is not a folder");
-    let read = "Done \u{2014} Text Editor \u{2014} MDG_spec.md\naccepted: True, settled: True\n{\"path\": \"/home/p/research/R1/MDG_spec.md\", \"text\": \"## 25. Key Research Hypothesis\", \"from_line\": 929}";
-    assert_eq!(crate::desktop::read_result(read), Some(("/home/p/research/R1/MDG_spec.md".into(), "## 25. Key Research Hypothesis".into())));
+/// E.EGRESS3b (the review's H3): whose hand-over a turn uses -- the person, in this desktop chat.
+#[tokio::test]
+async fn egress3b_the_hand_over_key_is_person_and_chat() {
+    let me = TurnIdentity::primary();
+    let member = TurnIdentity::new("member-a".to_string(), false, crate::OutputScope::HouseholdMember);
+    let off = ConversationEngine::handed_key(&me);
+    let c1 = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&me) }).await;
+    let c2 = crate::TURN_CONVERSATION.scope("c2".into(), async { ConversationEngine::handed_key(&me) }).await;
+    let m1 = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&member) }).await;
+    assert!(c1 != c2 && c1 != m1 && c1 != off, "{off} {c1} {c2} {m1}");
 }

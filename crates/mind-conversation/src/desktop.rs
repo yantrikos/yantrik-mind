@@ -1069,20 +1069,32 @@ fn path_tokens(text: &str) -> Vec<(usize, &str)> {
         .collect()
 }
 
-/// E.EGRESS3: every path a message names, as written.
-pub(crate) fn paths_named(text: &str) -> Vec<String> {
-    path_tokens(text).into_iter().map(|(_, p)| p.to_string()).collect()
+/// E.EGRESS3b: every path a message names, with where it starts (to read the words before it).
+pub(crate) fn path_mentions(text: &str) -> Vec<(usize, &str)> {
+    path_tokens(text)
+}
+
+/// E.EGRESS3b: the file an app's answer says it is on -- the `path` of its result object.
+pub(crate) fn reported_path(obs: &str) -> Option<String> {
+    let at = obs.find("\n{")? + 1;
+    let v: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
+    v.get("path")?.as_str().map(str::to_string)
+}
+
+/// E.EGRESS3b: does this call change what an editor tab holds, or write it to a file?
+pub(crate) fn changes_editor_text(tool: &str, args: &serde_json::Value) -> bool {
+    act_target(tool, args).is_some_and(|(app, action)| {
+        let editing = matches!(
+            action.trim_start_matches("editor_"),
+            "set_content" | "append" | "replace_text" | "replace" | "replace-all" | "undo" | "redo" | "save" | "save_as" | "discard"
+        );
+        editing && (app == "editor" || (app == TWIN_HOST && action.starts_with("editor_")))
+    })
 }
 
 /// E.EGRESS3: a path as the filesystem knows it -- `~/` resolved by the home, no trailing `/`.
 pub(crate) fn absolute(p: &str, home: Option<&str>) -> String {
     files_path(p, home).unwrap_or_else(|| p.to_string()).trim_end_matches('/').to_string()
-}
-
-/// E.EGRESS3: is `file` one of the `named` paths, or inside a named folder?
-pub(crate) fn under_a_named_path(file: &str, named: &[String], home: Option<&str>) -> bool {
-    let f = absolute(file, home);
-    named.iter().map(|n| absolute(n, home)).any(|n| !n.is_empty() && (f == n || f.starts_with(&format!("{n}/"))))
 }
 
 /// E.EGRESS3: the file and text an editor `read` gave back (`{path, text, …}` after its header).

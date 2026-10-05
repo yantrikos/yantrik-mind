@@ -584,16 +584,21 @@ async fn serve(
             let watched = trail.clone();
             // E.ERASE2: a question the turn asks the person, put on the desktop and answered here.
             let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::Ask>();
+            // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
+            let chat = turn["conversation"].as_str().unwrap_or_default().to_string();
             let mut thinking = tokio::spawn(async move {
-                mind_conversation::TURN_ASK
+                mind_conversation::TURN_CONVERSATION
                     .scope(
-                        ask_tx,
-                        mind_conversation::TURN_STAGE.scope(
-                            trail,
-                            mind_conversation::TURN_STATUS.scope(
-                                status_tx,
-                                mind_conversation::TURN_CALLS
-                                    .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                        chat,
+                        mind_conversation::TURN_ASK.scope(
+                            ask_tx,
+                            mind_conversation::TURN_STAGE.scope(
+                                trail,
+                                mind_conversation::TURN_STATUS.scope(
+                                    status_tx,
+                                    mind_conversation::TURN_CALLS
+                                        .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                                ),
                             ),
                         ),
                     )

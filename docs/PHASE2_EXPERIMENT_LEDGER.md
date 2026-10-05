@@ -13613,3 +13613,32 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - the 8-file cap.
 
 Plus a test that the tripwire still runs on a pass-through query (through `guards::pre`), and loop-level capture tests (an open, and a read, through `run_at`). The same reviewer re-checks before any install.
+
+**E.EGRESS3b: built. Every item of the prereg passes.**
+- **H1:**
+  - `query_is_a_span_of_one`: a whole-word contiguous span of ONE source, every word including short ones and digits.
+  - Web observations kept per observation, capped at 32 KB.
+  - The planner is shown the files' text (≤ 8 KB), this turn's web text (≤ 4 KB, newest) and the "3 to 8 search keywords" rule.
+- **L3:** the pass-through gives `{"query": q}` only.
+- **H2:**
+  - `HandedOver` holds EXACT files only (no folder form, no `..`, no negated mention).
+  - It keeps the text of the path the editor REPORTS (`reported_path` / `read_result`).
+  - A named file the Mind edits or saves (`changes_editor_text`) is dropped.
+  - The named paths are also noted at the loop's start, since an entry that skips `handle_turn_as` had none. The loop-level test found that.
+- **H3:**
+  - Keyed by person and desktop conversation (`handed_key`, with the harness setting `TURN_CONVERSATION` from `turn["conversation"]`).
+  - A typed `/new` clears that key.
+- **M1:**
+  - Every string argument has path words taken out: `~`, `./`, `../`, `file:`, `%2F`/`%5C`, a drive letter, any non-http(s) word holding `/` or `\`, and a named file's path or name.
+  - A url holding one anywhere is refused.
+- **L1:** the log line shows only what was sent.
+- **L2:** the lapse is fixed at naming, texts expire with their path, and at most 8 files.
+- **Tests:**
+  - six in `tests.rs` and `guards.rs`, including the tripwire through `pre` on a passed-through query, and the web-text cap;
+  - loop-level capture through `run_handed` on the real 520 open/describe pair: named, unnamed, the editor's path versus a `..` argument, and Mind-saved.
+- **Nineteen compiling mutants, all killed (K1–K19).**
+- **Workspace:** 0 failures. Linux `cargo check -p mind-core --tests` passes on staging.
+- **Residuals:**
+  - The harness `TURN_CONVERSATION` scope is Unix-only, so it is compiled but not unit-run.
+  - A symlink named exactly as a file counts, since the person named it. The Mind cannot realpath the person's files (ProtectHome).
+  - Over-stripping: "and/or" or "TCP/IP" in a query loses that word.

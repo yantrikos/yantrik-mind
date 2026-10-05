@@ -40,8 +40,11 @@ pub(crate) struct GuardState {
     /// E.EGRESS3: what the WEB tools (search, fetch) returned this turn -- the only outside text a web
     /// query may draw its words from. Mail and other external tools stay out: their output is the
     /// person's own, and must not launder into a query.
-    web_obs: String,
+    web_obs: Vec<String>,
 }
+
+/// E.EGRESS3b: the most web text kept this turn as query sources (the newest kept).
+const WEB_OBS_CAP: usize = 32_000;
 
 /// Why [`pre`] refused, so each loop can respond in its own idiom (the legacy loop counts an
 /// unavailable-repeat toward its barren limit; an egress refusal is not barren — the model should
@@ -112,15 +115,15 @@ pub(crate) async fn pre(
     };
     let asked = grounded.clone();
     let args = match engine
-        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance)
+        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance, &ConversationEngine::handed_key(id))
         .await
     {
         Ok(args) => {
-            // E.RES1: what actually leaves, when the clean planner re-authored it. Built only from the
-            // person's literal request (already in the harness line), so logging it reveals nothing
-            // new. R1b's six searches came back empty while the model's queries were sound.
+            // E.RES1: what actually leaves, when it is not what the model asked -- only what was SENT
+            // (the review's L1: the model's args may carry private values; the line above already
+            // prints them, and this one adds nothing private that did not leave anyway).
             if args != asked {
-                eprintln!("[egress] {ctx}: {tool} sent as re-authored {args} (the model asked {asked})");
+                eprintln!("[egress] {ctx}: {tool} sent as {args}");
             }
             args
         }
@@ -174,8 +177,11 @@ pub(crate) async fn post(
         s.external_obs.push_str(obs);
         s.external_obs.push('\n');
         if crate::egress_planning::is_web_tool(tool) {
-            s.web_obs.push_str(obs);
-            s.web_obs.push('\n');
+            // E.EGRESS3b: each observation its own source, the total capped, the newest kept.
+            s.web_obs.push(obs.to_string());
+            while s.web_obs.iter().map(String::len).sum::<usize>() > WEB_OBS_CAP && s.web_obs.len() > 1 {
+                s.web_obs.remove(0);
+            }
         }
     }
     outcome
@@ -333,8 +339,57 @@ mod tests {
         // outside tool's (mail) does not.
         let _ = post(&eng, &state, "mail_search", "From: clinic -- oncology appointment").await;
         let s = state.lock().unwrap();
-        assert!(s.web_obs.contains("example.com/article-42"), "the search's output is not web provenance");
-        assert!(!s.web_obs.contains("oncology"), "mail joined the web provenance");
+        assert!(s.web_obs.iter().any(|o| o.contains("example.com/article-42")), "the search's output is not web provenance");
+        assert!(!s.web_obs.iter().any(|o| o.contains("oncology")), "mail joined the web provenance");
+    }
+
+    /// E.EGRESS3b (the review's ask): the exact-value tripwire still runs after a query passes as a
+    /// span of a handed-over file -- a stored private value in that file does not leave through it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_tripwire_still_stops_a_passed_through_query() {
+        use mind_governance::egress::EgressBroker;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.remember_as_belief(mind_types::BeliefAssertion {
+            statement: "Alice's email is alice.private@example.com".into(),
+            polarity: 1.0,
+            weight: 1.0,
+            source_event: Some("test".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"nothing"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+            .with_home_dir(Some("/home/p".into()));
+        let id = TurnIdentity::primary();
+        let key = ConversationEngine::handed_key(&id);
+        eng.handed_over.lock().unwrap().note_named(&key, "Read ~/notes/contacts.md", Some("/home/p"), ConversationEngine::now_ms());
+        eng.note_handed_over(&key, "/home/p/notes/contacts.md", "contact alice.private@example.com for the project");
+        let state = Mutex::new(GuardState::default());
+        let v = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "alice.private@example.com"}), "t").await;
+        assert!(matches!(v, PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, .. }), "a stored private value left through a handed-over file");
+        // A span with no private value in it does leave.
+        let ok = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "for the project"}), "t").await;
+        assert!(matches!(ok, PreVerdict::Proceed(_)));
+    }
+
+    /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_web_text_a_query_may_use_is_capped() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+        let state = Mutex::new(GuardState::default());
+        for i in 0..4 {
+            let _ = post(&eng, &state, "search", &format!("result {i} {}", "x".repeat(15_000))).await;
+        }
+        let s = state.lock().unwrap();
+        assert!(s.web_obs.iter().map(String::len).sum::<usize>() <= WEB_OBS_CAP, "uncapped");
+        assert!(s.web_obs.last().is_some_and(|o| o.starts_with("result 3")), "the newest was not kept");
     }
 
     /// The exact-value tripwire refuses through the pipeline, with the egress kind — so a loop

@@ -1568,6 +1568,13 @@ pub(crate) const ERASE_SETTLED: [&str; 5] =
 /// E.ERASE2: the two answers, in the order the person sees them. Only the second erases.
 pub(crate) const ERASE_OPTIONS: [&str; 2] = ["Keep", "Erase"];
 
+tokio::task_local! {
+    /// E.EGRESS3b (the review's H3): the desktop conversation this turn belongs to, from the harness.
+    /// A new desktop chat is a new conversation -- it never reaches the engine as a message -- so
+    /// what was handed over in one chat is not a source in the next. Unset off the desktop.
+    pub static TURN_CONVERSATION: String;
+}
+
 /// E.STALL3: mark the step this turn is entering. No listener, no effect.
 pub(crate) fn stage(s: &'static str) {
     let _ = TURN_STAGE.try_with(|t| {
@@ -13340,6 +13347,13 @@ Open reminders you're carrying for them:",
         let mut last_save_target: Option<String> = None;
         // E.ARENA1-F60: each file saved this turn, with the text the Mind wrote into it (when known).
         let mut saved_files: Vec<(String, String)> = Vec::new();
+        // E.EGRESS3b: the files this message names, noted where the loop starts too (an eval or
+        // other entry that skips `handle_turn_as` must not run with none). Idempotent: a path already
+        // named keeps the time it was first named.
+        if let Ok(mut h) = self.handed_over.lock() {
+            let home = self.person_home();
+            h.note_named(&Self::handed_key(id), user_text, home.as_deref(), Self::now_ms());
+        }
         // E.ARENA1-F61: saves already held once for repeating a page saved this turn.
         let mut dup_held: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F8: the host families already looked up for a twin this turn.
@@ -14337,8 +14351,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             eprintln!("[agent] step {step}: opened {opened} \u{2014} its text added from the editor's description");
                             opened_text = true;
                             // E.EGRESS3: a file the person named is a source an outbound query may use.
-                            if let Some(text) = desktop::opened_text_of(&with, opened) {
-                                self.note_handed_over(opened, &text);
+                            // E.EGRESS3b: the path the EDITOR reports, not the model's argument.
+                            if let (Some(text), Some(path)) = (desktop::opened_text_of(&with, opened), desktop::reported_path(&obs)) {
+                                self.note_handed_over(&Self::handed_key(id), &path, &text);
                             }
                             with
                         }
@@ -14350,7 +14365,19 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.EGRESS3: an editor `read` of a file the person named -- its text may feed a web query.
             if sent && desktop::act_target(&tool, &args).is_some_and(|(app, action)| app == "editor" && action == "read") {
                 if let Some((path, text)) = desktop::read_result(&obs) {
-                    self.note_handed_over(&path, &text);
+                    self.note_handed_over(&Self::handed_key(id), &path, &text);
+                }
+            }
+            // E.EGRESS3b (the review's H2): an edit or save in the editor makes its file the Mind's
+            // writing, no longer the person's -- the tab's file as the editor reports it, and a
+            // save_as target.
+            if sent && desktop::changes_editor_text(&tool, &args) {
+                let key = Self::handed_key(id);
+                if let Some(path) = desktop::reported_path(&obs) {
+                    self.note_mind_written(&key, &path);
+                }
+                if let Some(p) = desktop::save_path(&tool, &args) {
+                    self.note_mind_written(&key, &p);
                 }
             }
             // E.ARENA1-F45: a command's answer leads with what the command did.
@@ -15228,12 +15255,14 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // E.SLASH1: a bare slash command is not work. VM 561, turn 60: "/new" (Hermes's new-chat
         // habit) became 12 steps and 195 s of opening a terminal. Answered by code, before the
         // router's shadow or anything else can call a model.
-        // E.EGRESS3: a new chat starts with nothing handed over; every message's paths are noted.
+        // E.EGRESS3/3b: the files this person names in this chat; a typed /new clears this chat's.
+        let handed_key = Self::handed_key(&id);
+        let home = self.person_home();
         if let Ok(mut h) = self.handed_over.lock() {
             if user_text.trim().split('@').next().is_some_and(|c| c.eq_ignore_ascii_case("/new")) {
-                h.clear();
+                h.clear(&handed_key);
             }
-            h.note_named(user_text, Self::now_ms());
+            h.note_named(&handed_key, user_text, home.as_deref(), Self::now_ms());
         }
         if let Some(reply) = slash_reply(user_text) {
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;

@@ -5955,6 +5955,8 @@ pub struct ConversationEngine {
     /// memory, for one turn -- never written anywhere, because writing it down would make one more
     /// copy of the thing being erased.
     pending_erase: Mutex<Option<String>>,
+    /// E.EGRESS3: the paths the person named in this conversation, and the text the Mind read from them.
+    handed_over: Mutex<egress_planning::HandedOver>,
     /// A recipe paused on an AskUser question — holds the run_id to resume with the next message.
     pending_question: Mutex<Option<String>>,
     /// Recipe engine — when set, recipes (e.g. the citation-validated briefing) run through it.
@@ -6108,6 +6110,7 @@ impl ConversationEngine {
             runtime: None,
             pending: Mutex::new(None),
             pending_erase: Mutex::new(None),
+            handed_over: Mutex::new(egress_planning::HandedOver::default()),
             pending_question: Mutex::new(None),
             recipes: None,
             route_budget: crate::delegate::ROUTE_BUDGET,
@@ -14333,6 +14336,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         Some(with) => {
                             eprintln!("[agent] step {step}: opened {opened} \u{2014} its text added from the editor's description");
                             opened_text = true;
+                            // E.EGRESS3: a file the person named is a source an outbound query may use.
+                            if let Some(text) = desktop::opened_text_of(&with, opened) {
+                                self.note_handed_over(opened, &text);
+                            }
                             with
                         }
                         None => obs,
@@ -14340,6 +14347,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 _ => obs,
             };
+            // E.EGRESS3: an editor `read` of a file the person named -- its text may feed a web query.
+            if sent && desktop::act_target(&tool, &args).is_some_and(|(app, action)| app == "editor" && action == "read") {
+                if let Some((path, text)) = desktop::read_result(&obs) {
+                    self.note_handed_over(&path, &text);
+                }
+            }
             // E.ARENA1-F45: a command's answer leads with what the command did.
             let obs = match desktop::runs_a_command(&tool, &args).then(|| desktop::command_first(&obs)).flatten() {
                 Some(first) => first,
@@ -15215,6 +15228,13 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // E.SLASH1: a bare slash command is not work. VM 561, turn 60: "/new" (Hermes's new-chat
         // habit) became 12 steps and 195 s of opening a terminal. Answered by code, before the
         // router's shadow or anything else can call a model.
+        // E.EGRESS3: a new chat starts with nothing handed over; every message's paths are noted.
+        if let Ok(mut h) = self.handed_over.lock() {
+            if user_text.trim().split('@').next().is_some_and(|c| c.eq_ignore_ascii_case("/new")) {
+                h.clear();
+            }
+            h.note_named(user_text, Self::now_ms());
+        }
         if let Some(reply) = slash_reply(user_text) {
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws.clone()).await;

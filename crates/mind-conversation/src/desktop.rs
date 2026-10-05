@@ -895,6 +895,14 @@ pub(crate) fn with_opened_text(obs: &str, opened: &str, description: &str) -> Op
     Some(format!("{obs}\n(the text of {opened}, from the editor's description:)\n{content}{cut}"))
 }
 
+/// E.EGRESS3: the file text `with_opened_text` added to an open's answer, without its cut note.
+pub(crate) fn opened_text_of(with: &str, opened: &str) -> Option<String> {
+    let marker = format!("(the text of {opened}, from the editor's description:)\n");
+    let rest = &with[with.find(&marker)? + marker.len()..];
+    let text = rest.split("\n(the text above is cut there").next().unwrap_or(rest);
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
+
 /// E.ARENA1-F12: said once, before a turn ends with the document unsaved.
 pub(crate) fn unsaved_nudge(step: usize, requested: Option<&str>) -> String {
     // E.ARENA1-F58: the call to copy, and never a folder as the file (F51's rule). VM 520, E.LONG1
@@ -1038,12 +1046,7 @@ pub(crate) fn another_new_while_unsaved(tool: &str, args: &serde_json::Value, un
 /// 692: the only path of 680 was JSON-shaped and never found; 692's one found path was "the grammar
 /// you wrote in ~/mdg/grammar.md", so the unsaved note's save call named the file to read.
 pub(crate) fn requested_path(user_text: &str) -> Option<String> {
-    let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | ',' | ';');
-    let paths: Vec<(usize, &str)> = user_text
-        .split(delim)
-        .map(|w| (w.as_ptr() as usize - user_text.as_ptr() as usize, w.trim_matches(':').trim_end_matches('.')))
-        .filter(|(_, w)| (w.starts_with("~/") || w.starts_with('/')) && w.len() > 2)
-        .collect();
+    let paths = path_tokens(user_text);
     let says_save = |at: usize| {
         let before: String = user_text[..at].chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
         let before = before.to_ascii_lowercase();
@@ -1054,6 +1057,41 @@ pub(crate) fn requested_path(user_text: &str) -> Option<String> {
         .find(|(at, _)| says_save(*at))
         .or_else(|| paths.first())
         .map(|(_, w)| w.to_string())
+}
+
+/// E.ARENA1-F65: every `~/…` or absolute path in a text, with where it starts -- words cut at
+/// whitespace, quotes, braces, brackets, commas and semicolons; a trailing `:` or `.` dropped.
+fn path_tokens(text: &str) -> Vec<(usize, &str)> {
+    let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | ',' | ';');
+    text.split(delim)
+        .map(|w| (w.as_ptr() as usize - text.as_ptr() as usize, w.trim_matches(':').trim_end_matches('.')))
+        .filter(|(_, w)| (w.starts_with("~/") || w.starts_with('/')) && w.len() > 2)
+        .collect()
+}
+
+/// E.EGRESS3: every path a message names, as written.
+pub(crate) fn paths_named(text: &str) -> Vec<String> {
+    path_tokens(text).into_iter().map(|(_, p)| p.to_string()).collect()
+}
+
+/// E.EGRESS3: a path as the filesystem knows it -- `~/` resolved by the home, no trailing `/`.
+pub(crate) fn absolute(p: &str, home: Option<&str>) -> String {
+    files_path(p, home).unwrap_or_else(|| p.to_string()).trim_end_matches('/').to_string()
+}
+
+/// E.EGRESS3: is `file` one of the `named` paths, or inside a named folder?
+pub(crate) fn under_a_named_path(file: &str, named: &[String], home: Option<&str>) -> bool {
+    let f = absolute(file, home);
+    named.iter().map(|n| absolute(n, home)).any(|n| !n.is_empty() && (f == n || f.starts_with(&format!("{n}/"))))
+}
+
+/// E.EGRESS3: the file and text an editor `read` gave back (`{path, text, …}` after its header).
+pub(crate) fn read_result(obs: &str) -> Option<(String, String)> {
+    let at = obs.find("\n{")? + 1;
+    let v: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
+    let path = v.get("path")?.as_str()?.to_string();
+    let text = v.get("text")?.as_str()?.to_string();
+    (!text.trim().is_empty()).then_some((path, text))
 }
 
 /// E.ARENA1-F23: how long to wait before looking again at an unsettled action. yantrik-os-f4:

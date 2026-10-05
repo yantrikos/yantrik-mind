@@ -37,6 +37,10 @@ pub(crate) struct GuardState {
     /// URL through against. Only external observations accumulate; a private tool's output must
     /// never join, or a stored private link would launder itself into fetchable.
     external_obs: String,
+    /// E.EGRESS3: what the WEB tools (search, fetch) returned this turn -- the only outside text a web
+    /// query may draw its words from. Mail and other external tools stay out: their output is the
+    /// person's own, and must not launder into a query.
+    web_obs: String,
 }
 
 /// Why [`pre`] refused, so each loop can respond in its own idiom (the legacy loop counts an
@@ -102,10 +106,13 @@ pub(crate) async fn pre(
     // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
     // The provenance snapshot is cloned out of the lock; append-only, so the worst staleness can
     // do is clean-author a URL it could have passed through — the safe direction.
-    let provenance = state.lock().unwrap().external_obs.clone();
+    let (provenance, web_provenance) = {
+        let s = state.lock().unwrap();
+        (s.external_obs.clone(), s.web_obs.clone())
+    };
     let asked = grounded.clone();
     let args = match engine
-        .egress_clean_args(tool, user_text, grounded, &provenance)
+        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance)
         .await
     {
         Ok(args) => {
@@ -166,6 +173,10 @@ pub(crate) async fn post(
     {
         s.external_obs.push_str(obs);
         s.external_obs.push('\n');
+        if crate::egress_planning::is_web_tool(tool) {
+            s.web_obs.push_str(obs);
+            s.web_obs.push('\n');
+        }
     }
     outcome
 }
@@ -318,6 +329,12 @@ mod tests {
                 panic!("clean-authoring should have produced args: {msg}")
             }
         }
+        // E.EGRESS3: a web tool's output becomes the web provenance a query may draw on; another
+        // outside tool's (mail) does not.
+        let _ = post(&eng, &state, "mail_search", "From: clinic -- oncology appointment").await;
+        let s = state.lock().unwrap();
+        assert!(s.web_obs.contains("example.com/article-42"), "the search's output is not web provenance");
+        assert!(!s.web_obs.contains("oncology"), "mail joined the web provenance");
     }
 
     /// The exact-value tripwire refuses through the pipeline, with the egress kind — so a loop

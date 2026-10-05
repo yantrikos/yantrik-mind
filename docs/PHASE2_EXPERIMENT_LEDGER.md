@@ -13526,3 +13526,28 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
    - a planner answer holding a local path is sent with the path removed.
 3. **Capture:** an editor read of a named file is kept; a read of an unnamed file is not; `/new` clears both.
 4. **A file the person did NOT name never becomes a source,** with a test.
+
+**E.EGRESS3: built. All four kill criteria pass, with one narrowing found on the way.**
+- **The change:**
+  - `HandedOver` keeps the named paths and the text read from them per conversation; `/new` clears it, and entries lapse after 12 h.
+  - `query_is_sanctioned`, `strip_local_paths` and `is_web_tool`.
+  - `egress_clean_args_with(…, web_provenance)`.
+  - The desktop helpers `paths_named`, `absolute`, `under_a_named_path`, `read_result` and `opened_text_of`.
+  - Capture hooks: F64's open-with-text, and the editor's `read`.
+  - `guards::post` keeps a separate `web_obs`.
+- **The narrowing:** the existing contract test `egress_clean_planning_passes_through_urls_with_external_provenance` (#4: "Provenance from a PRIVATE tool must not launder") failed against the first draft.
+  - `external_obs` holds EVERY external tool's output, mail search included, so mail text could have sanctioned a web query.
+  - Pranab's option named "pages fetched this turn", so only the WEB tools' output (search, fetch) counts: `web_obs`. The contract test passes unchanged.
+- **Deviation from the prereg:** the unit test quotes three sentences of the MDG spec instead of the whole file. The spec is Pranab's and is not put in the repo.
+- **Nine compiling mutants, all killed:**
+  1. no pass-through;
+  2. the planner is not shown the file;
+  3. any file counts as named;
+  4. the path is not stripped;
+  5. a path passes the check;
+  6. clear keeps the texts;
+  7. outside text is not a source;
+  8. a query uses all provenance;
+  9. every tool counts as web.
+- **Workspace:** 0 failures.
+- **Not tested at loop level:** the two capture hooks and the `/new` clear in `handle_turn_as`. The 520 run shows them by the "[egress] …: handed over by the person" line.

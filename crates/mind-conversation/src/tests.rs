@@ -18967,3 +18967,102 @@ fn a_failed_compose_says_the_true_reason_and_what_was_done() {
     assert!(line.contains("editor.new") && !line.contains("secret body"), "names actions, never contents: {line}");
     assert_eq!(crate::actions_done_line(&[]), "");
 }
+
+/// E.EGRESS3 (Pranab, 5 Oct: "Your words + named files"): a web query may use the text of a file the
+/// person named, and what came back from outside this turn -- never another file's text, and never a
+/// local path. Lines quoted from his MDG spec (the spec itself is his, so it is not in the repo).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn egress3_named_files_feed_web_queries_and_nothing_else() {
+    use mind_governance::egress::EgressBroker;
+    const SPEC: &str = "MDG is a proposed machine-native language in which information is not primarily \
+        represented as a sequence of human-readable words. Represent meaning as a multidimensional, \
+        compositional structure and only serialize it into tokens when required by a computational architecture.";
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    impl LLMBackend for Rec {
+        fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            Ok(yantrik_ml::LLMResponse {
+                thinking: String::new(),
+                text: r#"{"query":"semantic grammar ~/research/R1/BRIEF.md"}"#.into(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![],
+                api_tool_calls: vec![],
+                stop_reason: "stop".into(),
+            })
+        }
+        fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "rec"
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pool = InferencePool::new(Arc::new(Rec(seen.clone())) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker).with_home_dir(Some("/home/p".into()));
+    let now = ConversationEngine::now_ms();
+    conv.handed_over.lock().unwrap().note_named("Read ~/research/R1/BRIEF.md and carry out the task. Work in ~/research/R1/.", now);
+    conv.note_handed_over("/home/p/research/R1/MDG_spec.md", SPEC);
+    conv.note_handed_over("/home/p/notes/clinic.md", "Alice oncology appointment July 18");
+    let ask = |q: &str| serde_json::json!({ "query": q });
+    let calls = || seen.lock().unwrap().len();
+
+    // Every word is in the named file: it leaves as the model wrote it, and no planner is asked.
+    let q = ask("multidimensional compositional structure tokens");
+    assert_eq!(conv.egress_clean_args("search", "Continue.", q.clone(), "").await.unwrap(), q);
+    assert_eq!(calls(), 0, "a sanctioned query went to the planner");
+
+    // A word from nowhere the person handed over: the planner writes it, seeing the named file's text
+    // and the no-path rule -- never the unnamed file's -- and the path it wrote is taken out.
+    let out = conv.egress_clean_args("search", "Continue.", ask("Abstract Meaning Representation survey"), "").await.unwrap();
+    assert_eq!(calls(), 1);
+    let prompt = seen.lock().unwrap()[0].clone();
+    assert!(prompt.contains("machine-native language") && prompt.contains("Never put a file path"), "{prompt}");
+    assert!(!prompt.contains("oncology"), "an unnamed file reached the planner");
+    assert_eq!(out, ask("semantic grammar"), "a local path left in a query");
+
+    // What came back from outside this turn is a source too.
+    let page = "1. Survey of Abstract Meaning Representation: Then, Now, Future -- https://arxiv.org/abs/2505.03229";
+    let amr = ask("Abstract Meaning Representation survey");
+    assert_eq!(conv.egress_clean_args_with("search", "Continue.", amr.clone(), page, page).await.unwrap(), amr);
+    assert_eq!(calls(), 1);
+    // ...but only what the WEB tools returned: the same words from another outside tool (mail) do not
+    // make a query safe to send.
+    let _ = conv.egress_clean_args_with("search", "Continue.", amr.clone(), page, "").await.unwrap();
+    assert_eq!(calls(), 2, "non-web provenance sanctioned a query");
+
+    // An unnamed file's words are not a source.
+    let leak = ask("Alice oncology appointment");
+    assert_ne!(conv.egress_clean_args("search", "Continue.", leak.clone(), "").await.unwrap(), leak);
+
+    // A new chat hands nothing over.
+    conv.handed_over.lock().unwrap().clear();
+    let before = calls();
+    let _ = conv.egress_clean_args("search", "Continue.", q.clone(), "").await.unwrap();
+    assert_eq!(calls(), before + 1, "a cleared conversation still sanctioned the spec's words");
+}
+
+/// E.EGRESS3: the sanctioned-query check and the path helpers, on their own.
+#[test]
+fn egress3_sanctioned_query_and_named_paths() {
+    use crate::egress_planning::query_is_sanctioned as ok;
+    let spec = "Represent meaning as a multidimensional, compositional structure";
+    assert!(ok("multidimensional compositional structure", spec));
+    assert!(!ok("Abstract Meaning Representation survey", spec));
+    assert!(!ok("~/research/R1/BRIEF.md", "~/research/R1/BRIEF.md"), "a local path never passes");
+    assert!(!ok("the and for", "the and for"), "a query of stopwords is not a query");
+    assert_eq!(crate::egress_planning::strip_local_paths("prior work /home/p/x.md grammar"), "prior work grammar");
+    let named = crate::desktop::paths_named("Read ~/research/R1/BRIEF.md. Work in ~/research/R1/.");
+    assert_eq!(named, vec!["~/research/R1/BRIEF.md", "~/research/R1/"]);
+    assert!(crate::desktop::under_a_named_path("/home/p/research/R1/MDG_spec.md", &named, Some("/home/p")));
+    assert!(!crate::desktop::under_a_named_path("/home/p/research/R2/x.md", &named, Some("/home/p")));
+    assert!(!crate::desktop::under_a_named_path("/home/p/research/R1x/a.md", &named, Some("/home/p")), "a prefix is not a folder");
+    let read = "Done \u{2014} Text Editor \u{2014} MDG_spec.md\naccepted: True, settled: True\n{\"path\": \"/home/p/research/R1/MDG_spec.md\", \"text\": \"## 25. Key Research Hypothesis\", \"from_line\": 929}";
+    assert_eq!(crate::desktop::read_result(read), Some(("/home/p/research/R1/MDG_spec.md".into(), "## 25. Key Research Hypothesis".into())));
+}

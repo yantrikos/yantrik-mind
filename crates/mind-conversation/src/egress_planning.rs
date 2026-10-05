@@ -9,6 +9,110 @@ use yantrik_ml::{ChatMessage, GenerationConfig};
 
 use super::{ConversationEngine, TurnIdentity};
 
+/// E.EGRESS3 (Pranab's decision, 5 Oct): what the person handed over in this conversation -- the
+/// paths they named, and the text the Mind read from files under them -- which an outbound query may
+/// draw on. Cleared on `/new`; each entry lapses after [`HANDED_OVER_MS`].
+#[derive(Default)]
+pub(crate) struct HandedOver {
+    named: Vec<(String, u64)>,
+    texts: Vec<(String, String, u64)>,
+}
+
+/// E.EGRESS3: how long a named path, or text read from it, stays a permitted source.
+pub(crate) const HANDED_OVER_MS: u64 = 12 * 3600 * 1000;
+/// E.EGRESS3: the most text kept per handed-over file, and shown to the clean planner in all.
+const HANDED_TEXT_CAP: usize = 20_000;
+const PLANNER_HANDED_CAP: usize = 8_000;
+
+impl HandedOver {
+    fn fresh(&mut self, now: u64) {
+        self.named.retain(|(_, at)| now.saturating_sub(*at) < HANDED_OVER_MS);
+        self.texts.retain(|(_, _, at)| now.saturating_sub(*at) < HANDED_OVER_MS);
+    }
+
+    /// The paths a message names.
+    pub(crate) fn note_named(&mut self, user_text: &str, now: u64) {
+        self.fresh(now);
+        for p in crate::desktop::paths_named(user_text) {
+            self.named.retain(|(n, _)| *n != p);
+            self.named.push((p, now));
+        }
+    }
+
+    /// Text read from `path` -- kept only when the person named it or a folder holding it. Pages of
+    /// one file accumulate, up to the cap.
+    pub(crate) fn note_read(&mut self, path: &str, text: &str, home: Option<&str>, now: u64) -> bool {
+        self.fresh(now);
+        let named: Vec<String> = self.named.iter().map(|(n, _)| n.clone()).collect();
+        if !crate::desktop::under_a_named_path(path, &named, home) {
+            return false;
+        }
+        let key = crate::desktop::absolute(path, home);
+        match self.texts.iter_mut().find(|(p, _, _)| *p == key) {
+            Some((_, kept, at)) => {
+                if !kept.contains(text) {
+                    kept.push('\n');
+                    kept.push_str(text);
+                    *kept = kept.chars().take(HANDED_TEXT_CAP).collect();
+                }
+                *at = now;
+            }
+            None => self.texts.push((key, text.chars().take(HANDED_TEXT_CAP).collect(), now)),
+        }
+        true
+    }
+
+    /// All the handed-over text still current.
+    pub(crate) fn text(&mut self, now: u64) -> String {
+        self.fresh(now);
+        self.texts.iter().map(|(p, t, _)| format!("[{p}]\n{t}")).collect::<Vec<_>>().join("\n\n")
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.named.clear();
+        self.texts.clear();
+    }
+}
+
+/// E.EGRESS3: may this query leave as the model wrote it? Only when it names no local path and every
+/// content word (3+ letters or digits, not a stopword) is in the sanctioned text -- what the person
+/// wrote, handed over, or the outside world already returned.
+pub(crate) fn query_is_sanctioned(query: &str, sanctioned: &str) -> bool {
+    const STOP: [&str; 24] = [
+        "the", "and", "for", "with", "from", "into", "that", "this", "what", "which", "about", "are",
+        "was", "how", "why", "who", "its", "not", "but", "you", "your", "our", "has", "have",
+    ];
+    if has_local_path(query) {
+        return false;
+    }
+    let hay = sanctioned.to_lowercase();
+    let words: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.chars().count() >= 3 && !STOP.contains(&w.as_str()))
+        .collect();
+    !words.is_empty() && words.iter().all(|w| hay.contains(w.as_str()))
+}
+
+/// E.EGRESS3: the web tools -- search and fetch -- whose output a web query may draw its words from.
+pub(crate) fn is_web_tool(tool: &str) -> bool {
+    matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki" | "web_fetch" | "fetch" | "web")
+}
+
+/// E.EGRESS3: does a query carry a path on this machine? On VM 520 the clean planner sent
+/// "closest prior work to the specification described in ~/research/R1/BRIEF.md".
+fn has_local_path(q: &str) -> bool {
+    q.split_whitespace().any(|w| {
+        let w = w.trim_matches(|c: char| matches!(c, '"' | '\'' | '(' | ')' | ',' | '.' | ':'));
+        w.starts_with("~/") || w.starts_with("/home/") || w.starts_with("/var/") || w.starts_with("/root/")
+    })
+}
+
+/// E.EGRESS3: the query without the words that are local paths.
+pub(crate) fn strip_local_paths(q: &str) -> String {
+    q.split_whitespace().filter(|w| !has_local_path(w)).collect::<Vec<_>>().join(" ")
+}
+
 /// Extract DISTINCTIVE, high-precision PII-shaped values from text — the only class the exact-value
 /// exfil guard acts on (near-zero false positives). Catches: email addresses (`local@domain.tld`),
 /// contiguous 7–15 digit numbers (phone / account / card, unseparated), and long (≥16-char)
@@ -119,12 +223,35 @@ impl ConversationEngine {
     /// them the article. The pass-through also restores DETERMINISM, which the loop's repeat-guard
     /// depends on: a re-authoring model call gives the same tool call a different signature each
     /// time, so the guard never fires on exactly the repeats this failure produces.
+    /// E.EGRESS3: keep text the Mind read from a file the person named, as a permitted query source.
+    pub(crate) fn note_handed_over(&self, path: &str, text: &str) {
+        let home = self.person_home();
+        if let Ok(mut h) = self.handed_over.lock() {
+            if h.note_read(path, text, home.as_deref(), Self::now_ms()) {
+                eprintln!("[egress] {path}: handed over by the person, {} chars kept as a query source", text.chars().count());
+            }
+        }
+    }
+
     pub(crate) async fn egress_clean_args(
         &self,
         tool: &str,
         user_text: &str,
         grounded: serde_json::Value,
         external_provenance: &str,
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
+        self.egress_clean_args_with(tool, user_text, grounded, external_provenance, "").await
+    }
+
+    /// E.EGRESS3: [`Self::egress_clean_args`] with what the WEB tools returned this turn, the only
+    /// outside text a web query may take its words from.
+    pub(crate) async fn egress_clean_args_with(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: serde_json::Value,
+        external_provenance: &str,
+        web_provenance: &str,
     ) -> Result<serde_json::Value, CleanArgsFailure> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
         if self.egress.is_none() {
@@ -172,6 +299,24 @@ impl ConversationEngine {
                 }
             }
         }
+        // E.EGRESS3 (Pranab, 5 Oct): a web search may also draw on the text of files the person named
+        // in this conversation, and on what the outside world returned this turn. A query whose every
+        // content word is already there leaves as the model wrote it -- deterministic, so the repeat
+        // guard works -- and anything else is authored with that text in view.
+        let web_query = matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki");
+        let _ = external_provenance; // URLs only (above); a query's words come from the web tools' output alone
+        let handed = if web_query {
+            self.handed_over.lock().map(|mut h| h.text(Self::now_ms())).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if web_query {
+            if let Some(q) = grounded.get("query").and_then(|v| v.as_str()) {
+                if query_is_sanctioned(q, &format!("{user_text}\n{handed}\n{web_provenance}")) {
+                    return Ok(grounded);
+                }
+            }
+        }
         let schema = match tool {
             "web_fetch" | "fetch" | "web" => "{\"url\": \"<the URL, taken ONLY from the user's literal request>\"}",
             "translate" | "tr" => "{\"to\": \"<target language>\", \"text\": \"<the text to translate, from the literal request>\"}",
@@ -181,8 +326,16 @@ impl ConversationEngine {
             reach an external service. You have NO access to the user's private memory, notes, files, or \
             prior conversation. You MUST NOT invent or add any personal detail (names, dates, health, \
             finances, addresses, account numbers) that is not present VERBATIM in the user's literal \
-            request below. Build the argument ONLY from the literal request. Output ONLY one JSON object.";
-        let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n\nOutput ONLY the JSON args.");
+            request below. Build the argument ONLY from the literal request (and, for a web search, the \
+            text the person handed over, when it is shown). Never put a file path from this machine \
+            (~/... or /home/...) in a query. Output ONLY one JSON object.";
+        let handed_part = if handed.trim().is_empty() {
+            String::new()
+        } else {
+            let excerpt: String = handed.chars().take(PLANNER_HANDED_CAP).collect();
+            format!("\nText the person handed over for this task (you MAY take query terms from it):\n{excerpt}\n")
+        };
+        let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n{handed_part}\nOutput ONLY the JSON args.");
         let cfg = GenerationConfig {
             max_tokens: 300,
             ..GenerationConfig::default()
@@ -212,8 +365,14 @@ impl ConversationEngine {
             }
         };
         match serde_json::from_str::<serde_json::Value>(obj) {
-            Ok(parsed) if parsed.is_object() => {
+            Ok(mut parsed) if parsed.is_object() => {
                 let _ = grounded; // grounded args are intentionally DISCARDED for eligible egress tools
+                // E.EGRESS3: a path on this machine never leaves inside a query.
+                if let Some(q) = parsed.get("query").and_then(|v| v.as_str()).map(str::to_string) {
+                    if has_local_path(&q) {
+                        parsed["query"] = serde_json::Value::String(strip_local_paths(&q));
+                    }
+                }
                 Ok(parsed)
             }
             _ => {

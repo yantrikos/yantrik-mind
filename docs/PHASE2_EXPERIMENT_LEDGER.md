@@ -13467,3 +13467,11 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - **Workspace:** 0 failures.
 - **Side finding** (not changed): with a bot User-Agent, DuckDuckGo gives its 202 anti-bot page to requests that add browser headers (Content-Type set explicitly, Accept-Language, Referer). The plain client is fine.
 - **The live test is `#[ignore]`d** (network). The 520 run will be its field evidence.
+
+**E.EGRESS2 in the field (VM 520, eb27c95, 5 Oct 02:02):** the same probe now gets real results: an arXiv AMR survey (2505.03229) and Wikipedia. The fix holds through yantrik-egress.
+- **Seen, not changed:** the model sent the identical `search` 3–4 times in one turn, and the third came back "(no results)", probably DuckDuckGo throttling bursts. A repeated identical search should be held like other repeats. To look at after R1.
+
+**E.RES1: R1a VOID.** My driver ran attached to my ssh session, and killing it to detach also ran its exit trap, which turned approvals back on, mid-run.
+- Turn 0 (751) had already ended in 15 s, having failed to read the brief: `files_read` does not exist, and `editor.open` was refused because the editor was not running, so its grade could not be read.
+- No card reached the person (`pending_approvals` empty).
+- **R1b** was started clean from turn 0, detached with setsid (`~/start_R.sh`), at 02:04:43.

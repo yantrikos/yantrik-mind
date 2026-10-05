@@ -13564,3 +13564,52 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - **R1c is VOID** (the run was stopped). 520 is to be rolled back to d9e7a8a.
 - **Seen in R1c:** the planner writes long sentence-like queries ("machine-native semantic language for language models meaning as typed graph …") that Bing answers with Wikipedia "Machine". To address with H1's planner change.
 - **Lesson:** my nine mutants all checked the rule I wrote. None checked the rule against an adversary, which a review does.
+
+## E.EGRESS3b — PREREG: the review's fixes, and Pranab's "exact files only"
+
+**Pranab, in this session:** "Exact files only". A file is handed over only when its own path is in his message. No folders.
+
+**Plan, one fix per finding:**
+- **H1, as written only as a contiguous span of one source.**
+  - The query, normalised (lower case; every run of non-alphanumerics becomes one space), must appear between token boundaries in ONE source: the message, one handed-over file, or one web observation.
+  - Every token counts, short ones and digits included.
+  - Web observations are kept separately per observation, capped at 32 KB in all (latest kept).
+  - Otherwise the clean planner authors it, now shown a capped excerpt (≤ 4 KB) of this turn's web observations as well as the handed-over text, and asked for a concise keyword query (3–8 words).
+  - **L3:** the pass-through returns `{"query": q}` only.
+- **H2, exact files:**
+  - Named = file paths in the person's own messages. A path holding `..` never counts.
+  - The capture uses the path the EDITOR reports (the open result's or read result's `path`), not the model's argument.
+  - A named file the Mind itself saved to in this conversation stops counting, and its text is dropped.
+- **H3, per conversation and person:**
+  - The store is keyed by the turn's owner and the desktop conversation, passed from the harness as a task-local; `""` off the desktop.
+  - A household member's turn neither sees nor names into Pranab's.
+  - A new desktop chat is a new key.
+- **M1, a path never leaves in ANY string argument, url included.** A path is:
+  - any token that is not http(s) and holds `/` or `\`;
+  - a token starting `~`, `file:` or `./`;
+  - a drive letter `X:\`;
+  - `%2F`, case-insensitive;
+  - a named path, or its file name.
+  It is stripped from queries. A url holding one is refused (planner).
+- **L1:** the log line shows only what was SENT, not the model's args.
+- **L2:**
+  - the lapse is fixed at naming time and does not slide;
+  - texts expire with their path;
+  - at most 8 files.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- substring vs whole-token;
+- span across two sources;
+- short tokens and digits;
+- the web cap;
+- `..`;
+- the model's path vs the editor's;
+- Mind-written files;
+- the identity key;
+- the conversation key (New chat);
+- `q`/`topic` and url path removal;
+- each path form;
+- the never-expire lapse;
+- the 8-file cap.
+
+Plus a test that the tripwire still runs on a pass-through query (through `guards::pre`), and loop-level capture tests (an open, and a read, through `run_at`). The same reviewer re-checks before any install.

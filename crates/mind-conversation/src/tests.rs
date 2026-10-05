@@ -20018,3 +20018,68 @@ async fn a_history_move_counts_in_the_turn_budget() {
         "a history move past the budget went"
     );
 }
+
+/// E.PLAN1: the acronyms a source defines, and only those -- from the real R1 brief.
+#[test]
+fn the_sources_acronyms_are_found_and_only_those() {
+    use crate::egress_planning::defined_acronyms as found;
+    let brief = include_str!("../../../docs/research/R1_BRIEF.md");
+    assert_eq!(found(&[brief]), vec![("MDG".to_string(), "Multidimensional Grammar".to_string())]);
+    let other = "We use LF (Long Form) and the Abstract Meaning Representation (AMR). Not (XY) nor Big Cat (BD), nor (a lowercase aside), nor a rebid deal (BD).";
+    assert_eq!(
+        found(&[other]),
+        vec![("LF".to_string(), "Long Form".to_string()), ("AMR".to_string(), "Abstract Meaning Representation".to_string())],
+        "only definitions whose initials spell the acronym"
+    );
+}
+
+/// E.PLAN1: R1e's real planner outputs (4c's journal extract) never lead with the bare acronym.
+#[test]
+fn a_bare_acronym_is_written_out_as_the_sources_define_it() {
+    use crate::egress_planning::{defined_acronyms, write_out_acronyms};
+    let brief = include_str!("../../../docs/research/R1_BRIEF.md");
+    let acronyms = defined_acronyms(&[brief]);
+    for (sent, want) in [
+        (
+            "MDG machine-native multidimensional semantic representation transformer reasoning",
+            "\"Multidimensional Grammar\" machine-native multidimensional semantic representation transformer reasoning",
+        ),
+        (
+            "MDG multidimensional semantic representation transformer discrete semantic codes",
+            "\"Multidimensional Grammar\" multidimensional semantic representation transformer discrete semantic codes",
+        ),
+        (
+            "MDG multidimensional semantic representation grammar transformer",
+            "\"Multidimensional Grammar\" multidimensional semantic representation grammar transformer",
+        ),
+        ("Multidimensional Grammar MDG spec", "Multidimensional Grammar spec"),
+        ("machine-native semantic representation transformer reasoning", "machine-native semantic representation transformer reasoning"),
+    ] {
+        assert_eq!(write_out_acronyms(sent, &acronyms), want);
+    }
+}
+
+/// E.PLAN1 through the planner: its "MDG …" query leaves written out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_planners_query_has_its_acronyms_written_out() {
+    use mind_governance::egress::EgressBroker;
+    let reply = r#"{"query":"MDG machine-native multidimensional semantic representation transformer reasoning"}"#;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new(reply)) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS")
+        .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_home_dir(Some("/home/p".into()));
+    let key = "primary|c1";
+    conv.handed_over.lock().unwrap().note_named(key, "Read ~/research/R1/BRIEF.md", Some("/home/p"), ConversationEngine::now_ms());
+    conv.note_handed_over(key, "/home/p/research/R1/BRIEF.md", include_str!("../../../docs/research/R1_BRIEF.md"));
+    let ask = serde_json::json!({ "query": "latent reasoning continuous chain of thought Coconut fewer tokens than natural language" });
+    let out = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], &[], key).await.unwrap();
+    assert_eq!(
+        out["query"],
+        "\"Multidimensional Grammar\" machine-native multidimensional semantic representation transformer reasoning",
+        "the planner's query still led with a bare acronym"
+    );
+    // A query that leaves as written (a span of the brief) gets the same pass.
+    let span = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "Multidimensional Grammar (MDG)" }), "", &[], &[], key).await.unwrap();
+    assert_eq!(span["query"], "Multidimensional Grammar", "a span kept its bare acronym");
+}

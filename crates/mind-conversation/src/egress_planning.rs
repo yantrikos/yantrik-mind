@@ -369,6 +369,94 @@ pub(crate) fn query_is_a_span_of_one(query: &str, sources: &[&str], named: &[Str
     sources.iter().any(|s| format!(" {} ", norm(s)).contains(&needle))
 }
 
+/// E.PLAN1: the acronyms the sources define -- "Long Form (LF)" or "LF (Long Form)" -- matched the
+/// Schwartz-Hearst way: the acronym's letters are found in order, last to first, inside the words
+/// before it, and its first letter must begin a word ("Multidimensional Grammar (MDG)" takes its D
+/// from inside a word). First definition wins. The long form is a run of a source's own words, so
+/// writing it out sends nothing the sources did not already hold.
+pub(crate) fn defined_acronyms(sources: &[&str]) -> Vec<(String, String)> {
+    let clean = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '-').to_string();
+    let is_acronym = |w: &str| {
+        (2..=6).contains(&w.chars().count())
+            && w.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    };
+    let mut found: Vec<(String, String)> = Vec::new();
+    for src in sources {
+        let mut rest = *src;
+        while let Some(open) = rest.find('(') {
+            let Some(close) = rest[open..].find(')').map(|c| open + c) else { break };
+            let inside = rest[open + 1..close].trim();
+            let before: Vec<String> = rest[..open].split_whitespace().map(clean).filter(|w| !w.is_empty()).collect();
+            let definition = if is_acronym(inside) {
+                long_form(inside, &before).map(|long| (inside.to_string(), long))
+            } else {
+                // "LF (Long Form)".
+                before.last().filter(|w| is_acronym(w)).and_then(|acr| {
+                    let words: Vec<String> = inside.split_whitespace().map(clean).filter(|w| !w.is_empty()).collect();
+                    long_form(acr, &words).filter(|long| long.split_whitespace().count() == words.len()).map(|long| (acr.clone(), long))
+                })
+            };
+            if let Some((acr, long)) = definition {
+                if !found.iter().any(|(a, _)| *a == acr) {
+                    found.push((acr, long));
+                }
+            }
+            rest = &rest[close + 1..];
+        }
+    }
+    found
+}
+
+/// Schwartz & Hearst (2003): the shortest run of `words` (ending at the last) whose letters hold the
+/// acronym's in order, its first letter beginning a word. At most min(n + 5, 2n) words are looked at.
+fn long_form(acronym: &str, words: &[String]) -> Option<String> {
+    let n = acronym.chars().count();
+    let window = &words[words.len().saturating_sub((n + 5).min(2 * n))..];
+    // Lowered one character for one, so an index here is an index into the source's spelling too.
+    let long: Vec<char> = window.join(" ").chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect();
+    let short: Vec<char> = acronym.to_lowercase().chars().collect();
+    let mut l = long.len() as isize - 1;
+    for (si, &c) in short.iter().enumerate().rev() {
+        loop {
+            if l < 0 {
+                return None;
+            }
+            let at = long[l as usize];
+            let word_start = l == 0 || !long[(l - 1) as usize].is_alphanumeric();
+            if at == c && (si != 0 || word_start) {
+                break;
+            }
+            l -= 1;
+        }
+        l -= 1;
+    }
+    let start = (l + 1) as usize;
+    let text: String = long[start..].iter().collect();
+    // Back to the source's own spelling: the same characters of the window, unlowered.
+    let original: Vec<char> = window.join(" ").chars().collect();
+    let spelled: String = original[start..].iter().collect();
+    (text.split_whitespace().count() >= 2 || text.len() > acronym.len()).then_some(spelled)
+}
+
+/// E.PLAN1 (R1e: "MDG …" found a finance company): a bare acronym the sources define is written out
+/// as its long form -- quoted when it is several words -- or dropped when the long form is already
+/// there. Nothing else changes.
+pub(crate) fn write_out_acronyms(query: &str, acronyms: &[(String, String)]) -> String {
+    let lower = query.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    for word in query.split_whitespace() {
+        let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+        match acronyms.iter().find(|(a, _)| a == bare) {
+            Some((_, long)) if lower.contains(&long.to_lowercase()) => {}
+            Some((_, long)) if long.contains(' ') => out.push(format!("\"{long}\"")),
+            Some((_, long)) => out.push(long.clone()),
+            None => out.push(word.to_string()),
+        }
+    }
+    out.join(" ")
+}
+
 /// E.EGRESS3b (the review's M1): is this word a path on this machine, or a named file?
 fn is_path_word(w: &str, named: &[String]) -> bool {
     let w = w.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'));
@@ -1218,7 +1306,8 @@ impl ConversationEngine {
                 sources.extend(handed.iter().map(String::as_str));
                 if query_is_a_span_of_one(q, &sources, &named) {
                     // The review's L3: the query, and nothing else the model put beside it.
-                    return Ok(serde_json::json!({ "query": q }));
+                    // E.PLAN1: with the sources' acronyms written out.
+                    return Ok(serde_json::json!({ "query": write_out_acronyms(q, &defined_acronyms(&sources)) }));
                 }
             }
         }
@@ -1227,7 +1316,7 @@ impl ConversationEngine {
             "translate" | "tr" => "{\"to\": \"<target language>\", \"text\": \"<the text to translate, from the literal request>\"}",
             // E.EGRESS3b: keywords -- R1c's planner wrote sentence-long queries that a search engine
             // answered with Wikipedia "Machine".
-            _ => "{\"query\": \"<3 to 8 search keywords built ONLY from the sources shown>\"}",
+            _ => "{\"query\": \"<3 to 8 search keywords built ONLY from the sources shown; write an acronym out in full as the sources define it, never lead with a bare acronym, and prefer the technical terms the handed-over text itself uses>\"}",
         };
         let sys = "You author the ARGUMENTS for an OUTBOUND tool call that will LEAVE this device and \
             reach an external service. You have NO access to the user's private memory, notes, files, or \
@@ -1288,6 +1377,18 @@ impl ConversationEngine {
                 // E.EGRESS3b (the review's M1): no path on this machine, and no named file's path or
                 // name, leaves in ANY argument. Taken out of text; a url carrying one is refused.
                 if let Some(obj) = parsed.as_object_mut() {
+                    // E.PLAN1: a bare acronym the sources define is written out (R1e's "MDG …").
+                    if web_query {
+                        let mut acronym_sources: Vec<&str> = vec![user_text];
+                        if let Some(t) = &task {
+                            acronym_sources.push(t);
+                        }
+                        acronym_sources.extend(handed.iter().map(String::as_str));
+                        let acronyms = defined_acronyms(&acronym_sources);
+                        if let Some(serde_json::Value::String(q)) = obj.get_mut("query") {
+                            *q = write_out_acronyms(q, &acronyms);
+                        }
+                    }
                     for (k, v) in obj.iter_mut() {
                         let Some(text) = v.as_str().map(str::to_string) else { continue };
                         if k == "url" {

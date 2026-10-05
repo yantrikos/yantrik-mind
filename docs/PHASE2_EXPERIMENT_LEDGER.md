@@ -14754,3 +14754,25 @@ The review is a commit comment on f1364f0.
   - The difference in prior art is the Mind's egress planner: 4c's journal shows it rewrote every good query into words from the brief.
   - Hermes, outside that planner, reached the literature through the OS browser.
   - Hermes also completed in one turn where the Mind looped. Not claimed: that this is the planner alone. The harnesses differ in more than the planner.
+
+## E.PLAN1 — RESULT: acronyms written out under the current rule; 8 of 8 mutants killed; my first matcher failed on the real brief
+
+- **Built:** `defined_acronyms` reads "Long Form (LF)" and "LF (Long Form)" from the sources the planner may already use (the person's words, the task message, handed-over text). `write_out_acronyms` replaces a bare acronym with its long form, quoted when it is several words, and drops it when the long form is already in the query. It runs on BOTH paths: a query that leaves as written, and the planner's. The planner's prompt now asks for written-out acronyms, never a bare acronym first, and the handed text's own technical terms.
+- **Found by the first test run:** my matcher demanded one word per letter. "Multidimensional Grammar (MDG)" takes its D from INSIDE a word, so the real brief gave nothing. That is the common case, and my invented cases shared my misconception. Replaced with the standard Schwartz–Hearst match: the letters are found in order, last to first; the first letter must begin a word; the window is min(n+5, 2n) words; the text is lowered one character for one, so indices stay valid.
+- **Tests:**
+  - `the_sources_acronyms_are_found_and_only_those`: the real `docs/research/R1_BRIEF.md` gives exactly [MDG → Multidimensional Grammar]. In a mixed sample, LF and AMR are found, while "(XY)", "Big Cat (BD)" and "a rebid deal (BD)" are not.
+  - `a_bare_acronym_is_written_out_as_the_sources_define_it`: 4c's journal pairs.
+  - `the_planners_query_has_its_acronyms_written_out`: through the planner path and the span path.
+- **Mutants killed:**
+  - every letter must begin a word;
+  - a match may start inside a word;
+  - an acronym kept bare;
+  - the span path not written out;
+  - the planner path not written out;
+  - an acronym kept beside its long form;
+  - a long form unquoted;
+  - the "LF (Long Form)" form not read.
+- **Runs:**
+  - Full suite 2328 passed, 0 failed.
+  - Linux staging: mind-conversation 1137.
+- **Scope:** this only stops the "MDG USA" collision. Pranab's direction (via 4c) is a scoped grant for the model's own query words; that is E.GRANT1, to be preregistered against the OS's grant format.

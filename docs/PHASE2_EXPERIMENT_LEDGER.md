@@ -14850,3 +14850,36 @@ The review is a commit comment on f1364f0.
   - Full suite 2332 passed, 0 failed.
   - Linux staging: mind-conversation 1141.
 - **Not changed:** typed memory still holds what the Mind learned in earlier chats, by design. The remaining guard against stale claims is the date on each memory and the one-sentence rule. The live check is the next R1 pair (a reading, not a gate).
+
+## E.NET1h — PREREG: the review of b89a747..0a3f519 (SAFE WITH CHANGES): N1–N4
+
+The review is a commit comment on 0a3f519.
+
+**N1, MEDIUM. A parser differential: 520 does not go to enforce until this lands.**
+- The Rust guard split URLs by hand, but ureq parses them with `url::Url` (WHATWG). `http://gpu%2eexample.ts.net:11434/`, `http://gpu.example.ts.net:11434\@news.example.org/`, full-width letters, and a tab before the port were judged as one host and fetched as another.
+- **Fix:**
+  - mind-net (`host_of`, `host_port`, the configured-endpoint match, `leaves_to_proxy`) and mind-tools (`host_of`, `port_of`, `redirect_target`, `ssrf_resolve`, `get_checked_with`, `ssrf_check`, and so `checked_stream`) take host and port only from `url::Url`.
+  - Each hop is parsed once; the checks and the request use that same parsed URL (`as_str()`); a redirect is joined with `Url::join`.
+  - A URL that does not parse is refused.
+- **Tests:** the three review forms plus the tab, on the first hop and as a redirect target. Each must be judged as `gpu.example.ts.net:11434`, so refused when a LAN rule covers it, and refused without trust when the backslash hides a LAN name behind a public one.
+
+**N2, LOW. The browser lock leaks into callbacks.** The permission is a one-shot object, consumed at the locked method's entry. The real method runs outside the store (`LAUNCHING.exit`), so nothing it creates carries the permission. Tests:
+- an event fired from a resource made during the launch, which must be blocked;
+- a timer set by a wrapper (playwright-extra's place) before its own launch call, which must be blocked once that launch has used the permission.
+
+**N3, LOW. E.PLAN1's span path:**
+- Acronyms are written out only from the ONE source the span came from (E.EGRESS3b H1).
+- The rewritten query is checked with `has_path`; if it carries a path or a named file's name, the unrewritten span leaves instead.
+- A long form whose words hold anything but letters, digits and hyphens is not an acronym definition.
+
+**N4, LOW.** The research gradings and the ledger stop tying "bentonville" to the person: it becomes "a memory word". History keeps the old wording; rewriting pushed history needs Pranab's word.
+
+**Kill criteria**, each a mutant that must be killed:
+- each of the hand-split helpers restored;
+- the request not using the parsed URL;
+- an unparseable URL allowed;
+- the store not exited;
+- the permission not one-shot;
+- a long form from another source;
+- the path check skipped on the rewrite;
+- a long form with a path character.

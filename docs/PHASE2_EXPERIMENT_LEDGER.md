@@ -15015,3 +15015,12 @@ The review is a commit comment on 9f7149c.
 - an unknown version trusted.
 
 Tests send a request to a local fake public door and read the request line it receives.
+
+**E.NET1j — prereg AMENDED before their code: NET1i's review (`REVIEW a4d8f84..9d07468: SAFE`) lows, and #666's review:**
+- **L1:** the trait default of `messages_since_visible` returns no rows. It fails closed: a store that cannot filter by scope shows compaction nothing.
+- **L2:** `fetch`, `fetch_rendered` and `screenshot_page` rebind their URL to `ssrf_check`'s canonical answer, one rule crate-wide (`fetch_reader` gets it through `fetch`).
+- **L3:** a shared break row already in a store is ignored by both transcript reads (`recent_messages` with a viewer, and `messages_since_visible`). Only P2 stopped writing them.
+- **L4:** a group `/new` answers that a group has no window to restart, and that nothing changed.
+- **#666's review L2:** `public_proxy` is a URL ("http://127.0.0.1:7451", like `proxy`). Only that form is read: http, a loopback address, an explicit port, nothing else. The "ip:port" form is refused.
+- **Optional, not built:** checking that the listener on 7450/7451 is owned by the egress uid (`/proc/net/tcp`). It is recorded as a residual: the OS's kernel rules allow the mind uid only these loopback ports, but another local process could still squat one before the proxy binds.
+- **Kill criteria added:** the default reading all scopes; an entry discarding the canonical URL; a shared break honoured; the group reply claiming a restart.

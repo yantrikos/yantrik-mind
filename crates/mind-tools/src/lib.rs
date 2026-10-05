@@ -651,7 +651,7 @@ fn fetch_headless(url: &str) -> anyhow::Result<String> {
 /// block tier-3 (Amazon, Target render real product grids under headful where headless gets 0 chars).
 /// Slower + heavier, so it's only used deliberately (hostile retail), never in the default `fetch` ladder.
 fn fetch_headful(url: &str) -> anyhow::Result<String> {
-    let script = std::env::var("YM_HEADFUL_SCRIPT")
+    let script = mind_net::person_var("YM_HEADFUL_SCRIPT")
         .unwrap_or_else(|_| "/opt/yantrik-mind/headful_fetch.js".to_string());
     if !std::path::Path::new(&script).exists() {
         anyhow::bail!("headful fetch not available");
@@ -838,6 +838,24 @@ pub fn first_url(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OS's egress service keeps a twin of `deploy/private_ranges.json` (yantrik-os
+    /// crates/yantrik-egress, test `the_list_is_its_twins`) pinned to these same hashes of the compact
+    /// JSON arrays. Change one list and the other in the same breath, and pin the new hashes on both.
+    const TWIN_V4_SHA256: &str = "d9d605b737d44aee91f44b885949fd9e810124906b7b1933ef9141d456b5b8cc";
+    const TWIN_V6_SHA256: &str = "d65a0b3dc0bdc058a9eeccef63966f2645305fc0ddd7e28d86dabdea5046ee5a";
+
+    #[test]
+    fn the_private_ranges_are_their_os_twin() {
+        use sha2::{Digest, Sha256};
+        let list: serde_json::Value = serde_json::from_str(include_str!("../../../deploy/private_ranges.json")).unwrap();
+        let hash = |key: &str| {
+            let v: Vec<String> = serde_json::from_value(list[key].clone()).unwrap();
+            Sha256::digest(serde_json::to_string(&v).unwrap().as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert_eq!(hash("v4"), TWIN_V4_SHA256, "v4 drifted from the OS's twin (yantrik-egress ranges)");
+        assert_eq!(hash("v6"), TWIN_V6_SHA256, "v6 drifted from the OS's twin (yantrik-egress ranges)");
+    }
 
     #[test]
     fn first_url_extracts_and_trims() {
@@ -1285,7 +1303,7 @@ pub async fn screenshot_page(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         ssrf_check(&url).ok()?;
-        let script = std::env::var("YM_SNAP_SCRIPT")
+        let script = mind_net::person_var("YM_SNAP_SCRIPT")
             .unwrap_or_else(|_| "/opt/yantrik-mind/snap_page.js".into());
         let dir = std::path::Path::new(&script).parent()?.to_path_buf();
         let out = std::env::temp_dir().join(format!(

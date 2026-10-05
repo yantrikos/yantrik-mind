@@ -19941,3 +19941,80 @@ async fn another_servers_read_waits_for_the_person() {
     let desk = conv.run_agent_tool("mcp.yantrik-os.os_describe", &serde_json::json!({"app": "shell"})).await;
     assert!(!desk.contains("confirm with"), "the desktop's own read asked: {desk}");
 }
+
+/// E.EGRESS5d (the thirteenth pass): the browser action allowlist -- known reads and cleaned actions
+/// run; press, select, dialog, click (until planned) and anything unknown wait for the person, through
+/// web_* and os_act browser alike; another app's os_act is not touched.
+#[test]
+fn only_known_browser_actions_run_without_the_person() {
+    use crate::desktop::browser_needs_person as ask;
+    let act = |action: &str| serde_json::json!({"app": "browser", "action": action, "args": {}});
+    for name in ["read", "text", "find", "tabs", "scroll", "wait", "go", "type", "back", "commit", "switch_tab"] {
+        assert!(!ask(&format!("mcp.yantrik-os.web_{name}"), &serde_json::json!({})), "web_{name} asked");
+        assert!(!ask(crate::desktop::ACT, &act(name)), "browser {name} asked");
+    }
+    for name in ["press", "select", "dialog", "click", "frobnicate"] {
+        assert!(ask(&format!("mcp.yantrik-os.web_{name}"), &serde_json::json!({})), "web_{name} ran unasked");
+        assert!(ask(crate::desktop::ACT, &act(name)), "browser {name} ran unasked");
+    }
+    assert!(!ask(crate::desktop::ACT, &serde_json::json!({"app": "editor", "action": "press"})), "another app was touched");
+    assert!(!ask("mcp.elsewhere.press", &serde_json::json!({})), "another server's tool is not the desktop browser");
+}
+
+/// E.EGRESS5d through the real gate: the desktop's web_press waits for the person; its web_read runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_browser_press_waits_for_the_person() {
+    let hub = Arc::new(mind_tools::McpHub::new());
+    let tool = |name: &str, read_only: bool| mind_tools::McpTool {
+        server: "yantrik-os".into(),
+        name: name.into(),
+        description: name.to_string(),
+        read_only,
+        open_world: true,
+        destructive: false,
+        input_schema: serde_json::json!({"type": "object"}),
+    };
+    hub.add_scripted_tool(tool("web_press", false), vec![Ok("pressed".into())]).unwrap();
+    hub.add_scripted_tool(tool("web_read", true), vec![Ok("the page".into())]).unwrap();
+    // os_act declares itself local (open_world false): the gate alone would run it -- the allowlist asks.
+    let mut act = tool("os_act", false);
+    act.open_world = false;
+    hub.add_scripted_tool(act, vec![Ok("pressed".into())]).unwrap();
+    let executor = Arc::new(ToolActionExecutor::new().with_mcp_hub(hub.clone()));
+    let runtime: Arc<dyn ActionRuntime> = Arc::new(GovernedActionRuntime::new(
+        Arc::new(RealHarmGate::new()),
+        executor,
+        vec![Capability::Network, Capability::LocalControl],
+    ));
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM")
+        .with_mcp(hub.clone())
+        .with_runtime(runtime);
+    let pressed = conv.run_agent_tool("mcp.yantrik-os.web_press", &serde_json::json!({"key": "Enter"})).await;
+    assert!(pressed.contains("confirm with"), "web_press ran unasked: {pressed}");
+    assert!(!hub.scripted_calls().iter().any(|(t, _)| t.ends_with("web_press")), "it ran before being confirmed");
+    let read = conv.run_agent_tool("mcp.yantrik-os.web_read", &serde_json::json!({})).await;
+    assert!(!read.contains("confirm with"), "web_read asked: {read}");
+    let act_press = conv.run_agent_tool(crate::desktop::ACT, &serde_json::json!({"app": "browser", "action": "press", "args": {"key": "Enter"}})).await;
+    assert!(act_press.contains("confirm with"), "os_act browser press ran unasked: {act_press}");
+}
+
+/// E.EGRESS5d: a history move is a navigation -- counted, and refused past the turn's budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_history_move_counts_in_the_turn_budget() {
+    use mind_governance::egress::EgressBroker;
+    use crate::egress_planning::navigation_urls as nav;
+    assert_eq!(nav("mcp.yantrik-os.web_back", &serde_json::json!({})), vec!["about:history"]);
+    assert_eq!(nav(crate::desktop::ACT, &serde_json::json!({"app": "browser", "action": "reload"})), vec!["about:history"]);
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let six: Vec<String> = (0..6).map(|i| format!("https://h{i}.example/")).collect();
+    let back = serde_json::json!({});
+    assert_eq!(conv.egress_clean_args_with("mcp.yantrik-os.web_back", "go back", back.clone(), "", &[], &[], "").await, Ok(back.clone()));
+    assert_eq!(
+        conv.egress_clean_args_with("mcp.yantrik-os.web_back", "go back", back, "", &[], &six, "").await,
+        Err(crate::egress_planning::CleanArgsFailure::FetchBudget),
+        "a history move past the budget went"
+    );
+}

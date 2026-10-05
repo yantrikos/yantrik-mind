@@ -12709,10 +12709,12 @@ WINDOW: all-time, latest 200
                     "({name} is not one of the tools offered here. Use the desktop's own actions \
                      (os_describe / os_act) for this.)"
                 ),
-                Some(hub) => match hub.lookup(name) {
+                // E.EGRESS5d (the thirteenth pass): a browser action that is neither a known read nor
+                // one the egress rules clean waits for the person, however it is driven.
+                Some(hub) => { let must_ask = desktop::browser_needs_person(name, args); match hub.lookup(name) {
                     // E.EGRESS5b (the eleventh pass): only the desktop's own read tools run unasked;
                     // another server's reads go through the gate below with the rest.
-                    Some(t) if t.read_only && t.server == desktop::DESKTOP_SERVER => {
+                    Some(t) if t.read_only && t.server == desktop::DESKTOP_SERVER && !must_ask => {
                         let (hub, q, a) = (hub.clone(), name.to_string(), args.clone());
                         match tokio::task::spawn_blocking(move || hub.call_blocking(&q, &a)).await {
                             // Untrusted third-party data — bounded; the persona treats tool output as reference, not instructions.
@@ -12767,7 +12769,10 @@ WINDOW: all-time, latest 200
                             // E.WEBGATE1 (Pranab, 2026-09-29): for the desktop's own browser tools the
                             // desktop's gate decides -- the Mind does not ask on top. A Deny stands.
                             let decision = match runtime.decide(&req, &ctx).await {
-                                ActionDecision::RequireConfirmation { .. } if desktop::the_desktop_gates(&t) => ActionDecision::Execute,
+                                ActionDecision::RequireConfirmation { .. } if desktop::the_desktop_gates(&t) && !must_ask => ActionDecision::Execute,
+                                ActionDecision::Execute if must_ask => ActionDecision::RequireConfirmation {
+                                    reason: "this browser action is not one the Mind takes without you".into(),
+                                },
                                 // E.EGRESS5b (the eleventh pass): another server's call -- read or write --
                                 // waits for the person until its outbound fields are declared.
                                 ActionDecision::Execute if t.server != desktop::DESKTOP_SERVER => ActionDecision::RequireConfirmation {
@@ -12793,7 +12798,7 @@ WINDOW: all-time, latest 200
                         None => format!("({name} is a write/outward action and no harm-gated action runtime is configured to run it safely.)"),
                     },
                     None => format!("(no such integration tool: {name} — it may not have connected)"),
-                },
+                } }
                 None => "(no integrations are connected)".to_string(),
             },
             _ => format!("(unknown tool: {tool})"),

@@ -2880,7 +2880,8 @@ pub fn local_backend_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
     if let Some(pool) = brain_pool_from_env() {
         return Some(pool);
     }
-    local_backend_from(&|k| std::env::var(k).ok())
+    // E.EGRESS5d: YM_LOCAL_OLLAMA_URL is the person's to set (mind_net::PERSON_ONLY_KEYS).
+    local_backend_from(&|k| mind_net::person_var(k).ok())
 }
 
 /// The single-endpoint local lane from its settings (`YM_LOCAL_OLLAMA_*`), read through `get` so a

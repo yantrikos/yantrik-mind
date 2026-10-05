@@ -14331,3 +14331,66 @@ Verdict on c6f9379: SAFE WITH CHANGES. (f) is accepted, with GitHub removed from
 - an indirect key read missed by the scan;
 - the privacy keys falling back to the env;
 - the fallback used when `/etc/yantrik` exists.
+
+## E.EGRESS5d — RESULT: the thirteenth pass's (A) and (B) built; 11 of 11 mutants killed; one prereg rule dropped as unsafe for 520; the OS twin pinned
+
+**(A) The browser allowlist** (`desktop::browser_needs_person`, applied to `web_*` and `os_act browser` alike):
+- **Unasked:** the reads (read, text, find, tabs, media, listen, scroll, wait), tab housekeeping (switch_tab, close_tab), the cleaned actions (go / open / navigate through the fetch planner, type through the query rule), and the history moves. `commit` is the desktop's own card.
+- **Waits for the person:** press, select, dialog, click (until (C)) and any action not on the list.
+- **The gate:** in the MCP arm, `must_ask` stops the desktop read shortcut. It stops the desktop's own RequireConfirmation from being turned into Execute. It also turns an Execute into a confirmation.
+- **Deviation from the prereg:**
+  - The prereg listed web_back as a read. back / forward / reload are navigations, so they count in the turn's fetch budget (`navigation_urls` gives `about:history`) and are refused past it.
+  - switch_tab and close_tab were added as housekeeping.
+
+**(B) The person-only file:**
+- **The read:** `read_person_file` (Unix) checks that the folder is a directory, owned by root, with no group or other write. It opens the file with `O_NOFOLLOW` and checks the open handle (a regular file, uid 0, no group or other write), then reads from that handle. Absent means NotFound; anything unsafe means unset, logged. `libc` is a Unix-only dependency of mind-net.
+- **Keys:** YM_BROWSER_AGENT, YM_HEADFUL_SCRIPT and YM_SNAP_SCRIPT are added (26). Their reads in mind-tools go through `person_var`, and so does mind-inference's `local_backend_from`.
+- **Fail closed:** `FAIL_CLOSED_KEYS` (YM_SHAREABLE_FACTS, YM_WORK_RADAR) are never taken from the env. With no file they are unset.
+- **The scan:** any quoted person-only key outside mind-net, in non-test code, is a finding unless it is one of these forms:
+  - `person_var("…")`;
+  - `.env("…")`, handed to a child, not read;
+  - setup's `upsert_env_line` / `upsert` writes;
+  - the settings schema in config_panel.rs;
+  - a listed getter whose production caller handing it `person_var` is present in the same file (`GETTERS`);
+  - a listed name-only mention (`METADATA`).
+  The prereg's two exceptions were too few for the real tree; the added forms are each narrow and named.
+- **DROPPED from the prereg: "once `/etc/yantrik` exists, every key requires the file".** VM 520 already has `/etc/yantrik` (it holds devtools-guard.nft) and no person file. That rule would have unset every endpoint and routing key on the next install there. The signal is the file itself: once the OS writes it, it always exists. The kill criterion "the fallback used when `/etc/yantrik` exists" is withdrawn with it. The privacy keys fail closed regardless (its mutant below).
+
+**The OS twin** (4c's request, alongside #662): mind-tools `the_private_ranges_are_their_os_twin` pins the sha256 of the compact-JSON v4 and v6 arrays of `deploy/private_ranges.json` to the hashes in yantrik-os crates/yantrik-egress `the_list_is_its_twins` (from yantrik-os 32933579). A one-prefix change to v6 fails it ("v6 drifted").
+
+**Adapted eval:** `unfamiliar_mcp_schema_repairs_after_one_32602_without_inventing_a_tool` used `web_lookup`, which is now an unknown browser action and waits for the person. Its tool is `os_lookup` on the desktop's server; the schema repair it tests is unchanged.
+
+**Tests:**
+- `only_known_browser_actions_run_without_the_person`;
+- `a_browser_press_waits_for_the_person` (through the real gate; also an `os_act browser press`);
+- `a_history_move_counts_in_the_turn_budget`;
+- mind-net's `person_only_settings_come_from_the_persons_file`, extended with YM_SNAP_SCRIPT, the fail-closed keys, and on Unix a linked file and an unsafe folder;
+- mind-net's `person_only_keys_are_read_only_through_person_var` (the widened scan).
+
+**Mutants**, all killed:
+- press unasked;
+- an unknown action unasked;
+- the gate ignoring must_ask;
+- a history move not counted;
+- a history move past the budget going;
+- a new key read from the env;
+- a privacy key falling back to the env;
+- an indirect read slipping past the scan;
+- on Linux staging: `O_NOFOLLOW` removed, the folder check removed, the handle check removed.
+
+Two first SURVIVED and are killed by added cases:
+- the gate override, by the `os_act browser press` case;
+- the new key, by YM_SNAP_SCRIPT in the person-file test.
+
+The twin's own mutant is killed as well (above).
+
+**Runs:**
+- Full suite: 2315 passed, 0 failed.
+- On Linux staging: mind-net 8, mind-tools 256, mind-inference 74, mind-core 139, mind-conversation 1134.
+
+**Found for #662, not fixed here (filed as E.NET1e):** under the OS's kernel egress rules, three things in the Mind fail on 520:
+- the configured DIRECT endpoints that are public or named by hostname;
+- the Rust fetch's local resolve on proxied hops, when DNS is refused in enforce mode;
+- net_guard.js `fetchPinned`, which connects directly, and the launchers, which pass chromium no proxy.
+
+Sent to 4c before the apply.

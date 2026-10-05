@@ -2356,6 +2356,7 @@ dependencies = [
 name = "mind-net"
 version = "0.2.1"
 dependencies = [
+ "libc",
  "ureq 2.12.1",
 ]
 

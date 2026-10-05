@@ -138,7 +138,16 @@ pub const PERSON_ONLY_KEYS: &[&str] = &[
     "YM_WEB_READER",
     "YM_HEADLESS_SCRIPT",
     "PLAYWRIGHT_BROWSERS_PATH",
+    // E.EGRESS5d (the thirteenth pass): the other browser scripts -- pointing one at an unguarded copy
+    // would bypass net_guard.
+    "YM_BROWSER_AGENT",
+    "YM_HEADFUL_SCRIPT",
+    "YM_SNAP_SCRIPT",
 ];
+
+/// E.EGRESS5d (the thirteenth pass): what may leave the Mind is the person's word alone -- these are
+/// unset until the person's file exists, never taken from the Mind's own env.
+pub const FAIL_CLOSED_KEYS: &[&str] = &["YM_SHAREABLE_FACTS", "YM_WORK_RADAR"];
 
 /// E.EGRESS5b: where the OS writes the person's settings -- root:root 0644, made by a root helper from
 /// the person's own Settings, never writable by the Mind's account.
@@ -160,22 +169,54 @@ pub fn person_var_from(
     if !PERSON_ONLY_KEYS.contains(&key) {
         return env(key);
     }
-    match std::fs::read_to_string(file) {
-        Ok(text) => {
-            if !person_file_is_safe(file) {
-                eprintln!("[settings] {} is writable by others -- person-only settings are ignored", file.display());
+    match read_person_file(file) {
+        Ok(text) => env_file_value(&text, key).ok_or(std::env::VarError::NotPresent),
+        // No file yet (an OS before it ships it): what may leave stays unset; routing and endpoints
+        // come from the env for now, said once. Once the OS writes the file it always exists.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if FAIL_CLOSED_KEYS.contains(&key) {
                 return Err(std::env::VarError::NotPresent);
             }
-            env_file_value(&text, key).ok_or(std::env::VarError::NotPresent)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             static SAID: std::sync::Once = std::sync::Once::new();
             SAID.call_once(|| {
-                eprintln!("[settings] {} is absent: person-only settings come from the Mind's own env for now", file.display())
+                eprintln!("[settings] {} is absent: routing and endpoint settings come from the Mind's own env for now", file.display())
             });
             env(key)
         }
-        Err(_) => Err(std::env::VarError::NotPresent),
+        Err(e) => {
+            eprintln!("[settings] {} is not safe to trust ({e}) -- person-only settings are unset", file.display());
+            Err(std::env::VarError::NotPresent)
+        }
+    }
+}
+
+/// E.EGRESS5d (the thirteenth pass): read the person's file without a race -- its folder must be a
+/// root-owned directory nobody else can write; the file is opened without following a link,
+/// checked on the open handle (a regular file, owned by root, nobody else can write), and read from
+/// that same handle. Absent: NotFound. Anything unsafe: an error.
+fn read_person_file(file: &std::path::Path) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let unsafe_file = |why: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why.to_string());
+        let dir = file.parent().unwrap_or(std::path::Path::new("/"));
+        let d = std::fs::symlink_metadata(dir)?;
+        if !d.is_dir() || d.uid() != 0 || d.mode() & 0o022 != 0 {
+            return Err(unsafe_file("its folder is not a root-owned directory only root can write"));
+        }
+        let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file)?;
+        let m = f.metadata()?;
+        if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 {
+            return Err(unsafe_file("it is not a root-owned regular file only root can write"));
+        }
+        let mut text = String::new();
+        f.read_to_string(&mut text)?;
+        Ok(text)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::read_to_string(file)
     }
 }
 
@@ -194,17 +235,7 @@ fn env_file_value(text: &str, key: &str) -> Option<String> {
     })
 }
 
-/// E.EGRESS5b: the person file is owned by root and writable by nobody else.
-#[cfg(unix)]
-fn person_file_is_safe(file: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(file).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
-}
 
-#[cfg(not(unix))]
-fn person_file_is_safe(_file: &std::path::Path) -> bool {
-    true
-}
 
 fn direct() -> &'static ureq::Agent {
     static A: OnceLock<ureq::Agent> = OnceLock::new();
@@ -323,23 +354,48 @@ mod tests {
         let file = dir.join("mind-person.env");
         let env = |k: &str| match k {
             "YM_SHAREABLE_FACTS" => Ok("weather: Attacker City".to_string()),
+            "YM_SEARXNG_URL" => Ok("http://192.168.4.42:8888".to_string()),
+            "YM_SNAP_SCRIPT" => Ok("/tmp/unguarded_snap.js".to_string()),
             "YM_MAX_STEPS" => Ok("40".to_string()),
             _ => Err(std::env::VarError::NotPresent),
         };
         let _ = std::fs::remove_file(&file);
-        assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env).as_deref(), Ok("weather: Attacker City"), "no file: the env stands in");
+        // E.EGRESS5d: with no file, what may leave stays unset; routing still comes from the env.
+        assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env), Err(std::env::VarError::NotPresent), "no file: the Mind's env set what may leave");
+        assert_eq!(person_var_from("YM_SEARXNG_URL", &file, &env).as_deref(), Ok("http://192.168.4.42:8888"), "no file: routing lost its endpoint");
         std::fs::write(&file, "# person settings\nexport YM_SHAREABLE_FACTS=\"weather: Bentonville\"\nYM_WORK_RADAR=on\n").unwrap();
         assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env).as_deref(), Ok("weather: Bentonville"), "the Mind's env overrode the person");
         assert_eq!(person_var_from("YM_SEARXNG_URL", &file, &env), Err(std::env::VarError::NotPresent), "a person-only key absent from the file came from elsewhere");
         assert_eq!(person_var_from("YM_MAX_STEPS", &file, &env).as_deref(), Ok("40"), "an ordinary key stopped reading the env");
+        // E.EGRESS5d: the browser scripts are the person's too -- an unguarded copy cannot be swapped in.
+        assert_eq!(person_var_from("YM_SNAP_SCRIPT", &file, &env), Err(std::env::VarError::NotPresent), "a browser script path came from the Mind's env");
         #[cfg(unix)]
         {
+            // (Run as root on staging, so the files are root's.) A file others can write, a folder
+            // others can write, and a link to the file are each not trusted.
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
             assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env), Err(std::env::VarError::NotPresent), "a file others can write was trusted");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env).as_deref(), Ok("weather: Bentonville"));
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &file, &env), Err(std::env::VarError::NotPresent), "a folder others can write was trusted");
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let link = dir.join("linked.env");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert_eq!(person_var_from("YM_SHAREABLE_FACTS", &link, &env), Err(std::env::VarError::NotPresent), "a link to the file was followed");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// E.EGRESS5d: getters that read a person-only key, each allowed only with the production call that
+    /// hands it `person_var` present in the same file.
+    const GETTERS: [(&str, &str, &str); 2] = [
+        ("mind-tools/src/lib.rs", "YM_WEB_READER", "reader_allowed(&|k| mind_net::person_var(k).ok())"),
+        ("mind-inference/src/lib.rs", "YM_LOCAL_OLLAMA_URL", "local_backend_from(&|k| mind_net::person_var(k).ok())"),
+    ];
+    /// E.EGRESS5d: places that only NAME a key (shown to the person), never read it.
+    const METADATA: [(&str, &str); 1] = [("mind-conversation/src/plugins_mod.rs", "YM_FACE_ML_URL")];
 
     /// E.EGRESS5b: no code outside this crate reads a person-only key straight from the env -- every
     /// read goes through `person_var`. (The eval CLI and a live test read their own config.)
@@ -362,10 +418,31 @@ mod tests {
                 if !name.ends_with(".rs") || EXEMPT.iter().any(|e| name.contains(e)) || name.ends_with("tests.rs") {
                     continue;
                 }
-                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                let full = std::fs::read_to_string(&p).unwrap_or_default();
+                // Test code may set and read anything.
+                let src = full.split("#[cfg(test)]").next().unwrap_or("");
+                // E.EGRESS5d (the thirteenth pass): not only `env::var("KEY")` -- ANY mention of a
+                // person-only key outside this crate is a read in disguise (var_os, a key held in a
+                // variable, a getter), unless it is one of the forms below.
                 for key in PERSON_ONLY_KEYS {
-                    if src.contains(&format!("env::var(\"{key}\")")) {
-                        found.push(format!("{name}: {key}"));
+                    let quoted = format!("\"{key}\"");
+                    for (at, _) in src.match_indices(&quoted) {
+                        let before = src[..at].trim_end();
+                        let allowed_form = before.ends_with("person_var(") // the one way to read it
+                            || before.ends_with(".env(") // handed to a child process, not read
+                            || before.ends_with("upsert_env_line(&existing,") // setup WRITES the Mind's env;
+                            || before.ends_with("upsert(&existing,") //  ignored once the person's file exists
+                            || (name.ends_with("config_panel.rs") && before.ends_with("key:")); // the schema
+                        // A getter is allowed only where its production caller in the same file hands
+                        // it `person_var` -- the companion line must be there.
+                        let companion = GETTERS
+                            .iter()
+                            .find(|(file, k, _)| name.ends_with(file) && k == key)
+                            .is_some_and(|(_, _, line)| full.contains(line));
+                        let metadata = METADATA.iter().any(|(file, k)| name.ends_with(file) && k == key);
+                        if !allowed_form && !companion && !metadata {
+                            found.push(format!("{name}: {key}"));
+                        }
                     }
                 }
             }

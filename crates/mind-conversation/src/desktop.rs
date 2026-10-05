@@ -452,6 +452,30 @@ pub(crate) fn is_read_act(tool: &str, args: &serde_json::Value) -> bool {
     })
 }
 
+/// E.EGRESS5d (the thirteenth pass): the browser actions the Mind takes without the person -- the
+/// reads, the tab housekeeping, the ones the egress rules clean (go / open / navigate, type), the
+/// history moves the turn budget counts (back, forward, reload) and commit (the desktop's own card).
+/// Anything else -- press, select, dialog, an action not known here, and click until it is planned --
+/// waits for the person, through `web_*` or `os_act browser` alike.
+const BROWSER_UNASKED: [&str; 17] = [
+    "read", "text", "find", "tabs", "media", "listen", "scroll", "wait", "switch_tab", "close_tab", "go", "open",
+    "navigate", "type", "back", "forward", "reload",
+];
+const BROWSER_DESKTOP_CARD: [&str; 1] = ["commit"];
+
+/// E.EGRESS5d: does this call drive the desktop browser in a way that needs the person's OK?
+pub(crate) fn browser_needs_person(tool: &str, args: &serde_json::Value) -> bool {
+    let action = if let Some(a) = tool.strip_prefix(WEB_PREFIX) {
+        a.to_string()
+    } else {
+        match act_target(tool, args) {
+            Some((app, action)) if app == "browser" => action,
+            _ => return false,
+        }
+    };
+    !BROWSER_UNASKED.contains(&action.as_str()) && !BROWSER_DESKTOP_CARD.contains(&action.as_str())
+}
+
 /// E.ARENA1-F41: `os_act browser <action>` that only reads.
 const BROWSER_READ_ACTS: [&str; 5] = ["read", "find", "text", "tabs", "media"];
 

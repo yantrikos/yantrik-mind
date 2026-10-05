@@ -471,7 +471,7 @@ mod tests {
         // E.EGRESS5b (the eleventh egress review): another server's calls -- reads too -- now wait for the
         // person until their fields are declared, so the unfamiliar contract is served by the desktop's
         // own server here; what is tested is the schema repair, not the approval.
-        let tool_name = "mcp.yantrik-os.web_lookup";
+        let tool_name = "mcp.yantrik-os.os_lookup";
         let replies = vec![
             String::new(),
             String::new(),
@@ -488,7 +488,7 @@ mod tests {
         hub.add_scripted_tool(
             mind_tools::McpTool {
                 server: "yantrik-os".into(),
-                name: "web_lookup".into(),
+                name: "os_lookup".into(),
                 description: "look up colors using the novel contract".into(),
                 read_only: true,
                 open_world: true,

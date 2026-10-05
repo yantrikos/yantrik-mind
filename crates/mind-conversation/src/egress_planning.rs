@@ -513,10 +513,26 @@ pub(crate) fn shareable_fact_in(raw: &str, kind: &str, value: &str) -> bool {
     shareable_facts_from(raw).iter().any(|(k, v)| k.eq_ignore_ascii_case(kind) && crate::erase_redact::canon(v) == want)
 }
 
+/// E.EGRESS5d: back, forward or reload, through `web_*` or `os_act browser`.
+fn is_history_move(tool: &str, args: &serde_json::Value) -> bool {
+    let action = match tool.strip_prefix("mcp.yantrik-os.web_") {
+        Some(a) => a.to_string(),
+        None => match crate::desktop::act_target(tool, args) {
+            Some((app, action)) if app == "browser" => action,
+            _ => return false,
+        },
+    };
+    matches!(action.as_str(), "back" | "forward" | "reload")
+}
+
 /// E.EGRESS5b: the addresses a call navigates to, as the turn's fetch budget counts them -- a fetch,
 /// the desktop browser's `web_go` or `os_act browser go`, and any outbound tool's url field.
 pub(crate) fn navigation_urls(tool: &str, args: &serde_json::Value) -> Vec<String> {
     let s = |v: Option<&serde_json::Value>| v.and_then(|u| u.as_str()).filter(|u| !u.is_empty()).map(str::to_string);
+    // E.EGRESS5d: a history move counts in the turn's total (it has no domain of its own here).
+    if is_history_move(tool, args) {
+        return vec!["about:history".to_string()];
+    }
     if matches!(tool, "web_fetch" | "fetch" | "web" | "mcp.yantrik-os.web_go") {
         return s(args.get("url")).into_iter().collect();
     }
@@ -943,6 +959,11 @@ impl ConversationEngine {
         fetched: &[String],
         key: &str,
     ) -> Option<Result<serde_json::Value, CleanArgsFailure>> {
+        // E.EGRESS5d (the thirteenth pass): a history move goes where a page already took the browser;
+        // nothing to clean, but it is a navigation -- within the turn's budget.
+        if is_history_move(tool, grounded) {
+            return (fetched.len() >= FETCH_TURN_BUDGET).then_some(Err(CleanArgsFailure::FetchBudget));
+        }
         let (path, is_url): (&[&str], bool) = match tool {
             "mcp.yantrik-os.web_go" => (&["url"], true),
             "mcp.yantrik-os.web_type" => (&["text"], false),

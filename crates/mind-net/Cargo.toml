@@ -6,3 +6,7 @@ description = "The one way the Mind reaches the network: through the machine's e
 
 [dependencies]
 ureq = { version = "2", features = ["json"] }
+
+# E.EGRESS5d: open the person's settings file without following a link (O_NOFOLLOW).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

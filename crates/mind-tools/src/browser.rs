@@ -160,7 +160,7 @@ pub struct BrowserSession {
 impl BrowserSession {
     /// Start the driver. `headful` renders on a real display (needed where headless is fingerprinted).
     pub fn start(headful: bool, profile: Option<&str>) -> anyhow::Result<BrowserSession> {
-        let script = std::env::var("YM_BROWSER_AGENT")
+        let script = mind_net::person_var("YM_BROWSER_AGENT")
             .unwrap_or_else(|_| "/opt/yantrik-mind/browser_agent.js".into());
         if !std::path::Path::new(&script).exists() {
             anyhow::bail!("the browser driver is not installed at {script}");

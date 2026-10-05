@@ -15125,3 +15125,22 @@ Tests send a request to a local fake public door and read the request line it re
   - Full suite 2346 passed, 0 failed.
   - Linux staging: mind-net 13, mind-core 140, mind-conversation 1149.
 - **Not built:** the live card. The desktop side is #667, unmerged. The first drive is on 520 after both are reviewed.
+
+## E.NET1k — PREREG: the review of ec53b34..9308899 (SAFE WITH CHANGES): M1, L1–L4
+
+The review is a commit comment on 9308899. Its verdict: from this code's side, 520 may move to enforce once #666 is merged and installed; M1 is held by the kernel table there and should land soon after.
+
+- **M1:** ffmpeg runs with `-protocol_whitelist http,https,tls,tcp,crypto,httpproxy` before its input options. SDP over http can then no longer make it bind RTP/UDP outside the proxy. The `bounded_command` test asserts the whitelist comes before `-http_proxy` and the input.
+- **L1 (built rather than recorded):** the media children use a valid public door even when the signal is not fully trusted.
+  - `mind_net::public_door()` reads the signal with the same root-file checks: version 3, our own proxy, a well-formed loopback public door that differs from it. It does NOT require `enforced`, because a door that refuses more is safe to use without the OS's enforcement.
+  - `outside_proxy()` takes it. The ureq fetches keep checking for themselves whenever trust is missing.
+- **L2:** a public door equal to `proxy` (normalised) means NO trust, in Rust and JS, and no door for L1.
+- **L3:** every guarded Chromium launch adds `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so WebRTC sends no UDP outside a proxy.
+- **L4:** the group `/new` reply is asserted in `a_group_new_chat_leaves_everyones_window_alone`, through the real entry.
+- **Kill criteria**, each a mutant that must be killed:
+  - no whitelist;
+  - the whitelist after the input;
+  - an untrusted door ignored by the media children;
+  - a door equal to proxy trusted (Rust, JS);
+  - no WebRTC flag;
+  - the group reply removed.

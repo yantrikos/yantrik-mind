@@ -15136,7 +15136,7 @@ The review is a commit comment on 9308899. Its verdict: from this code's side, 5
   - `outside_proxy()` takes it. The ureq fetches keep checking for themselves whenever trust is missing.
 - **L2:** a public door equal to `proxy` (normalised) means NO trust, in Rust and JS, and no door for L1.
 - **L3:** every guarded Chromium launch adds `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, so WebRTC sends no UDP outside a proxy.
-- **L4:** the group `/new` reply is asserted in `a_group_new_chat_leaves_everyones_window_alone`, through the real entry.
+- **L4:** the group `/new` reply is asserted through the real entry -- in `a_group_new_chat_says_nothing_changed` (E.NET1j), as it turned out (corrected in E.GRANT2).
 - **Kill criteria**, each a mutant that must be killed:
   - no whitelist;
   - the whitelist after the input;
@@ -15190,3 +15190,9 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
   - the turn's No not remembered;
   - no per-turn cap;
   - no 10-minute cap.
+
+**E.GRANT2 — prereg AMENDED before that code:** the desktop ask is gated on #667 being installed.
+- Without #667 the host does not know `grant_request`. If it answered `{}`, an own-words search would wait out the 110-second card wait for a card that never shows.
+- So the Mind asks the desktop only when `/run/yantrik-mind-egress/grants.json` passes the root-file read. #667's `mind-egress apply` writes that file at every boot, empty or not.
+- Without it there is no ask, and the planner writes the query.
+- **Kill criterion added:** an ask sent with no grants file.

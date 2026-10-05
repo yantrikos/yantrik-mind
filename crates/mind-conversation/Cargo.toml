@@ -32,6 +32,9 @@ sha2 = "0.10"
 url = "2"
 psl = "2"
 icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
+# E.GRANT2b: the OS card's query screen, pinned to the OS's versions (yantrik-os FIXES #667).
+unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
+unicode-script = "=0.5.8"
 
 [dev-dependencies]
 mind-memory = { workspace = true, features = ["fixtures"] }

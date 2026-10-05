@@ -635,17 +635,14 @@ async fn serve(
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
                         let conversation = turn["conversation"].as_str().unwrap_or_default();
                         let now = std::time::Instant::now();
-                        let blocked = RECENT_GRANT_CARDS.lock().ok().and_then(|r| grant_blocked(&grant_limits, &r, now));
+                        let blocked = grant_blocked_now(&RECENT_GRANT_CARDS, &grant_limits, now);
                         let outcome = match blocked {
                             Some(why) => mind_conversation::GrantOutcome::Denied(format!("not asked: {why}")),
                             None => {
                                 let (outcome, card) = request_grant(send, session, turn_id, conversation, &g.request_id, &g.query, ASK_WAIT, &mut held).await;
                                 if card {
                                     grant_limits.cards += 1;
-                                    if let Ok(mut r) = RECENT_GRANT_CARDS.lock() {
-                                        r.retain(|t| now.duration_since(*t) < GRANT_CARD_WINDOW);
-                                        r.push_back(now);
-                                    }
+                                    note_grant_card(&RECENT_GRANT_CARDS, now);
                                 }
                                 if matches!(outcome, mind_conversation::GrantOutcome::Denied(_)) {
                                     grant_limits.denied = true;
@@ -869,6 +866,24 @@ pub(crate) const GRANT_CARD_WINDOW: Duration = Duration::from_secs(600);
 /// The cards shown lately, Mind-wide.
 pub(crate) static RECENT_GRANT_CARDS: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> =
     std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// E.GRANT2b (the review's L3): the limits read through a poisoned lock too -- a panic elsewhere must
+/// not read as "nothing shown lately".
+pub(crate) fn grant_blocked_now(
+    recent: &std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
+    turn: &GrantLimits,
+    now: std::time::Instant,
+) -> Option<&'static str> {
+    let recent = recent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    grant_blocked(turn, &recent, now)
+}
+
+/// A card was shown: counted Mind-wide, through a poisoned lock too.
+pub(crate) fn note_grant_card(recent: &std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>, now: std::time::Instant) {
+    let mut r = recent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    r.retain(|t| now.duration_since(*t) < GRANT_CARD_WINDOW);
+    r.push_back(now);
+}
 
 /// Why this request may not be sent, if it may not.
 pub(crate) fn grant_blocked(turn: &GrantLimits, recent: &std::collections::VecDeque<std::time::Instant>, now: std::time::Instant) -> Option<&'static str> {
@@ -1223,6 +1238,23 @@ mod status_tests {
         assert!(grant_blocked(&GrantLimits::default(), &three, now).is_some(), "a fourth card within ten minutes");
         let old: std::collections::VecDeque<_> = (0..3).map(|i| now - Duration::from_secs(700 + i)).collect();
         assert_eq!(grant_blocked(&GrantLimits::default(), &old, now), None, "cards older than ten minutes still counted");
+    }
+
+    /// E.GRANT2b (the review's L3): a lock poisoned by a panic still counts the cards shown.
+    #[test]
+    fn a_poisoned_grant_card_count_still_counts() {
+        let now = std::time::Instant::now();
+        let recent = std::sync::Mutex::new(std::collections::VecDeque::new());
+        note_grant_card(&recent, now - Duration::from_secs(120));
+        let _ = std::panic::catch_unwind(|| {
+            let _held = recent.lock().unwrap();
+            panic!("poison the card count");
+        });
+        assert!(recent.is_poisoned());
+        note_grant_card(&recent, now - Duration::from_secs(60));
+        note_grant_card(&recent, now);
+        assert_eq!(recent.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len(), 3, "a card shown after the poison was not counted");
+        assert!(grant_blocked_now(&recent, &GrantLimits::default(), now).is_some(), "a fourth card within ten minutes, through a poisoned lock");
     }
 
     /// E.STALL3: quiet for the first minute; then the turn, its seconds, its last stage and trail.

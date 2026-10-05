@@ -15313,3 +15313,51 @@ The review's Info items, done:
 - K5: any of google, ddg, wikipedia, wiki, `search` with the plugin disabled, or `search` with no searcher sends a GrantAsk or uses an always grant.
 - K6: with the lock poisoned, a card past the ten-minute cap is asked.
 - K7: a mutant of each new condition survives: the tool names, the handler check, the searcher check, either poison site.
+
+## E.GRANT2b — RESULT: the Mind screens its own words by the OS card's rule, asks only where a search will run, and a poisoned lock still counts; 22 mutants killed
+
+**The screen (FIXES #667's H1, mirrored):**
+- `unshowable` and `mixed_script_word` are copied from yantrik-os `crates/yantrik-harness/src/host/grant.rs` (feat/mind-search-grants, b5c6394). A diff against `git show` of that file shows them identical apart from `pub(crate)`.
+- `unicode-properties =0.1.4` (general-category only) and `unicode-script =0.5.8` are pinned to the OS's lock versions (K3 held).
+- `query_can_be_shown` now applies, in this order: 1..=300 chars; no edge space; no unshowable char; no mixed-script word.
+- It runs before the card and before the grants file. A refused query is never asked and never used under an `always` grant; the planner writes it.
+
+**`own_words_are_screened_by_the_cards_rule`:**
+- The OS's 15 ordinary queries pass, plus its passing controls: `a b c`, `a  b`, ‘fine’ «ok», `rust 1.97 release notes` (K1 held).
+- All 63 of the OS's refused cases are refused (the count is asserted exactly). Each of the 62 that need no trim reaches neither a desk that says yes to anything nor the always grant (K2 held).
+- The scripts named for `раypal` and `gοogle` are checked.
+
+**The review of ae399d4^..563d314 (SAFE WITH CHANGES):**
+- **L1/L2:** `search_will_run(tool)` requires the tool to be `search` or `web_search`, a searcher configured, and the web_search plugin's handler present. The grant block runs only when it holds.
+  - `a_search_grant_covers_searches_only` now covers google, ddg, wikipedia, wiki and research, plus `search` with no searcher and with the plugin turned off. No GrantAsk is sent and no always grant is used for any of them; the control is a search that runs (K5 held).
+  - The four grant tests that need a card now configure a searcher. Without it, two failed. `a_stored_identifier_never_reaches_the_card` still passed, but only vacuously, because nothing was ever asked; it now runs against a real search.
+- **L3:** `grant_blocked_now` and `note_grant_card` read `RECENT_GRANT_CARDS` through `PoisonError::into_inner`. `a_poisoned_grant_card_count_still_counts` poisons the lock, counts two cards through it, and refuses a fourth (K6 held).
+  - Both L3 mutants first SURVIVED: the test was named `a_poisoned_card_count_...`, and the runner's `grant` filter never ran it. Renamed, both are killed.
+- **Info:**
+  - JS reads `localhost.` as localhost in the door != proxy check. Its new test fails without the fix (watched) and passes with it.
+  - Rust gets `a_localhost_endpoint_door_is_never_the_public_door`, covering `localhost`, `localhost.` and `LOCALHOST` (`url_host_port` already strips the dot).
+  - research is now covered directly in the scope test.
+
+**Mutants: 22, all killed (K4, K7 held):**
+- the space arm;
+- the quote marks;
+- the variation selectors;
+- the tag range;
+- the draws-as-nothing list;
+- Cc, Cf, Co and Cn each allowed;
+- Zs together with the is_whitespace fallback, and Zl/Zp together with it (one alone is an equivalent mutant: every Zs, Zl and Zp char is whitespace);
+- the one-system exemption;
+- Common counted as a script;
+- the mixed-script check dropped;
+- the whole screen dropped;
+- the grant tools widened to `plans_from_handed`;
+- no searcher check;
+- no handler check;
+- the gate not consulted;
+- both poison sites;
+- the localhost door.
+
+Cs cannot be reached: a Rust char is never a surrogate.
+
+**Full suite:** 2354 passed, 0 failed; net_guard ok.
+**Linux staging (.95):** mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1154, all passed; net_guard ok. target/debug removed afterwards.

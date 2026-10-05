@@ -184,7 +184,8 @@ function egressTrust(deps = {}) {
         if (d.protocol !== "http:" || !loop || !d.port || !bare) return null;
         // E.NET1k (L2): never the endpoint door itself.
         const theirs = new URL(ours);
-        if (theirs.port === d.port && (theirs.hostname === "localhost" || theirs.hostname === d.hostname)) return null;
+        // (E.GRANT2b, the review's Info: `localhost.` is localhost too, as url_host_port has it in Rust.)
+        if (theirs.port === d.port && (theirs.hostname.replace(/\.$/, "") === "localhost" || theirs.hostname === d.hostname)) return null;
         pub = `http://${d.host}`;
       }
     }

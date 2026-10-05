@@ -735,6 +735,19 @@ mod tests {
         }
     }
 
+    /// E.GRANT2b (the review's Info): an endpoint door written as localhost is this machine's loopback,
+    /// so it is never taken for the public door.
+    #[test]
+    fn a_localhost_endpoint_door_is_never_the_public_door() {
+        for host in ["localhost", "localhost.", "LOCALHOST"] {
+            let proxy = format!("http://{host}:7450");
+            let ours = env_of(&[("HTTPS_PROXY", proxy.as_str())]);
+            let said = |door: &str| serde_json::json!({ "public_proxy": door });
+            assert_eq!(public_door_of(&said("http://127.0.0.1:7450"), &ours), None, "the endpoint door under {host} taken for the public one");
+            assert_eq!(public_door_of(&said("http://127.0.0.1:7451"), &ours), Some(Some("http://127.0.0.1:7451".to_string())), "{host}");
+        }
+    }
+
     /// E.NET1e: the OS's egress signal is trusted only whole -- root's file in root's folder, version
     /// 1, enforced, the proxy refusing private ranges, and the proxy the Mind routes through.
     #[test]

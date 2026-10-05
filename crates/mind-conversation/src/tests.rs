@@ -20406,7 +20406,8 @@ async fn the_planner_sends_the_models_words_under_a_grant() {
     use mind_governance::egress::EgressBroker;
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"MDG machine-native\"}")) as Arc<dyn LLMBackend>, 1);
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_searcher(Arc::new(mind_tools::ScriptedSearch::new(vec![])));
     let ask = serde_json::json!({ "query": "Abstract Meaning Representation graph-to-text survey" });
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
     tokio::spawn(async move {
@@ -20433,10 +20434,17 @@ async fn a_search_grant_covers_searches_only() {
     use mind_governance::egress::EgressBroker;
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_searcher(Arc::new(mind_tools::ScriptedSearch::new(vec![])));
     let me = TurnIdentity::primary();
     let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let calls: [(&str, serde_json::Value, &str); 4] = [
+    let calls: [(&str, serde_json::Value, &str); 9] = [
+        // E.GRANT2b (the review's L1/L2): a search nothing runs, and another service than the web.
+        ("google", serde_json::json!({ "query": "model chosen search words" }), "query"),
+        ("ddg", serde_json::json!({ "query": "model chosen search words" }), "query"),
+        ("wikipedia", serde_json::json!({ "query": "model chosen search words" }), "query"),
+        ("wiki", serde_json::json!({ "query": "model chosen search words" }), "query"),
+        ("research", serde_json::json!({ "query": "model chosen search words" }), "query"),
         ("weather", serde_json::json!({ "city": "model chosen words here" }), "city"),
         ("github", serde_json::json!({ "repo": "model chosen repo words" }), "repo"),
         ("mcp.yantrik-os.web_type", serde_json::json!({ "text": "model typed text into page" }), "text"),
@@ -20463,6 +20471,41 @@ async fn a_search_grant_covers_searches_only() {
         assert!(off.as_ref().map_or(true, |o| o.get(field) != args.get(field)), "{tool}: an always grant let the model's words out: {off:?}");
     }
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a card was asked for a non-search");
+    // E.GRANT2b (L1): `search` itself, where it would not run -- no searcher, or the plugin turned off.
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let unsearched = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let off = ConversationEngine::new(mem, pool, "JARVIS")
+        .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_searcher(Arc::new(mind_tools::ScriptedSearch::new(vec![])));
+    assert!(off.plugins.lock().unwrap().set_enabled("web_search", false).is_some());
+    assert!(conv.search_will_run("search") && conv.search_will_run("web_search"), "the control: a search that runs");
+    let ask = serde_json::json!({ "query": "model chosen search words" });
+    let used = std::sync::atomic::AtomicUsize::new(0);
+    let always = || {
+        used.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("g-9b0d5e1a7c32".to_string())
+    };
+    for (engine, why) in [(&unsearched, "no searcher"), (&off, "the plugin off")] {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        let counter = asked.clone();
+        tokio::spawn(async move {
+            while let Some(g) = rx.recv().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+            }
+        });
+        let desk = Some(crate::egress_planning::Grantable { id: &me, offdesk: &always, os_grants: &|| true });
+        let out = crate::TURN_GRANT.scope(tx, engine.egress_clean_args_inner("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1", desk)).await.unwrap();
+        assert_eq!(out["query"], "planner words", "{why}");
+        let grant = Some(crate::egress_planning::Grantable { id: &me, offdesk: &always, os_grants: &|| true });
+        let out = engine.egress_clean_args_inner("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1", grant).await.unwrap();
+        assert_eq!(out["query"], "planner words", "{why}: an always grant");
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a card was asked for a search that would not run");
+    assert_eq!(used.load(std::sync::atomic::Ordering::SeqCst), 0, "an always grant was used for a search that would not run");
 }
 
 /// E.GRANT2 (M1): a stored private value in the model's query never reaches the card.
@@ -20484,7 +20527,8 @@ async fn a_stored_identifier_never_reaches_the_card() {
     .unwrap();
     let memf: Arc<dyn MemoryFacade> = mem;
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
-    let conv = ConversationEngine::new(memf, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let conv = ConversationEngine::new(memf, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_searcher(Arc::new(mind_tools::ScriptedSearch::new(vec![])));
     let me = TurnIdentity::primary();
     let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
@@ -20508,7 +20552,8 @@ async fn no_grant_is_asked_where_the_os_has_none() {
     use mind_governance::egress::EgressBroker;
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"planner words\"}")) as Arc<dyn LLMBackend>, 1);
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_searcher(Arc::new(mind_tools::ScriptedSearch::new(vec![])));
     let me = TurnIdentity::primary();
     let ask = serde_json::json!({ "query": "abstract meaning representation survey" });
     for (os_has_grants, asks_expected) in [(false, 0usize), (true, 1usize)] {
@@ -20530,3 +20575,95 @@ async fn no_grant_is_asked_where_the_os_has_none() {
     }
 }
 
+
+/// E.GRANT2b: the Mind screens its own words by the OS card's rule (yantrik-os FIXES #667, host/grant.rs),
+/// the cases copied from the OS's own tests: what passes there passes here, and what it refuses never
+/// reaches a card or an always grant here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_words_are_screened_by_the_cards_rule() {
+    use crate::egress_planning::{mixed_script_word, own_words_under_grant as own, query_can_be_shown as shown, unshowable};
+    for ok in [
+        "weather in Pune",
+        "café crème brûlée recipe",
+        "Москва погода",
+        "Москва weather",
+        "αβγ decay",
+        "東京 天気",
+        "ラーメン屋 渋谷",
+        "日本語の文法",
+        "서울 날씨",
+        "北京 天气 注音ㄅㄆ",
+        "naïve Bayes 2027",
+        "C++ std::vector",
+        "pizza 🍕 near me",
+        "it's 3/4 – ok?",
+        "हिन्दी समाचार",
+        "a b c",
+        "a  b",
+        "it's ‘fine’ «ok»",
+        "rust 1.97 release notes",
+    ] {
+        assert!(shown(ok), "{ok:?} refused");
+    }
+    let mut refused: Vec<String> = vec![String::new(), " padded ".into(), "x".repeat(301)];
+    refused.extend(["two\nlines", "a\tb", "bell\u{7}", "nel\u{85}x", "del\u{7f}x"].map(String::from));
+    for c in ['\u{200b}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{ad}', '\u{61c}', '\u{200e}', '\u{200f}', '\u{202e}', '\u{2066}', '\u{2069}'] {
+        refused.push(format!("rust{c}editions"));
+    }
+    refused.extend(["a\u{2028}b", "a\u{2029}b", "foo\u{201d} \u{2029}Always: until you revoke it", "foo \u{2029}Always: until you revoke it"].map(String::from));
+    for c in ['\u{e000}', '\u{f8ff}', '\u{f0000}', '\u{10fffd}', '\u{378}', '\u{fffe}', '\u{e0080}'] {
+        refused.push(format!("x{c}y"));
+    }
+    for c in ['\u{378}', '\u{fffe}', '\u{e0080}'] {
+        assert_eq!(unshowable(c), Some("an unassigned code point"), "U+{:04X}", c as u32);
+    }
+    for c in ['\u{fe00}', '\u{fe0f}', '\u{e0100}', '\u{e01ef}'] {
+        assert_eq!(unshowable(c), Some("a variation selector"), "U+{:04X}", c as u32);
+    }
+    refused.push("heart \u{2764}\u{fe0f}".into());
+    refused.push("rust editions".chars().chain("ssn 123".chars().map(|c| char::from_u32(0xe0000 + c as u32).unwrap())).collect());
+    for c in ['\u{e0001}', '\u{e0020}', '\u{e0041}', '\u{e007f}'] {
+        refused.push(format!("x{c}"));
+    }
+    for c in ['\u{a0}', '\u{2002}', '\u{2003}', '\u{2009}', '\u{200a}', '\u{202f}', '\u{205f}', '\u{3000}', '\u{1680}', '\u{b}', '\u{c}', '\r'] {
+        refused.push(format!("a{c}b"));
+    }
+    for c in ['\u{34f}', '\u{115f}', '\u{1160}', '\u{17b4}', '\u{180e}', '\u{3164}', '\u{ffa0}'] {
+        refused.push(format!("a{c}b"));
+    }
+    refused.extend(["foo\u{201d} bar", "\u{201c}foo", "say \"hi\""].map(String::from));
+    refused.extend(["\u{440}\u{430}ypal login", "g\u{3bf}ogle", "Αpple", "abcабв", "東京tokyo"].map(String::from));
+    assert_eq!(refused.len(), 63, "every OS case is here");
+    let named: Vec<String> = vec![];
+    let offdesk_used = std::sync::atomic::AtomicUsize::new(0);
+    let always = || {
+        offdesk_used.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("g-9b0d5e1a7c32".to_string())
+    };
+    for q in &refused {
+        assert!(!shown(q), "{q:?} would be shown");
+        // own() sends the trimmed query (the existing test pins that), so " padded " is the screen's case only.
+        if q.trim() != q.as_str() {
+            continue;
+        }
+        // A desk that says yes to anything: a query the screen let through would leave, not hang.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        tokio::spawn(async move {
+            while let Some(g) = rx.recv().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+            }
+        });
+        let left = crate::TURN_GRANT.scope(tx, own(q, &named, &always)).await;
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "{q:?} reached a card");
+        assert_eq!(left, None, "{q:?} left");
+        assert_eq!(own(q, &named, &always).await, None, "{q:?} left under an always grant");
+    }
+    assert_eq!(offdesk_used.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused query reached the grants file");
+    let (word, scripts) = mixed_script_word("\u{440}\u{430}ypal login").unwrap();
+    assert_eq!((word.as_str(), scripts), ("\u{440}\u{430}ypal", vec!["Cyrillic", "Latin"]));
+    assert_eq!(mixed_script_word("g\u{3bf}ogle").unwrap().1, vec!["Latin", "Greek"]);
+    assert_eq!(mixed_script_word("Москва weather"), None, "two words, one script each");
+}

@@ -197,6 +197,13 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   // E.NET1j: version 3 and its public door.
   assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":"http://127.0.0.1:7451"') }).public, "http://127.0.0.1:7451");
   assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":null') }).public, null);
+  // E.GRANT2b (the review's Info): an endpoint door written as localhost is this machine's loopback.
+  for (const host of ["localhost", "localhost."]) {
+    const proxy = `http://${host}:7450`;
+    const said = (door) => WHOLE.replace('"http://127.0.0.1:7450"', JSON.stringify(proxy)).replace('"version":2', `"version":3,"public_proxy":"${door}"`);
+    assert.strictEqual(trust({ text: said("http://127.0.0.1:7450") }, { HTTPS_PROXY: proxy }), null, `the endpoint door under ${host} trusted as the public door`);
+    assert.strictEqual(trust({ text: said("http://127.0.0.1:7451") }, { HTTPS_PROXY: proxy }).public, "http://127.0.0.1:7451", host);
+  }
   for (const [v, why] of [
     ['"version":3', "a v3 signal saying nothing of a public door"],
     ['"version":3,"public_proxy":"http://10.0.0.5:7451"', "a public door that is not this machine"],

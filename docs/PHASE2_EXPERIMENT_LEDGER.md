@@ -14134,3 +14134,10 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
   - `the_task_message_does_not_exempt_from_the_tripwire`: a stored private value in the task message is still refused on "Continue.".
   - The Erase test now checks the erased words are no longer a person message.
 - **Mutants:** every kept message used; quoted text kept; no 12 h limit; the erase not purging (first SURVIVED: no test erased and then checked; the Erase test now does, and it is killed); the purge doing nothing; a long turn still adding the task; the tripwire given the task. All killed.
+
+## E.RES1 — note before the next R1 pair: the model, and a protocol change
+
+- **Model:** VM 520's Mind runs every turn on one cloud model, `ollama-cloud:deepseek-v4.1-flash` (the 08:37 startup line: "no local endpoint … cloud provider 'ollama-cloud:deepseek-v4.1-flash'"). The research turns of R1d2 were the flash model's. That may explain why it never opened the files. The earlier R9 reading on deepseek-v4-pro did better on other tasks.
+- **Protocol change for the next pair** (not a code change): the opening message asks for the files to be read first, with each file named by its exact path:
+  > Open and read /home/yantrik/research/R1/BRIEF.md and the spec /home/yantrik/research/R1/MDG_spec.md first, then carry out the research task the brief describes. Work in /home/yantrik/research/R1/. Say when the report is written.
+- The model is kept as deployed, so the pair measures the Mind as it ships. Changing the model is a configuration choice for the box's owners. Both runs of the pair are on one build; no comparison with R1d2 is claimed, because the build and the protocol both differ.

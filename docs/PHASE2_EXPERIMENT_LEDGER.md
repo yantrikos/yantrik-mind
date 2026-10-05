@@ -13964,3 +13964,34 @@ The instance is fine; the request is the fix.
    - Test: `a_text_the_person_never_said_here_is_not_quoted`.
    - Mutants: 3, all killed (quoted though unsaid, `person_said` always true, never quoted).
 3. **Unicode tables:** the Mind's ICU tables and the desktop's may disagree on newly encoded characters. That fails safe: the redact is refused, and the reply says the conversation still holds the text. Noted, not built.
+
+## E.EGRESS4b — PREREG: the seventh pass's 1–3 (fetch budgets, the person's-URL rule, query spans)
+
+Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The residual is not "~1 bit per call": a deterministic planner still lets an attacker read the COUNT and the positions of fetches, about 5 bits per turn, and tens over a "Continue." autopilot.
+
+1. **Budgets:** at most 6 fetches per turn, and at most 2 per host per turn. A fetch over either is refused (`FetchBudget`, a reason that says to use what was fetched).
+2. **The person's URL:** a fetch passes through as written only when:
+   - its address is a whole token of the person's message (not a prefix of a longer one);
+   - it is not in quoted, fenced or forwarded text (`in_quoted_text`, the paths' rule);
+   - and it is the message's only candidate address, or matches one exactly as a token.
+   Otherwise it goes to the planner's pick.
+3. **Query spans:** a search query passes as written only when it is a span of the person's words or of a handed-over file. A span of web text goes to the planner, which still sees the web text.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- the turn budget, and the host budget;
+- a prefix accepted as the person's URL;
+- a quoted URL passed through;
+- a web-text span passed through.
+
+## E.NET1 — PREREG: SSRF through redirects, DNS rebinding and the browser fallback (pre-existing, MEDIUM)
+
+- `ssrf_check` runs on the first URL only (mind-tools/src/lib.rs:621), and the HTTP client follows redirects unchecked. The headless-Chromium fallback runs page script with no private-range block. DNS is resolved twice, so a rebinding host can pass the check and then connect to the LAN.
+- **The fix:**
+  - automatic redirects off; each hop is followed by hand and re-checked (5 hops at most);
+  - the connection goes to the IP that was checked (resolve once, pin);
+  - the browser fallback aborts any request to a private, loopback, link-local or unique-local address.
+- **Kill criteria:** a compiling mutant killed for each of:
+  - a redirect hop unchecked;
+  - the pinned IP not used;
+  - the browser's private-range block off.
+  Tested against local servers: a redirect to 127.0.0.1, and a host resolving to a private address.

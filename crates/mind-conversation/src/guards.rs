@@ -114,7 +114,11 @@ pub(crate) async fn pre(
     // do is clean-author a URL it could have passed through — the safe direction.
     let (provenance, web_provenance, fetched) = {
         let s = state.lock().unwrap();
-        (s.external_obs.clone(), s.web_obs.clone(), s.fetched.clone())
+        // E.EGRESS4d: the turn's count when there is a turn; this loop's otherwise.
+        let fetched = crate::TURN_FETCHES
+            .try_with(|f| f.lock().map(|v| v.clone()).unwrap_or_default())
+            .unwrap_or_else(|_| s.fetched.clone());
+        (s.external_obs.clone(), s.web_obs.clone(), fetched)
     };
     let asked = grounded.clone();
     // E.EGRESS3e (A3): a handed-over file written since it was named stops being a source first.
@@ -153,7 +157,10 @@ pub(crate) async fn pre(
     // E.EGRESS4: a fetch that goes out is one the next fetch planner knows of, and the cap counts.
     if matches!(tool, "web_fetch" | "fetch" | "web") {
         if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
-            state.lock().unwrap().fetched.push(url.to_string());
+            let in_turn = crate::TURN_FETCHES.try_with(|f| f.lock().map(|mut v| v.push(url.to_string())).is_ok()).unwrap_or(false);
+            if !in_turn {
+                state.lock().unwrap().fetched.push(url.to_string());
+            }
         }
     }
     PreVerdict::Proceed(args)
@@ -437,6 +444,49 @@ mod tests {
         assert_eq!((left, kept), (serde_json::json!({"query": "typed semantic graph"}), 1), "an unchanged file stopped being a source");
         let (left, kept) = run(4_102_444_800).await;
         assert_eq!((left, kept), (serde_json::json!({"query": "planned"}), 0), "a file written after it was named stayed a source");
+    }
+
+    /// E.EGRESS4d (the eighth pass): the fetch budget is the TURN's -- a second loop's fresh guard state
+    /// does not get a fresh budget -- and it counts registrable domains, so a.evil.com and b.evil.com
+    /// share one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_fetch_budget_is_the_turns_and_the_domains() {
+        use mind_governance::egress::EgressBroker;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = mind_inference::InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new(r#"{"pick": 1}"#)) as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+        let id = TurnIdentity::primary();
+        let results = "1. one -- https://a.evil.com/1  2. two -- https://b.evil.com/2";
+        let ask = || serde_json::json!({"url": "https://a.evil.com/1"});
+        crate::TURN_FETCHES
+            .scope(Default::default(), async {
+                let first_loop = Mutex::new(GuardState::default());
+                let _ = post(&eng, &first_loop, "search", results).await;
+                for _ in 0..2 {
+                    assert!(matches!(pre(&eng, &first_loop, &id, "research", "web_fetch", ask(), "t").await, PreVerdict::Proceed(_)));
+                }
+                // The second loop of the same turn: a fresh guard state, the same turn's count.
+                let second_loop = Mutex::new(GuardState::default());
+                let _ = post(&eng, &second_loop, "search", results).await;
+                match pre(&eng, &second_loop, &id, "research", "web_fetch", ask(), "t").await {
+                    PreVerdict::Refuse { msg, .. } => assert!(msg.contains("as many pages as it may"), "{msg}"),
+                    PreVerdict::Proceed(a) => panic!("a second loop got a fresh budget: {a}"),
+                }
+            })
+            .await;
+    }
+
+    #[test]
+    fn the_budget_counts_registrable_domains() {
+        use crate::egress_planning::budget_domain as d;
+        assert_eq!(d("https://a.evil.com/x"), d("https://b.evil.com/y"));
+        assert_eq!(d("https://a.evil.com/x"), "evil.com");
+        assert_eq!(d("https://www.example.co.uk./p"), "example.co.uk", "a trailing dot or a public suffix split it");
+        assert_eq!(d("https://example.com:443/"), d("https://EXAMPLE.com/"), "the default port or the case split it");
+        assert_eq!(d("https://b\u{fc}cher.example/"), d("https://xn--bcher-kva.example/"), "IDN and punycode split it");
+        assert_eq!(d("http://93.184.216.34/x"), "93.184.216.34");
+        assert_ne!(d("https://evil.com/"), d("https://evil.co.uk/"));
     }
 
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.

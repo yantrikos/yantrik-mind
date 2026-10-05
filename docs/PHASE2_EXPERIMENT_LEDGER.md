@@ -14083,3 +14083,23 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
 - **What the scan found beyond the inventory:** 19 aliases (photo tools, `trip`/`trips`) and `browse`, a declared plugin with no agent arm. All are placed.
 - **Mutants:** a new dispatcher arm, and a table entry dropped. Both killed, with the failure naming the tools.
 - Full suite 2293 passed.
+
+## E.EGRESS4d — PREREG: the fetch budget per turn and per registrable domain (eighth pass, claim 1)
+
+- **Per turn:** the fetches of a turn are counted in one task-local, `TURN_FETCHES`, scoped around the whole turn. Each loop's `GuardState` is fresh, so a fallback from the bounded loop to the classic loop used to get 12. Outside a turn (tests, tools only), the guard state's own list stands in.
+- **Per registrable domain:** the host budget counts by eTLD+1 (the `psl` crate's public-suffix list) after normalising with the `url` crate: lower case, punycode, no trailing dot, no default port. `a.evil.com` and `b.evil.com` are one domain; a bare IP is its own.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- the count per loop, not per turn;
+- the host compared raw (no eTLD+1);
+- the trailing dot or default port kept;
+- IDN and punycode treated as different.
+
+## E.EGRESS4d — RESULT: built as preregistered; 3 of 4 mutants killed, the 4th equivalent
+
+- **Per turn:** `TURN_FETCHES` (task-local) is scoped around `handle_turn_as` (the body moved to `handle_turn_as_counted`). `guards::pre` reads and pushes the turn's list and falls back to the loop's own guard state outside a turn.
+- **Per domain:** `budget_domain` takes the url crate's parsed host (lower case, punycode, no default port), drops a trailing dot, and reduces it to eTLD+1 with `psl`. An IP is its own domain. New dependencies: `url` (already in the tree) and `psl` (plus `psl-types`).
+- **Tests:**
+  - `the_fetch_budget_is_the_turns_and_the_domains`: two fetches in a first loop; a second loop of the same turn, with a fresh guard state, is refused.
+  - `the_budget_counts_registrable_domains`: subdomains, co.uk, a trailing dot, the port and case, IDN against punycode, an IP.
+- **Mutants:** the count per loop; the host compared raw; a raw string host. All killed. "Trailing dot kept" is EQUIVALENT (the url parser or psl already drops it); the trim is kept as belt-and-braces.

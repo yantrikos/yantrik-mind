@@ -430,11 +430,19 @@ const FETCH_CANDIDATES: usize = 40;
 const FETCH_TURN_BUDGET: usize = 6;
 const FETCH_HOST_BUDGET: usize = 2;
 
-/// E.EGRESS4b: an address's host, lower case (its authority without user info).
-fn host_of(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    authority.rsplit('@').next().unwrap_or(authority).to_ascii_lowercase()
+/// E.EGRESS4d (the eighth pass): what the host budget counts -- the registrable domain (eTLD+1) of
+/// the address, after the url crate normalises it (lower case, punycode, no default port), without a
+/// trailing dot. `a.evil.com` and `b.evil.com` are one domain; a bare IP is its own.
+pub(crate) fn budget_domain(url: &str) -> String {
+    let Ok(parsed) = url::Url::parse(url) else { return url.to_ascii_lowercase() };
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => {
+            let d = d.trim_end_matches('.').to_ascii_lowercase();
+            psl::domain_str(&d).map(str::to_string).unwrap_or(d)
+        }
+        Some(ip) => ip.to_string(),
+        None => url.to_ascii_lowercase(),
+    }
 }
 
 /// E.EGRESS4b: the addresses the person wrote themselves -- not inside quoted, fenced or forwarded
@@ -723,8 +731,8 @@ impl ConversationEngine {
                 .unwrap_or_default()
         };
         let over_budget = |url: &str| {
-            let host = host_of(url);
-            fetched.len() >= FETCH_TURN_BUDGET || fetched.iter().filter(|f| host_of(f) == host).count() >= FETCH_HOST_BUDGET
+            let domain = budget_domain(url);
+            fetched.len() >= FETCH_TURN_BUDGET || fetched.iter().filter(|f| budget_domain(f) == domain).count() >= FETCH_HOST_BUDGET
         };
         // E.EGRESS4b: as written only when the person's own message holds exactly ONE address and this
         // is it, as a whole token -- a pasted list (?v=alice, ?v=bob) is the planner's to choose from.

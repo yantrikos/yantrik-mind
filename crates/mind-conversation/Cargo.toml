@@ -25,6 +25,10 @@ chrono-tz = "0.10"
 # E.ERASE4: the desktop's redact needles -- SHA-256 of NFC text (icu_normalizer is already in the
 # tree through url/idna).
 sha2 = "0.10"
+# E.EGRESS4d: the fetch budget per registrable domain -- url normalises (punycode, default port), psl
+# knows the public suffixes.
+url = "2"
+psl = "2"
 icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 
 [dev-dependencies]

@@ -1508,6 +1508,11 @@ tokio::task_local! {
     pub static TURN_STAGE: StageTrail;
 }
 
+tokio::task_local! {
+    /// E.EGRESS4d: the addresses fetched in this turn, by every loop the turn runs.
+    pub static TURN_FETCHES: std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+}
+
 /// E.ERASE2: a question for the person, asked through whatever channel the turn arrived on, and the
 /// answer it gets back: one of `options`, or None when nothing came (declined, cancelled, expired).
 pub struct Ask {
@@ -15248,6 +15253,15 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     }
 
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        // E.EGRESS4d (the eighth pass): one fetch count for the whole turn, across every loop it runs --
+        // each loop's guard state is fresh, so a fallback from one loop to the other got a new budget.
+        if TURN_FETCHES.try_with(|_| ()).is_ok() {
+            return self.handle_turn_as_counted(user_text, id).await;
+        }
+        TURN_FETCHES.scope(Default::default(), self.handle_turn_as_counted(user_text, id)).await
+    }
+
+    async fn handle_turn_as_counted(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let ws = id.write_scope(); // how this turn's transcript lines are tagged
                                    // E.G1b: the world model sees EVERY primary turn — before any early return (a turn
                                    // answered by the self-claims registry is still the primary being here) — and NO member

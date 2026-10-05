@@ -51,9 +51,51 @@ fn no_proxy_matches(host: &str, no_proxy: &str) -> bool {
     })
 }
 
+/// E.NET1c (the tenth pass): the endpoints the person configured, which connect DIRECT -- the OS
+/// egress proxy refuses private ranges in every mode, and these (search, models, Home Assistant,
+/// photos) live on the LAN by design. Routing only: the fetch tools still refuse them.
+const DIRECT_ENDPOINT_VARS: [&str; 9] = [
+    "YM_SEARXNG_URL",
+    "YM_HA_URL",
+    "YM_LOCAL_OLLAMA_URL",
+    "YM_OLLAMA_LOCAL_URL",
+    "YM_NIM_BASE_URL",
+    "YM_FACE_ML_URL",
+    "YM_CRITIC_URL",
+    "YM_WEFT_URL",
+    "YM_IMMICH_URL",
+];
+
+/// E.NET1c: a URL's host and port (the scheme's when unwritten).
+fn host_port(url: &str) -> (String, u16) {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let port = match authority.strip_prefix('[') {
+        Some(v6) => v6.split_once("]:").map(|(_, p)| p),
+        None => authority.split_once(':').map(|(_, p)| p),
+    };
+    let default = if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 };
+    (host_of(url), port.and_then(|p| p.parse().ok()).unwrap_or(default))
+}
+
+/// E.NET1c: is `url` on one of the person-configured endpoints (same host and port)?
+fn configured_endpoint(url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
+    let target = host_port(url);
+    DIRECT_ENDPOINT_VARS
+        .iter()
+        .filter_map(|k| get(k))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .any(|v| host_port(&v) == target)
+}
+
 /// Should a request to `url` go direct rather than through the proxy?
 fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
     if proxy_url(get).is_none() {
+        return true;
+    }
+    if configured_endpoint(url, get) {
         return true;
     }
     let host = host_of(url);
@@ -174,6 +216,24 @@ mod tests {
         assert!(goes_direct("http://127.9.9.9/", &e), "all of 127/8 is loopback");
         assert!(goes_direct("http://gpu-box.lan:11434/", &e), "a NO_PROXY suffix");
         assert!(!goes_direct("http://gpu-box:11434/", &e), "a bare LAN name is not exempt unless listed");
+    }
+
+    /// E.NET1c (the tenth pass): the endpoints the person configured go direct -- the OS proxy refuses
+    /// private ranges -- matched by host AND port; any other host, or another port, still takes the proxy.
+    #[test]
+    fn configured_endpoints_go_direct_and_nothing_else() {
+        let e = env_of(&[
+            ("HTTPS_PROXY", "http://127.0.0.1:7450"),
+            ("YM_SEARXNG_URL", "http://192.168.4.42:8888"),
+            ("YM_HA_URL", "http://192.168.4.10:8123/"),
+            ("YM_NIM_BASE_URL", "https://integrate.example.com/v1"),
+        ]);
+        assert!(goes_direct("http://192.168.4.42:8888/search?q=semantic", &e), "the configured SearXNG took the proxy");
+        assert!(goes_direct("http://192.168.4.10:8123/api/states", &e), "Home Assistant took the proxy");
+        assert!(goes_direct("https://integrate.example.com/v1/chat/completions", &e), "the model endpoint (default port) took the proxy");
+        assert!(!goes_direct("http://192.168.4.42:22/", &e), "another port on a configured host went direct");
+        assert!(!goes_direct("http://192.168.4.99:8888/", &e), "an unconfigured LAN host went direct");
+        assert!(!goes_direct("https://evil.example/", &e));
     }
 
     /// E.EGRESS1: no Mind code builds its own ureq request or agent -- every one goes through here,

@@ -191,9 +191,12 @@ async function guardContext(ctx) {
       return route.abort("blockedbyclient");
     }
   });
-  if (typeof ctx.routeWebSocket === "function") {
-    await ctx.routeWebSocket(/.*/, (ws) => ws.close());
+  // E.NET1c (the tenth pass): fail closed -- without WebSocket routing (Playwright >= 1.48) a page
+  // could open a socket to the LAN, so the browser does not run at all.
+  if (typeof ctx.routeWebSocket !== "function") {
+    throw new Error("this Playwright cannot route WebSockets (needs >= 1.48); refusing to browse");
   }
+  await ctx.routeWebSocket(/.*/, (ws) => ws.close());
 }
 
 module.exports = { privateIp, v6ToBigInt, checkedAddresses, hostIsPrivate, fetchPinned, guardContext };

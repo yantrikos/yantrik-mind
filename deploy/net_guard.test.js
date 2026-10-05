@@ -9,6 +9,7 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     "10.0.0.1", "127.0.0.1", "192.168.4.44", "172.16.0.1", "172.31.255.1", "169.254.1.1", "100.64.0.1",
     "0.0.0.0", "224.0.0.1", "240.0.0.1", "255.255.255.255", "::1", "::", "fd00::1", "fe80::1", "ff02::1",
     "::ffff:192.168.1.1", "::ffff:7f00:1", "::ffff:c0a8:407", "::7f00:1", "64:ff9b::c0a8:407", "[::ffff:127.0.0.1]",
+    "2002:c0a8:407::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
   ]) {
     assert.strictEqual(privateIp(ip), true, `${ip} should be private`);
   }
@@ -52,6 +53,30 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   // With the real check, the loopback server itself is refused.
   await assert.rejects(fetchPinned(`http://127.0.0.1:${port}/page`), /private/);
   server.close();
+
+  // E.NET1c: without WebSocket routing the guard refuses to run at all; with it, it routes.
+  const { guardContext } = require("./net_guard");
+  const routed = [];
+  const oldCtx = { route: async (pattern) => routed.push(pattern) };
+  await assert.rejects(guardContext(oldCtx), /WebSocket/, "an old Playwright browsed anyway");
+  const newCtx = { route: async (pattern) => routed.push(pattern), routeWebSocket: async (pattern) => routed.push(String(pattern)) };
+  await guardContext(newCtx);
+  assert.ok(routed.includes("**/*"), "requests were not routed");
+
+  // E.NET1c: every browser script in deploy/ loads the guard and runs it on its context.
+  const fs = require("fs");
+  const path = require("path");
+  for (const f of fs.readdirSync(__dirname)) {
+    if (!f.endsWith(".js") || f.startsWith("net_guard")) continue;
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    if (!src.includes("playwright")) continue;
+    assert.ok(src.includes('require("./net_guard")'), `${f} browses without net_guard`);
+    // One guard per context the script creates -- a second, unguarded context is a way around it.
+    const contexts = (src.match(/\.newContext\(|launchPersistentContext\(|browser\.newPage\(/g) || []).length;
+    const guards = (src.match(/await guardContext\(ctx\)/g) || []).length;
+    assert.ok(contexts > 0 && guards >= contexts, `${f}: ${contexts} context(s) but ${guards} guard call(s)`);
+    assert.ok(src.includes('serviceWorkers: "block"'), `${f} lets service workers bypass the guard`);
+  }
   console.log("net_guard: ok");
 })().catch((e) => {
   console.error(e);

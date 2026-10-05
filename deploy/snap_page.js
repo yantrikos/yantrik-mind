@@ -6,6 +6,9 @@
 // Same install/deploy notes as headless_fetch.js (shares node_modules + PLAYWRIGHT_BROWSERS_PATH).
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
+// E.NET1c (the tenth pass): a screenshot of a LAN admin page would be described by vision -- every
+// request goes through net_guard.js (deployed beside), service workers blocked.
+const { guardContext } = require("./net_guard");
 chromium.use(stealth);
 
 (async () => {
@@ -19,7 +22,9 @@ chromium.use(stealth);
     args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"], // --no-sandbox: unprivileged LXC
   });
   try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 1800 } });
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 1800 }, serviceWorkers: "block" });
+    await guardContext(ctx);
+    const page = await ctx.newPage();
     await page.goto(url, { waitUntil: "networkidle", timeout: 40000 }).catch(() => {});
     // A short scroll pass triggers lazy-loaded content, then back to the top for the shot.
     await page.evaluate(async () => {

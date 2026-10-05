@@ -10,7 +10,8 @@
 //
 // Deploy (on the box, as root, then chown to the service user):
 //   cd /opt/yantrik-mind
-//   npm install playwright playwright-extra puppeteer-extra-plugin-stealth
+//   npm install playwright@1.48.2 playwright-extra puppeteer-extra-plugin-stealth   (E.NET1c: >= 1.48 for WebSocket routing; net_guard refuses older)
+//   cp net_guard.js private_ranges.json /opt/yantrik-mind/   (E.NET1: the guard every browser script loads)
 //   PLAYWRIGHT_BROWSERS_PATH=/opt/yantrik-mind/pw-browsers npx playwright install --with-deps chromium
 //   chown -R yantrikmind:yantrikmind node_modules pw-browsers headless_fetch.js
 // The Rust HttpFetcher spawns: `timeout 45 node headless_fetch.js <url>` with

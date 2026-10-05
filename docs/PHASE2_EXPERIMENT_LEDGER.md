@@ -14234,3 +14234,26 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
 - **Mutants:** fields not cleaned; query, url and token kinds passing raw; a fact to any kind; classify ignoring the table (first SURVIVED, then killed by the new tripwire test); work_radar running when off (egress and tool); the researcher's persona back; inbox back; the gender back. All killed.
 - Full suite 2306 passed; on Linux staging mind-conversation 1128 and mind-core 139.
 - **Next:** (b) ask-only-if-from-memory cards for share, photo_send, onedrive and coder (Pranab decided); (c) the call-site scan.
+
+## E.NET1c — PREREG: the tenth pass's E.NET1 items
+
+1. **`deploy/snap_page.js` and `deploy/browser_agent.js`** load net_guard and call `guardContext` on every context, with service workers blocked. A JS scan test holds every Playwright script in deploy/ to this.
+2. **WebSockets fail closed:** `guardContext` throws when Playwright cannot route WebSockets (needs >= 1.48), so the browser does not run. The deploy note pins playwright@1.48.2.
+3. **Ranges:** 2002::/16 (6to4) and 2001::/32 (Teredo) are added to `private_ranges.json`.
+4. **The direct list:** `mind_net` sends person-configured endpoints DIRECT, matched by host and port: YM_SEARXNG_URL, YM_HA_URL, YM_LOCAL_OLLAMA_URL, YM_OLLAMA_LOCAL_URL, YM_NIM_BASE_URL, YM_FACE_ML_URL, YM_CRITIC_URL, YM_WEFT_URL and YM_IMMICH_URL. They keep working when the OS egress refuses private ranges in every mode. The fetch tools still refuse them (the SSRF check is separate from routing). The Mind's unit on 520 has no IPAddressDeny.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- a browser script without the guard;
+- WebSockets allowed without routing;
+- 6to4 or Teredo allowed;
+- a configured endpoint not direct;
+- an unconfigured host direct.
+
+## E.NET1c — RESULT: built as preregistered; 7 of 7 mutants killed
+
+- **The browser scripts:** `snap_page.js` and `browser_agent.js` (both the persistent and the fresh context) create their contexts with service workers blocked and call `guardContext`. The JS scan requires every Playwright script in deploy/ to load net_guard, block service workers, and make one guard call per context it creates. The first scan (any guard call at all) let browser_agent's second context go unguarded: that mutant SURVIVED and is now killed.
+- **WebSockets:** `guardContext` throws without `routeWebSocket` (Playwright < 1.48). The deploy note pins playwright@1.48.2 and says to copy net_guard.js and private_ranges.json.
+- **Ranges:** 2001::/32 (Teredo) and 2002::/16 (6to4) were added to the shared list. A test address for each is in the Rust and JS tests.
+- **The direct list:** `mind_net::goes_direct` sends a URL direct when its host AND port match a person-configured endpoint (`DIRECT_ENDPOINT_VARS`: SearXNG, Home Assistant, the local and NIM model URLs, face-ML, critic, Weft, Immich). Another port, or an unconfigured LAN host, still takes the proxy. The fetch tools still refuse these addresses.
+- **OS side (4c):** kernel enforcement is coming (nftables for the yantrik-mind uid). Direct connections will then reach only loopback and person-made literal-IP lan rules, so a configured LAN endpoint also needs such a rule. 4c adds one for 520's SearXNG first.
+- **Mutants:** snap_page unguarded; browser_agent's fresh context unguarded; WebSockets allowed without routing; 6to4 and Teredo allowed (each killed in Rust and JS); a configured endpoint not direct; any port of a configured host direct. All killed.

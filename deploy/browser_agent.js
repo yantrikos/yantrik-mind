@@ -23,6 +23,9 @@ const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 chromium.use(stealth);
 const readline = require("readline");
+// E.NET1c (the tenth pass): every request the agent's pages make goes through net_guard.js (deployed
+// beside) -- a page cannot redirect or script its way onto the LAN; service workers blocked.
+const { guardContext } = require("./net_guard");
 
 // Words that mean "this cannot be undone by pressing back". Matched against the accessible name of
 // whatever is about to be clicked. Deliberately broad: a false positive costs one confirmation, a
@@ -52,12 +55,14 @@ async function ensure(opts) {
   const args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"];
   if (profile) {
     // A persistent profile keeps logins between RUNS, not just between steps.
-    ctx = await chromium.launchPersistentContext(profile, { headless: !headful, args, locale: "en-US" });
+    ctx = await chromium.launchPersistentContext(profile, { headless: !headful, args, locale: "en-US", serviceWorkers: "block" });
+    await guardContext(ctx);
     browser = ctx.browser();
     page = ctx.pages()[0] || (await ctx.newPage());
   } else {
     browser = await chromium.launch({ headless: !headful, args });
-    ctx = await browser.newContext({ locale: "en-US" });
+    ctx = await browser.newContext({ locale: "en-US", serviceWorkers: "block" });
+    await guardContext(ctx);
     page = await ctx.newPage();
   }
   page.setDefaultTimeout(20000);

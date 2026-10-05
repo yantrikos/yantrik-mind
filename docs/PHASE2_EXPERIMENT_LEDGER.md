@@ -13500,3 +13500,29 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - **What came back:** Wikipedia "Research" and Vocabulary.com "closest". So R1b's empty searches were the planner, not (or not only) DuckDuckGo throttling.
 - **Side finding:** the planner put a LOCAL FILE PATH into an outbound query.
 - **The decision is Pranab's** (ARCH-3 is a privacy boundary). The options and worst-case leaks are put to him. R1c waits for it.
+
+## E.EGRESS3 — PREREG: an outbound query may use the text of files the person named (Pranab's decision)
+
+**The decision**, Pranab's own answer in this session, 5 Oct: "Your words + named files". Outbound search queries may also be built from the text of files he explicitly names in the request, and from pages fetched this turn. The stored-private-value tripwire stays.
+- **Worst case, as he was told:** phrases from a handed-over file reach the search engine (upstream engines via his SearXNG).
+
+**Plan:**
+1. **Named paths.** The paths in the person's messages (all `~/…` and absolute paths, F65's tokenizer) are kept per conversation. They reset on `/new` and expire after 12 h.
+2. **Handed-over text.** When a desktop read returns a file's text (F64's open-with-text, or the editor's `read`) and that file is a named path or inside a named folder, the text is kept, capped at 20 KB per file, with the same reset and expiry.
+3. **In `egress_clean_args` for query tools,** the sanctioned text is the literal message, plus the handed-over text, plus the external provenance this turn.
+   - **(a)** The model's query passes AS WRITTEN when it holds no local path and every content word (at least 3 letters or digits, not a stopword) appears in the sanctioned text.
+   - **(b)** Otherwise the clean planner authors it, now shown up to 8 KB of handed-over text as a permitted source, and told never to put a local path in a query.
+   - **(c)** A local path the planner still writes is removed before dispatch.
+4. The exact-value tripwire (`model_injected_private_value`) is unchanged and still runs after.
+
+**Kill criteria** (each watched to fail under a compiling mutant):
+1. **Unit test, `query_is_sanctioned`:**
+   - "multidimensional grammar semantic graph" against the real spec gives true;
+   - "Abstract Meaning Representation survey" against the spec alone gives false, and with a fetched page naming AMR gives true;
+   - "~/research/R1/BRIEF.md" gives false.
+2. **`egress_clean_args`:**
+   - a sanctioned query returns unchanged, and the planner is not called (a scripted planner that would answer something else);
+   - an unsanctioned one goes to the planner, whose prompt holds the handed-over text and the no-path rule;
+   - a planner answer holding a local path is sent with the path removed.
+3. **Capture:** an editor read of a named file is kept; a read of an unnamed file is not; `/new` clears both.
+4. **A file the person did NOT name never becomes a source,** with a test.

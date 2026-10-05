@@ -13762,3 +13762,25 @@ Verdict on 6dee92b: SAFE WITH CHANGES. N1, N3, N5 and 3c fixed; N2, N4 and N6 pa
   - The E.EGRESS3d re-run: two mutants (one decode, no decode) SURVIVED. The A2 refusal masks them, because a url not fully decoded is refused anyway. The loop's remaining job is to keep ordinary encoded urls usable; tests for `Caf%C3%A9?q=semantic%20graph` and `semantic%2520graph` now kill both.
   - The N2 anchor was re-cut to the Option form, and the mutant is killed.
   - The N4 terminal and Files-write mutants are superseded by the A3 backstop mutant.
+
+## E.EGRESS3f — PREREG: the fourth pass's S1–S3, and more quoted-text forms
+
+Verdict on 0f79206: SAFE WITH CHANGES. Every earlier item is fixed, and the equivalent-mutant claim is confirmed (the markers are dead code after the stability refusal).
+
+- **S1:** `unchanged_since` also requires `changed > 0`. A ctime of 0 is not a time.
+- **S2:**
+  - An editor edit or save whose answer names no file (no `{"path": …}`) and gives no save_as target takes EVERY named file of that conversation out of the hand-over. It cannot say which tab it changed, so it is taken to have changed any of them.
+  - A read whose answer says `"modified": true` hands nothing over. A read answer with no `modified` field stays as it is until 4c says whether the OS's `read` carries it.
+- **S3:** a "look" is an explicit (app, action) pair:
+  - the editor's open, read, show, find, find-next and find-prev;
+  - the shell twin's editor_open, editor_read, files_stat, files_go, files_view and files_list.
+  The same action name in any other app is not a look.
+- **S4:** noted, not built. The Mind and the desktop share one host on 520 and 561, so their clocks agree. Revisit if they ever run apart; 4c can add `now` to files_stat.
+- **Quoted text (optional, taken in part):** ~~~ fences, a 4-space or tab-indented line, and everything after an "On … wrote:" line or a line starting "From:". A Telegram forward has no header and stays undetectable; noted.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- `changed > 0` dropped;
+- the pathless edit marking nothing;
+- a modified read accepted;
+- `open` in a non-editor app taken as a look;
+- each new quoted form.

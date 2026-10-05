@@ -15296,3 +15296,20 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
 **Also checked (no change expected):**
 - the Mind's `grant_request` carries no `run_id` key (harness.rs builds {kind, request_id, capability, query} only);
 - no Mind `request` offers the card's four labels.
+
+**E.GRANT2b — prereg AMENDED before that code: the review of ae399d4^..563d314 (`SAFE WITH CHANGES`, no High or Medium) folds in.**
+
+The review's three Lows:
+- **L1 (a card for a search that never runs):** `plans_from_handed` admits google, ddg, wikipedia and wiki, but no plugin runs google or ddg, and `search` with the web_search plugin disabled or no searcher answers "(search not configured)". The grant path is taken only for `search` / `web_search`, with the web_search plugin's handler present (`handler_for_tool(tool).is_some()`) and a searcher configured. Test: google and ddg under Granted send no GrantAsk; nor does `search` with the plugin disabled, or with no searcher.
+- **L2 (Wikipedia under a "search the web" grant):** follows from L1's rule: wikipedia and wiki never take the grant path. Add both to `a_search_grant_covers_searches_only`.
+- **L3 (a poisoned lock reads as "not blocked"):** `RECENT_GRANT_CARDS` is read with `unwrap_or_else(PoisonError::into_inner)` at both sites, so a poisoned lock still counts. Test: poison it, then a fourth card within ten minutes is still refused.
+
+The review's Info items, done:
+- door-versus-proxy tests for a `localhost` proxy, in Rust and JS;
+- JS reads `localhost.` (trailing dot) as localhost, as Rust already does through `url_host_port`;
+- a direct test that `research` never takes the grant path.
+
+**Added kill criteria:**
+- K5: any of google, ddg, wikipedia, wiki, `search` with the plugin disabled, or `search` with no searcher sends a GrantAsk or uses an always grant.
+- K6: with the lock poisoned, a card past the ten-minute cap is asked.
+- K7: a mutant of each new condition survives: the tool names, the handler check, the searcher check, either poison site.

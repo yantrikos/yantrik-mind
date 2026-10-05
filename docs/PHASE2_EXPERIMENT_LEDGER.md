@@ -13707,3 +13707,30 @@ Plus a test that the tripwire still runs on a pass-through query (through `guard
   - K12's first run died of a compiler panic. It was rerun and killed by a test failure.
   - K6 (negation) and K15 (the model's path) are superseded by the N5 and N3 mutants.
 - **Not done:** the reviewer's re-check; 520 (blocked until approval and #654).
+
+## E.EGRESS3e — PREREG: the third pass's A1–A4, quoted text, and the member-scope key
+
+Verdict on 6dee92b: SAFE WITH CHANGES. N1, N3, N5 and 3c fixed; N2, N4 and N6 partial. A1 before 520; A2 and A3 before any public nightly.
+
+- **A1 (crash):** `path_tokens` takes a path's start from the trimmed path itself, not from the word before `:` was trimmed. `sentence_around` slices only through `str::get`, and a slice that is not a character boundary hands nothing over. "Read :~/résumé" must not panic, and must leave the hand-over usable afterwards.
+- **A2 (url):**
+  - A url that still changes after the last decoding round is refused.
+  - `%2f`, `%5c` and `%7e` stay markers on the decoded text.
+  - Every path segment of the url goes through `is_path_word`.
+  - Five rounds of encoding /home/p/x into the PATH must be refused.
+- **A3 (writes):**
+  - The test is the file's ctime: `files_stat`'s `changed` (yantrik-os #657, unix seconds) must be earlier than the second the person named the file.
+  - `hand_over_checked` requires `changed` as well as `real` and `via_link`. Missing means nothing is kept (fail closed; nothing until #654 and #657 are on the OS).
+  - Before a web tool's arguments are planned, every handed-over file is stat'ed again. One that changed since it was named is dropped and never comes back.
+  - The text match stays as a backstop, widened: any tool except a look (os_describe, web tools) and the editor's and Files' read-only actions, whose arguments mention a named file. That covers agent_input, the terminal and files apps, blender's run_python, and anything else.
+- **A4:** a hard link (`exists: "unknown"`, `reason: "hard_link"`) is not handed over. Test only; the code already refuses it.
+- **Quoted text (optional, taken):** a path on a line starting with `>`, inside a ``` fence, or after "Forwarded message" or "Original Message" is never handed over.
+- **Member scope:** the hand-over key includes the turn's output scope and its shared flag as well as the owner. A member-scoped turn under the primary's name (YM_HARNESS_SCOPE=member) cannot use the primary's hand-over.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- A1: the start taken before trimming, and a byte slice in `sentence_around`;
+- A2: the last-round refusal, the encoded markers, and the path-segment check;
+- A3: `changed` ignored, `changed` missing accepted, `<` loosened to "any", no re-check before a web tool, and the backstop narrowed back to shell actions;
+- A4: the hard-link answer;
+- quoted text: the `>` line, the fence, and the forwarded marker;
+- the key without scope.

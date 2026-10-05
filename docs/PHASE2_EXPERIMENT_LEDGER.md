@@ -14038,3 +14038,40 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
   - `deploy/net_guard.test.js` in plain Node: private ranges, mixed-address hosts, lookup failure.
   - The browser routing itself is not run here (no Playwright on any box I can reach).
 - **Mutants:** Rust: hop unchecked, the client following redirects, not pinned, a relative redirect resolved wrongly. JS: 192.168 public, lookup failing open, one public address being enough. All killed.
+
+## E.EGRESS5 — PREREG (scope for review): every outbound tool behind one boundary (eighth pass, HIGH, pre-existing)
+
+**The inventory (2026-10-05, read-only sweep):**
+- About 45 tool paths reach the network; `egress::classify` knows about 15, and clean planning covers fewer.
+- Clean planning runs only in `guards::pre`, so it applies to the agent loops and to nothing else.
+- The research sub-agent (mind-core lib.rs:837) gets web_search, fetch, recall (shared scope), INBOX (the last 10 messages) and GitHub. Its own queries and URLs pass only the credential check, so mail it read can be written into a search or a fetch.
+- Model-written outbound text with no planning at all:
+  - research{query}, deals{query} (plus the profile's gender prepended), watch_price{query};
+  - learn_about{url}, track_subject{subject}, see_page{url}, news{topic}, track_news{topic}, analyze{ticker};
+  - weather{place}, crypto/stock{symbol}, quote{symbols}, github_repo_items{repo}, set_monitor{url/target};
+  - watch/copy_trade{url}, surf{handles}, run_skill{target,url};
+  - `mcp.*` (the whole args object).
+- `work_radar` mines topics from the last 160 person messages and researches them on the web.
+
+**Phase 1 (this pass), the boundary:**
+1. **One table of outbound tools** (name → connector, and each outbound field's kind: query, url, token, or none), read by `classify`. Every tool with network reach is in the table or in a LOCAL list; nothing is left unclassified.
+2. **A source-scan test:** every string arm of `run_agent_tool_as`'s match, every registry tool name, and every recipe-host tool is in the table or in LOCAL. A new tool fails the build until it is placed.
+3. **Clean planning extended to every table tool's fields, in `guards::pre`:**
+   - query fields: the span rule (the person's words or a handed-over file), otherwise the planner;
+   - url fields: the fetch planner (candidates, budgets);
+   - token fields (a city, a ticker, a coin, a repo): passed only as a span of the person's words or a handed-over file, otherwise the planner.
+   - `mcp.*` read tools: their string args are cleaned as query fields. Writes keep their existing per-call approval.
+4. **The research sub-agent:** INBOX and recall come out of its tool list, and `research`'s query is cleaned as in 3. A sub-agent that holds no private context cannot write it out.
+5. **`deals`:** the gender prepend from people profiles is removed. It puts a private attribute into a search query, against Pranab's "your words + named files".
+
+**For Pranab (product decisions, not built until he says):**
+- `work_radar` sends topics mined from the person's messages to the web by design. Keep it (as an explicit opt-in), or refuse it under the egress policy?
+- The direct CLI paths (`ym …` commands the person types) are the person's own words and are not cleaned. Confirm.
+
+**Kill criteria (phase 1):** a compiling mutant killed for each of:
+- a table tool missing (the scan test);
+- a query field passing unplanned;
+- a url field passing unplanned;
+- a token not from the person passing;
+- inbox or recall back in the sub-agent;
+- the gender prepend back.

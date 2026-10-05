@@ -29,7 +29,31 @@ struct Store {
     texts: Vec<(String, String)>,
     /// E.ERASE4 (the redact review's note 2): the person's own messages in this conversation, newest
     /// last, canonical -- a forget question quotes only words the person already put here.
-    said: Vec<String>,
+    said: Vec<Said>,
+}
+
+/// E.ERASE4 / E.EGRESS4c: one message of the person's, as written, canonical, and when.
+#[derive(Clone)]
+struct Said {
+    text: String,
+    canon: String,
+    at: u64,
+}
+
+/// E.EGRESS4c: a message this short ("Continue.", "go on") sets no task of its own.
+const TASK_MIN_WORDS: usize = 4;
+
+/// E.EGRESS4c: the text of a message without its quoted, fenced or forwarded parts.
+fn own_words(text: &str) -> String {
+    let mut out = String::new();
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        if !in_quoted_text(text, offset) {
+            out.push_str(line);
+        }
+        offset += line.len();
+    }
+    out
 }
 
 /// E.ERASE4: how many of the person's messages a conversation keeps for that check.
@@ -143,9 +167,9 @@ impl HandedOver {
         let store = self.stores.entry(key.to_string()).or_default();
         store.fresh(now);
         // E.ERASE4: the person's message, once (both loops note the same turn).
-        let said = crate::erase_redact::canon(user_text);
-        if store.said.last() != Some(&said) {
-            store.said.push(said);
+        let canon = crate::erase_redact::canon(user_text);
+        if store.said.last().map(|s| &s.canon) != Some(&canon) {
+            store.said.push(Said { text: user_text.to_string(), canon, at: now });
             let over = store.said.len().saturating_sub(SAID_MAX);
             store.said.drain(..over);
         }
@@ -257,7 +281,36 @@ impl HandedOver {
     /// E.ERASE4: has the person put these exact words (canonical) in this conversation?
     pub(crate) fn person_said(&self, key: &str, text: &str) -> bool {
         let needle = crate::erase_redact::canon(text);
-        !needle.is_empty() && self.stores.get(key).is_some_and(|s| s.said.iter().any(|m| m.contains(&needle)))
+        !needle.is_empty() && self.stores.get(key).is_some_and(|s| s.said.iter().any(|m| m.canon.contains(&needle)))
+    }
+
+    /// E.EGRESS4c (narrowed by the eighth pass): on a turn whose message is too short to set a task
+    /// ("Continue."), the message that DID set it -- the latest earlier one of the person's with
+    /// [`TASK_MIN_WORDS`] or more, said within [`HANDED_OVER_MS`], without its quoted parts. One
+    /// message, never the whole history.
+    pub(crate) fn task_message(&self, key: &str, user_text: &str, now: u64) -> Option<String> {
+        if words_of(user_text).split_whitespace().count() >= TASK_MIN_WORDS {
+            return None;
+        }
+        let store = self.stores.get(key)?;
+        let said = store.said.iter().rev().find(|s| words_of(&s.text).split_whitespace().count() >= TASK_MIN_WORDS)?;
+        if now.saturating_sub(said.at) >= HANDED_OVER_MS {
+            return None;
+        }
+        let own = own_words(&said.text);
+        (!own.trim().is_empty()).then_some(own)
+    }
+
+    /// E.EGRESS4c: an erase takes every kept message holding the erased words out of every
+    /// conversation -- "forget my PIN 4821" must not stay a query source.
+    pub(crate) fn purge_said(&mut self, text: &str) {
+        let needle = crate::erase_redact::canon(text);
+        if needle.trim().is_empty() {
+            return;
+        }
+        for store in self.stores.values_mut() {
+            store.said.retain(|s| !s.canon.contains(&needle));
+        }
     }
 
     /// The file names and paths named in this conversation -- never to leave inside a query.
@@ -766,8 +819,10 @@ impl ConversationEngine {
         let sys = "You choose which ONE web page to fetch next for the person's request, from a numbered \
             list of addresses that web searches returned. Prefer a page not fetched yet that best serves \
             the request. You know nothing else about the person. Output ONLY {\"pick\": <number>}.";
+        let task = if key.is_empty() { None } else { self.handed_over.lock().ok().and_then(|h| h.task_message(key, user_text, Self::now_ms())) };
+        let task_part = task.map_or_else(String::new, |t| format!("The task they set earlier in this conversation: {t}\n"));
         let user = format!(
-            "Person's request: {user_text}\n{handed_part}\nAlready fetched this turn:\n{done}\n\nAddresses:\n{list}\nOutput ONLY {{\"pick\": <number>}}."
+            "Person's request: {user_text}\n{task_part}{handed_part}\nAlready fetched this turn:\n{done}\n\nAddresses:\n{list}\nOutput ONLY {{\"pick\": <number>}}."
         );
         let cfg = GenerationConfig { max_tokens: 40, temperature: 0.0, seed: 0, ..GenerationConfig::default() };
         let text = self
@@ -895,6 +950,8 @@ impl ConversationEngine {
         // E.EGRESS3b (the review's H1): it leaves as written only as ONE contiguous run of whole words
         // of ONE source; anything assembled from several is the planner's to write.
         let web_query = plans_from_handed(tool);
+        // E.EGRESS4c: on a "Continue." turn, the message that set the task.
+        let task = if key.is_empty() { None } else { self.handed_over.lock().ok().and_then(|h| h.task_message(key, user_text, Self::now_ms())) };
         let (handed, named) = if key.is_empty() {
             (Vec::new(), Vec::new())
         } else {
@@ -913,6 +970,9 @@ impl ConversationEngine {
                 // never of web text -- an injected page could list `site:evil.com alice` / `... bob`.
                 // The planner still sees the web text and may follow a lead from it.
                 let mut sources: Vec<&str> = vec![user_text];
+                if let Some(t) = &task {
+                    sources.push(t);
+                }
                 sources.extend(handed.iter().map(String::as_str));
                 if query_is_a_span_of_one(q, &sources, &named) {
                     // The review's L3: the query, and nothing else the model put beside it.
@@ -950,7 +1010,8 @@ impl ConversationEngine {
         } else {
             String::new()
         };
-        let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n{handed_part}{web_part}\nOutput ONLY the JSON args.");
+        let task_part = task.as_deref().map_or_else(String::new, |t| format!("The task they set earlier in this conversation: {t}\n"));
+        let user = format!("Tool: {tool}\nArgument shape: {schema}\nUser's literal request: {user_text}\n{task_part}{handed_part}{web_part}\nOutput ONLY the JSON args.");
         let cfg = GenerationConfig {
             max_tokens: 300,
             ..GenerationConfig::default()

@@ -489,6 +489,32 @@ mod tests {
         assert_ne!(d("https://evil.com/"), d("https://evil.co.uk/"));
     }
 
+    /// E.EGRESS4c: the task message is a span source, never a "the person typed it" exemption -- a
+    /// stored private value in an earlier message is still caught by the tripwire on "Continue.".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_task_message_does_not_exempt_from_the_tripwire() {
+        use mind_governance::egress::EgressBroker;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        mem.remember_as_belief(mind_types::BeliefAssertion {
+            statement: "Alice's email is alice.private@example.com".into(),
+            polarity: 1.0,
+            weight: 1.0,
+            source_event: Some("test".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        let pool = mind_inference::InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"nothing"}"#)) as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+            .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+        let id = TurnIdentity::primary();
+        let key = ConversationEngine::handed_key(&id);
+        eng.handed_over.lock().unwrap().note_named(&key, "Look up who alice.private@example.com works for", None, ConversationEngine::now_ms());
+        let state = Mutex::new(GuardState::default());
+        let v = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "alice.private@example.com"}), "t").await;
+        assert!(matches!(v, PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, .. }), "the task message exempted a stored private value");
+    }
+
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_web_text_a_query_may_use_is_capped() {

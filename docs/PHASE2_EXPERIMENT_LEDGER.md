@@ -14103,3 +14103,34 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
   - `the_fetch_budget_is_the_turns_and_the_domains`: two fetches in a first loop; a second loop of the same turn, with a fresh guard state, is refused.
   - `the_budget_counts_registrable_domains`: subdomains, co.uk, a trailing dot, the port and case, IDN against punycode, an IP.
 - **Mutants:** the count per loop; the host compared raw; a raw string host. All killed. "Trailing dot kept" is EQUIVALENT (the url parser or psl already drops it); the trim is kept as belt-and-braces.
+
+## E.EGRESS4c — PREREG (narrowed per the eighth pass): the task message on "Continue." turns
+
+R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and searched for "continue". The reviewer allows a narrowed fix:
+- **Which message:** when this turn's message has fewer than 4 words, the turn also has the person's TASK MESSAGE: the latest earlier message of theirs in this conversation with 4 or more words. Only that one, not the 50 kept.
+- **Quoted text:** its quoted, fenced and forwarded parts are removed (`in_quoted_text`).
+- **Expiry:** 12 hours from when it was said; older is ignored.
+- **Erased text:** an erase (`erase_everywhere`) purges every kept message holding the erased text (canonical), so "forget my PIN 4821" cannot become a source.
+- **Uses:** it is a span source for a query, and the planners (query and fetch) are shown it as "the task they set earlier".
+- **Not used for:** the person's-URL pass-through, which stays this message's only. The tripwire's "the person typed it" exemption also stays on this message alone.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- every kept message used, not just the task message;
+- quoted text kept;
+- the 12 h limit off;
+- erased text not purged;
+- a 4+ word current message still adding the task message;
+- the tripwire given the task message.
+
+## E.EGRESS4c — RESULT: built as preregistered (narrowed); 7 of 7 mutants killed
+
+- **Kept messages:** `said` now keeps each person message as written, canonical, and when.
+- **`task_message`:** on a turn of fewer than 4 words, the latest earlier person message with 4+ words, within 12 h, through `own_words` (its quoted, fenced and forwarded lines removed).
+- **Purge:** `purge_said` runs first in `erase_everywhere`, in every conversation.
+- **Use:** the task message is a span source for queries and is shown to both planners as "the task they set earlier in this conversation". It is NOT used for the person's-URL pass-through or the tripwire.
+- **Tests:**
+  - `a_continue_turn_has_the_message_that_set_the_task`: latest only, quoted text out, a long turn adds nothing, 12 h, purge.
+  - `a_continue_turn_searches_from_the_task_message`: a task-span query passes; an older message's span goes to the planner; the planner sees only the task message.
+  - `the_task_message_does_not_exempt_from_the_tripwire`: a stored private value in the task message is still refused on "Continue.".
+  - The Erase test now checks the erased words are no longer a person message.
+- **Mutants:** every kept message used; quoted text kept; no 12 h limit; the erase not purging (first SURVIVED: no test erased and then checked; the Erase test now does, and it is killed); the purge doing nothing; a long turn still adding the task; the tripwire given the task. All killed.

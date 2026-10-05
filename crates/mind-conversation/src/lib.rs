@@ -11073,6 +11073,10 @@ WINDOW: all-time, latest 200
     /// what the after-count found. "Gone" is said only when every count is 0 -- the operator verb
     /// this replaces answered "None remain" with every copy still on disk.
     pub(crate) async fn erase_everywhere(&self, needle: &str) -> String {
+        // E.EGRESS4c: the erased words stop being a query source in every conversation.
+        if let Ok(mut h) = self.handed_over.lock() {
+            h.purge_said(needle);
+        }
         let lc = needle.trim().to_ascii_lowercase();
         let store = match self.memory.erase_literal(needle, true).await {
             Ok(r) => r,

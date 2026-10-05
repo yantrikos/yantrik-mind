@@ -19529,6 +19529,9 @@ async fn a_pressed_erase_asks_the_desktop_to_erase_its_copies() {
     assert_eq!(redacts[0].1, vec![crate::erase_redact::needle(ERASE_SECRET)]);
     assert!(!format!("{redacts:?}").contains(ERASE_SECRET), "the words travelled");
     assert!(reply.starts_with("Erased") && reply.contains("gone from this conversation (3 place(s))"), "{reply}");
+    // E.EGRESS4c: the erased words are no longer a message of the person's a query could draw on.
+    let key = ConversationEngine::handed_key(&TurnIdentity::primary());
+    assert!(!conv.handed_over.lock().unwrap().person_said(&key, ERASE_SECRET), "the erased words stayed a query source");
     for (tag, answer) in [("redact-keep", Some("Keep")), ("redact-none", None), ("redact-typed", Some("erase"))] {
         let (_db, _log, conv) = erase_engine_on_desktop(tag, false).await;
         let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, answer, accepted.clone(), true).await;
@@ -19696,4 +19699,67 @@ fn every_tool_is_on_one_side_of_the_egress_boundary() {
     // And no name on both sides.
     let both: Vec<&&str> = LOCAL_TOOLS.iter().filter(|n| mind_governance::egress::outbound(n).is_some()).collect();
     assert!(both.is_empty(), "on both sides: {both:?}");
+}
+
+/// E.EGRESS4c (narrowed): on a short turn, the ONE message that set the task -- the latest earlier one
+/// with 4+ words, within 12 h, without its quoted parts; none on a turn that sets its own; purged by
+/// an erase.
+#[test]
+fn a_continue_turn_has_the_message_that_set_the_task() {
+    use crate::egress_planning::{HandedOver, HANDED_OVER_MS};
+    let k = "primary|c1";
+    let mut h = HandedOver::default();
+    h.note_named(k, "Research prior art on typed meaning graphs", None, 1_000);
+    h.note_named(k, "Now look at semantic token compression instead\n> forwarded: my bank PIN is 4821", None, 2_000);
+    h.note_named(k, "Continue.", None, 3_000);
+    let task = h.task_message(k, "Continue.", 3_000).expect("no task message on a Continue turn");
+    assert!(task.contains("semantic token compression"), "not the latest task: {task}");
+    assert!(!task.contains("typed meaning graphs"), "an older message came along: {task}");
+    assert!(!task.contains("4821"), "quoted text came along: {task}");
+    assert_eq!(h.task_message(k, "Search for semantic token compression papers", 3_000), None, "a turn with its own task got another");
+    assert_eq!(h.task_message(k, "Continue.", 2_000 + HANDED_OVER_MS), None, "a task older than 12 h");
+    h.purge_said("semantic token compression");
+    let after = h.task_message(k, "Continue.", 3_000).unwrap_or_default();
+    assert!(!after.contains("semantic token compression"), "an erased message stayed a source: {after}");
+}
+
+/// E.EGRESS4c through the planner: on "Continue." a query that is a span of the task message leaves as
+/// written, and the planner is shown the task; a span of an OLDER message is the planner's to write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_continue_turn_searches_from_the_task_message() {
+    use mind_governance::egress::EgressBroker;
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    impl LLMBackend for Rec {
+        fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: r#"{"query":"planned"}"#.into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "rec"
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pool = InferencePool::new(Arc::new(Rec(seen.clone())) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let key = "primary|c1";
+    {
+        let mut h = conv.handed_over.lock().unwrap();
+        h.note_named(key, "Find prior art on typed meaning graphs", None, ConversationEngine::now_ms());
+        h.note_named(key, "Research semantic token compression for language models", None, ConversationEngine::now_ms());
+        h.note_named(key, "Continue.", None, ConversationEngine::now_ms());
+    }
+    let out = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({"query": "semantic token compression"}), "", &[], &[], key).await;
+    assert_eq!(out, Ok(serde_json::json!({"query": "semantic token compression"})), "a span of the task message was rewritten");
+    let older = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({"query": "typed meaning graphs"}), "", &[], &[], key).await;
+    assert_eq!(older, Ok(serde_json::json!({"query": "planned"})), "a span of an older message passed");
+    let prompt = seen.lock().unwrap().last().cloned().unwrap_or_default();
+    assert!(prompt.contains("The task they set earlier in this conversation: Research semantic token compression"), "{prompt}");
+    assert!(!prompt.contains("typed meaning graphs"), "the planner saw more than the task message: {prompt}");
 }

@@ -37,8 +37,54 @@ const HANDED_FILES_MAX: usize = 8;
 const PLANNER_HANDED_CAP: usize = 8_000;
 const PLANNER_WEB_CAP: usize = 4_000;
 
-/// E.EGRESS3b: words that make a mention of a path a refusal, not a hand-over ("don't touch ~/.ssh").
-const NEGATIONS: [&str; 8] = ["don't", "dont", "do not", "never", "not ", "without", "except", "avoid"];
+/// E.EGRESS3d (the re-review's N5): a path is handed over only by a sentence that asks for it -- a
+/// positive verb before it -- and that negates nothing. Matched as whole words of normalised text
+/// (apostrophes of either kind, every other punctuation mark a space).
+const HAND_OVER_VERBS: [&str; 15] = [
+    "read", "open", "use", "see", "here s", "here is", "attached", "review", "study", "summarise", "summarize",
+    "analyse", "analyze", "check", "look at",
+];
+const NEGATIONS: [&str; 21] = [
+    "don t", "dont", "do not", "never", "not", "no", "without", "except", "avoid", "ignore", "skip",
+    "shouldn t", "should not", "stay out", "off limits", "can t", "cannot", "won t", "mustn t", "doesn t",
+    "isn t",
+];
+
+/// E.EGRESS3d: the sentence around byte `at` (a char boundary: `path_mentions` cuts at characters),
+/// bounded by ". ", "!", "?" or a newline -- and the part of it before the path.
+fn sentence_around(text: &str, at: usize, len: usize) -> (&str, &str) {
+    let is_end = |i: usize| {
+        let rest = &text[i..];
+        rest.starts_with(". ") || rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('\n')
+    };
+    let start = text[..at].char_indices().rev().find(|(i, _)| is_end(*i)).map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+    let from = (at + len).min(text.len());
+    let end = text[from..].char_indices().find(|(i, _)| is_end(from + i)).map(|(i, _)| from + i).unwrap_or(text.len());
+    (&text[start..end], &text[start..at])
+}
+
+/// E.EGRESS3d: text as whole words, lower case, every apostrophe (' and ’ alike) and all other
+/// punctuation a space -- "don’t" and "don't" are both "don t".
+fn words_of(s: &str) -> String {
+    format!(" {} ", norm(s))
+}
+
+/// E.EGRESS3d (N5, N2): does this mention of `path` hand it over? Lowercasing happens after the
+/// slicing, never before (N2: "ẞ" lowercases to a different byte length).
+fn hands_over(text: &str, at: usize, path: &str) -> bool {
+    let (sentence, before) = sentence_around(text, at, path.len());
+    let (sentence, before) = (words_of(sentence), words_of(before));
+    HAND_OVER_VERBS.iter().any(|v| before.contains(&format!(" {v} ")))
+        && !NEGATIONS.iter().any(|n| sentence.contains(&format!(" {n} ")))
+}
+
+/// E.EGRESS3d (N5): a dotfile, a dot-folder, or a key-like name is never handed over.
+fn is_secret_like(p: &str) -> bool {
+    let name = p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase();
+    p.split('/').any(|seg| seg.starts_with('.') && seg != "." && seg != "..")
+        || name.starts_with("id_")
+        || [".pem", ".key", ".p12", ".pfx", ".kdbx"].iter().any(|e| name.ends_with(e))
+}
 
 impl Store {
     fn fresh(&mut self, now: u64) {
@@ -54,13 +100,11 @@ impl HandedOver {
     pub(crate) fn note_named(&mut self, key: &str, user_text: &str, home: Option<&str>, now: u64) {
         let store = self.stores.entry(key.to_string()).or_default();
         store.fresh(now);
-        let lower = user_text.to_lowercase();
         for (at, p) in crate::desktop::path_mentions(user_text) {
-            if p.ends_with('/') || p.split('/').any(|seg| seg == "..") {
+            if p.ends_with('/') || p.split('/').any(|seg| seg == "..") || is_secret_like(p) {
                 continue;
             }
-            let before: String = lower[..at.min(lower.len())].chars().rev().take(24).collect::<Vec<_>>().into_iter().rev().collect();
-            if NEGATIONS.iter().any(|n| before.contains(n)) {
+            if !hands_over(user_text, at, p) {
                 continue;
             }
             let abs = crate::desktop::absolute(p, home);
@@ -106,6 +150,27 @@ impl HandedOver {
             }
         }
         true
+    }
+
+    /// E.EGRESS3d (N4): a terminal command or Files action whose text mentions a named file -- its
+    /// path or its name -- is taken to have written it. Returns the files so marked.
+    pub(crate) fn note_written_if_mentioned(&mut self, key: &str, text: &str) -> Vec<String> {
+        let Some(store) = self.stores.get_mut(key) else { return Vec::new() };
+        let lower = text.to_lowercase();
+        let hit: Vec<String> = store
+            .named
+            .iter()
+            .map(|(p, _)| p.clone())
+            .filter(|p| {
+                let name = p.rsplit('/').next().unwrap_or(p);
+                lower.contains(&p.to_lowercase()) || (!name.is_empty() && lower.contains(&name.to_lowercase()))
+            })
+            .collect();
+        for p in &hit {
+            store.texts.retain(|(t, _)| t != p);
+            store.mind_written.insert(p.clone());
+        }
+        hit
     }
 
     /// Each handed-over file's text, as separate sources.
@@ -169,7 +234,8 @@ fn is_path_word(w: &str, named: &[String]) -> bool {
     }
     let lower = w.to_ascii_lowercase();
     let web = lower.starts_with("http://") || lower.starts_with("https://");
-    let drive = w.len() >= 3 && w.as_bytes()[0].is_ascii_alphabetic() && &w[1..3] == ":\\";
+    // E.EGRESS3d (N1): by characters -- a byte slice panicked on "A–Z".
+    let drive = w.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && w.get(1..3) == Some(":\\");
     lower.starts_with('~')
         || lower.starts_with("./")
         || lower.starts_with("../")
@@ -183,12 +249,46 @@ fn is_path_word(w: &str, named: &[String]) -> bool {
 
 /// E.EGRESS3b (M1): does a url carry a path on this machine anywhere in it -- `file:`, `~/`, a home
 /// or system folder, an encoded slash, or a named file? A web address is checked as a whole.
-fn url_holds_path(url: &str, named: &[String]) -> bool {
-    let lower = url.to_ascii_lowercase();
-    ["file:", "~/", "/home/", "/root/", "/etc/", "/var/", "/users/", "/tmp/", "%2f", "%5c", ":\\"]
-        .iter()
-        .any(|m| lower.contains(m))
-        || named.iter().any(|n| !n.is_empty() && lower.contains(&n.to_ascii_lowercase()))
+pub(crate) fn url_holds_path(url: &str, named: &[String]) -> bool {
+    // E.EGRESS3d (N6): decoded until it stops changing -- %252F is %2F is /.
+    let mut decoded = url.to_string();
+    for _ in 0..4 {
+        let next = percent_decode(&decoded);
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    let lower = decoded.to_lowercase();
+    let marker = [
+        "file:", "~/", "~\\", "/home/", "/root/", "/etc/", "/var/", "/users/", "/tmp/", "/mnt/", "/opt/", "/srv/",
+        "/media/", "/run/", ":\\",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
+    // A query or fragment value that is itself a path ("?f=./notes.md", "#../x").
+    let after = lower.split_once(['?', '#']).map(|(_, rest)| rest).unwrap_or("");
+    let value_is_path = after.split(['&', '=', '#']).any(|v| !v.is_empty() && is_path_word(v, &[]));
+    marker || value_is_path || named.iter().any(|n| !n.is_empty() && lower.contains(&n.to_lowercase()))
+}
+
+/// E.EGRESS3d (N6): one round of percent-decoding (bytes, then UTF-8, lossily).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16)) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// E.EGRESS3b: does a text carry a path, or a named file's path or name, in any of its words?
@@ -290,6 +390,71 @@ impl CleanArgsFailure {
 }
 
 impl ConversationEngine {
+    /// E.EGRESS3b: whose hand-over this turn reads and writes -- the person, in this desktop chat.
+    pub(crate) fn handed_key(id: &TurnIdentity) -> String {
+        let chat = crate::TURN_CONVERSATION.try_with(|c| c.clone()).unwrap_or_default();
+        format!("{}|{chat}", id.owner)
+    }
+
+    /// E.EGRESS3: keep text the editor read from a file the person named, as a permitted query source.
+    pub(crate) fn note_handed_over(&self, key: &str, editor_path: &str, text: &str) {
+        let home = self.person_home();
+        if let Ok(mut h) = self.handed_over.lock() {
+            if h.note_read(key, editor_path, text, home.as_deref(), Self::now_ms()) {
+                eprintln!("[egress] {editor_path}: handed over by the person, {} chars kept as a query source", text.chars().count());
+            }
+        }
+    }
+
+    /// E.EGRESS3b: the Mind saved to `path` -- a named file it wrote is no longer the person's text.
+    pub(crate) fn note_mind_written(&self, key: &str, path: &str) {
+        let home = self.person_home();
+        if let Ok(mut h) = self.handed_over.lock() {
+            h.note_written(key, path, home.as_deref());
+        }
+    }
+
+    /// E.EGRESS3d (N4): every way the Mind writes takes a named file out of the hand-over -- an editor
+    /// edit or save (the tab's file as the editor reports it, and a save_as target), and a terminal
+    /// command or Files action that mentions a named file. Both loops call this after `guards::post`.
+    pub(crate) fn note_writes(&self, id: &TurnIdentity, tool: &str, args: &serde_json::Value, obs: &str) {
+        let key = Self::handed_key(id);
+        if crate::desktop::changes_editor_text(tool, args) {
+            if let Some(path) = crate::desktop::reported_path(obs) {
+                self.note_mind_written(&key, &path);
+            }
+            if let Some(p) = crate::desktop::save_path(tool, args) {
+                self.note_mind_written(&key, &p);
+            }
+        }
+        let writes_outside_the_editor = crate::desktop::act_target(tool, args).is_some_and(|(app, action)| {
+            app == crate::desktop::TWIN_HOST
+                && (action == "agent_run"
+                    || (action.starts_with("files_") && !matches!(action.as_str(), "files_stat" | "files_go" | "files_view" | "files_list")))
+        });
+        if writes_outside_the_editor {
+            if let Ok(mut h) = self.handed_over.lock() {
+                for p in h.note_written_if_mentioned(&key, &args.to_string()) {
+                    eprintln!("[egress] {p}: touched by a {tool} write -- no longer the person's text");
+                }
+            }
+        }
+    }
+
+    /// E.EGRESS3c (4c's #654): keep an editor's text of a named file only when the desktop vouches
+    /// that the editor's path IS the file -- it exists, is reached through no link, and its real path
+    /// is that path. Anything else, an unreachable desktop included, keeps nothing.
+    pub(crate) async fn hand_over_checked(&self, key: &str, editor_path: &str, text: &str, id: &TurnIdentity) {
+        let args = serde_json::json!({"app": crate::desktop::TWIN_HOST, "action": "files_stat", "args": {"path": editor_path}});
+        let answer = self.run_agent_tool_as(crate::desktop::ACT, &args, id).await;
+        let home = self.person_home();
+        let same = |real: &str| crate::desktop::absolute(real, home.as_deref()) == crate::desktop::absolute(editor_path, home.as_deref());
+        match crate::desktop::files_stat_real(&answer) {
+            Some((true, false, real)) if same(&real) => self.note_handed_over(key, editor_path, text),
+            other => eprintln!("[egress] {editor_path}: not handed over -- the desktop did not vouch for it ({other:?})"),
+        }
+    }
+
     /// ARCH-3 slice 2 — EGRESS-CLEAN TOOL PLANNING. For an outbound tool whose argument is a
     /// self-contained query/url the model can build from the LITERAL request, RE-AUTHOR the argument
     /// in a SEPARATE, STATELESS model call that never saw the private grounding, working-set, people
@@ -316,30 +481,6 @@ impl ConversationEngine {
     /// them the article. The pass-through also restores DETERMINISM, which the loop's repeat-guard
     /// depends on: a re-authoring model call gives the same tool call a different signature each
     /// time, so the guard never fires on exactly the repeats this failure produces.
-    /// E.EGRESS3b: whose hand-over this turn reads and writes -- the person, in this desktop chat.
-    pub(crate) fn handed_key(id: &TurnIdentity) -> String {
-        let chat = crate::TURN_CONVERSATION.try_with(|c| c.clone()).unwrap_or_default();
-        format!("{}|{chat}", id.owner)
-    }
-
-    /// E.EGRESS3: keep text the editor read from a file the person named, as a permitted query source.
-    pub(crate) fn note_handed_over(&self, key: &str, editor_path: &str, text: &str) {
-        let home = self.person_home();
-        if let Ok(mut h) = self.handed_over.lock() {
-            if h.note_read(key, editor_path, text, home.as_deref(), Self::now_ms()) {
-                eprintln!("[egress] {editor_path}: handed over by the person, {} chars kept as a query source", text.chars().count());
-            }
-        }
-    }
-
-    /// E.EGRESS3b: the Mind saved to `path` -- a named file it wrote is no longer the person's text.
-    pub(crate) fn note_mind_written(&self, key: &str, path: &str) {
-        let home = self.person_home();
-        if let Ok(mut h) = self.handed_over.lock() {
-            h.note_written(key, path, home.as_deref());
-        }
-    }
-
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn egress_clean_args(
         &self,

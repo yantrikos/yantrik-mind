@@ -340,6 +340,8 @@ impl Bus for EngineBus {
         // ONE definition of "worked": the five-way outcome, recorded and classified in `post`.
         // An empty result is the tool WORKING; the capsule sees it as a barren step, not a break.
         let verdict = crate::guards::post(&self.engine, &self.guard_state, tool, &out).await;
+        // E.EGRESS3d (N4): a write here makes a named file the Mind's, as in the agent loop.
+        self.engine.note_writes(&self.identity, tool, &clean, &out);
         // ── REAL OUTCOME + BRIER LOSS → the bandit update happens inside `post`; here we persist
         // the pair so calibration is auditable per call and bucketable by confidence later.
         {
@@ -1186,6 +1188,40 @@ mod tests {
             pool,
             "JARVIS",
         ))
+    }
+
+    /// E.EGRESS3d (N4): a terminal command on the bounded loop that touches a file the person handed
+    /// over takes it back, as the agent loop's does -- one hook, after `guards::post`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bounded_loop_write_takes_a_named_file_back() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: "os_act".into(),
+            description: "os_act on this computer".into(),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        hub.add_scripted_tool(tool, vec![Ok("Done \u{2014} Yantrik \u{2014} desktop screen\naccepted: True, settled: True".to_string())]).unwrap();
+        let pool = mind_inference::InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("ok")) as Arc<dyn yantrik_ml::LLMBackend>, 1);
+        let conv = Arc::new(
+            ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_mcp(hub)
+                .with_home_dir(Some("/home/p".into())),
+        );
+        let key = ConversationEngine::handed_key(&TurnIdentity::primary());
+        conv.handed_over.lock().unwrap().note_named(&key, "Read ~/mdg/spec-1.md", Some("/home/p"), ConversationEngine::now_ms());
+        conv.note_handed_over(&key, "/home/p/mdg/spec-1.md", "MDG is a graph.");
+        assert_eq!(conv.handed_over.lock().unwrap().texts(&key, ConversationEngine::now_ms()).len(), 1);
+        let bus = EngineBus::new(conv.clone(), TurnIdentity::primary()).for_turn("Read ~/mdg/spec-1.md");
+        let r = bus
+            .call(crate::desktop::ACT, &serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "sed -i s/a/b/ ~/mdg/spec-1.md"}}))
+            .await;
+        assert!(r.is_ok(), "{r:?}");
+        assert!(conv.handed_over.lock().unwrap().texts(&key, ConversationEngine::now_ms()).is_empty(), "a bounded-loop write left the file handed over");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

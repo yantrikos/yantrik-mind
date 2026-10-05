@@ -13677,3 +13677,33 @@ Plus a test that the tripwire still runs on a pass-through query (through `guard
 - `via_link`, a different `real`, and an unreachable `files_stat`.
 
 **Ticket, separate (the reviewer's):** a `web_fetch` URL found in this turn's outside results passes through unchanged (egress_planning ~291). An attacker's page listing `?v=alice`, `?v=bob` and so on lets the model choose, sending log2(N) bits to the attacker. It needs its own design. OPEN.
+
+## E.EGRESS3d + E.EGRESS3c — RESULT: built as preregistered; every kill criterion met by a compiling mutant
+
+- **What changed:**
+  - **N1, N6, N2/N5:** as preregistered, in `egress_planning.rs`.
+  - **N3:** the open hook reads the description's own `path` and `modified`, and requires `settled: True` (`desktop::described_file`, `desktop::settled`).
+  - **N4:** one `note_writes` hook, called by the agent loop and by the bounded loop right after `guards::post`. It marks a named file Mind-written for:
+    - an editor edit or save;
+    - `agent_run`, or a `files_*` action other than stat/go/view/list, whose arguments mention a named path or name.
+  - **3c:** `hand_over_checked` asks `files_stat` and keeps the text only when the answer is `exists: true`, `via_link: false` and `real` equals the editor path.
+- **Removed:** `words_of`'s apostrophe replace. `norm` already makes ' and ’ a space, so a mutant on that line could never be caught.
+- **Fails closed on 520 today:** the df42338 `files_stat` capture (no `real` field) is treated as not vouching, so on an OS without #654 nothing is handed over.
+- **Tests:** 34 hand-over/egress tests, 9 of them new:
+  - loop tests: `the_desktop_must_vouch_for_a_handed_over_file`, `only_a_settled_unmodified_open_of_the_named_file_hands_it_over`, `a_write_outside_the_editor_takes_a_named_file_back`;
+  - `cognitive::a_bounded_loop_write_takes_a_named_file_back`;
+  - units for N1/N2, N5 and N6.
+  - **SYNTHETIC:** the #654 `files_stat` answer in the loop tests (`STAT_OK`) is the df42338 shape plus #654's two fields. It is replaced when 4c's 520 captures arrive (plain file, via a symlinked folder, outside home).
+- **Mutants:** 24 E.EGRESS3d mutants, all compiling, all killed:
+  - N1 byte slice; N2 lowercasing before slicing;
+  - N5 curly apostrophe, shouldn't, no, negation after the path, no verb, dotfile, .pem, id_;
+  - N3 unsettled, modified, the open's path trusted;
+  - N4 terminal, Files write, Files look, bounded loop;
+  - N6 one decode, no decode, /mnt/, query value;
+  - 3c via_link, real, unanswered.
+- **Mutant fixes along the way:**
+  - The first N2 mutant survived: the test's shift landed on a character boundary. A case where three ẞ put the offset inside é now kills it.
+  - On the E.EGRESS3b set, K9 (the lapse slides) and K4/K5 (`..` and folder) survived, because N5 masked them: the test sentences had no verb or were negated. The tests now ask plainly, and all three are killed.
+  - K12's first run died of a compiler panic. It was rerun and killed by a test failure.
+  - K6 (negation) and K15 (the model's path) are superseded by the N5 and N3 mutants.
+- **Not done:** the reviewer's re-check; 520 (blocked until approval and #654).

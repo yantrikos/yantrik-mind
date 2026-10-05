@@ -1074,6 +1074,34 @@ pub(crate) fn path_mentions(text: &str) -> Vec<(usize, &str)> {
     path_tokens(text)
 }
 
+/// E.EGRESS3d (N3): the file a DESCRIPTION is of -- its own top-level `path` -- and whether the tab
+/// is modified. Read field by field, as the condensed description keeps them on their own lines.
+pub(crate) fn described_file(description: &str) -> Option<(String, bool)> {
+    let field = |key: &str| -> Option<serde_json::Value> {
+        let marker = format!("\"{key}\": ");
+        description
+            .lines()
+            .filter(|l| l.trim_start().starts_with(&marker))
+            .find_map(|l| serde_json::from_str(l.trim_start()[marker.len()..].trim_end().trim_end_matches(',')).ok())
+    };
+    let path = field("path")?.as_str()?.to_string();
+    let modified = field("modified")?.as_bool()?;
+    Some((path, modified))
+}
+
+/// E.EGRESS3d (N3): did the desktop say the action had settled (not the state from before it)?
+pub(crate) fn settled(obs: &str) -> bool {
+    obs.lines().any(|l| l.to_ascii_lowercase().contains("settled: true"))
+}
+
+/// E.EGRESS3c (yantrik-os #654): `files_stat`'s word on where a path really is -- (exists,
+/// via_link, real). None when it does not say all three: an older desktop, `unknown`, an error.
+pub(crate) fn files_stat_real(obs: &str) -> Option<(bool, bool, String)> {
+    let at = obs.find("\n{")? + 1;
+    let v: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
+    Some((v.get("exists")?.as_bool()?, v.get("via_link")?.as_bool()?, v.get("real")?.as_str()?.to_string()))
+}
+
 /// E.EGRESS3b: the file an app's answer says it is on -- the `path` of its result object.
 pub(crate) fn reported_path(obs: &str) -> Option<String> {
     let at = obs.find("\n{")? + 1;
@@ -2108,7 +2136,9 @@ const CONDENSED_MARK: &str = "\nACTIONS:";
 /// long note (3,545 characters) reached the model only to the 900-character head; its later
 /// sections were gone with no sign they existed.
 // E.ERASE2: `approvals_off_for_test` too -- whether a question may be put in front of the person.
-const ALWAYS_KEPT: [&str; 4] = ["clock", "mind_mode", "content", "approvals_off_for_test"];
+// E.EGRESS3d (N3): `path` and `modified` too -- which file the described text is, and whether it
+// is still as on disk.
+const ALWAYS_KEPT: [&str; 6] = ["clock", "mind_mode", "content", "approvals_off_for_test", "path", "modified"];
 
 /// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
 /// value is taken to its matching bracket when it is an object or a list (however it was

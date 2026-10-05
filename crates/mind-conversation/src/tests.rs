@@ -18086,18 +18086,18 @@ mod desktop_consent_and_stall_wiring {
         const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
         let home = Some("/home/yantrik".to_string());
         let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
-        let (_, named) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        let (_, named) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, STAT_OK]).await;
         assert!(named.iter().any(|t| t.contains("Multidimensional Grammar")), "the named file was not handed over: {named:?}");
         // The path the EDITOR reports is what counts, not the model's argument (here one through `..`).
         let crooked = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/x/../mdg/spec-1.md"}}));
-        let (_, via_editor) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![crooked, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        let (_, via_editor) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home.clone(), false, vec![crooked, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, STAT_OK]).await;
         assert!(!via_editor.is_empty(), "the model's argument was used, not the editor's path");
-        let (_, unnamed) = run_handed("Tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN]).await;
+        let (_, unnamed) = run_handed("Tell me what MDG is.", home.clone(), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, STAT_OK]).await;
         assert!(unnamed.is_empty(), "a file the person did not name was handed over");
         // The Mind saves over it: no longer the person's text.
         let saved = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\"}";
         let save = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "save", "args": {}}));
-        let (_, after) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home, false, vec![open(), save, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, saved]).await;
+        let (_, after) = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", home, false, vec![open(), save, Step::Say("ok")], vec![DESC, DESC, DESC], vec![OPEN, STAT_OK, saved]).await;
         assert!(after.is_empty(), "a named file the Mind wrote stayed a source");
     }
 
@@ -18107,8 +18107,80 @@ mod desktop_consent_and_stall_wiring {
     async fn a_read_page_of_a_named_file_is_handed_over() {
         let read = "Done \u{2014} Text Editor \u{2014} spec-1.md, 19 lines, saved \u{b7} tab 2 of 2\naccepted: True, settled: True\n{\"path\": \"/home/yantrik/mdg/spec-1.md\", \"from_line\": 1, \"to_line\": 19, \"text\": \"MDG represents meaning as a typed graph.\"}";
         let step = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "read", "args": {"tab": 1}}));
-        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step, Step::Say("ok")], vec![EDITOR, EDITOR], vec![read]).await;
+        let (_, got) = run_handed("Read ~/mdg/spec-1.md", Some("/home/yantrik".into()), false, vec![step, Step::Say("ok")], vec![EDITOR, EDITOR], vec![read, STAT_OK]).await;
         assert_eq!(got, vec!["MDG represents meaning as a typed graph.".to_string()]);
+    }
+
+    /// E.EGRESS3c: `files_stat`'s answer for spec-1.md on an OS with yantrik-os #654. SYNTHETIC: the
+    /// shape of the df42338 capture (fixtures/desktop/files_stat_true_df42338.txt) with #654's two
+    /// fields added as its contract states them -- replace with a capture once #654 is on 520.
+    const STAT_OK: &str = "Yantrik \u{2014} desktop screen, 1 windows open\naccepted: True, settled: True\nrevision: 0\n{\n  \"exists\": true,\n  \"kind\": \"file\",\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",\n  \"real\": \"/home/yantrik/mdg/spec-1.md\",\n  \"via_link\": false\n}";
+
+    /// E.EGRESS3c through the loop: the editor's text of a named file counts only when the desktop
+    /// vouches for the file -- not through a link, not another real file, not an older desktop that
+    /// does not say, not when it cannot be asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_desktop_must_vouch_for_a_handed_over_file() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        const OLDER: &str = include_str!("../fixtures/desktop/files_stat_true_df42338.txt");
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let run = |stat: String| async move {
+            let acts = vec![OPEN, Box::leak(stat.into_boxed_str()) as &str];
+            run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), Step::Say("ok")], vec![DESC, DESC, DESC], acts).await.1
+        };
+        assert!(!run(STAT_OK.to_string()).await.is_empty(), "a vouched-for file was not handed over");
+        let linked = run(STAT_OK.replace("\"via_link\": false", "\"via_link\": true")).await;
+        assert!(linked.is_empty(), "a file reached through a link was handed over");
+        let elsewhere = run(STAT_OK.replace("\"real\": \"/home/yantrik/mdg/spec-1.md\"", "\"real\": \"/home/yantrik/.ssh/notes.md\"")).await;
+        assert!(elsewhere.is_empty(), "a file whose real path is another was handed over");
+        assert!(run(OLDER.to_string()).await.is_empty(), "an older desktop's files_stat, which names no real path, was taken as vouching");
+        assert!(run("ERR:the desktop is not answering".to_string()).await.is_empty(), "an unreachable files_stat was taken as vouching");
+    }
+
+    /// E.EGRESS3d (N3) through the loop: an open's text counts only when the open settled, the tab is
+    /// not modified, and the DESCRIPTION is of the named file -- whatever path the model opened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_settled_unmodified_open_of_the_named_file_hands_it_over() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let run = |open_answer: String, desc: String| async move {
+            let o: &'static str = Box::leak(open_answer.into_boxed_str());
+            let d: &'static str = Box::leak(desc.into_boxed_str());
+            run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), Step::Say("ok")], vec![d, d, d], vec![o, STAT_OK, STAT_OK]).await.1
+        };
+        assert!(!run(OPEN.to_string(), DESC.to_string()).await.is_empty(), "the plain case was not handed over");
+        assert_eq!(DESC.matches("\n  \"modified\": false,").count(), 1);
+        let modified = run(OPEN.to_string(), DESC.replace("\n  \"modified\": false,", "\n  \"modified\": true,")).await;
+        assert!(modified.is_empty(), "a modified tab's text was handed over");
+        let unsettled = run(OPEN.replace("settled: True", "settled: False"), DESC.to_string()).await;
+        assert!(unsettled.is_empty(), "an open that had not settled was handed over");
+        assert_eq!(DESC.matches("\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",").count(), 1);
+        let other = run(OPEN.to_string(), DESC.replace("\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",", "\n  \"path\": \"/home/yantrik/old/spec-1.md\",")).await;
+        assert!(other.is_empty(), "the model's open path was trusted over the description's own");
+    }
+
+    /// E.EGRESS3d (N4) through the agent loop: a terminal command or a Files action that mentions a
+    /// named file takes it out of the hand-over; a Files look does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_outside_the_editor_takes_a_named_file_back() {
+        const OPEN: &str = include_str!("../fixtures/desktop/act_editor_open_spec1_ace075fd.txt");
+        const DESC: &str = include_str!("../fixtures/desktop/describe_editor_spec1_ace075fd.txt");
+        let open = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let then = |action: &str, args: serde_json::Value| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": action, "args": args}));
+        let done = "Done \u{2014} Yantrik \u{2014} desktop screen\naccepted: True, settled: True";
+        let run = |step: Step| async move {
+            run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), step, Step::Say("ok")], vec![DESC, DESC, DESC, DESC], vec![OPEN, STAT_OK, done, done]).await.1
+        };
+        let terminal = run(then("agent_run", serde_json::json!({"command": "sed -i s/MDG/XYZ/ mdg/spec-1.md"}))).await;
+        assert!(terminal.is_empty(), "a terminal command that wrote the named file left it handed over");
+        let files = run(then("files_rename", serde_json::json!({"path": "~/mdg/spec-1.md", "to": "spec-2.md"}))).await;
+        assert!(files.is_empty(), "a Files action on the named file left it handed over");
+        let look = run(then("files_stat", serde_json::json!({"path": "~/mdg/spec-1.md"}))).await;
+        assert!(!look.is_empty(), "a Files look took the named file back");
+        let unrelated = run(then("agent_run", serde_json::json!({"command": "ls ~/Downloads"}))).await;
+        assert!(!unrelated.is_empty(), "a command that did not mention the file took it back");
     }
 
     /// E.ARENA1-F64 through the loop, the MDG turn's shape: the spec opened, then an answer. The model's
@@ -19112,6 +19184,8 @@ fn egress3b_only_exact_named_files_of_this_chat_are_sources() {
     assert!(!h.note_read(other_chat, "/home/p/research/R1/MDG_spec.md", "spec text", home, 1), "another chat");
     assert!(!h.note_read(member, "/home/p/research/R1/MDG_spec.md", "spec text", home, 1), "another person");
     assert_eq!(h.texts(me, 2), vec!["spec text".to_string()]);
+    // Asked for plainly, a folder and a path through .. still name nothing.
+    h.note_named(me, "Use the files in ~/research/R1/ and read ~/a/../c.md", home, 0);
     let names = h.named_names(me);
     assert!(!names.iter().any(|n| n.contains("..") || n.ends_with("/R1") || n.contains(".ssh")), "a folder, a .. path or a negated one was named: {names:?}");
     assert!(names.contains(&"/home/p/research/R1/BRIEF.md".to_string()));
@@ -19122,12 +19196,12 @@ fn egress3b_only_exact_named_files_of_this_chat_are_sources() {
     assert!(!h.note_read(me, "/home/p/research/R1/MDG_spec.md", "rewritten", home, 3));
     // The lapse is fixed when the file is named; naming it again does not move it.
     assert!(h.note_read(me, "/home/p/research/R1/BRIEF.md", "brief", home, 4));
-    h.note_named(me, "and again ~/research/R1/BRIEF.md", home, HANDED_OVER_MS - 10);
+    h.note_named(me, "Read it again: ~/research/R1/BRIEF.md", home, HANDED_OVER_MS - 10);
     assert!(h.texts(me, HANDED_OVER_MS + 1).is_empty(), "the lapse slid, or never came");
     // At most 8 files.
     let mut many = HandedOver::default();
     let names: Vec<String> = (0..10).map(|i| format!("~/f{i}.md")).collect();
-    many.note_named(me, &names.join(" "), home, 0);
+    many.note_named(me, &format!("Read {}", names.join(" ")), home, 0);
     let kept = (0..10).filter(|i| many.note_read(me, &format!("/home/p/f{i}.md"), "t", home, 1)).count();
     assert_eq!(kept, 8);
     many.clear(me);
@@ -19198,4 +19272,71 @@ async fn egress3b_the_hand_over_key_is_person_and_chat() {
     let c2 = crate::TURN_CONVERSATION.scope("c2".into(), async { ConversationEngine::handed_key(&me) }).await;
     let m1 = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&member) }).await;
     assert!(c1 != c2 && c1 != m1 && c1 != off, "{off} {c1} {c2} {m1}");
+}
+
+/// E.EGRESS3d (N1, N2): text that is not ASCII, at both places a word is cut, never panics, and a
+/// path after it is still found.
+#[test]
+fn egress3d_non_ascii_never_panics() {
+    use crate::egress_planning::{strip_local_paths as strip, HandedOver};
+    let none: Vec<String> = Vec::new();
+    for w in ["A\u{2013}Z", "a\u{1F600}", "x\u{2192}y", "\u{1E9E}:x", "\u{e9}"] {
+        assert_eq!(strip(&format!("grammar {w}"), &none), format!("grammar {w}"), "{w}");
+    }
+    // A drive-shaped word after a character wider than a byte is a path; cutting it does not panic.
+    assert_eq!(strip("grammar \u{1E9E}:\\x", &none), "grammar");
+    let mut h = HandedOver::default();
+    h.note_named("k", "K\u{1E9E}\u{1E9E} read ~/\u{e9}x.md", Some("/home/p"), 0);
+    h.note_named("k", "\u{1E9E}\u{1E9E}\u{1E9E}. Read ~/b.md \u{1E9E}", Some("/home/p"), 0);
+    // Lowercased, each ẞ is a byte shorter: three of them would put the path's offset inside é.
+    h.note_named("k", "\u{1E9E}\u{1E9E}\u{1E9E} read ~/\u{e9}y.md", Some("/home/p"), 0);
+    assert!(h.named_names("k").contains(&"/home/p/\u{e9}y.md".to_string()));
+    let names = h.named_names("k");
+    assert!(names.contains(&"/home/p/\u{e9}x.md".to_string()) && names.contains(&"/home/p/b.md".to_string()), "{names:?}");
+}
+
+/// E.EGRESS3d (N5): a path is handed over only by a sentence that asks for it and negates nothing;
+/// never a dotfile, a dot-folder or a key-like name.
+#[test]
+fn egress3d_only_a_sentence_that_asks_hands_a_file_over() {
+    use crate::egress_planning::HandedOver;
+    let named = |text: &str| {
+        let mut h = HandedOver::default();
+        h.note_named("k", text, Some("/home/p"), 0);
+        h.named_names("k")
+    };
+    assert!(named("Please read ~/a.md and summarise it.").contains(&"/home/p/a.md".to_string()));
+    assert!(named("Here\u{2019}s ~/a.md. Don\u{2019}t open ~/b.md").contains(&"/home/p/a.md".to_string()), "a curly apostrophe broke the verb");
+    for (text, why) in [
+        ("Don\u{2019}t read ~/a.md", "a curly apostrophe's negation"),
+        ("You shouldn't read ~/a.md", "shouldn't"),
+        ("Read ~/a.md, no.", "no"),
+        ("Use ~/a.md, without opening it", "a negation after the path"),
+        ("~/a.md is where my diary lives", "no verb asking for it"),
+        ("Read ~/.bashrc", "a dotfile"),
+        ("Read ~/.config/app/a.md", "a dot-folder"),
+        ("Read ~/keys/server.pem", "a key-like name"),
+        ("Read ~/id_ed25519", "an id_ key"),
+    ] {
+        assert!(named(text).is_empty(), "{why}: {:?}", named(text));
+    }
+}
+
+/// E.EGRESS3d (N6): a url is decoded until it stops changing, and refused when it then holds a path.
+#[test]
+fn egress3d_a_url_is_decoded_before_it_is_judged() {
+    use crate::egress_planning::url_holds_path as holds;
+    let none: Vec<String> = Vec::new();
+    for u in [
+        "https://x.example/a%252Fhome%252Fp%252Fnotes",
+        "https://x.example/%7E/notes.md",
+        "https://x.example/mnt/data/x",
+        "https://x.example/s?f=./notes.md",
+        "https://x.example/s#../x",
+        "https://x.example/C%3A%5CUsers",
+    ] {
+        assert!(holds(u, &none), "{u}");
+    }
+    assert!(!holds("https://arxiv.org/abs/2505.03229?v=2", &none));
+    assert!(holds("https://x.example/BRIEF.md", &["BRIEF.md".to_string()]));
 }

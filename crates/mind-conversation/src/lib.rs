@@ -14351,9 +14351,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             eprintln!("[agent] step {step}: opened {opened} \u{2014} its text added from the editor's description");
                             opened_text = true;
                             // E.EGRESS3: a file the person named is a source an outbound query may use.
-                            // E.EGRESS3b: the path the EDITOR reports, not the model's argument.
-                            if let (Some(text), Some(path)) = (desktop::opened_text_of(&with, opened), desktop::reported_path(&obs)) {
-                                self.note_handed_over(&Self::handed_key(id), &path, &text);
+                            // E.EGRESS3d (N3): the file the DESCRIPTION is of -- the object that holds
+                            // the text -- only after an open that settled, of a tab not modified.
+                            if let (Some(text), Some((path, false))) = (desktop::opened_text_of(&with, opened), desktop::described_file(&seen)) {
+                                if desktop::settled(&obs) {
+                                    self.hand_over_checked(&Self::handed_key(id), &path, &text, id).await;
+                                }
                             }
                             with
                         }
@@ -14365,20 +14368,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.EGRESS3: an editor `read` of a file the person named -- its text may feed a web query.
             if sent && desktop::act_target(&tool, &args).is_some_and(|(app, action)| app == "editor" && action == "read") {
                 if let Some((path, text)) = desktop::read_result(&obs) {
-                    self.note_handed_over(&Self::handed_key(id), &path, &text);
+                    self.hand_over_checked(&Self::handed_key(id), &path, &text, id).await;
                 }
             }
-            // E.EGRESS3b (the review's H2): an edit or save in the editor makes its file the Mind's
-            // writing, no longer the person's -- the tab's file as the editor reports it, and a
-            // save_as target.
-            if sent && desktop::changes_editor_text(&tool, &args) {
-                let key = Self::handed_key(id);
-                if let Some(path) = desktop::reported_path(&obs) {
-                    self.note_mind_written(&key, &path);
-                }
-                if let Some(p) = desktop::save_path(&tool, &args) {
-                    self.note_mind_written(&key, &p);
-                }
+            // E.EGRESS3b/3d (H2, N4): an edit, save, terminal command or Files action that touches a
+            // named file makes it the Mind's writing -- the same hook the bounded loop calls.
+            if sent {
+                self.note_writes(id, &tool, &args, &obs);
             }
             // E.ARENA1-F45: a command's answer leads with what the command did.
             let obs = match desktop::runs_a_command(&tool, &args).then(|| desktop::command_first(&obs)).flatten() {

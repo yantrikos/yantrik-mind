@@ -14004,3 +14004,17 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
 - **Tests:** the fetch test gained the budgets and the three pass-through cases.
 - **Mutants:** no turn budget; no host budget; a prefix accepted; any listed URL passing; a quoted URL counting; a web span passing. All killed.
 - Full suite 2289 passed; mind-conversation 1117 passed on Linux staging.
+
+## E.RES1 R1d2 — RESULT: 0/12, valid (Mind 54bd13f, VM 520), with two design lessons
+
+- **Run:** opening plus 15 Continue, 08:38–08:47 CDT. No report. Graded in `docs/research/R1d2_grading_54bd13f.json`. Search and fetch worked outside the Mind, so the run is valid.
+- **Protocol deviation:** the opening message names the spec as well as the brief (needed since E.EGRESS3).
+- **What happened:**
+  - The Mind never opened either file. It searched from its own memory: "memory deduplication …", then "memory decay gradient", reading MDG as a memory topic.
+  - The clean planner, with no handed-over text and only the turn's words ("Continue."), rewrote the queries to "research task brief spec report" and "continue". Wikipedia answered both.
+  - From then on it gave status replies, and finally asked the person to choose "1 or 2".
+- **Lessons:**
+  1. On a "Continue." turn, "the person's words" must mean the person's words in THIS conversation (the opening task message), not this turn's alone. The Mind keeps them since E.ERASE4 (`said`, 50 per conversation), so the planner can use them without widening the policy.
+  2. A named file the model never opens gives the planner nothing. Research quality now rests on the model choosing to read the files, which it did not.
+  Also seen again: memory bleed from earlier R1 attempts, and asking the person instead of proceeding under the Continue protocol.
+- **Not claimed:** one run is not a score for 54bd13f. The next pair goes on the build that carries lesson 1, twice on one build before any comparison.

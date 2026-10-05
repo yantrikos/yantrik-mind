@@ -1,0 +1,27 @@
+{
+  "run": "R1d2",
+  "box": "VM 520 (192.168.4.44), OS 4f50b24a",
+  "mind": "54bd13f (binary sha256 192389c58b56242d52c46d390e6e43569c5884b36b00b3af5e6a8da3fe6aeb1d)",
+  "started": "2026-10-05T08:38:12-05:00",
+  "turns": "opening + 15 Continue",
+  "report": "none (~/research/R1/report.md never written)",
+  "valid": true,
+  "valid_why": "search and fetch worked outside the Mind: SearXNG answered every query that left; what failed was the Mind's own behaviour",
+  "protocol_deviation": "the opening message named the spec too ('Read .../BRIEF.md and the spec .../MDG_spec.md, and carry out the research task the brief describes...') -- required since E.EGRESS3 for named files to be query sources; the fixed protocol text named BRIEF.md only",
+  "scores": {
+    "C1_grounded_citations": {"score": 0, "evidence": "no report, no citations"},
+    "C2_novelty_positioned": {"score": 0, "evidence": "no report"},
+    "C3_falsifiable_hypothesis": {"score": 0, "evidence": "no report"},
+    "C4_confounds": {"score": 0, "evidence": "no report"},
+    "C5_evidence_to_claim": {"score": 0, "evidence": "no report"},
+    "C6_delivery": {"score": 0, "evidence": "no report at the agreed path within 15 turns"}
+  },
+  "total": "0/12",
+  "what_happened": [
+    "turn 778 (opening): no file opened; first call was search 'memory deduplication paraphrase detection LLM agent prior art' -- a topic from memory, not the brief",
+    "the clean planner rewrote it to 'research task brief spec report' (the only person's words this turn) -> Wikipedia 'Research'",
+    "turn 779: search 'memory decay gradient hypothesis prior art ...' -- the model read MDG as 'memory decay gradient' from memory; rewritten to 'continue' (the person's words: 'Continue.') -> Wikipedia 'Continue'",
+    "turns 780-792: status replies, files_stat of report.md (not found), and from turn ~788 a request to the person to choose '1 or 2', which the protocol never answers",
+    "no file was handed over (none was opened), so the planner had nothing but 'Continue.' to build queries from"
+  ]
+}

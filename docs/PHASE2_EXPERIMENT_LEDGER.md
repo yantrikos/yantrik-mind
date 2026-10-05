@@ -14308,3 +14308,26 @@ Verdict on c6f9379: SAFE WITH CHANGES. (f) is accepted, with GitHub removed from
 - **Lockfile:** `deploy/package.json` pins playwright 1.48.2, playwright-extra 4.3.6 and puppeteer-extra-plugin-stealth 2.11.2; `deploy/package-lock.json` comes from `npm install --package-lock-only`. The deploy note now says `npm ci`, and everything stays ROOT-owned and read-only to the Mind's account (the old note chowned it to the service user).
 - **Tests:** the launchers with a fake chromium (service workers blocked, routed, a guard failure refusing).
 - **Mutants:** a script launching around the guard; an implicit-context `browser.newPage`; `connectOverCDP`; `contexts()`; launchGuarded skipping the guard; launchGuarded letting service workers in. All killed. The last two SURVIVED the first run (no test of the launchers themselves) and are killed by the fake-chromium test.
+
+## E.EGRESS5d — PREREG: the thirteenth pass's (A) and (B); (C) after a capture
+
+**(A) A browser action allowlist:**
+- The desktop's `web_*` tools and `os_act browser` actions run unasked only when they are known reads: web_read, web_text, web_find, web_tabs, web_listen, web_scroll, web_wait and web_back, and browser read, find, text, tabs and media.
+- Known cleaned actions run cleaned (go/open/navigate as a fetch, type as a query). `web_commit` is the desktop's own card.
+- Anything else (web_press, an unknown action, and web_click until (C)) needs the person's confirmation.
+
+**(B) The person-only file:**
+- **Read race-free:** on Unix, `/etc/yantrik` must be a root-owned directory not writable by group or others. The file is opened with O_NOFOLLOW, fstat'd on that fd (a regular file, uid 0, no group or other write), and read from the same fd.
+- **Keys:** YM_BROWSER_AGENT, YM_HEADFUL_SCRIPT and YM_SNAP_SCRIPT are added (26).
+- **The scan:** it forbids each person-only key string outside mind-net, except in `person_var("…")` calls and the settings schema (config_panel.rs), so an indirect read cannot pass.
+- **Fail closed now:** YM_SHAREABLE_FACTS and YM_WORK_RADAR are unset when the file is absent. Once `/etc/yantrik` exists (an OS that ships the file), every person-only key requires it; the env fallback is only for an OS without `/etc/yantrik`.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- web_press unasked;
+- an unknown browser action unasked;
+- a symlinked person file trusted;
+- a group-writable `/etc/yantrik` trusted;
+- a new key read from the env when the file exists;
+- an indirect key read missed by the scan;
+- the privacy keys falling back to the env;
+- the fallback used when `/etc/yantrik` exists.

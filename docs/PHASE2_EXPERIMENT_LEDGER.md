@@ -14618,3 +14618,25 @@ The review is a commit comment on f1364f0.
 - the tunnel timeout left armed;
 - userinfo sent to the proxy;
 - the wiring check missing a line.
+
+## E.RES1 R1e — RESULT: the R1 pair on one build (Mind 54bd13f, VM 520): R1e1 4/12, R1e2 0/12
+
+- **Set-up:** asked by Pranab (via 4c) to show beside a reference report. Mind 54bd13f on OS 4f50b24a, audit mode, the model as deployed (`ollama-cloud:deepseek-v4.1-flash`), SearXNG general+science. The opening is the protocol change recorded before the pair ("Open and read … first, then …"), followed by up to 15 "Continue.". Approvals were off for the test, and nothing went in front of the person. R1e1 ran 12:49:53–13:00:29 and R1e2 13:00:32–13:09:54 CDT.
+- **Grades:** `docs/research/R1e1_grading_54bd13f.json` and `R1e2_grading_54bd13f.json`; R1e1's report is copied to `docs/research/R1e1_report_54bd13f.md`.
+  - **R1e1, 4/12.** A 34-line report at the agreed path, self-marked PARTIAL.
+    - C1 0: no citations, and none fabricated.
+    - C2 0: AMR/UMR and Coconut are named but not positioned.
+    - C3 1: a metric and a kill condition, but no thresholds.
+    - C4 0: four confounds, but not the encoder-does-the-reasoning trap.
+    - C5 2: VACUOUS, since there are no numbers.
+    - C6 1.
+  - **R1e2, 0/12.** No report.
+- **What changed from R1d2:** this time the Mind read both files (the spec in full by R1e1's t8) and wrote an honest partial report with a sound falsifiable design.
+- **What did not change:**
+  - **Prior art never got going.** Every search it reported hit a word collision: "MDG" returned a finance company and the Millennium Development Goals, "flow" a cognitive-flow paper, "machine" dictionary entries. It named the right terms (AMR/UMR, Coconut, graph-to-text) and never got results for them. NOT VERIFIED: which query text actually left the Mind (the clean planner's rewrite, or the model's own). The mind unit's journal needs root on 520, so I asked 4c for the window.
+  - **A loop that narrates instead of acting.** From mid-run on, the turns took 3–20 s and the replies were near-identical: "the one move … I'm making it now", with no move made. It also asked the person to pick a job, which the protocol never answers.
+  - **Memory bleed across fresh chats.** R1e2 claimed report.md "has sat at 34 lines" (it did not exist in R1e2) and counted "ten-plus" Continues from the first one on. R1e1 invented a "~2 minutes left" budget and answered about "D2" and the desktop.
+- **Not claimed:**
+  - Two runs on one build give a range (0–4), not a score.
+  - No comparison with R1d2, since the protocol differs.
+  - The search-collision cause is a hypothesis until the journal is read.

@@ -1,0 +1,44 @@
+{
+  "run": "R1e2",
+  "started": "2026-10-05T13:00:32-05:00",
+  "ended": "2026-10-05T13:09:54-05:00",
+  "turns": "opening + 15 Continue (ran out)",
+  "report": "none: report.md was never written in this run",
+  "box": "VM 520 (192.168.4.44), OS 4f50b24a, audit mode",
+  "mind": "54bd13f (/opt/yantrik-mind/BUILD), model ollama-cloud:deepseek-v4.1-flash as deployed",
+  "protocol": "fresh chat; opening 'Open and read /home/yantrik/research/R1/BRIEF.md and the spec /home/yantrik/research/R1/MDG_spec.md first, then carry out the research task the brief describes. Work in /home/yantrik/research/R1/. Say when the report is written.'; then up to 15 'Continue.'; approvals off for the test, nothing in front of the person",
+  "valid": true,
+  "valid_why": "search answered every query that left (results were off-topic, not errors); the Mind read both files; no tool outage. Which query text left the Mind is NOT verified: the mind unit's journal needs root on 520 (asked of 4c)",
+  "scores": {
+    "C1_grounded_citations": {
+      "score": 0,
+      "evidence": "no report"
+    },
+    "C2_novelty_positioned": {
+      "score": 0,
+      "evidence": "no report"
+    },
+    "C3_falsifiable_hypothesis": {
+      "score": 0,
+      "evidence": "no report"
+    },
+    "C4_confounds": {
+      "score": 0,
+      "evidence": "no report"
+    },
+    "C5_evidence_to_claim": {
+      "score": 0,
+      "evidence": "no report"
+    },
+    "C6_delivery": {
+      "score": 0,
+      "evidence": "no report at the agreed path within 15 turns"
+    }
+  },
+  "total": "0/12",
+  "what_happened": [
+    "t0 (18 s): said it had read both files; reported the same word-collision searches as R1e1 ('MDG' -> the financing company, 'flow' -> a cognitive-flow paper)",
+    "t1-t15: 3-20 s turns; every reply announced 'the one move that breaks it ... I'm making it now' (prior art with AMR/UMR, semantic graphs, discrete sentence compression) and made no move -- no report written, no search for those terms reported",
+    "memory bleed from R1e1 in a fresh chat: claimed report.md 'has sat at 34 lines' (in R1e2 it did not exist; the runner had moved R1e1's aside), counted 'ten-plus' then 'twenty-plus' Continues from the first Continue on"
+  ]
+}

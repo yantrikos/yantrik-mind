@@ -1,0 +1,47 @@
+{
+  "run": "R1e1",
+  "started": "2026-10-05T12:49:53-05:00",
+  "ended": "2026-10-05T13:00:29-05:00",
+  "turns": "opening + 15 Continue (ran out; never said the report was finished)",
+  "report": "/home/yantrik/research/R1/report.md, kept as report_R1e1.md (1504 bytes, 34 lines; copy: docs/research/R1e1_report_54bd13f.md)",
+  "box": "VM 520 (192.168.4.44), OS 4f50b24a, audit mode",
+  "mind": "54bd13f (/opt/yantrik-mind/BUILD), model ollama-cloud:deepseek-v4.1-flash as deployed",
+  "protocol": "fresh chat; opening 'Open and read /home/yantrik/research/R1/BRIEF.md and the spec /home/yantrik/research/R1/MDG_spec.md first, then carry out the research task the brief describes. Work in /home/yantrik/research/R1/. Say when the report is written.'; then up to 15 'Continue.'; approvals off for the test, nothing in front of the person",
+  "valid": true,
+  "valid_why": "search answered every query that left (results were off-topic, not errors); the Mind read both files; no tool outage. Which query text left the Mind is NOT verified: the mind unit's journal needs root on 520 (asked of 4c)",
+  "scores": {
+    "C1_grounded_citations": {
+      "score": 0,
+      "evidence": "no citations at all ('Sources: None verified yet'). None fabricated -- the report says why it cites nothing"
+    },
+    "C2_novelty_positioned": {
+      "score": 0,
+      "evidence": "names AMR/UMR, Coconut-style latent reasoning and graph-to-text, but explicitly as 'not yet verified against the spec's claims'; none of the five reference families is positioned; RDF/temporal KGs, Meta LCM and VQ codebooks are absent"
+    },
+    "C3_falsifiable_hypothesis": {
+      "score": 1,
+      "evidence": "metric (sequence positions at matched accuracy) and a kill condition (same or more positions at equal accuracy, or accuracy collapse at equal positions), written before any result; but no threshold for 'materially fewer' and the accuracy threshold is deferred ('pre-register the task set and the accuracy threshold')"
+    },
+    "C4_confounds": {
+      "score": 0,
+      "evidence": "four confounds named (task difficulty, tokenizer, training data, selective reporting) with controls, but NOT the key one: the NL->MDG encoder doing the reasoning, so the baselines need the same help"
+    },
+    "C5_evidence_to_claim": {
+      "score": 2,
+      "evidence": "VACUOUS: the report makes no quantitative claim, so none is unsupported. 'Results: NONE. Not run.' is honest"
+    },
+    "C6_delivery": {
+      "score": 1,
+      "evidence": "a report at the agreed path, self-marked PARTIAL; the run ended by running out of turns, never saying the report was finished"
+    }
+  },
+  "total": "4/12",
+  "what_happened": [
+    "t0 (25 s): read BRIEF.md in full and MDG_spec.md to line 734; searched 'MDG' -> MDG Financial / Millennium Development Goals",
+    "t2 (33 s): wrote report.md (34 lines): prior art marked INCOMPLETE, the experiment design, 'not run', no sources",
+    "t5, t7, t9: searches returned a financing company, a 'cognitive flow' paper (arXiv 2504.16021) and dictionary entries for 'machine'; it named the right terms (AMR/UMR, Coconut, graph-to-text) but never got results for them",
+    "t8: read the spec to line 1246 and realised 'MDG' is defined in it",
+    "t10-t15: 3-16 s turns, near-identical status replies naming the loop ('motion, not progress') and asking the person to pick a job, which the protocol never answers",
+    "also seen: an invented time budget ('~2 minutes left', t1), a reply about 'D2' (t5) and one describing the desktop (t11) -- answers to things nobody asked in this run"
+  ]
+}

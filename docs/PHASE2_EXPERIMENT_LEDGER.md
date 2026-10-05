@@ -13642,3 +13642,38 @@ Plus a test that the tripwire still runs on a pass-through query (through `guard
   - The harness `TURN_CONVERSATION` scope is Unix-only, so it is compiled but not unit-run.
   - A symlink named exactly as a file counts, since the person named it. The Mind cannot realpath the person's files (ProtectHome).
   - Over-stripping: "and/or" or "TCP/IP" in a query loses that word.
+
+**E.EGRESS3b (866b019): re-review "SAFE WITH CHANGES".** H1, H3, L1–L3 are fixed; H2 and M1 are partial.
+
+## E.EGRESS3d — PREREG: the re-review's N1–N6, and E.EGRESS3c (files_stat `real`/`via_link`)
+
+- **N1:** the drive-letter check compares by characters (`w.get(1..3)`), never slicing at a byte. "A–Z", "a😀" and "x→y" must not panic.
+- **N2:**
+  - The words before a path are read from the ORIGINAL text by characters, lowercased only after slicing.
+  - Becomes part of N5's rule.
+  - "Kẞ ~/éx.md" must not panic, and the hand-over lock cannot be poisoned. `note_named` takes no lock across anything that can panic.
+- **N3:**
+  - The open hook takes the path from the DESCRIPTION's own `path` (the object that holds `content`), and requires the open's answer `settled: True` and the description's `modified: false`.
+  - `path` and `modified` join ALWAYS_KEPT so a condensed description keeps them.
+- **N4:**
+  - Writes outside the editor mark a file Mind-written: a terminal command (`agent_run`) or a `files_*` action whose arguments mention a named path or its file name.
+  - The marking moves to one shared hook that both loops call, next to `guards::post`.
+- **N5:** an allowlist, not negation-guessing.
+  - A path counts only when its sentence (bounded by `. `, `!`, `?` or a newline):
+    - has a positive verb before it (read, open, use, see, here's, here is, attached, review, study, summarise/summarize, analyse/analyze, check);
+    - has no negating word anywhere (don't, do not, never, not, no, without, except, avoid, ignore, skip, shouldn't, stay out, off limits), with apostrophes normalised (’ and ' alike).
+  - Never dotfiles or dot-dirs, nor key-like names (.ssh, .gnupg, .env, *.pem, *.key, id_*).
+- **N6:** a url is percent-decoded until it stops changing. It is refused when the decoded text holds `file:`, `~/`, a home or system folder (/home/ /root/ /etc/ /var/ /users/ /tmp/ /mnt/ /opt/ /srv/ /media/ /run/), `:\`, or a named path or name, or when a query or fragment value is a path word.
+- **E.EGRESS3c (4c's #654):** a named file's text counts only when `files_stat` answers `exists: true`, `via_link: false`, and `real` equals the editor-reported path. Unreachable, `unknown`, or a desktop without `real` means it does not count (fail-closed). On an OS without #654, nothing is handed over.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- non-ASCII at both slicing sites;
+- curly apostrophe, "shouldn't", "no", a negation after the path, a missing positive verb;
+- a dotfile or key-like name;
+- an unsettled or modified open;
+- the description's path versus the open answer's;
+- a terminal write, a Files write, and a bounded-loop write;
+- `%252F`, `%7E/`, /mnt/ and a path in a query value;
+- `via_link`, a different `real`, and an unreachable `files_stat`.
+
+**Ticket, separate (the reviewer's):** a `web_fetch` URL found in this turn's outside results passes through unchanged (egress_planning ~291). An attacker's page listing `?v=alice`, `?v=bob` and so on lets the model choose, sending log2(N) bits to the attacker. It needs its own design. OPEN.

@@ -15058,3 +15058,31 @@ Tests send a request to a local fake public door and read the request line it re
   - Linux staging: mind-net 12, mind-tools 265, mind-memory 113, mind-conversation 1147.
   - net_guard.test.js as root (trusted) and as nobody (not trusted).
 - **Residual, named:** the listener on 7450/7451 is not checked to be the egress uid's. That would mean reading `/proc/net/tcp`; it is optional per #666's review and not built.
+
+## E.GRANT1 — PREREG: the model's own search words under a grant the person gives (yantrik-os #667)
+
+**Why:** Pranab's direction (via 4c): "too many restriction maybe not good … we can approve per run/session/agent". Others let the model write its own query and control it with approvals and a log, not by rewriting. R1e showed the clean planner dropping every useful word. The OS side is #667, and its "Format for the Mind" (PR body) is the contract.
+
+**Change:**
+1. **Asking (desktop turns).** When a web search's query is not a span of the person's words, the task message or a handed-over file (today: the planner rewrites it), the Mind first sends the harness event `{kind:"grant_request", request_id, capability:"web_search_own_words", query, run_id?}` on the turn being answered. The query must be exact, 1–300 characters, with no control or bidi characters and no edge spaces; one that cannot be shown exactly is not asked about.
+   - `{"granted":…}`: the query leaves as the model wrote it.
+   - `{}`: the person sees the card. The answer comes on a later `harness.poll`: `once`, `session` or `always` lets it leave; `no`, a typed answer, or nothing before the turn ends does not.
+   - `{"refused":…}` or no harness: no grant.
+2. **Off the desktop** (Telegram, the CLI), the Mind reads `/run/yantrik-mind-egress/grants.json` itself, with the signal's race-free root-file read, a 64 KiB cap and version 1 only. It drops any malformed or expired grant. Only an `always` grant applies there: a session grant belongs to a harness session, and a run grant needs its run id.
+3. **Without a grant,** today's rule stands: the span, else the clean planner (with E.PLAN1).
+4. **Kept, grant or not:**
+   - no path or named file leaves (`has_path`);
+   - the exact-value tripwire (`model_injected_private_value`) refuses a query carrying a stored private identifier;
+   - each own-words query is logged with the grant that let it leave (id or answer).
+   The residual a grant accepts is the derived leak (a generalisation of a private fact in public words). Pranab accepts that by approving the scope.
+5. **run_id:** taken from the turn (`turn["run_id"]`) when the harness supplies one, which needs 4c's confirmation. A run starter adds the run grant with `yantrik-update mind-grant add --scope run --run-id ID --ttl 4h`.
+
+**Kill criteria**, each a mutant that must be killed:
+- an own-words query leaving without a grant;
+- `no`, a typed answer or a timeout treated as yes;
+- a `refused` reply treated as yes;
+- a query with a path or a stored private identifier leaving under a grant;
+- the file read without the trust checks;
+- an expired or malformed grant honoured;
+- a session or run grant honoured off the desktop;
+- a version other than 1 read.

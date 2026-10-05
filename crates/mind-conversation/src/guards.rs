@@ -103,11 +103,20 @@ pub(crate) async fn pre(
     // The provenance snapshot is cloned out of the lock; append-only, so the worst staleness can
     // do is clean-author a URL it could have passed through — the safe direction.
     let provenance = state.lock().unwrap().external_obs.clone();
+    let asked = grounded.clone();
     let args = match engine
         .egress_clean_args(tool, user_text, grounded, &provenance)
         .await
     {
-        Ok(args) => args,
+        Ok(args) => {
+            // E.RES1: what actually leaves, when the clean planner re-authored it. Built only from the
+            // person's literal request (already in the harness line), so logging it reveals nothing
+            // new. R1b's six searches came back empty while the model's queries were sound.
+            if args != asked {
+                eprintln!("[egress] {ctx}: {tool} sent as re-authored {args} (the model asked {asked})");
+            }
+            args
+        }
         Err(failure) => {
             return PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, msg: egress_refusal(tool, failure) };
         }

@@ -18588,8 +18588,8 @@ mod desktop_consent_and_stall_wiring {
             (reply, calls, hub.scripted_calls().len())
         };
         for (text, starts) in [
-            ("/new", "I don't start over from a message"),
-            ("  /new@th_ym_c1_bot ", "I don't start over from a message"),
+            ("/new", "New conversation: this chat starts clean"),
+            ("  /new@th_ym_c1_bot ", "New conversation: this chat starts clean"),
             ("/stop", "Nothing is running for a message to stop"),
             ("/frobnicate", "`/frobnicate` looks like a command"),
         ] {
@@ -20082,4 +20082,116 @@ async fn the_planners_query_has_its_acronyms_written_out() {
     // A query that leaves as written (a span of the brief) gets the same pass.
     let span = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "Multidimensional Grammar (MDG)" }), "", &[], &[], key).await.unwrap();
     assert_eq!(span["query"], "Multidimensional Grammar", "a span kept its bare acronym");
+}
+
+/// E.MEM1 (4c's test): an R1e1-style exchange, then the desktop's New chat (`/new`), then the next
+/// turn -- whose prompts hold none of R1e1's turns and none of its summary. The mind still keeps the
+/// old summary for audit, and the transcript keeps the record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_chat_starts_without_the_last_chats_turns() {
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    impl LLMBackend for Rec {
+        fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: "Starting on it.".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "rec"
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rec: Arc<dyn LLMBackend> = Arc::new(Rec(seen.clone()));
+    let pool = InferencePool::new(Arc::clone(&rec), 1).with_provider("rec").with_private_backend(rec, "rec");
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+    // R1e1, as it was: the task, and a claim about a report.
+    mem.append_message("user", "Open and read ~/research/R1/BRIEF.md first, then carry out the research task.").await.unwrap();
+    mem.append_message("assistant", "R1E1-MARK report.md is 34 lines, saved, prior art INCOMPLETE.").await.unwrap();
+    mem.profile_set("conversation_summary", "R1E1-SUMMARY the person set research task R1; report.md has 34 lines.").await.unwrap();
+    let reply = conv.handle_turn_as("/new", TurnIdentity::primary()).await.unwrap();
+    assert!(reply.starts_with("New conversation"), "{reply}");
+    let ctx = mind_types::AccessContext::principal(mind_types::Scope::primary(), mind_types::Purpose::conversation(mind_types::PRIMARY));
+    let window = mem.recent_messages(50, &ctx).await.unwrap();
+    assert!(window.iter().all(|(_, t)| !t.contains("R1E1-MARK") && !t.contains("/new")), "the last chat is still in the window: {window:?}");
+    assert_eq!(mem.profile_get("conversation_summary").await.unwrap().unwrap_or_default(), "", "the last chat's summary stayed");
+    assert!(mem.profile_get("earlier_conversations_summary").await.unwrap().unwrap_or_default().contains("R1E1-SUMMARY"), "the old summary was lost, not set aside");
+    // The next turn: nothing of R1e1 in any prompt the model is given.
+    let _ = conv.handle_turn_as("Continue.", TurnIdentity::primary()).await.unwrap();
+    let prompts = seen.lock().unwrap().clone();
+    assert!(!prompts.is_empty(), "the next turn never reached the model");
+    assert!(prompts.iter().all(|p| !p.contains("R1E1-MARK") && !p.contains("R1E1-SUMMARY")), "R1e1 reached the new chat's prompt");
+}
+
+/// E.MEM1: a member's New chat ends the member's window, never the primary's; the primary's
+/// summary stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_new_chat_leaves_the_primarys_conversation_alone() {
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+    mem.append_message("user", "PRIMARY-MARK plan the trip").await.unwrap();
+    mem.profile_set("conversation_summary", "PRIMARY-SUMMARY").await.unwrap();
+    conv.fresh_window(mind_types::Scope::Private("kid".into())).await;
+    let ctx = mind_types::AccessContext::principal(mind_types::Scope::primary(), mind_types::Purpose::conversation(mind_types::PRIMARY));
+    let window = mem.recent_messages(50, &ctx).await.unwrap();
+    assert!(window.iter().any(|(_, t)| t.contains("PRIMARY-MARK")), "a member's /new cut the primary's window");
+    assert_eq!(mem.profile_get("conversation_summary").await.unwrap().as_deref(), Some("PRIMARY-SUMMARY"), "a member's /new retired the primary's summary");
+}
+
+/// E.MEM1: a memory carries the date it was noted; an unknown date says nothing.
+#[test]
+fn a_memory_shows_when_it_was_noted() {
+    let ms = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap().timestamp_millis() as u64;
+    assert_eq!(crate::noted(ms), " (noted 2026-10-05)");
+    assert_eq!(crate::noted(0), "");
+    assert!(crate::is_fresh_start("/new") && crate::is_fresh_start(" /NEW@th_bot ") && crate::is_fresh_start("/reset"));
+    assert!(!crate::is_fresh_start("/new project plan") && !crate::is_fresh_start("new"));
+}
+
+/// E.MEM1: compaction never folds the last conversation into the new one's summary -- it moves past
+/// the break and summarises only what came after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_does_not_carry_the_last_chat_into_the_new_summary() {
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    impl LLMBackend for Rec {
+        fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n"));
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: "A summary of the conversation so far, long enough to keep.".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "rec"
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rec: Arc<dyn LLMBackend> = Arc::new(Rec(seen.clone()));
+    let pool = InferencePool::new(Arc::clone(&rec), 1).with_provider("rec").with_private_backend(rec, "rec");
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+    for i in 0..30 {
+        mem.append_message(if i % 2 == 0 { "user" } else { "assistant" }, &format!("OLDCHAT-{i}")).await.unwrap();
+    }
+    conv.fresh_window(mind_types::Scope::primary()).await;
+    for i in 0..40 {
+        mem.append_message(if i % 2 == 0 { "user" } else { "assistant" }, &format!("NEWCHAT-{i}")).await.unwrap();
+    }
+    let mut summarised = false;
+    for _ in 0..4 {
+        summarised |= conv.compact_conversation().await;
+    }
+    assert!(summarised, "the new conversation was never summarised");
+    let prompts = seen.lock().unwrap().clone();
+    assert!(prompts.iter().any(|p| p.contains("NEWCHAT-0")), "the new conversation's turns were not what was summarised");
+    assert!(prompts.iter().all(|p| !p.contains("OLDCHAT-")), "the last chat was folded into the new summary");
 }

@@ -14819,3 +14819,34 @@ The review is a commit comment on f1364f0.
   - a memory without its age;
   - a member's `/new` breaking the primary's window (scope).
 - **The test 4c asked for:** an R1e1-style exchange, then `/new`, then the next turn's prompt holds none of R1e1's turns and none of its summary.
+
+## E.MEM1 — RESULT: a new desktop chat starts clean; 9 of 9 mutants killed; the /new reply told the person to use the control that sends it
+
+- **Built (as amended):**
+  - `fresh_window(scope)` writes the break row in the turn's own scope. For the primary, it sets the rolling summary aside as `earlier_conversations_summary`, which is never put in a prompt, and clears it.
+  - A bare `/new` (the desktop's New chat, per yantrik-os), `/reset` or `/clear`, with or without a bot suffix, calls it after the exchange is written. So does the operator's `break`/`fresh`.
+  - Compaction moves its cursor past the newest break and summarises only what came after.
+  - Both memory renderers add "(noted YYYY-MM-DD)" from `updated_ms`, and nothing when it is unknown.
+  - The agent loop's system message gains one sentence: the state of a file, a report or a task's progress comes ONLY from a tool result this turn; memories carry a date and are history.
+- **Found:** the old `/new` reply said "I don't start over from a message … use your app's new-chat control". That control IS `/new`. The reply now says what happens: "New conversation: this chat starts clean. Everything I've learned stays in my memory. Nothing was run." `/reset` and `/clear` share it, a small widening beyond the amended prereg's `/new`.
+- **Found (my own slip):** re-running part of an edit script through Python's default cp1252 put "â€”" into the break row's text. The tests matched on other words and still passed; a mutant's anchor (ANCHOR 0) showed it. Repaired, and grepped clean.
+- **Tests:**
+  - `a_new_chat_starts_without_the_last_chats_turns` (4c's test): an R1e1 exchange and summary, then `/new`, then the next turn's prompts hold neither;
+  - `a_members_new_chat_leaves_the_primarys_conversation_alone`;
+  - `compaction_does_not_carry_the_last_chat_into_the_new_summary`;
+  - `a_memory_shows_when_it_was_noted`;
+  - the E.SLASH1 test, with the new reply text.
+- **Mutants killed:**
+  - `/new` without a break;
+  - the break not written;
+  - the summary kept;
+  - the old summary lost rather than set aside;
+  - a member's `/new` breaking the primary's window;
+  - a member's `/new` retiring the primary's summary;
+  - compaction folding pre-break rows;
+  - a memory without its age;
+  - `/new` with words starting fresh.
+- **Runs:**
+  - Full suite 2332 passed, 0 failed.
+  - Linux staging: mind-conversation 1141.
+- **Not changed:** typed memory still holds what the Mind learned in earlier chats, by design. The remaining guard against stale claims is the date on each memory and the one-sentence rule. The live check is the next R1 pair (a reading, not a gate).

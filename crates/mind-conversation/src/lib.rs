@@ -1977,6 +1977,24 @@ fn mcp_ran_text(output: &str) -> String {
     }
 }
 
+/// E.MEM1: a bare `/new` (the desktop's New chat), `/reset` or `/clear`, with or without a bot suffix.
+pub(crate) fn is_fresh_start(user_text: &str) -> bool {
+    user_text
+        .trim()
+        .split('@')
+        .next()
+        .is_some_and(|c| ["/new", "/reset", "/clear"].iter().any(|w| c.eq_ignore_ascii_case(w)))
+}
+
+/// E.MEM1: when a memory was last noted, as a date -- a memory is history, and an undated one reads as
+/// the present (R1e2 took an earlier run's "report.md, 34 lines" for its own). Nothing when unknown.
+pub(crate) fn noted(updated_ms: mind_types::UnixMillis) -> String {
+    match i64::try_from(updated_ms).ok().filter(|ms| *ms > 0).and_then(chrono::DateTime::from_timestamp_millis) {
+        Some(at) => format!(" (noted {})", at.with_timezone(&chrono::Local).format("%Y-%m-%d")),
+        None => String::new(),
+    }
+}
+
 /// E.SLASH1: the reply to a message that is exactly one slash command (`/new`, `/stop@bot`), or None.
 /// Only the bare command: a slash word followed by text, or a path, is an ordinary message.
 pub(crate) fn slash_reply(text: &str) -> Option<String> {
@@ -1990,8 +2008,10 @@ pub(crate) fn slash_reply(text: &str) -> Option<String> {
         return None;
     }
     Some(match cmd.to_ascii_lowercase().as_str() {
-        "new" | "reset" | "clear" => "I don't start over from a message: I keep one continuing conversation, and what I \
-             remember stays. To open a fresh chat, use your app's new-chat control. Nothing was run."
+        // E.MEM1: the desktop's New chat IS this message (yantrik-os sends `/new`), so it does start a
+        // new conversation -- the old reply sent the person to a control that sends it.
+        "new" | "reset" | "clear" => "New conversation: this chat starts clean. Everything I've learned stays in my \
+             memory. Nothing was run."
             .to_string(),
         "stop" | "cancel" => "Nothing is running for a message to stop -- each message is its own turn, and this one \
              does nothing. Nothing was run."
@@ -9025,7 +9045,7 @@ pub(crate) fn forget_report(forgotten: usize, residual: usize, needle: &str) -> 
             // and the transcript's full record are untouched — the mind still KNOWS everything,
             // it just stops carrying the previous thread's momentum into unrelated turns.
             "break" | "fresh" => {
-                let _ = self.memory.append_message("break", "— context break (operator) —").await;
+                self.fresh_window(mind_types::Scope::primary()).await;
                 "Fresh start — I keep everything in memory, but the new conversation begins clean.".to_string()
             }
             "packets" if rest.trim() == "prune" => {
@@ -11349,12 +11369,30 @@ WINDOW: all-time, latest 200
 
     /// Render the typed working-set as a grounding block: stable facts as-is, uncertain beliefs
     /// hedged with their confidence, open contradictions flagged as ask-don't-assert.
+    /// E.MEM1: a new conversation begins clean. The break row ends the conversational window in
+    /// `scope` (prompt assembly and the restored chat pane stop at it); for the primary, the rolling
+    /// summary of the previous conversation is retired -- kept under `earlier_conversations_summary`,
+    /// never put in a prompt -- and compaction starts after the break. Typed memory and consolidation
+    /// are untouched: the mind still knows what it learned.
+    pub(crate) async fn fresh_window(&self, scope: mind_types::Scope) {
+        let primary = matches!(&scope, mind_types::Scope::Private(v) if v == mind_types::PRIMARY);
+        let _ = self.memory.append_message_scoped("break", "— context break —", scope).await;
+        if primary {
+            if let Ok(Some(sum)) = self.memory.profile_get("conversation_summary").await {
+                if !sum.trim().is_empty() {
+                    let _ = self.memory.profile_set("earlier_conversations_summary", &sum).await;
+                }
+            }
+            let _ = self.memory.profile_set("conversation_summary", "").await;
+        }
+    }
+
     fn render_grounding(ws: &WorkingSet) -> String {
         let mut s = String::new();
         if !ws.stable_facts.is_empty() {
             s.push_str("What you know about the user (stable):\n");
             for f in &ws.stable_facts {
-                s.push_str(&format!("- {}\n", f.text));
+                s.push_str(&format!("- {}{}\n", f.text, noted(f.updated_ms)));
             }
         }
         if !ws.uncertain_beliefs.is_empty() {
@@ -11381,8 +11419,8 @@ WINDOW: all-time, latest 200
                     | None => "low confidence — say \"I think\"",
                 };
                 s.push_str(&format!(
-                    "- {} (confidence {:.2}; {hedge})\n",
-                    b.statement, b.confidence
+                    "- {} (confidence {:.2}; {hedge}){}\n",
+                    b.statement, b.confidence, noted(b.updated_ms)
                 ));
             }
         }
@@ -13024,7 +13062,7 @@ WINDOW: all-time, latest 200
             "What I know that may be relevant:",
         );
         for b in ws.stable_facts.iter().take(5) {
-            grounding.push(mind_types::Channel::Grounding, &format!("\n- {}", b.text));
+            grounding.push(mind_types::Channel::Grounding, &format!("\n- {}{}", b.text, noted(b.updated_ms)));
         }
         for b in ws.uncertain_beliefs.iter().take(3) {
             let rtag = match b.uncertainty_reason {
@@ -13042,7 +13080,7 @@ WINDOW: all-time, latest 200
             };
             grounding.push(
                 mind_types::Channel::Grounding,
-                &format!("\n- {} (uncertain:{rtag} {:.2})", b.statement, b.confidence),
+                &format!("\n- {} (uncertain:{rtag} {:.2}){}", b.statement, b.confidence, noted(b.updated_ms)),
             );
         }
         // ALWAYS ground the people in the user's life from the canonical people layer — it's clean +
@@ -13564,7 +13602,7 @@ Open reminders you're carrying for them:",
                 if names_nothing {
                     ChatMessage::system("You have been asked not to reveal private facts. Private memory, external data, configuration, clock, discovery, and mutating tools are withheld. You may use only the explicitly listed pure-local tools, with arguments copied from the current request; do not attempt any lookup or recall. Otherwise answer at the level of SHAPE and KIND from what is already in front of you, name no people, projects, accounts, purchases, places or dates, and say plainly that you cannot cite private specifics here. A short honest answer is correct; guessing to fill the gap is not.")
                 } else {
-                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
+                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
                 },
                 ChatMessage::user(&prompt),
             ];
@@ -15302,6 +15340,11 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         if let Some(reply) = slash_reply(user_text) {
             let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
             let _ = self.memory.append_message_scoped("assistant", &reply, ws.clone()).await;
+            // E.MEM1: the desktop's New chat is this `/new` turn (yantrik-os: no chat ids), so it is
+            // where the previous conversation ends -- R1e2 took R1e1's turns for its own.
+            if is_fresh_start(user_text) {
+                self.fresh_window(ws.clone()).await;
+            }
             return Ok(reply);
         }
         // E.MQ5: THE ROUTER'S SHADOW. A closed-schema classifier says which claim (or ABSTAIN)

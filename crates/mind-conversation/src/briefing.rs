@@ -315,6 +315,12 @@ impl super::ConversationEngine {
         else {
             return false;
         };
+        // E.MEM1: a conversation that ended at a break is not this one's to summarise -- move the
+        // cursor past the newest break and summarise only what came after, on a later pass.
+        if let Some(b) = msgs.iter().rposition(|(_, role, _)| role == "break") {
+            let _ = self.memory.profile_set("compact_cursor", &msgs[b].0.to_string()).await;
+            return false;
+        }
         if msgs.len() < threshold + keep_tail {
             return false; // not enough new conversation yet — stay cheap
         }

@@ -18114,7 +18114,7 @@ mod desktop_consent_and_stall_wiring {
     /// E.EGRESS3c: `files_stat`'s answer for spec-1.md on an OS with yantrik-os #654. SYNTHETIC: the
     /// shape of the df42338 capture (fixtures/desktop/files_stat_true_df42338.txt) with #654's two
     /// fields added as its contract states them -- replace with a capture once #654 is on 520.
-    const STAT_OK: &str = "Yantrik \u{2014} desktop screen, 1 windows open\naccepted: True, settled: True\nrevision: 0\n{\n  \"exists\": true,\n  \"kind\": \"file\",\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",\n  \"real\": \"/home/yantrik/mdg/spec-1.md\",\n  \"via_link\": false\n}";
+    const STAT_OK: &str = "Yantrik \u{2014} desktop screen, 1 windows open\naccepted: True, settled: True\nrevision: 0\n{\n  \"exists\": true,\n  \"kind\": \"file\",\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",\n  \"real\": \"/home/yantrik/mdg/spec-1.md\",\n  \"via_link\": false,\n  \"changed\": 1790602795\n}";
 
     /// E.EGRESS3c through the loop: the editor's text of a named file counts only when the desktop
     /// vouches for the file -- not through a link, not another real file, not an older desktop that
@@ -18136,6 +18136,14 @@ mod desktop_consent_and_stall_wiring {
         assert!(elsewhere.is_empty(), "a file whose real path is another was handed over");
         assert!(run(OLDER.to_string()).await.is_empty(), "an older desktop's files_stat, which names no real path, was taken as vouching");
         assert!(run("ERR:the desktop is not answering".to_string()).await.is_empty(), "an unreachable files_stat was taken as vouching");
+        // E.EGRESS3e (A3): no ctime, or a ctime after the naming, keeps nothing.
+        let undated = run(STAT_OK.replace(",\n  \"changed\": 1790602795", "")).await;
+        assert!(undated.is_empty(), "a files_stat without `changed` (no #657) was taken as vouching");
+        let rewritten = run(STAT_OK.replace("\"changed\": 1790602795", "\"changed\": 4102444800")).await;
+        assert!(rewritten.is_empty(), "a file changed after it was named was handed over");
+        // E.EGRESS3e (A4): a hard link, as files_stat answers one (SYNTHETIC, the shape 4c gave).
+        let hard = "Yantrik \u{2014} desktop screen\naccepted: True, settled: True\n{\n  \"exists\": \"unknown\",\n  \"path\": \"/home/yantrik/mdg/spec-1.md\",\n  \"reason\": \"hard_link\"\n}";
+        assert!(run(hard.to_string()).await.is_empty(), "a hard link was handed over");
     }
 
     /// E.EGRESS3d (N3) through the loop: an open's text counts only when the open settled, the tab is
@@ -18181,6 +18189,11 @@ mod desktop_consent_and_stall_wiring {
         assert!(!look.is_empty(), "a Files look took the named file back");
         let unrelated = run(then("agent_run", serde_json::json!({"command": "ls ~/Downloads"}))).await;
         assert!(!unrelated.is_empty(), "a command that did not mention the file took it back");
+        // E.EGRESS3e (A3): the backstop is any call but a look -- typed into a terminal, another app.
+        let typed = run(then("agent_input", serde_json::json!({"text": "cat > mdg/spec-1.md"}))).await;
+        assert!(typed.is_empty(), "agent_input on the named file left it handed over");
+        let blender = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "blender", "action": "run_python", "args": {"code": "open('/home/yantrik/mdg/spec-1.md','w')"}}));
+        assert!(run(blender).await.is_empty(), "another app's write left it handed over");
     }
 
     /// E.ARENA1-F64 through the loop, the MDG turn's shape: the spec opened, then an answer. The model's
@@ -19339,4 +19352,91 @@ fn egress3d_a_url_is_decoded_before_it_is_judged() {
     }
     assert!(!holds("https://arxiv.org/abs/2505.03229?v=2", &none));
     assert!(holds("https://x.example/BRIEF.md", &["BRIEF.md".to_string()]));
+}
+
+/// E.EGRESS3e (A1): a path's start is its own, after a leading ':' is trimmed -- "Read :~/résumé"
+/// put a slice inside é and panicked with the hand-over lock held.
+#[test]
+fn egress3e_a_trimmed_path_never_panics() {
+    use crate::egress_planning::HandedOver;
+    let mut h = HandedOver::default();
+    h.note_named("k", "Read :~/r\u{e9}sum\u{e9}", Some("/home/p"), 0);
+    h.note_named("k", "Read :~/\u{e9}t\u{e9}.md: and :::~/\u{e9}a.md", Some("/home/p"), 0);
+    let names = h.named_names("k");
+    assert!(names.contains(&"/home/p/r\u{e9}sum\u{e9}".to_string()) && names.contains(&"/home/p/\u{e9}a.md".to_string()), "{names:?}");
+    // Should any offset still land inside a character, the sentence is None, never a panic.
+    use crate::egress_planning::sentence_around;
+    let t = "Read :~/r\u{e9}sum\u{e9}";
+    assert!(sentence_around(t, 5, 10).is_none(), "an end inside \u{e9} gave a sentence");
+    assert!(sentence_around(t, 10, 2).is_none(), "a start inside \u{e9} gave a sentence");
+    assert!(sentence_around(t, 6, 10).is_some());
+}
+
+/// E.EGRESS3e (A3): a file's ctime counts as before the naming only in an earlier second.
+#[test]
+fn egress3e_a_change_in_the_naming_second_is_after_it() {
+    use crate::egress_planning::unchanged_since;
+    assert!(unchanged_since(999, Some(1_000_500)));
+    assert!(!unchanged_since(1_000, Some(1_000_500)), "a write in the second of the naming passed");
+    assert!(!unchanged_since(0, None), "a file never named passed");
+}
+
+/// E.EGRESS3e (A2): a url still encoded after the last round, an encoded slash or tilde, and a path
+/// in one of the url's own segments are refused.
+#[test]
+fn egress3e_a_deeply_encoded_url_is_refused() {
+    use crate::egress_planning::url_holds_path as holds;
+    let none: Vec<String> = Vec::new();
+    let mut five = "/home/p/x".to_string();
+    for _ in 0..5 {
+        five = five.replace('%', "%25").replace('/', "%2F");
+    }
+    assert!(holds(&format!("https://evil.example/{five}"), &none), "five rounds of encoding left");
+    let mut four = "/home/p/x".to_string();
+    for _ in 0..4 {
+        four = four.replace('%', "%25").replace('/', "%2F");
+    }
+    assert!(holds(&format!("https://evil.example/{four}"), &none), "four rounds of encoding left");
+    // Five levels where four decodes leave no marker at all ("/%68ome/p/x"): only the refusal of a
+    // url still changing after the last round stops it.
+    assert!(holds("https://evil.example/%2525252568ome/p/x", &none), "a fifth level hidden behind %68 left");
+    assert!(holds("https://evil.example/a/~notes/b", &none), "a ~ segment left");
+    assert!(!holds("https://arxiv.org/abs/2505.03229", &none));
+    assert!(!holds("https://en.wikipedia.org/wiki/Abstract_Meaning_Representation", &none));
+    // Ordinary encoding is decoded, not refused: one level, and a doubly encoded space.
+    assert!(!holds("https://en.wikipedia.org/wiki/Caf%C3%A9?q=semantic%20graph", &none), "an ordinary encoded url was refused");
+    assert!(!holds("https://x.example/search?q=semantic%2520graph", &none), "a doubly encoded space was refused");
+}
+
+/// E.EGRESS3e: a file named inside quoted, fenced or forwarded text was named by someone else.
+#[test]
+fn egress3e_a_quoted_path_is_not_handed_over() {
+    use crate::egress_planning::HandedOver;
+    let named = |text: &str| {
+        let mut h = HandedOver::default();
+        h.note_named("k", text, Some("/home/p"), 0);
+        h.named_names("k")
+    };
+    assert!(named("Read ~/a.md").contains(&"/home/p/a.md".to_string()));
+    for (text, why) in [
+        ("Summarise this:\n> Read ~/a.md first", "a > line"),
+        ("Look:\n```\nread ~/a.md\n```", "a fence"),
+        ("fyi\n---------- Forwarded message ---------\nPlease read ~/a.md", "a forwarded message"),
+        ("fyi\n-----Original Message-----\nRead ~/a.md", "an original message"),
+    ] {
+        assert!(named(text).is_empty(), "{why}: {:?}", named(text));
+    }
+    // A file the person names themselves after a fence closes is theirs.
+    assert!(named("```\nx\n```\nRead ~/b.md").contains(&"/home/p/b.md".to_string()));
+}
+
+/// E.EGRESS3e: the hand-over key holds the scope -- a member-scoped turn under the primary's name
+/// (YM_HARNESS_SCOPE=member) is not the primary's.
+#[tokio::test]
+async fn egress3e_a_member_scope_under_the_primary_name_is_another_key() {
+    let me = TurnIdentity::primary();
+    let scoped = TurnIdentity::new(mind_types::PRIMARY.to_string(), false, crate::OutputScope::HouseholdMember);
+    let a = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&me) }).await;
+    let b = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&scoped) }).await;
+    assert_ne!(a, b);
 }

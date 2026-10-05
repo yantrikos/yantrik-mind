@@ -1063,8 +1063,11 @@ pub(crate) fn requested_path(user_text: &str) -> Option<String> {
 /// whitespace, quotes, braces, brackets, commas and semicolons; a trailing `:` or `.` dropped.
 fn path_tokens(text: &str) -> Vec<(usize, &str)> {
     let delim = |c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '{' | '}' | '[' | ']' | '(' | ')' | ',' | ';');
+    // E.EGRESS3e (A1): the start is the TRIMMED path's own -- the word's start sat before a leading
+    // ':' and put a slice at start + trimmed length inside "é" ("Read :~/résumé").
     text.split(delim)
-        .map(|w| (w.as_ptr() as usize - text.as_ptr() as usize, w.trim_matches(':').trim_end_matches('.')))
+        .map(|w| w.trim_matches(':').trim_end_matches('.'))
+        .map(|p| (p.as_ptr() as usize - text.as_ptr() as usize, p))
         .filter(|(_, w)| (w.starts_with("~/") || w.starts_with('/')) && w.len() > 2)
         .collect()
 }
@@ -1094,12 +1097,18 @@ pub(crate) fn settled(obs: &str) -> bool {
     obs.lines().any(|l| l.to_ascii_lowercase().contains("settled: true"))
 }
 
-/// E.EGRESS3c (yantrik-os #654): `files_stat`'s word on where a path really is -- (exists,
-/// via_link, real). None when it does not say all three: an older desktop, `unknown`, an error.
-pub(crate) fn files_stat_real(obs: &str) -> Option<(bool, bool, String)> {
+/// E.EGRESS3c (yantrik-os #654, #657): `files_stat`'s word on where a path really is and when it
+/// last changed -- (exists, via_link, real, changed: ctime in unix seconds). None when it does not
+/// say all four: an older desktop, `unknown` (a hard link among them), an error.
+pub(crate) fn files_stat_real(obs: &str) -> Option<(bool, bool, String, u64)> {
     let at = obs.find("\n{")? + 1;
     let v: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter::<serde_json::Value>().next()?.ok()?;
-    Some((v.get("exists")?.as_bool()?, v.get("via_link")?.as_bool()?, v.get("real")?.as_str()?.to_string()))
+    Some((
+        v.get("exists")?.as_bool()?,
+        v.get("via_link")?.as_bool()?,
+        v.get("real")?.as_str()?.to_string(),
+        v.get("changed")?.as_u64()?,
+    ))
 }
 
 /// E.EGRESS3b: the file an app's answer says it is on -- the `path` of its result object.

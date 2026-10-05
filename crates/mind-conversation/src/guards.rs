@@ -114,6 +114,10 @@ pub(crate) async fn pre(
         (s.external_obs.clone(), s.web_obs.clone())
     };
     let asked = grounded.clone();
+    // E.EGRESS3e (A3): a handed-over file written since it was named stops being a source first.
+    if crate::egress_planning::plans_from_handed(tool) {
+        engine.recheck_handed(&ConversationEngine::handed_key(id), id).await;
+    }
     let args = match engine
         .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance, &ConversationEngine::handed_key(id))
         .await
@@ -364,7 +368,8 @@ mod tests {
         );
         let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
             .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
-            .with_home_dir(Some("/home/p".into()));
+            .with_home_dir(Some("/home/p".into()))
+            .with_mcp(desktop_answering(vec![stat("/home/p/notes/contacts.md", 1_790_602_795); 4]));
         let id = TurnIdentity::primary();
         let key = ConversationEngine::handed_key(&id);
         eng.handed_over.lock().unwrap().note_named(&key, "Read ~/notes/contacts.md", Some("/home/p"), ConversationEngine::now_ms());
@@ -375,6 +380,61 @@ mod tests {
         // A span with no private value in it does leave.
         let ok = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "for the project"}), "t").await;
         assert!(matches!(ok, PreVerdict::Proceed(_)));
+    }
+
+    /// E.EGRESS3e: a desktop whose os_act answers with these, in order.
+    fn desktop_answering(replies: Vec<String>) -> Arc<mind_tools::McpHub> {
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: "os_act".into(),
+            description: "os_act on this computer".into(),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        hub.add_scripted_tool(tool, replies.into_iter().map(Ok).collect()).unwrap();
+        hub
+    }
+
+    /// E.EGRESS3e: `files_stat`'s answer with #654's and #657's fields. SYNTHETIC until 4c's captures.
+    fn stat(path: &str, changed: u64) -> String {
+        format!("Yantrik \u{2014} desktop screen\naccepted: True, settled: True\n{{\n  \"changed\": {changed},\n  \"exists\": true,\n  \"path\": \"{path}\",\n  \"real\": \"{path}\",\n  \"via_link\": false\n}}")
+    }
+
+    /// E.EGRESS3e (A3): before a web search is planned, a handed-over file written since it was named
+    /// (its ctime after the naming) stops being a source -- the query no longer leaves as its span.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_changed_since_it_was_named_is_no_longer_a_source() {
+        use mind_governance::egress::EgressBroker;
+        let run = |changed: u64| async move {
+            let pool = mind_inference::InferencePool::new(
+                Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"planned"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+                1,
+            );
+            let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+            let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+                .with_home_dir(Some("/home/p".into()))
+                .with_mcp(desktop_answering(vec![stat("/home/p/mdg/spec.md", changed)]));
+            let id = TurnIdentity::primary();
+            let key = ConversationEngine::handed_key(&id);
+            eng.handed_over.lock().unwrap().note_named(&key, "Read ~/mdg/spec.md", Some("/home/p"), ConversationEngine::now_ms());
+            eng.note_handed_over(&key, "/home/p/mdg/spec.md", "a typed semantic graph");
+            let state = Mutex::new(GuardState::default());
+            let v = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "typed semantic graph"}), "t").await;
+            let left = match v {
+                PreVerdict::Proceed(a) => a,
+                PreVerdict::Refuse { msg, .. } => panic!("{msg}"),
+            };
+            let kept = eng.handed_over.lock().unwrap().texts(&key, ConversationEngine::now_ms()).len();
+            (left, kept)
+        };
+        let (left, kept) = run(1_790_602_795).await;
+        assert_eq!((left, kept), (serde_json::json!({"query": "typed semantic graph"}), 1), "an unchanged file stopped being a source");
+        let (left, kept) = run(4_102_444_800).await;
+        assert_eq!((left, kept), (serde_json::json!({"query": "planned"}), 0), "a file written after it was named stayed a source");
     }
 
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.

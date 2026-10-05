@@ -13734,3 +13734,31 @@ Verdict on 6dee92b: SAFE WITH CHANGES. N1, N3, N5 and 3c fixed; N2, N4 and N6 pa
 - A4: the hard-link answer;
 - quoted text: the `>` line, the fence, and the forwarded marker;
 - the key without scope.
+
+## E.EGRESS3e — RESULT: built as preregistered; 17 of 18 mutants killed, the 18th equivalent
+
+- **A1:** `path_tokens` takes the start from the trimmed path. `sentence_around` returns an Option and slices only through `get`.
+  - "Read :~/résumé" and ":::~/éa.md" are named, and no panic is possible.
+  - `sentence_around` with an offset inside é gives None.
+- **A2:**
+  - A url still changing after four decoding rounds is refused.
+  - Every path segment goes through `is_path_word`.
+  - `%2f`/`%5c`/`%7e` were added to the markers as asked, but the mutant removing them SURVIVES and is equivalent. Once the decoded url no longer changes, no valid %XX sequence can remain in it. Kept as belt-and-braces, and stated plainly here.
+  - A fifth level hidden behind `%68` ("/%68ome/p/x" after four decodes) is stopped only by the last-round refusal, and the test covers it.
+- **A3:**
+  - `files_stat_real` requires `changed` (yantrik-os #657).
+  - A handed-over file's ctime must be in an earlier second than its naming (strictly: a write in the naming second fails).
+  - `recheck_handed` stats every kept file again before a web search is planned (`guards::pre`), and drops for good any file that changed or is no longer vouched for.
+  - The backstop is any call but a look (os_describe, web tools, and the editor/Files read-only actions) whose arguments mention a named file. Tests cover agent_input and blender's run_python.
+- **A4:** a test with the hard-link answer (`exists: "unknown"`, `reason: "hard_link"`). SYNTHETIC, in the shape 4c gave.
+- **Quoted text:** paths on `>` lines, in ``` fences, and after "Forwarded message"/"Original Message" are never handed over.
+- **Key:** owner | output_scope | shared | chat.
+- **Existing tests updated:**
+  - The tripwire test now has a scripted desktop that vouches for its file. Without one, the re-check drops the file and the test loses its subject.
+  - STAT_OK gains `"changed": 1790602795` (SYNTHETIC until 4c's captures).
+- **Mutants:** 18 in this pass, and the E.EGRESS3d set re-run against the new code.
+  - A1 start-before-trim (killed via the names assertion; anchored per line because desktop.rs mixes line endings), A1 byte slice head and tail; A2 last-round refusal, segments; A3 changed ignored, changed missing, any time, the naming second, no re-check, backstop narrowed to shell; A4; quoted `>`, fence, forwarded, not called; the key without scope. All killed.
+  - A2 encoded markers: equivalent, as above.
+  - The E.EGRESS3d re-run: two mutants (one decode, no decode) SURVIVED. The A2 refusal masks them, because a url not fully decoded is refused anyway. The loop's remaining job is to keep ordinary encoded urls usable; tests for `Caf%C3%A9?q=semantic%20graph` and `semantic%2520graph` now kill both.
+  - The N2 anchor was re-cut to the Option form, and the mutant is killed.
+  - The N4 terminal and Files-write mutants are superseded by the A3 backstop mutant.

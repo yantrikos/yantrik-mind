@@ -50,17 +50,21 @@ const NEGATIONS: [&str; 21] = [
     "isn t",
 ];
 
-/// E.EGRESS3d: the sentence around byte `at` (a char boundary: `path_mentions` cuts at characters),
-/// bounded by ". ", "!", "?" or a newline -- and the part of it before the path.
-fn sentence_around(text: &str, at: usize, len: usize) -> (&str, &str) {
+/// E.EGRESS3d: the sentence around byte `at`, bounded by ". ", "!", "?" or a newline -- and the part
+/// of it before the path. E.EGRESS3e (A1): every slice goes through `get`; an offset that is not a
+/// character boundary gives None, and None hands nothing over.
+pub(crate) fn sentence_around(text: &str, at: usize, len: usize) -> Option<(&str, &str)> {
     let is_end = |i: usize| {
-        let rest = &text[i..];
-        rest.starts_with(". ") || rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('\n')
+        text.get(i..).is_some_and(|rest| {
+            rest.starts_with(". ") || rest.starts_with('!') || rest.starts_with('?') || rest.starts_with('\n')
+        })
     };
-    let start = text[..at].char_indices().rev().find(|(i, _)| is_end(*i)).map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
+    let head = text.get(..at)?;
+    let start = head.char_indices().rev().find(|(i, _)| is_end(*i)).map(|(i, c)| i + c.len_utf8()).unwrap_or(0);
     let from = (at + len).min(text.len());
-    let end = text[from..].char_indices().find(|(i, _)| is_end(from + i)).map(|(i, _)| from + i).unwrap_or(text.len());
-    (&text[start..end], &text[start..at])
+    let tail = text.get(from..)?;
+    let end = tail.char_indices().find(|(i, _)| is_end(from + i)).map(|(i, _)| from + i).unwrap_or(text.len());
+    Some((text.get(start..end)?, text.get(start..at)?))
 }
 
 /// E.EGRESS3d: text as whole words, lower case, every apostrophe (' and ’ alike) and all other
@@ -72,10 +76,34 @@ fn words_of(s: &str) -> String {
 /// E.EGRESS3d (N5, N2): does this mention of `path` hand it over? Lowercasing happens after the
 /// slicing, never before (N2: "ẞ" lowercases to a different byte length).
 fn hands_over(text: &str, at: usize, path: &str) -> bool {
-    let (sentence, before) = sentence_around(text, at, path.len());
+    let Some((sentence, before)) = sentence_around(text, at, path.len()) else { return false };
     let (sentence, before) = (words_of(sentence), words_of(before));
     HAND_OVER_VERBS.iter().any(|v| before.contains(&format!(" {v} ")))
         && !NEGATIONS.iter().any(|n| sentence.contains(&format!(" {n} ")))
+}
+
+/// E.EGRESS3e: is byte `at` inside text the person quoted rather than wrote -- a line starting with
+/// `>`, a ``` fence, or anything after "Forwarded message" / "Original Message"? A file named there
+/// was named by someone else.
+fn in_quoted_text(text: &str, at: usize) -> bool {
+    let mut fenced = false;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let lower = line.to_lowercase();
+        if lower.contains("forwarded message") || lower.contains("original message") {
+            return at >= offset;
+        }
+        let fence = trimmed.starts_with("```");
+        if at >= offset && at < offset + line.len() {
+            return fenced || fence || trimmed.starts_with('>');
+        }
+        if fence {
+            fenced = !fenced;
+        }
+        offset += line.len();
+    }
+    false
 }
 
 /// E.EGRESS3d (N5): a dotfile, a dot-folder, or a key-like name is never handed over.
@@ -104,7 +132,7 @@ impl HandedOver {
             if p.ends_with('/') || p.split('/').any(|seg| seg == "..") || is_secret_like(p) {
                 continue;
             }
-            if !hands_over(user_text, at, p) {
+            if in_quoted_text(user_text, at) || !hands_over(user_text, at, p) {
                 continue;
             }
             let abs = crate::desktop::absolute(p, home);
@@ -171,6 +199,18 @@ impl HandedOver {
             store.mind_written.insert(p.clone());
         }
         hit
+    }
+
+    /// E.EGRESS3e (A3): when the person named this file (ms), if they did, in this conversation.
+    pub(crate) fn named_at(&self, key: &str, abs: &str) -> Option<u64> {
+        self.stores.get(key)?.named.iter().find(|(n, _)| n == abs).map(|(_, at)| *at)
+    }
+
+    /// E.EGRESS3e (A3): the files whose text is kept, with when each was named.
+    pub(crate) fn kept_files(&self, key: &str) -> Vec<(String, u64)> {
+        self.stores.get(key).map_or_else(Vec::new, |s| {
+            s.texts.iter().filter_map(|(p, _)| s.named.iter().find(|(n, _)| n == p).cloned()).collect()
+        })
     }
 
     /// Each handed-over file's text, as separate sources.
@@ -259,17 +299,25 @@ pub(crate) fn url_holds_path(url: &str, named: &[String]) -> bool {
         }
         decoded = next;
     }
+    // E.EGRESS3e (A2): still encoded after the last round is refused -- five rounds of /home/p/x
+    // read as "%2Fhome%2Fp%2Fx" after four and went out.
+    if percent_decode(&decoded) != decoded {
+        return true;
+    }
     let lower = decoded.to_lowercase();
     let marker = [
         "file:", "~/", "~\\", "/home/", "/root/", "/etc/", "/var/", "/users/", "/tmp/", "/mnt/", "/opt/", "/srv/",
-        "/media/", "/run/", ":\\",
+        "/media/", "/run/", ":\\", "%2f", "%5c", "%7e",
     ]
     .iter()
     .any(|m| lower.contains(m));
     // A query or fragment value that is itself a path ("?f=./notes.md", "#../x").
-    let after = lower.split_once(['?', '#']).map(|(_, rest)| rest).unwrap_or("");
+    let (before, after) = lower.split_once(['?', '#']).unwrap_or((&lower, ""));
     let value_is_path = after.split(['&', '=', '#']).any(|v| !v.is_empty() && is_path_word(v, &[]));
-    marker || value_is_path || named.iter().any(|n| !n.is_empty() && lower.contains(&n.to_lowercase()))
+    // E.EGRESS3e (A2): and each segment of the url's own path ("/~x/", "/c:\\…").
+    let path = before.split_once("://").map_or(before, |(_, rest)| rest.split_once('/').map_or("", |(_, p)| p));
+    let segment_is_path = path.split('/').any(|seg| !seg.is_empty() && is_path_word(seg, &[]));
+    marker || value_is_path || segment_is_path || named.iter().any(|n| !n.is_empty() && lower.contains(&n.to_lowercase()))
 }
 
 /// E.EGRESS3d (N6): one round of percent-decoding (bytes, then UTF-8, lossily).
@@ -294,6 +342,17 @@ fn percent_decode(s: &str) -> String {
 /// E.EGRESS3b: does a text carry a path, or a named file's path or name, in any of its words?
 fn has_path(q: &str, named: &[String]) -> bool {
     q.split_whitespace().any(|w| is_path_word(w, named))
+}
+
+/// E.EGRESS3e (A3): the file's ctime (unix seconds, `files_stat`'s `changed`) is before the second
+/// the person named it (ms). Strictly before: a write in that same second would pass otherwise.
+pub(crate) fn unchanged_since(changed: u64, named_at_ms: Option<u64>) -> bool {
+    named_at_ms.is_some_and(|at| changed < at / 1000)
+}
+
+/// E.EGRESS3e: the tools whose query may be planned from the handed-over text.
+pub(crate) fn plans_from_handed(tool: &str) -> bool {
+    matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki")
 }
 
 /// E.EGRESS3: the web tools -- search and fetch -- whose output a web query may draw its words from.
@@ -393,7 +452,9 @@ impl ConversationEngine {
     /// E.EGRESS3b: whose hand-over this turn reads and writes -- the person, in this desktop chat.
     pub(crate) fn handed_key(id: &TurnIdentity) -> String {
         let chat = crate::TURN_CONVERSATION.try_with(|c| c.clone()).unwrap_or_default();
-        format!("{}|{chat}", id.owner)
+        // E.EGRESS3e: the scope and the shared flag too -- a member-scoped turn under the primary's
+        // name (YM_HARNESS_SCOPE=member) must not read the primary's hand-over.
+        format!("{}|{:?}|{}|{chat}", id.owner, id.output_scope, id.shared)
     }
 
     /// E.EGRESS3: keep text the editor read from a file the person named, as a permitted query source.
@@ -427,12 +488,17 @@ impl ConversationEngine {
                 self.note_mind_written(&key, &p);
             }
         }
-        let writes_outside_the_editor = crate::desktop::act_target(tool, args).is_some_and(|(app, action)| {
-            app == crate::desktop::TWIN_HOST
-                && (action == "agent_run"
-                    || (action.starts_with("files_") && !matches!(action.as_str(), "files_stat" | "files_go" | "files_view" | "files_list")))
-        });
-        if writes_outside_the_editor {
+        // E.EGRESS3e (A3): the backstop to the ctime check -- any call but a look whose arguments
+        // mention a named file (a terminal's agent_run or agent_input, Files, blender's run_python...).
+        let a_look = tool == crate::desktop::DESCRIBE
+            || is_web_tool(tool)
+            || crate::desktop::act_target(tool, args).is_some_and(|(_, action)| {
+                matches!(
+                    action.trim_start_matches("editor_"),
+                    "open" | "read" | "show" | "find" | "find-next" | "find-prev" | "files_stat" | "files_go" | "files_view" | "files_list"
+                )
+            });
+        if !a_look {
             if let Ok(mut h) = self.handed_over.lock() {
                 for p in h.note_written_if_mentioned(&key, &args.to_string()) {
                     eprintln!("[egress] {p}: touched by a {tool} write -- no longer the person's text");
@@ -449,9 +515,30 @@ impl ConversationEngine {
         let answer = self.run_agent_tool_as(crate::desktop::ACT, &args, id).await;
         let home = self.person_home();
         let same = |real: &str| crate::desktop::absolute(real, home.as_deref()) == crate::desktop::absolute(editor_path, home.as_deref());
+        let abs = crate::desktop::absolute(editor_path, home.as_deref());
+        let named_at = self.handed_over.lock().ok().and_then(|h| h.named_at(key, &abs));
         match crate::desktop::files_stat_real(&answer) {
-            Some((true, false, real)) if same(&real) => self.note_handed_over(key, editor_path, text),
+            Some((true, false, real, changed)) if same(&real) && unchanged_since(changed, named_at) => {
+                self.note_handed_over(key, editor_path, text)
+            }
             other => eprintln!("[egress] {editor_path}: not handed over -- the desktop did not vouch for it ({other:?})"),
+        }
+    }
+
+    /// E.EGRESS3e (A3): before a web search plans from handed-over text, ask the desktop again about
+    /// each file; one written since it was named (its ctime moved), or no longer vouched for, is
+    /// dropped and never comes back. Nothing is asked when nothing is kept.
+    pub(crate) async fn recheck_handed(&self, key: &str, id: &TurnIdentity) {
+        let kept = self.handed_over.lock().map(|h| h.kept_files(key)).unwrap_or_default();
+        for (abs, named_at) in kept {
+            let args = serde_json::json!({"app": crate::desktop::TWIN_HOST, "action": "files_stat", "args": {"path": abs}});
+            let answer = self.run_agent_tool_as(crate::desktop::ACT, &args, id).await;
+            let still = matches!(crate::desktop::files_stat_real(&answer),
+                Some((true, false, real, changed)) if real == abs && unchanged_since(changed, Some(named_at)));
+            if !still {
+                eprintln!("[egress] {abs}: changed or unvouched since it was named -- no longer a query source");
+                self.note_mind_written(key, &abs);
+            }
         }
     }
 
@@ -556,7 +643,7 @@ impl ConversationEngine {
         // guard works -- and anything else is authored with that text in view.
         // E.EGRESS3b (the review's H1): it leaves as written only as ONE contiguous run of whole words
         // of ONE source; anything assembled from several is the planner's to write.
-        let web_query = matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki");
+        let web_query = plans_from_handed(tool);
         let (handed, named) = if key.is_empty() {
             (Vec::new(), Vec::new())
         } else {

@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"><title>MDG position accounting</title></head><body><pre id="out">running...</pre><script>
+// MDG experiment P1: sequence-position accounting. Deterministic; no model needed.
+// NL rule: lowercase, split on runs of non-alphanumeric, drop empties. 1 token = 1 position.
+// MDG-C conservative: spec sec.24 serialises the codes for the model -> 3 positions per triple.
+// MDG-G generous (multidimensional graph read, node references free): 1 position per DISTINCT subject/object node.
+// MDG-GA stricter-on-MDG variant: 1 per DISTINCT string incl. predicate labels.
+function toks(s){return s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);}
+const D=[
+[1,"The database remembers the user's preference.",[["db","REMEMBERS","pref"],["pref","OWNER","user"],["pref","ISA","PREFERENCE"]]],
+[2,"Alice switched from Qwen to DeepSeek on Tuesday because DeepSeek is faster.",[["e1","ISA","SWITCH"],["e1","ACTOR","alice"],["e1","FROM","qwen"],["e1","TO","deepseek"],["e1","AT","tuesday"],["e1","CAUSE","c1"],["c1","ISA","SPEED_DIFF"],["c1","SUBJ","deepseek"],["c1","OBJ","qwen"],["c1","DIR","GREATER"]]],
+[3,"Bob prefers Rust, but he used Python last year.",[["bob","PREFERS","rust"],["bob","USED","python"],["ubp","ISA","STATE"],["ubp","OF","bob"],["ubp","OBJ","python"],["ubp","VALID_UNTIL","last_year"]]],
+[4,"The server in Bentonville has been offline since 3 p.m.",[["server","LOCATED_AT","bentonville"],["server","STATE","offline"],["offline","SINCE","3pm"]]],
+[5,"Turn off the lights, then lock the door.",[["a1","ISA","ACTION"],["a1","OP","TURN_OFF"],["a1","OBJ","lights"],["a2","ISA","ACTION"],["a2","OP","LOCK"],["a2","OBJ","door"],["a2","AFTER","a1"]]],
+[6,"If the temperature drops below 0 C, the pipes may freeze.",[["cond","ISA","CONDITION"],["cond","LHS","temp"],["temp","OP","LESS"],["temp","VAL","zero_c"],["cond","RHS","freeze"],["freeze","OF","pipes"],["freeze","MODAL","POSSIBLE"]]],
+[7,"Dr. Chen said the trial succeeded, but the results were not published.",[["claim","ISA","CLAIM"],["claim","SOURCE","chen"],["claim","MODE","HEARD_SAY"],["claim","CONTENT","success"],["success","OF","trial"],["neg","ISA","NEGATION"],["neg","OF","published"],["published","OBJ","results"]]],
+[8,"Three of the twelve servers failed.",[["fail","ISA","EVENT"],["fail","ACTOR","server"],["fail","COUNT","three"],["server","COUNT_TOTAL","twelve"]]],
+[9,"The user's name is Sam and their email is sam at example dot com.",[["user","NAME","sam"],["user","EMAIL","sam@example.com"]]],
+[10,"Revenue rose 12 percent to 4.2 million dollars in Q3.",[["rev","ISA","EVENT"],["rev","OP","RISE"],["rev","AMOUNT","pct12"],["rev","TO","money_4p2m"],["rev","AT","q3"]]],
+[11,"I think it will rain tomorrow.",[["claim","ISA","CLAIM"],["claim","MODE","PREDICTED"],["claim","CONTENT","rain"],["rain","AT","tomorrow"]]],
+[12,"The cat that the dog chased ran under the porch.",[["chase","ISA","EVENT"],["chase","ACTOR","dog"],["chase","OBJ","cat"],["run","ISA","EVENT"],["run","ACTOR","cat"],["run","UNDER","porch"]]],
+[13,"Neither of the two candidates has a valid licence.",[["neg","ISA","NEGATION"],["neg","OF","holds"],["holds","ACTOR","candidate"],["candidate","COUNT","two"],["licence","STATE","valid"]]],
+[14,"Send the report to the finance team by Friday.",[["a","ISA","ACTION"],["a","OP","SEND"],["a","OBJ","report"],["a","TO","finance_team"],["a","BY","friday"]]],
+[15,"The memory of the old machine was 8 GB and the machine was cheap.",[["machine","ISA","DEVICE"],["machine","MEMORY","8GB"],["machine","QUALITY","cheap"],["machine","AGE","old"]]],
+[16,"After the model finished training, we evaluated it on 500 examples.",[["t1","ISA","EVENT"],["t1","ACTOR","model"],["t1","OP","FINISH_TRAIN"],["t2","ISA","EVENT"],["t2","ACTOR","we"],["t2","OP","EVALUATE"],["t2","OBJ","model"],["t2","ON","ex_500"],["t2","AFTER","t1"]]]
+];
+let rows=[],sNL=0,sC=0,sG=0,sGA=0;
+for(const [id,en,tr] of D){
+  const nl=toks(en).length;
+  const c=3*tr.length;
+  const nodes=new Set(), all=new Set();
+  for(const t of tr){ nodes.add(t[0]); nodes.add(t[2]); all.add(t[0]); all.add(t[1]); all.add(t[2]); }
+  const g=nodes.size, ga=all.size;
+  rows.push([id,nl,c,g,ga,(nl/c).toFixed(2),(nl/g).toFixed(2)]);
+  sNL+=nl; sC+=c; sG+=g; sGA+=ga;
+}
+function avg(a){return (a.reduce((x,y)=>x+y,0)/a.length).toFixed(2);}
+let s="MDG experiment P1 - sequence-position accounting (NL tokens vs MDG positions)\n";
+s+="id | NL | MDG_C | MDG_G | MDG_GA | NL/MDG_C | NL/MDG_G\n";
+for(const r of rows) s+=r.join(" | ")+"\n";
+s+="\nTOTALS: NL="+sNL+" MDG_C="+sC+" MDG_G="+sG+" MDG_GA="+sGA+"\n";
+s+="POOLED: NL/MDG_C="+(sNL/sC).toFixed(2)+" NL/MDG_G="+(sNL/sG).toFixed(2)+" NL/MDG_GA="+(sNL/sGA).toFixed(2)+"\n";
+s+="MEAN of per-item ratios: NL/MDG_C="+avg(rows.map(r=>+r[5]))+" NL/MDG_G="+avg(rows.map(r=>+r[6]))+"\n";
+s+="ITEMS WHERE MDG USES FEWER POSITIONS: C="+rows.filter(r=>r[5]>1).length+"/"+rows.length+" G="+rows.filter(r=>r[6]>1).length+"/"+rows.length+"\n";
+s+="\nPRE-REGISTERED READING: the hypothesis needs NL/MDG substantially >1 AND it must hold under\nMDG_C, because spec sec.24 serialises the codes for the model.\n";
+document.getElementById('out').textContent=s;
+document.title="DONE";
+</script></body></html>

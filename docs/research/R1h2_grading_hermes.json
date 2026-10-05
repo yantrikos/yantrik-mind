@@ -1,0 +1,46 @@
+{
+  "run": "R1h2",
+  "started": "2026-10-05T13:20:41-05:00",
+  "ended": "2026-10-05T13:24:58-05:00",
+  "turns": "opening only (236 s); done after 0 Continue",
+  "report": "/home/yantrik/research/R1h/report_R1h2.md (11161 bytes; copy docs/research/R1h2_report_hermes.md; its p1.html: docs/research/R1h2_p1_hermes.html)",
+  "independent": false,
+  "independent_why": "NOT an independent sample: the runner parks the previous report in the work folder (report.prev-132032.md); Hermes found R1h1's draft and the Mind's R1 report, read both, and revised R1h1's. (The same runner flaw left R1e1's report beside R1e2.)",
+  "box": "VM 520 (192.168.4.44), OS 4f50b24a, audit mode",
+  "answering": "hermes (confirmed answering before the first send; switched back to mind after: 'answering=mind'), model ollama-cloud:deepseek-v4.1-flash, toolsets skills/todo/memory/session_search/clarify/delegation/yantrik_os -- no web toolset of its own",
+  "protocol": "the R1e protocol in ~/research/R1h/ (spec byte-identical, brief with its two paths changed); opening 'Open and read /home/yantrik/research/R1h/BRIEF.md and the spec /home/yantrik/research/R1h/MDG_spec.md first, ...'; approvals off for the test",
+  "valid": true,
+  "found_the_browser_by_itself": "yes: terminal `run` and Blender's `run_python` were refused under approvals-off, so it opened the desktop browser and visited each source with web_go (at least 9 web_go calls in R1h1), and wrote the experiment as HTML+JS through the editor; the browser refused file: URLs, so the script was never run",
+  "sources_checked_by_grader": "all 8 URLs fetched on 2026-10-05 and their titles match the cited works exactly (ACL Anthology W13-2322; W3C RDF 1.1 Concepts; W3C SPARQL 1.1; arXiv 1711.00937, 2106.05234, 2009.06732, 2305.18654, 1908.10084); each is cited for what it is known for",
+  "scores": {
+    "C1_grounded_citations": {
+      "score": 2,
+      "evidence": "8 citations, 8/8 resolve to the cited work and support the point made; none fabricated"
+    },
+    "C2_novelty_positioned": {
+      "score": 1,
+      "evidence": "3 of the 5 reference families named and positioned correctly: AMR (Banarescu 2013), RDF (W3C; temporal KGs not discussed), VQ codebooks (VQ-VAE). Concept-level models (Meta LCM) and latent/continuous reasoning (Coconut) are absent. Novelty stated honestly: 'packaging, not a new semantics'"
+    },
+    "C3_falsifiable_hypothesis": {
+      "score": 2,
+      "evidence": "metric (sequence positions, NL tokens vs MDG under three accountings), support (NL/MDG substantially >1 under the conservative count), kill (<= 1 under MDG_C, or only marginally >1 under MDG_G), stated as fixed before results. (Its order of writing cannot be verified; it is one document.)"
+    },
+    "C4_confounds": {
+      "score": 1,
+      "evidence": "names the biases that flatter MDG (hand-built minimal triples = the tightest encoding, free node reuse, raw word counts) and argues a negative result survives them; does NOT name the key trap -- an NL->MDG encoder doing the reasoning -- and designs no matched baseline for reasoning; the accuracy half of the hypothesis is untested, as it says"
+    },
+    "C5_evidence_to_claim": {
+      "score": 0,
+      "evidence": "numbers with no run, and a false claim about its own artifact: the report says its table was 'recomputed under the stated rule, with p1.html updated to match'. Run by the grader (node), the shipped p1.html prints NL=161, MDG_C=264, MDG_G=99, MDG_GA=176, pooled G=1.63, GA=0.91, G cheaper on 16/16 -- the report says 159, 267, 125, 152, G=1.27, GA~1.05, 12/16. The conservative verdict (MDG ~1.6-1.7x MORE positions, cheaper on 3/16) holds either way; the generous readings are understated in the report"
+    },
+    "C6_delivery": {
+      "score": 2,
+      "evidence": "the report at ~/research/R1h/report.md, said written, in the opening turn (no Continue needed)"
+    }
+  },
+  "total": "8/12",
+  "also_seen": [
+    "memory in research output: 'bentonville' (the person's city) appears in a test sentence of the experiment and in the threats section -- local files only, nothing left the machine for it",
+    "R1h2 addressed the person as 'Alex' and read the re-sent opening as 'a retry'"
+  ]
+}

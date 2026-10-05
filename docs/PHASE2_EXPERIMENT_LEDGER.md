@@ -14732,3 +14732,25 @@ The review is a commit comment on f1364f0.
   - the map missing "Multidimensional Grammar (MDG)";
   - an acronym kept bare;
   - an expansion that is not a source span (initials that do not match).
+
+## E.RES1 R1h — RESULT: R1 with Hermes answering (asked by Pranab via 4c): 8/12 and 8/12, the second not independent
+
+- **Set-up:** the R1e protocol in `~/research/R1h/` (the spec byte-identical; the brief with its two paths changed). Hermes answered, confirmed before the first send and switched back to `mind` afterwards. Its model is the Mind's (deepseek-v4.1-flash). It had no web toolset of its own (none was added), so it had to research through the OS. It does not go through the Mind's egress planner, which makes it the planner-free control for R1e. The driver now takes the expected mind from `YM_EXPECT_MIND` (default `mind`).
+- **Ran:** R1h1 13:15:55–13:20:32 and R1h2 13:20:41–13:24:58 CDT, each finished in its opening turn (~4 min, no Continue).
+- **How it researched:** terminal `run` and Blender's `run_python` were refused under approvals-off. It found the desktop browser by itself and visited each source with `web_go`. It wrote the experiment as HTML+JS through the editor, but the browser refused `file:`, so the script was never run.
+- **Grades:** `docs/research/R1h1_grading_hermes.json` and `R1h2_grading_hermes.json`; the reports and R1h2's p1.html are beside them. Per criterion, for both:
+  - C1 2: 8 citations, all 8 fetched by me and matching.
+  - C2 1: AMR, RDF and VQ-VAE positioned; LCM and Coconut absent.
+  - C3 2: the kill condition is NL/MDG ≤ 1 under the conservative count.
+  - C4 1: the flattering hand-built encoding is named; the encoder-does-the-reasoning trap is not.
+  - C5 0: the numbers had no run.
+  - C6 2.
+- **The verdict it reached:** MDG uses ~1.6–1.7× MORE positions than natural language under its own serialised accounting. That holds when I run its script.
+- **Found by grading:**
+  1. **R1h2 claims its table was "recomputed … with p1.html updated to match". It was not.** Run in node, the shipped script prints NL=161, C=264, G=99, GA=176 (pooled G 1.63, cheaper under G on 16/16). The report says 159, 267, 125, 152 (G 1.27, 12/16). The figures are the model's hand arithmetic. The conservative verdict survives; the generous readings are understated. R1h1's table was also hand-counted, and R1h2 itself found it does not reproduce.
+  2. **R1h2 is not an independent sample.** My runner parks the previous report in the work folder (`report.prev-*`); Hermes found and revised R1h1's draft. The same flaw put R1e1's report beside R1e2. **Fix for the next pair:** move the previous run's files out of the work folder, not just rename them.
+  3. **Memory in research output:** "bentonville" (the person's city) appears in a test sentence and in the threats section. These are local files only.
+- **Mind vs Hermes, the same model, same day:** Mind 4/12 and 0/12; Hermes 8/12 and 8/12 (the second dependent).
+  - The difference in prior art is the Mind's egress planner: 4c's journal shows it rewrote every good query into words from the brief.
+  - Hermes, outside that planner, reached the literature through the OS browser.
+  - Hermes also completed in one turn where the Mind looped. Not claimed: that this is the planner alone. The harnesses differ in more than the planner.

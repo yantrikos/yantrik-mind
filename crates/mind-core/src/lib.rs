@@ -605,10 +605,13 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .filter(|u| !u.trim().is_empty())
     {
         Some(url) => {
-            eprintln!("[search] using SearXNG at {url} (DDG fallback)");
+            // E.SEARCH2: the categories a general search asks for, when set (VM 520: general,science).
+            let categories = std::env::var("YM_SEARXNG_CATEGORIES").ok();
+            eprintln!("[search] using SearXNG at {url} (DDG fallback; categories: {})", categories.as_deref().unwrap_or("the instance's default"));
             Arc::new(
                 mind_tools::SearxngSearch::new(url)
-                    .with_fallback(Arc::new(mind_tools::DdgSearch::new())),
+                    .with_fallback(Arc::new(mind_tools::DdgSearch::new()))
+                    .with_categories(categories),
             )
         }
         None => Arc::new(mind_tools::DdgSearch::new()),

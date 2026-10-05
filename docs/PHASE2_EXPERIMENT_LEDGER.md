@@ -13929,3 +13929,38 @@ The instance is fine; the request is the fix.
 - a person-typed URL not passed through;
 - the refusal skip for a non-os_act tool;
 - the short refusal form accepted.
+
+## E.EGRESS4 — RESULT: built as preregistered, with the variant rule narrowed; every real mutant killed
+
+- **A fetch now leaves one of two ways:**
+  - as written, when its address is in the person's own words this turn (only `{url}`);
+  - otherwise as the clean planner's pick (`plan_fetch`), at temperature 0 and seed 0, among `fetch_candidates`: addresses in the person's words and in the WEB results of this turn, never mail. The planner is shown the person's request, the handed-over text (capped), each candidate's result line and what was already fetched, and answers `{"pick": n}`. The grounded model's choice is discarded.
+- **Departure from the prereg:** the prereg's variant group, "the same host and path up to the last segment", puts every arXiv paper (`/abs/…`) in one group, so a per-turn cap of 2 would stop research after two papers. So:
+  - the >20 drop is counted within ONE result page (the reviewer's own wording, "a result offering more than ~20 variants");
+  - the 2-per-turn cap applies to addresses that differ only in query or fragment (the `?v=` channel).
+  Since the planner now makes the pick, the model cannot steer among last-segment variants anyway.
+- **The sixth pass's note 1:** the refusal skip is now only for `os_act` and the full form "REFUSED — nothing was run. refused:".
+- **E.EGRESS3g superseded:** the planner-URL copy check and its tests are gone; fetch tools no longer reach the generic planner. The old contract test (a search-result URL "dispatches exactly as chosen") is replaced by `a_fetch_goes_to_the_planners_pick_never_the_models`:
+  - typed → as written;
+  - three different model choices → the same planner pick;
+  - a mail-only reset link → refused without asking the planner;
+  - a 25-variant menu → no candidate;
+  - a third `?v=` fetch → `FetchCapReached`;
+  - picks 9, 0, a URL, or prose → refused;
+  - a query still never passes on provenance.
+  The guards provenance test now expects an invented address to be replaced by the listed result.
+- **Mutants:** 9 real ones, all killed: mail as a candidate; the grounded choice used; the variant drop; the cap; a pick out of range; a URL instead of a number; a person-typed URL not passed through; the refusal skip for any tool; the short refusal form. A tenth was malformed (it changed nothing) and is not counted.
+- **Reaches production only on Pranab's word** (4c will raise it after review): this hole is in every deployed Mind.
+
+## E.SEARCH2 — RESULT
+
+- `SearxngSearch::with_categories`, read from `YM_SEARXNG_CATEGORIES` in mind-core and blank-trimmed; the request is built by `params`. A one-shot local server test checks the request line in four cases: set, unset, blank, and news keeping `news`.
+- **Mutants:** 4, all killed. VM 520's env file gets `general,science` before R1d run 2, with 4c told.
+
+## E.ERASE4 — the redact review's notes
+
+1. **Wording:** "Erase removes it from my memory and asks the desktop to remove it from this conversation" (the desktop decides).
+2. **Quote only the person's own words:** quoted only when the person put the words in THIS conversation themselves. `HandedOver` keeps the person's last 50 messages per conversation, canonical, and `person_said` checks them. Otherwise the question is the unquoted memory-only one, no redact is sent, and the reply makes no claim about the conversation. The Mind's own replies don't count yet, which is stricter.
+   - Test: `a_text_the_person_never_said_here_is_not_quoted`.
+   - Mutants: 3, all killed (quoted though unsaid, `person_said` always true, never quoted).
+3. **Unicode tables:** the Mind's ICU tables and the desktop's may disagree on newly encoded characters. That fails safe: the redact is refused, and the reply says the conversation still holds the text. Noted, not built.

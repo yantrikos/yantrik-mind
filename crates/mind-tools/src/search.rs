@@ -75,6 +75,8 @@ impl WebSearch for DdgSearch {
 pub struct SearxngSearch {
     base: String,
     fallback: Option<Arc<dyn WebSearch>>,
+    /// E.SEARCH2: the categories a general search asks for (`YM_SEARXNG_CATEGORIES`), when set.
+    categories: Option<String>,
 }
 
 impl SearxngSearch {
@@ -82,11 +84,27 @@ impl SearxngSearch {
         Self {
             base: base.into().trim_end_matches('/').to_string(),
             fallback: None,
+            categories: None,
         }
     }
     pub fn with_fallback(mut self, fb: Arc<dyn WebSearch>) -> Self {
         self.fallback = Some(fb);
         self
+    }
+    /// E.SEARCH2: send these categories on every general search ("general,science" for research:
+    /// `general` alone is Bing on the shared instance, which reads "machine" literally).
+    pub fn with_categories(mut self, categories: Option<String>) -> Self {
+        self.categories = categories.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+        self
+    }
+
+    /// E.SEARCH2: the request a query makes -- (name, value) pairs after the url, in order.
+    pub(crate) fn params(query: &str, categories: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut p = vec![("q", query.to_string()), ("format", "json".to_string()), ("language", "en".to_string())];
+        if let Some(cat) = categories {
+            p.push(("categories", cat.to_string()));
+        }
+        p
     }
 }
 
@@ -96,19 +114,16 @@ impl SearxngSearch {
         &self,
         query: &str,
         limit: usize,
-        categories: Option<&'static str>,
+        categories: Option<&str>,
     ) -> anyhow::Result<Vec<SearchHit>> {
         let url = format!("{}/search", self.base);
-        let (q, want) = (query.to_string(), limit.max(1));
+        let (params, want) = (Self::params(query, categories), limit.max(1));
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<SearchHit>> {
             let mut req = mind_net::get(&url)
                 .timeout(std::time::Duration::from_secs(15))
-                .set("User-Agent", "Mozilla/5.0 (compatible; yantrik-mind/1.0)")
-                .query("q", &q)
-                .query("format", "json")
-                .query("language", "en");
-            if let Some(cat) = categories {
-                req = req.query("categories", cat);
+                .set("User-Agent", "Mozilla/5.0 (compatible; yantrik-mind/1.0)");
+            for (k, v) in &params {
+                req = req.query(k, v);
             }
             Ok(parse_searxng(&req.call()?.into_json()?, want))
         })
@@ -119,7 +134,7 @@ impl SearxngSearch {
 #[async_trait]
 impl WebSearch for SearxngSearch {
     async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<SearchHit>> {
-        match self.query(query, limit, None).await {
+        match self.query(query, limit, self.categories.as_deref()).await {
             Ok(hits) if !hits.is_empty() => Ok(hits),
             other => match &self.fallback {
                 Some(fb) => fb.search(query, limit).await,
@@ -294,6 +309,52 @@ fn parse_ddg(html: &str, limit: usize) -> Vec<SearchHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E.SEARCH2: a one-shot local SearXNG that answers `{"results": []}` and hands back the request line.
+    fn one_request_server() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let mut rest = String::new();
+                while reader.read_line(&mut rest).map(|n| n > 2).unwrap_or(false) {
+                    rest.clear();
+                }
+                let body = "{\"results\": []}";
+                let mut s = stream;
+                let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = tx.send(line);
+            }
+        });
+        (addr, rx)
+    }
+
+    /// E.SEARCH2: the configured categories go on a general search; unset sends none; news keeps `news`.
+    #[tokio::test]
+    async fn the_configured_categories_reach_searxng() {
+        let line = |cats: Option<&str>, news: bool| {
+            let cats = cats.map(str::to_string);
+            async move {
+                let (addr, rx) = one_request_server();
+                let s = SearxngSearch::new(addr).with_categories(cats);
+                let _ = if news { s.search_news("typed graph", 5).await } else { s.search("typed graph", 5).await };
+                rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+            }
+        };
+        let set = line(Some("general,science"), false).await;
+        assert!(set.contains("categories=general%2Cscience"), "{set}");
+        let unset = line(None, false).await;
+        assert!(!unset.contains("categories="), "{unset}");
+        let blank = line(Some("   "), false).await;
+        assert!(!blank.contains("categories="), "a blank setting was sent: {blank}");
+        let news = line(Some("general,science"), true).await;
+        assert!(news.contains("categories=news"), "{news}");
+    }
 
     #[test]
     fn pct_decode_basics() {

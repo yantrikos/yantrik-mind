@@ -12464,7 +12464,9 @@ WINDOW: all-time, latest 200
                         let options = ERASE_OPTIONS.iter().map(|o| o.to_string()).collect();
                         // E.ERASE4: the question quotes the text, so the desktop can erase this
                         // conversation's copies too -- the needle is exactly that quote.
-                        let (question, needle) = erase_redact::forget_question(&what, r.remaining_cells.max(1), &person_clock_now());
+                        // E.ERASE4 (the redact review's note 2): quoted only if the person said it here.
+                        let in_conversation = self.handed_over.lock().map(|h| h.person_said(&Self::handed_key(id), &what)).unwrap_or(false);
+                        let (question, needle) = erase_redact::forget_question(&what, r.remaining_cells.max(1), &person_clock_now(), in_conversation);
                         match ask_person(request_id.clone(), question, options).await.as_deref() {
                             Some("Erase") => {
                                 let erased = self.erase_everywhere(&what).await;
@@ -12473,7 +12475,8 @@ WINDOW: all-time, latest 200
                                         let reply = erase_redact::send_redact(request_id, vec![n]).await;
                                         format!("{erased}{}", erase_redact::conversation_outcome(reply.as_ref()))
                                     }
-                                    None => format!("{erased}{}", erase_redact::NOT_QUOTABLE),
+                                    None if in_conversation => format!("{erased}{}", erase_redact::NOT_QUOTABLE),
+                                    None => erased,
                                 }
                             }
                             Some("Keep") => ERASE_KEPT.to_string(),

@@ -77,8 +77,19 @@ pub(crate) fn quoted_spans(question: &str) -> Vec<String> {
 /// on Erase -- None when the desktop could not be asked to erase it: too short or too long once
 /// canonical, holding both kinds of double quote, or a quote that would not close where the person
 /// can see it. Then the question does not quote it, and only the Mind's memory is erased.
-pub(crate) fn forget_question(text: &str, places: usize, asked_at: &str) -> (String, Option<(String, usize)>) {
-    let tail = format!("It is in {places} place(s) in my memory. Erase removes it from my memory and from this conversation; this can't be undone. (Asked at {asked_at}.)");
+///
+/// `in_conversation`: the person put these words in THIS conversation themselves (the redact review's
+/// note 2). Otherwise quoting would ADD a copy -- in the card, the run store and the pane -- of text the
+/// Mind recalled, which stays there on Keep, no answer or a refusal; so it is not quoted.
+pub(crate) fn forget_question(text: &str, places: usize, asked_at: &str, in_conversation: bool) -> (String, Option<(String, usize)>) {
+    if !in_conversation {
+        return (
+            format!("Erase the text you asked me to forget? It is in {places} place(s) in my memory, and this can't be undone. (Asked at {asked_at}.)"),
+            None,
+        );
+    }
+    // The redact review's note 1: the desktop decides, so the question only says the Mind will ask.
+    let tail = format!("It is in {places} place(s) in my memory. Erase removes it from my memory and asks the desktop to remove it from this conversation; this can't be undone. (Asked at {asked_at}.)");
     let quote = if !text.contains('"') {
         Some(('"', '"'))
     } else if !text.contains(['\u{201C}', '\u{201D}']) {
@@ -188,13 +199,17 @@ mod tests {
     #[test]
     fn the_question_quotes_exactly_the_text() {
         for text in ["throwaway-erase2", "don't share 'x' anywhere", "Priya lives at 12 Elm Street", "\u{130}stanbul flat", "say \"hello\" now"] {
-            let (q, n) = forget_question(text, 2, "10:05");
+            let (q, n) = forget_question(text, 2, "10:05", true);
             assert_eq!(quoted_spans(&q), vec![canon(text)], "{q}");
             assert_eq!(n, Some(needle(text)), "{q}");
             assert!(q.starts_with("Forget "), "{q}");
         }
         // A text with a straight quote is quoted with curly ones.
-        assert!(forget_question("say \"hello\" now", 1, "10:05").0.starts_with("Forget \u{201C}"));
+        assert!(forget_question("say \"hello\" now", 1, "10:05", true).0.starts_with("Forget \u{201C}"));
+        // Words the person never put in this conversation are not quoted: that would add a copy.
+        let (q, n) = forget_question("throwaway-erase2", 1, "10:05", false);
+        assert!(n.is_none() && !q.contains("throwaway-erase2"), "{q}");
+        assert!(q.contains("Erase the text you asked me to forget?"), "{q}");
     }
 
     /// Not quoted, and no needle: both kinds of double quote, under 4 scalars, over 4096, or a quote
@@ -207,13 +222,13 @@ mod tests {
             ("abc", "under four scalars"),
             (long.as_str(), "past the visible prefix"),
         ] {
-            let (q, n) = forget_question(text, 1, "10:05");
+            let (q, n) = forget_question(text, 1, "10:05", true);
             assert!(n.is_none(), "{why}");
             assert!(!q.contains(text), "{why}: the question quoted it");
             assert!(q.contains("This conversation keeps its own copy"), "{why}");
         }
         let huge = "y".repeat(4097);
-        assert!(forget_question(&huge, 1, "10:05").1.is_none(), "over 4096");
+        assert!(forget_question(&huge, 1, "10:05", true).1.is_none(), "over 4096");
     }
 
     #[test]

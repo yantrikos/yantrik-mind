@@ -27,7 +27,13 @@ struct Store {
     mind_written: std::collections::HashSet<String>,
     /// Text read from a named file: (path, text). Expires with its path.
     texts: Vec<(String, String)>,
+    /// E.ERASE4 (the redact review's note 2): the person's own messages in this conversation, newest
+    /// last, canonical -- a forget question quotes only words the person already put here.
+    said: Vec<String>,
 }
+
+/// E.ERASE4: how many of the person's messages a conversation keeps for that check.
+const SAID_MAX: usize = 50;
 
 /// E.EGRESS3: how long a named file, and the text read from it, stays a permitted source.
 pub(crate) const HANDED_OVER_MS: u64 = 12 * 3600 * 1000;
@@ -136,6 +142,13 @@ impl HandedOver {
     pub(crate) fn note_named(&mut self, key: &str, user_text: &str, home: Option<&str>, now: u64) {
         let store = self.stores.entry(key.to_string()).or_default();
         store.fresh(now);
+        // E.ERASE4: the person's message, once (both loops note the same turn).
+        let said = crate::erase_redact::canon(user_text);
+        if store.said.last() != Some(&said) {
+            store.said.push(said);
+            let over = store.said.len().saturating_sub(SAID_MAX);
+            store.said.drain(..over);
+        }
         for (at, p) in crate::desktop::path_mentions(user_text) {
             if p.ends_with('/') || p.split('/').any(|seg| seg == "..") || is_secret_like(p) {
                 continue;
@@ -239,6 +252,12 @@ impl HandedOver {
             }
             None => Vec::new(),
         }
+    }
+
+    /// E.ERASE4: has the person put these exact words (canonical) in this conversation?
+    pub(crate) fn person_said(&self, key: &str, text: &str) -> bool {
+        let needle = crate::erase_redact::canon(text);
+        !needle.is_empty() && self.stores.get(key).is_some_and(|s| s.said.iter().any(|m| m.contains(&needle)))
     }
 
     /// The file names and paths named in this conversation -- never to leave inside a query.
@@ -373,6 +392,70 @@ pub(crate) fn plans_from_handed(tool: &str) -> bool {
     matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki")
 }
 
+/// E.EGRESS4: the http(s) addresses in a text, in order, without trailing punctuation.
+pub(crate) fn urls_in(text: &str) -> Vec<String> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '`'))
+        .map(|w| w.trim_end_matches(['.', ',', ';', ':', '!', '?']))
+        .filter(|w| {
+            let lower = w.to_ascii_lowercase();
+            (lower.starts_with("http://") || lower.starts_with("https://")) && w.split_once("://").is_some_and(|(_, rest)| !rest.is_empty())
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// E.EGRESS4: an address without its query and fragment -- what `?v=alice` and `?v=bob` share.
+fn without_query(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or(url)
+}
+
+/// E.EGRESS4: an address up to its last path segment -- what `/p/alice` and `/p/bob` share.
+fn variant_group(url: &str) -> String {
+    let base = without_query(url).trim_end_matches('/');
+    match base.split_once("://") {
+        Some((scheme, rest)) => match rest.rsplit_once('/') {
+            Some((head, _)) => format!("{}://{}/", scheme.to_ascii_lowercase(), head.to_ascii_lowercase()),
+            None => format!("{}://{}/", scheme.to_ascii_lowercase(), rest.to_ascii_lowercase()),
+        },
+        None => base.to_ascii_lowercase(),
+    }
+}
+
+/// E.EGRESS4: a page offering more variants of one address than this is a menu, not a source.
+const VARIANT_MENU: usize = 20;
+/// E.EGRESS4: the most candidates the planner is shown (the newest), and fetches per query-variant.
+const FETCH_CANDIDATES: usize = 40;
+const FETCHES_PER_PAGE: usize = 2;
+
+/// E.EGRESS4: the addresses a fetch may go to, newest last -- those in the person's words and in what
+/// the WEB tools returned this turn, never another tool's. From each result page, a group of more
+/// than [`VARIANT_MENU`] variants is dropped whole; an address holding a local path is dropped.
+pub(crate) fn fetch_candidates(user_text: &str, web_obs: &[String], named: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |u: String| {
+        if !url_holds_path(&u, named) && !out.contains(&u) {
+            out.push(u);
+        }
+    };
+    for u in urls_in(user_text) {
+        push(u);
+    }
+    for page in web_obs {
+        let urls = urls_in(page);
+        let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for u in &urls {
+            *groups.entry(variant_group(u)).or_default() += 1;
+        }
+        for u in urls {
+            if groups.get(&variant_group(&u)).copied().unwrap_or(0) <= VARIANT_MENU {
+                push(u);
+            }
+        }
+    }
+    let skip = out.len().saturating_sub(FETCH_CANDIDATES);
+    out.into_iter().skip(skip).collect()
+}
+
 /// E.EGRESS3: the web tools -- search and fetch -- whose output a web query may draw its words from.
 pub(crate) fn is_web_tool(tool: &str) -> bool {
     matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki" | "web_fetch" | "fetch" | "web")
@@ -456,6 +539,8 @@ pub(crate) enum CleanArgsFailure {
     /// E.EGRESS3g (R1d on VM 520): a fetch whose address came from neither the person's words nor
     /// this turn's outside results -- the planner cannot write one, and wrote "" three times running.
     UrlNotFromSources,
+    /// E.EGRESS4: a third fetch this turn of one page that differs only in its query or fragment.
+    FetchCapReached,
 }
 
 impl CleanArgsFailure {
@@ -464,6 +549,9 @@ impl CleanArgsFailure {
             CleanArgsFailure::NoAnswer => "the model that prepares outbound requests did not answer",
             CleanArgsFailure::NoUsableArgs => {
                 "the model that prepares outbound requests returned no usable arguments"
+            }
+            CleanArgsFailure::FetchCapReached => {
+                "two pages that differ only in their query were already fetched from that address this turn; use what they gave"
             }
             CleanArgsFailure::UrlNotFromSources => {
                 "that address is not in the person's words or in what a search returned this turn; search first, then fetch an address the results give"
@@ -506,7 +594,9 @@ impl ConversationEngine {
         // E.EGRESS3g (R1d on VM 520): a call the desktop refused ran nothing and wrote nothing -- the
         // model's `editor.open_path` on the spec took it out of the hand-over. Only the desktop's own
         // refusal line, at the very start, counts: a command's output could print the words.
-        if obs.trim_start().starts_with("REFUSED \u{2014} nothing was run") {
+        // E.EGRESS4 (the sixth pass's note 1): and only the DESKTOP's own -- any other MCP server's
+        // output passes through and could print the line first, then write -- in the gate's full form.
+        if tool == crate::desktop::ACT && obs.trim_start().starts_with("REFUSED \u{2014} nothing was run. refused:") {
             return;
         }
         let key = Self::handed_key(id);
@@ -587,6 +677,91 @@ impl ConversationEngine {
         }
     }
 
+    /// E.EGRESS4: where a fetch goes. An address in the person's own words of this turn leaves as
+    /// written; anything else is the CLEAN planner's pick among [`fetch_candidates`], made at
+    /// temperature 0 from the person's request, the files they handed over, each candidate's result
+    /// line and what was fetched already -- the grounded model's choice is discarded, so it carries
+    /// no private bits. A third fetch of one page differing only in its query is refused.
+    async fn plan_fetch(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: &serde_json::Value,
+        web_obs: &[String],
+        fetched: &[String],
+        key: &str,
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
+        let (handed, named) = if key.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            self.handed_over
+                .lock()
+                .map(|mut h| (h.texts(key, Self::now_ms()), h.named_names(key)))
+                .unwrap_or_default()
+        };
+        let capped = |url: &str| {
+            let page = without_query(url);
+            fetched.iter().filter(|f| without_query(f) == page).count() >= FETCHES_PER_PAGE
+        };
+        if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
+            if !url.is_empty() && user_text.contains(url) {
+                if capped(url) {
+                    return Err(CleanArgsFailure::FetchCapReached);
+                }
+                return Ok(serde_json::json!({ "url": url }));
+            }
+        }
+        let candidates = fetch_candidates(user_text, web_obs, &named);
+        if candidates.is_empty() {
+            eprintln!("[egress] {tool}: no address from the person's words or a web result \u{2014} refused");
+            return Err(CleanArgsFailure::UrlNotFromSources);
+        }
+        let all_web = web_obs.join("\n");
+        let line_of = |u: &str| -> String {
+            all_web.lines().chain(user_text.lines()).find(|l| l.contains(u)).unwrap_or("").chars().take(200).collect()
+        };
+        let list: String = candidates.iter().enumerate().map(|(i, u)| format!("{}. {u}\n   {}\n", i + 1, line_of(u))).collect();
+        let handed_all = handed.join("\n\n");
+        let handed_part = if handed_all.trim().is_empty() {
+            String::new()
+        } else {
+            let excerpt: String = handed_all.chars().take(PLANNER_HANDED_CAP).collect();
+            format!("\nText of the files the person handed over:\n{excerpt}\n")
+        };
+        let done = if fetched.is_empty() { "(none)".to_string() } else { fetched.join("\n") };
+        let sys = "You choose which ONE web page to fetch next for the person's request, from a numbered \
+            list of addresses that web searches returned. Prefer a page not fetched yet that best serves \
+            the request. You know nothing else about the person. Output ONLY {\"pick\": <number>}.";
+        let user = format!(
+            "Person's request: {user_text}\n{handed_part}\nAlready fetched this turn:\n{done}\n\nAddresses:\n{list}\nOutput ONLY {{\"pick\": <number>}}."
+        );
+        let cfg = GenerationConfig { max_tokens: 40, temperature: 0.0, seed: 0, ..GenerationConfig::default() };
+        let text = self
+            .inference
+            .chat_household_attributed(vec![ChatMessage::system(sys), ChatMessage::user(&user)], cfg, concat!(module_path!(), ":fetch-pick"))
+            .await
+            .map_err(|e| {
+                eprintln!("[egress] fetch planner for {tool} did not answer: {e}");
+                CleanArgsFailure::NoAnswer
+            })?
+            .text;
+        let body = crate::strip_reasoning(&text);
+        let pick = match (body.find('{'), body.rfind('}')) {
+            (Some(a), Some(b)) if b > a => serde_json::from_str::<serde_json::Value>(&body[a..=b])
+                .ok()
+                .and_then(|v| v.get("pick").and_then(|p| p.as_u64())),
+            _ => None,
+        };
+        let Some(url) = pick.and_then(|n| usize::try_from(n).ok()).and_then(|n| n.checked_sub(1)).and_then(|i| candidates.get(i)) else {
+            eprintln!("[egress] fetch planner for {tool} picked no listed address \u{2014} refused");
+            return Err(CleanArgsFailure::NoUsableArgs);
+        };
+        if capped(url) {
+            return Err(CleanArgsFailure::FetchCapReached);
+        }
+        Ok(serde_json::json!({ "url": url }))
+    }
+
     /// ARCH-3 slice 2 — EGRESS-CLEAN TOOL PLANNING. For an outbound tool whose argument is a
     /// self-contained query/url the model can build from the LITERAL request, RE-AUTHOR the argument
     /// in a SEPARATE, STATELESS model call that never saw the private grounding, working-set, people
@@ -621,7 +796,7 @@ impl ConversationEngine {
         grounded: serde_json::Value,
         external_provenance: &str,
     ) -> Result<serde_json::Value, CleanArgsFailure> {
-        self.egress_clean_args_with(tool, user_text, grounded, external_provenance, &[], "").await
+        self.egress_clean_args_with(tool, user_text, grounded, external_provenance, &[], &[], "").await
     }
 
     /// E.EGRESS3: [`Self::egress_clean_args`] with what the WEB tools returned this turn (each
@@ -634,6 +809,7 @@ impl ConversationEngine {
         grounded: serde_json::Value,
         external_provenance: &str,
         web_obs: &[String],
+        fetched: &[String],
         key: &str,
     ) -> Result<serde_json::Value, CleanArgsFailure> {
         // Only active when the egress kernel is wired (keeps legacy/test paths unchanged).
@@ -670,17 +846,13 @@ impl ConversationEngine {
         ) {
             return Ok(grounded);
         }
-        // PROVENANCE PASS-THROUGH (scoped to the url-bearing fetch tools, where the breakage is
-        // total): a URL the user typed, or that an external service returned this turn, is not a
-        // private fact — dispatch it exactly as chosen. Queries stay clean-authored: they are built
-        // from the user's request, which the clean planner CAN see, so it does its job there.
+        // E.EGRESS4 (the sixth pass): a fetch never leaves as the grounded model chose it from what
+        // came back this turn -- a page listing ?v=alice, ?v=bob... let it pick private bits, and a
+        // mail result let it follow a reset link. Only the person's own words pass through; anything
+        // else is the clean planner's pick among the web results.
         if matches!(tool, "web_fetch" | "fetch" | "web") {
-            if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
-                if !url.is_empty() && (user_text.contains(url) || external_provenance.contains(url))
-                {
-                    return Ok(grounded);
-                }
-            }
+            let _ = external_provenance; // mail and every non-web tool: never a fetch source
+            return self.plan_fetch(tool, user_text, &grounded, web_obs, fetched, key).await;
         }
         // E.EGRESS3 (Pranab, 5 Oct): a web search may also draw on the text of files the person named
         // in this conversation, and on what the outside world returned this turn. A query whose every
@@ -783,13 +955,6 @@ impl ConversationEngine {
                             if url_holds_path(&text, &named) {
                                 eprintln!("[egress] clean planner for {tool} wrote a url holding a local path \u{2014} refused");
                                 return Err(CleanArgsFailure::NoUsableArgs);
-                            }
-                            // E.EGRESS3g: the planner may only COPY an address from the literal request
-                            // or this turn's outside results; one it made up (or "") goes nowhere useful.
-                            let fetch = matches!(tool, "web_fetch" | "fetch" | "web");
-                            if fetch && (text.is_empty() || !(user_text.contains(&text) || external_provenance.contains(&text))) {
-                                eprintln!("[egress] clean planner for {tool} wrote an address from no source \u{2014} refused");
-                                return Err(CleanArgsFailure::UrlNotFromSources);
                             }
                             continue;
                         }

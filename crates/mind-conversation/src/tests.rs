@@ -2481,100 +2481,62 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
     );
 }
 
-/// PROVENANCE PASS-THROUGH: a URL the user typed, or that an EXTERNAL service returned this turn,
-/// dispatches exactly as the model chose it — the outside world already has it, so re-authoring
-/// protects nothing and (observed live 2026-08-16) destroys the fetch: the clean planner, which by
-/// design never sees the work log, re-invented a search-result URL as search-engine pages and
-/// unfetchable garbage, six times for one article. A URL with NO such provenance still goes through
-/// the clean planner, so the private-memory property is intact.
+/// E.EGRESS4 (the sixth pass), replacing ARCH-3's provenance pass-through: a fetch leaves as the
+/// model wrote it only when the address is in the person's own words. Otherwise the CLEAN planner
+/// picks among what the WEB tools returned this turn -- the grounded model's choice is discarded, so a
+/// page listing ?v=alice, ?v=bob... cannot be used to choose by memory -- and a link that only mail
+/// returned (a reset, an unsubscribe) is never a candidate. A query still never passes on provenance.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn egress_clean_planning_passes_through_urls_with_external_provenance() {
+async fn a_fetch_goes_to_the_planners_pick_never_the_models() {
     use mind_governance::egress::EgressBroker;
-    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    // The clean planner is scripted to MANGLE any url it authors — so a pass-through is only
-    // provable when the scripted reply does NOT come back.
-    let pool = InferencePool::new(
-        Arc::new(ScriptedLLM::new(
-            r#"{"url":"https://google.com/search?q=mangled"}"#,
-        )) as Arc<dyn LLMBackend>,
-        1,
-    );
-    let broker = Arc::new(EgressBroker::open(std::env::temp_dir(), false));
-    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(broker);
+    let engine = |reply: &'static str| {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new(reply)) as Arc<dyn LLMBackend>, 1);
+        ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+    };
+    let conv = engine(r#"{"pick": 2}"#);
+    let fetch = |url: &str| serde_json::json!({ "url": url });
+    let results = vec!["1. Local agents -- https://example.com/blog/local-agents-2026\n2. A survey -- https://arxiv.org/abs/2505.03229\n".to_string()];
 
-    let article = serde_json::json!({ "url": "https://example.com/blog/local-agents-2026" });
+    // 1. The person typed it: it leaves as written, and only the url.
+    let typed = conv
+        .egress_clean_args_with("web_fetch", "fetch https://example.com/blog/x for me", serde_json::json!({"url": "https://example.com/blog/x", "extra": 1}), "", &[], &[], "")
+        .await;
+    assert_eq!(typed, Ok(fetch("https://example.com/blog/x")));
 
-    // 1. The URL came from THIS turn's search results (external provenance) → untouched.
-    let prov = "1. The On-Device Agent Era — https://example.com/blog/local-agents-2026\n";
-    let kept = conv
-        .egress_clean_args(
-            "web_fetch",
-            "research local agent runtimes",
-            article.clone(),
-            prov,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        kept, article,
-        "a search-result URL must dispatch exactly as chosen"
-    );
+    // 2. From the web results: the planner's pick (the second), whatever the model chose.
+    for chosen in ["https://example.com/blog/local-agents-2026", "https://arxiv.org/abs/2505.03229", "https://invented.example/x"] {
+        let out = conv.egress_clean_args_with("web_fetch", "research local agent runtimes", fetch(chosen), "", &results, &[], "").await;
+        assert_eq!(out, Ok(fetch("https://arxiv.org/abs/2505.03229")), "the model's choice ({chosen}) steered the fetch");
+    }
 
-    // 2. The user themselves typed the URL → untouched, even with empty provenance.
-    let kept = conv
-        .egress_clean_args(
-            "web_fetch",
-            "fetch https://example.com/blog/local-agents-2026 for me",
-            article.clone(),
-            "",
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        kept, article,
-        "a user-typed URL must dispatch exactly as chosen"
-    );
+    // 3. A link only mail returned is never fetched -- not even the planner is asked.
+    let mail = "From: bank -- reset your password: https://bank.example/reset?token=abc123";
+    let out = conv.egress_clean_args_with("web_fetch", "check my mail", fetch("https://bank.example/reset?token=abc123"), mail, &[], &[], "").await;
+    assert_eq!(out, Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources));
 
-    // 3. NO provenance: the URL might carry a private fact -- it never leaves as the model wrote it.
-    //    E.EGRESS3g: and the planner may only COPY an address from a source, so with none the fetch
-    //    is refused with a reason that sends the model to search first (VM 520 R1d: "" three times).
-    let cleaned = conv.egress_clean_args("web_fetch", "look that thing up", article.clone(), "").await;
-    assert_eq!(
-        cleaned,
-        Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources),
-        "an unprovenanced URL left, or was made up"
-    );
-    // ...but an address the planner COPIES from the person's words leaves: the model mangled the one
-    // the person typed (a trailing slash), and the planner restores it.
-    let copying = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"url":"https://example.com/a"}"#)) as Arc<dyn LLMBackend>, 1);
-    let mem2: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let conv2 = ConversationEngine::new(mem2, copying, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
-    let restored = conv2.egress_clean_args("web_fetch", "fetch https://example.com/a for me", serde_json::json!({"url": "https://example.com/a/"}), "").await;
-    assert_eq!(restored, Ok(serde_json::json!({"url": "https://example.com/a"})), "the person's own address was refused");
-    // What VM 520 saw: the planner wrote "" -- which every text "contains".
-    let empty = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"url":""}"#)) as Arc<dyn LLMBackend>, 1);
-    let mem3: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let conv3 = ConversationEngine::new(mem3, empty, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
-    let blank = conv3.egress_clean_args("web_fetch", "research the thing", serde_json::json!({"url": "https://arxiv.org/list/cs.CL/recent"}), "").await;
-    assert_eq!(blank, Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources), "an empty address left");
+    // 4. A page offering more than 20 variants of one address is a menu: none of them is a candidate.
+    let menu: String = (0..25).map(|i| format!("https://evil.example/p/u{i}?v={i}\n")).collect();
+    let out = conv.egress_clean_args_with("web_fetch", "research", fetch("https://evil.example/p/u7?v=7"), "", &[menu], &[], "").await;
+    assert_eq!(out, Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources), "a variant menu stayed fetchable");
 
-    // 4. Provenance from a PRIVATE tool must not launder: the caller only accumulates EXTERNAL
-    //    observations, and this pins the contract that queries stay clean-authored regardless —
-    //    a query embedding a private fact re-authors even when that fact is in the provenance.
+    // 5. Two fetches of one page differing only in the query: a third is refused.
+    let q = vec!["https://site.example/page?v=1 https://site.example/page?v=2 https://site.example/page?v=3".to_string()];
+    let done = vec!["https://site.example/page?v=1".to_string(), "https://site.example/page?v=2".to_string()];
+    let pick3 = engine(r#"{"pick": 3}"#);
+    let out = pick3.egress_clean_args_with("web_fetch", "research", fetch("https://site.example/page?v=3"), "", &q, &done, "").await;
+    assert_eq!(out, Err(crate::egress_planning::CleanArgsFailure::FetchCapReached));
+
+    // 6. A pick that is not a listed number goes nowhere.
+    for reply in [r#"{"pick": 9}"#, r#"{"pick": 0}"#, r#"{"url": "https://arxiv.org/abs/2505.03229"}"#, "the second one"] {
+        let out = engine(reply).egress_clean_args_with("web_fetch", "research", fetch("https://arxiv.org/abs/2505.03229"), "", &results, &[], "").await;
+        assert_eq!(out, Err(crate::egress_planning::CleanArgsFailure::NoUsableArgs), "{reply}");
+    }
+
+    // 7. A query never passes through on provenance (ARCH-3, unchanged).
     let leaky_query = serde_json::json!({ "query": "Alice oncology 47-12-33" });
-    let cleaned = conv
-        .egress_clean_args(
-            "web_search",
-            "find hospitals",
-            leaky_query.clone(),
-            "Alice oncology 47-12-33",
-        )
-        .await
-        .unwrap();
-    assert_ne!(
-        cleaned, leaky_query,
-        "queries are never passed through on provenance"
-    );
+    let cleaned = engine(r#"{"query":"hospitals"}"#).egress_clean_args("web_search", "find hospitals", leaky_query.clone(), "Alice oncology 47-12-33").await.unwrap();
+    assert_ne!(cleaned, leaky_query, "queries are never passed through on provenance");
 }
 
 /// ARCH-3 slice 2 (complementary): the exact-value exfil guard. A distinctive stored private value
@@ -2696,12 +2658,14 @@ async fn the_clean_planner_says_why_it_produced_nothing() {
     };
     let fetch = serde_json::json!({ "url": "https://www.debian.org/releases/trixie/releasenotes" });
     let ask = "Read the Debian 13 trixie release notes on debian.org";
+    // E.EGRESS4: a fetch planner is asked only when a web result offers an address.
+    let results = vec!["1. Debian 13 release notes -- https://www.debian.org/releases/trixie/releasenotes".to_string()];
     assert_eq!(
-        engine(Arc::new(Silent)).egress_clean_args("web_fetch", ask, fetch.clone(), "").await,
+        engine(Arc::new(Silent)).egress_clean_args_with("web_fetch", ask, fetch.clone(), "", &results, &[], "").await,
         Err(CleanArgsFailure::NoAnswer)
     );
     assert_eq!(
-        engine(Arc::new(ScriptedLLM::new("[\"https://www.debian.org/\"]"))).egress_clean_args("web_fetch", ask, fetch, "").await,
+        engine(Arc::new(ScriptedLLM::new("[\"https://www.debian.org/\"]"))).egress_clean_args_with("web_fetch", ask, fetch, "", &results, &[], "").await,
         Err(CleanArgsFailure::NoUsableArgs),
         "an answer holding no JSON object (here an array of strings) gives no usable arguments"
     );
@@ -2715,6 +2679,8 @@ fn an_outbound_refusal_names_its_real_cause() {
     for (failure, why) in [
         (CleanArgsFailure::NoAnswer, "did not answer"),
         (CleanArgsFailure::NoUsableArgs, "returned no usable arguments"),
+        (CleanArgsFailure::UrlNotFromSources, "search first"),
+        (CleanArgsFailure::FetchCapReached, "already fetched"),
     ] {
         let msg = crate::guards::egress_refusal("web_fetch", failure);
         assert!(msg.contains(why) && msg.contains("nothing was sent"), "{msg}");
@@ -19103,7 +19069,7 @@ async fn erase_engine_on_desktop(tag: &str, approvals_off: bool) -> (mind_types:
 /// E.ERASE2: run `forget` in a turn that can ask, answering each question with `answer`. The
 /// questions asked come back with the reply.
 async fn forget_when_asked(conv: &ConversationEngine, answer: Option<&'static str>) -> (String, Vec<(String, Vec<String>)>) {
-    let (reply, asked, _) = forget_with_redact(conv, ERASE_SECRET, answer, serde_json::json!({"redacted": 2, "where": ["transcript", "runs"]})).await;
+    let (reply, asked, _) = forget_with_redact(conv, ERASE_SECRET, answer, serde_json::json!({"redacted": 2, "where": ["transcript", "runs"]}), true).await;
     (reply, asked.into_iter().map(|(p, o, _)| (p, o)).collect())
 }
 
@@ -19116,6 +19082,7 @@ async fn forget_with_redact(
     what: &str,
     answer: Option<&'static str>,
     desktop_says: serde_json::Value,
+    person_said: bool,
 ) -> (String, Vec<(String, Vec<String>, String)>, Vec<(String, Vec<(String, usize)>)>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::Ask>();
     let (rtx, mut rrx) = tokio::sync::mpsc::unbounded_channel::<crate::erase_redact::Redact>();
@@ -19135,6 +19102,10 @@ async fn forget_with_redact(
         }
     });
     let args = serde_json::json!({ "what": what });
+    // The person's own message, as a turn notes it (E.ERASE4: only their words are quoted).
+    let key = ConversationEngine::handed_key(&TurnIdentity::primary());
+    let message = if person_said { format!("Forget {what} please") } else { "Forget what you know about my bank".to_string() };
+    conv.handed_over.lock().unwrap().note_named(&key, &message, None, ConversationEngine::now_ms());
     let reply = crate::erase_redact::TURN_REDACT.scope(rtx, crate::TURN_ASK.scope(tx, conv.run_agent_tool("forget", &args))).await;
     answerer.await.unwrap();
     desktop.await.unwrap();
@@ -19341,20 +19312,20 @@ async fn egress3b_the_planner_writes_what_is_not_a_span() {
     conv.handed_over.lock().unwrap().note_named(key, "Read ~/research/R1/MDG_spec.md", Some("/home/p"), ConversationEngine::now_ms());
     conv.note_handed_over(key, "/home/p/research/R1/MDG_spec.md", SPEC);
     let ask = serde_json::json!({ "query": "multidimensional, compositional structure", "extra": "anything" });
-    let out = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], key).await.unwrap();
+    let out = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], &[], key).await.unwrap();
     assert_eq!(out, serde_json::json!({ "query": "multidimensional, compositional structure" }), "only the query leaves");
     assert_eq!(seen.lock().unwrap().len(), 0);
     let web = vec!["1. Survey of Abstract Meaning Representation -- arxiv.org/abs/2505.03229".to_string()];
-    let out = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional Representation" }), "", &web, key).await.unwrap();
+    let out = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional Representation" }), "", &web, &[], key).await.unwrap();
     let prompt = seen.lock().unwrap()[0].clone();
     assert!(prompt.contains("machine-native language") && prompt.contains("Survey of Abstract Meaning Representation") && prompt.contains("3 to 8 search keywords"), "{prompt}");
     assert_eq!(out, serde_json::json!({ "query": "semantic grammar", "q": "grammar", "topic": "grammar" }), "a path or named file left");
     // Another person's chat: none of this person's text.
-    let _ = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional structure" }), "", &[], "member|c1").await.unwrap();
+    let _ = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({ "query": "compositional structure" }), "", &[], &[], "member|c1").await.unwrap();
     assert!(!seen.lock().unwrap()[1].contains("machine-native"), "a member's turn saw the primary's file");
     // A url holding a local path is refused, not trimmed.
     let (conv, _) = engine(r#"{"url":"https://example.com/file:///home/p/notes"}"#);
-    assert!(conv.egress_clean_args_with("web_fetch", "fetch that", serde_json::json!({ "url": "https://x.example/" }), "", &[], key).await.is_err());
+    assert!(conv.egress_clean_args_with("web_fetch", "fetch that", serde_json::json!({ "url": "https://x.example/" }), "", &[], &[], key).await.is_err());
 }
 
 /// E.EGRESS3b (the review's H3): whose hand-over a turn uses -- the person, in this desktop chat.
@@ -19535,7 +19506,7 @@ async fn egress3e_a_member_scope_under_the_primary_name_is_another_key() {
 async fn a_pressed_erase_asks_the_desktop_to_erase_its_copies() {
     let accepted = serde_json::json!({"redacted": 3, "where": ["transcript", "runs"]});
     let (_db, _log, conv) = erase_engine_on_desktop("redact-erase", false).await;
-    let (reply, asked, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), accepted.clone()).await;
+    let (reply, asked, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), accepted.clone(), true).await;
     assert_eq!(asked.len(), 1);
     assert_eq!(redacts.len(), 1, "{redacts:?}");
     assert_eq!(redacts[0].0, asked[0].2, "the redact is not for the question asked");
@@ -19544,14 +19515,14 @@ async fn a_pressed_erase_asks_the_desktop_to_erase_its_copies() {
     assert!(reply.starts_with("Erased") && reply.contains("gone from this conversation (3 place(s))"), "{reply}");
     for (tag, answer) in [("redact-keep", Some("Keep")), ("redact-none", None), ("redact-typed", Some("erase"))] {
         let (_db, _log, conv) = erase_engine_on_desktop(tag, false).await;
-        let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, answer, accepted.clone()).await;
+        let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, answer, accepted.clone(), true).await;
         assert!(redacts.is_empty(), "[{tag}] a redact went out: {redacts:?}");
         assert!(!reply.contains("this conversation ("), "[{tag}] {reply}");
     }
     // Refused: the person is told this conversation still holds it, never that it is gone.
     let (_db, _log, conv) = erase_engine_on_desktop("redact-refused", false).await;
     let refused = serde_json::json!({"refused": "a needle is not in the question the person answered"});
-    let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), refused).await;
+    let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), refused, true).await;
     assert_eq!(redacts.len(), 1);
     assert!(reply.contains("still holds it: a needle is not in the question") && !reply.contains("gone from this conversation"), "{reply}");
 }
@@ -19587,4 +19558,41 @@ fn the_real_files_stat_and_read_answers_parse_as_the_mind_expects() {
     assert_eq!(files_stat_real(include_str!("../fixtures/desktop/files_stat_hard_link_4f50b24a.txt")), None, "a hard link");
     let read = include_str!("../fixtures/desktop/editor_read_plain_4f50b24a.txt");
     assert_eq!(read_result(read), Some(("/home/yantrik/captest/plain.txt".to_string(), "capture file\n".to_string())));
+}
+
+/// E.EGRESS4 (the sixth pass's note 1): only the DESKTOP's refusal, in the gate's full form, means
+/// nothing ran -- another MCP server could print the line first and then write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_desktops_full_refusal_means_nothing_was_written() {
+    let run = |tool: &'static str, obs: &'static str| async move {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem, pool, "JARVIS").with_home_dir(Some("/home/p".into()));
+        let id = TurnIdentity::primary();
+        let key = ConversationEngine::handed_key(&id);
+        conv.handed_over.lock().unwrap().note_named(&key, "Read ~/mdg/spec.md", Some("/home/p"), ConversationEngine::now_ms());
+        conv.note_handed_over(&key, "/home/p/mdg/spec.md", "a typed semantic graph");
+        let args = serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "sed -i s/a/b/ ~/mdg/spec.md"}});
+        conv.note_writes(&id, tool, &args, obs);
+        let kept = conv.handed_over.lock().unwrap().texts(&key, ConversationEngine::now_ms()).len();
+        kept
+    };
+    let full = "REFUSED \u{2014} nothing was run. refused: approvals are off for this test run";
+    assert_eq!(run(crate::desktop::ACT, full).await, 1, "the desktop's own refusal took the file back");
+    assert_eq!(run("mcp.other-shell.run", full).await, 0, "another server's printed refusal hid a write");
+    assert_eq!(run(crate::desktop::ACT, "REFUSED \u{2014} nothing was run").await, 0, "a short form hid a write");
+}
+
+/// E.ERASE4 (the redact review's note 2): words the person never put in this conversation -- the
+/// Mind found them in memory -- are not quoted, so the card adds no copy; no redact is sent, and the
+/// reply makes no claim about this conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_the_person_never_said_here_is_not_quoted() {
+    let (_db, _log, conv) = erase_engine_on_desktop("redact-unsaid", false).await;
+    let accepted = serde_json::json!({"redacted": 3, "where": ["transcript", "runs"]});
+    let (reply, asked, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), accepted, false).await;
+    assert_eq!(asked.len(), 1);
+    assert!(!asked[0].0.contains(ERASE_SECRET), "the card quoted words the person never said here: {}", asked[0].0);
+    assert!(redacts.is_empty(), "{redacts:?}");
+    assert!(reply.starts_with("Erased") && !reply.contains("conversation"), "{reply}");
 }

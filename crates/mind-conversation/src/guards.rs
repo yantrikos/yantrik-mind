@@ -41,6 +41,9 @@ pub(crate) struct GuardState {
     /// query may draw its words from. Mail and other external tools stay out: their output is the
     /// person's own, and must not launder into a query.
     web_obs: Vec<String>,
+    /// E.EGRESS4: the addresses fetched this turn -- what the fetch planner is told it has, and what
+    /// the per-page cap counts.
+    fetched: Vec<String>,
 }
 
 /// E.EGRESS3b: the most web text kept this turn as query sources (the newest kept).
@@ -109,9 +112,9 @@ pub(crate) async fn pre(
     // never saw private memory (the grounded args are discarded). None = fail-closed refusal.
     // The provenance snapshot is cloned out of the lock; append-only, so the worst staleness can
     // do is clean-author a URL it could have passed through — the safe direction.
-    let (provenance, web_provenance) = {
+    let (provenance, web_provenance, fetched) = {
         let s = state.lock().unwrap();
-        (s.external_obs.clone(), s.web_obs.clone())
+        (s.external_obs.clone(), s.web_obs.clone(), s.fetched.clone())
     };
     let asked = grounded.clone();
     // E.EGRESS3e (A3): a handed-over file written since it was named stops being a source first.
@@ -119,7 +122,7 @@ pub(crate) async fn pre(
         engine.recheck_handed(&ConversationEngine::handed_key(id), id).await;
     }
     let args = match engine
-        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance, &ConversationEngine::handed_key(id))
+        .egress_clean_args_with(tool, user_text, grounded, &provenance, &web_provenance, &fetched, &ConversationEngine::handed_key(id))
         .await
     {
         Ok(args) => {
@@ -146,6 +149,12 @@ pub(crate) async fn pre(
             kind: RefusalKind::EgressUnsafe,
             msg,
         };
+    }
+    // E.EGRESS4: a fetch that goes out is one the next fetch planner knows of, and the cap counts.
+    if matches!(tool, "web_fetch" | "fetch" | "web") {
+        if let Some(url) = args.get("url").and_then(|u| u.as_str()) {
+            state.lock().unwrap().fetched.push(url.to_string());
+        }
     }
     PreVerdict::Proceed(args)
 }
@@ -265,21 +274,18 @@ mod tests {
         }
     }
 
-    /// Provenance flows from post into pre: an external observation containing a URL lets the SAME
-    /// turn fetch that URL exactly as chosen, while an unprovenanced URL still gets clean-authored.
-    /// This is the parity gap that kept YM_COGNITION off — the bus path never had clean-authoring
-    /// or provenance at all.
+    /// Provenance flows from post into pre: a web result's address is one the SAME turn may fetch.
+    /// E.EGRESS4: which one is the clean planner's pick, never the grounded model's -- so an invented
+    /// address never leaves, and the fetch goes to a listed result. This is the parity gap that kept
+    /// YM_COGNITION off -- the bus path never had clean-authoring or provenance at all.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn external_observations_become_egress_provenance() {
         use mind_governance::egress::EgressBroker;
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let eng = {
             let pool = mind_inference::InferencePool::new(
-                // The clean planner is scripted to MANGLE any url — pass-through is only provable
-                // when this reply does NOT come back.
-                Arc::new(mind_inference::ScriptedLLM::new(
-                    r#"{"url":"https://mangled.example/x"}"#,
-                )) as Arc<dyn yantrik_ml::LLMBackend>,
+                // E.EGRESS4: the fetch planner picks the first listed address.
+                Arc::new(mind_inference::ScriptedLLM::new(r#"{"pick": 1}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
                 1,
             );
             ConversationEngine::new(
@@ -301,7 +307,7 @@ mod tests {
         )
         .await;
 
-        // Fetching that link passes through untouched…
+        // Fetching that link goes to it -- the planner's pick among this turn's web results…
         let v = pre(
             &eng,
             &state,
@@ -315,12 +321,12 @@ mod tests {
         match v {
             PreVerdict::Proceed(args) => assert_eq!(
                 args["url"], "https://example.com/article-42",
-                "provenanced URL must dispatch exactly as chosen"
+                "the web result's address was not fetched"
             ),
             PreVerdict::Refuse { msg, .. } => panic!("must proceed: {msg}"),
         }
-        // …while an invented one never leaves: the clean planner may only copy an address from a
-        // source, and the one it wrote is in none (E.EGRESS3g) -- refused, with the way forward.
+        // …while an invented one never leaves: the grounded choice is discarded, and the fetch goes
+        // to a listed result instead (E.EGRESS4).
         let v = pre(
             &eng,
             &state,
@@ -332,8 +338,8 @@ mod tests {
         )
         .await;
         match v {
-            PreVerdict::Proceed(args) => panic!("an address from no source left: {args}"),
-            PreVerdict::Refuse { msg, .. } => assert!(msg.contains("search first"), "{msg}"),
+            PreVerdict::Proceed(args) => assert_eq!(args["url"], "https://example.com/article-42", "the invented address left"),
+            PreVerdict::Refuse { msg, .. } => panic!("the listed result should have been picked: {msg}"),
         }
         // E.EGRESS3: a web tool's output becomes the web provenance a query may draw on; another
         // outside tool's (mail) does not.

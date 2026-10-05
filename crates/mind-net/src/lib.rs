@@ -135,6 +135,27 @@ mod tests {
         move |k| m.get(k).cloned()
     }
 
+    /// E.EGRESS2: a plain `http` request to a proxy keeps the absolute-form request line the proxy
+    /// needs. (The `https` case -- origin-form inside the CONNECT tunnel -- is the patched line in
+    /// third_party/ureq-2.12.1/src/unit.rs, checked by hand against DuckDuckGo.)
+    #[test]
+    fn a_plain_http_request_to_a_proxy_keeps_the_absolute_form() {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(s.try_clone().unwrap()).read_line(&mut line).unwrap();
+            let mut s = s;
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            line
+        });
+        let agent = builder().proxy(ureq::Proxy::new(format!("http://127.0.0.1:{port}")).unwrap()).build();
+        let _ = agent.get("http://example.test/x?q=1").call();
+        assert_eq!(seen.join().unwrap().trim_end(), "GET http://example.test/x?q=1 HTTP/1.1");
+    }
+
     /// E.EGRESS1: with 520's environment, public hosts take the proxy; loopback and NO_PROXY go direct.
     #[test]
     fn public_hosts_take_the_proxy_and_loopback_goes_direct() {

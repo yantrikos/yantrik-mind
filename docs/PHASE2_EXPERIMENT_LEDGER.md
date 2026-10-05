@@ -13438,3 +13438,32 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
 - A run whose tools were broken (search or fetch failing for reasons outside the Mind) is VOID, not scored.
 - The first probe (turn 747, 05 Oct 01:36) found the Mind's search failing with HTTP 400 through the egress proxy. R1 waits for that.
 - **Not claimed:** a single R1 score says nothing across versions until R1 has been run at least twice on one build. The variance comes first.
+
+## E.EGRESS2 — PREREG: through the egress proxy, an HTTPS request uses the origin-form request line
+
+**Seen:** R1's capability probe (VM 520, turn 747) got `search` → "html.duckduckgo.com: status code 400".
+- **What the proxy showed (4c, egress control socket):** audit mode; the two CONNECTs were allowed, and none refused. So the 400 is DuckDuckGo's.
+- **Reproduced off the box** with a local CONNECT proxy (`scratchpad/connect_proxy.py`): every `mind_net` request gets 400 (POST, GET, every header variant). Direct, the same client gets 200 and 10 results.
+- **The cause, in ureq 2.12.1 `unit.rs` `send_prelude`:** with an HTTP proxy, the request line is written in absolute form (`POST https://host/path`) also for HTTPS. That request travels inside the CONNECT tunnel to the origin, where RFC 7230 §5.3.2 calls for origin-form. DuckDuckGo refuses absolute-form.
+- **Scope:** every `mind_net` request routed through the proxy, 93 call sites in 23 files. The model calls use ureq 3 and are unaffected.
+
+**Plan:**
+1. Keep a copy of ureq 2.12.1 (MIT OR Apache-2.0, licences kept) at `third_party/ureq-2.12.1/`.
+2. Change one line: absolute form only for an `http` URL through an HTTP proxy.
+3. Add `[patch.crates-io] ureq = { path = "third_party/ureq-2.12.1" }`.
+4. The proper long-term fix is moving `mind_net` to ureq 3. This is the minimal one.
+
+**Kill criteria:**
+1. **Through the local CONNECT proxy,** `DdgSearch` gets results (at least 1) and the raw GET and POST are 200. With the one line reverted, 400. That is a live, network-dependent test, run by hand (`#[ignore]`) and recorded here.
+2. An `http://` URL through the proxy still uses absolute form. A unit test against a local TCP listener posing as the proxy reads the request line.
+3. **Workspace:** 0 failures. `cargo tree -i ureq@2.12.1` shows the path source.
+
+**E.EGRESS2: built.**
+- **The change:** `third_party/ureq-2.12.1/` (licences kept, Cargo.lock removed), with the one changed line in `src/unit.rs` (`Proto::HTTP if unit.url.scheme() == "http"`), and `[patch.crates-io]` in the workspace. `cargo tree -i ureq@2.12.1` shows the path source.
+- **Through a local CONNECT proxy,** `DdgSearch` gets 5 results, and the raw GET and the `Accept` POST get 200, the same as direct.
+- **Mutants:**
+  - Z1, the line reverted: the live `ddg_search_returns_results` through the proxy fails (400), as before the fix.
+  - Z2, `http` loses absolute form: the new `a_plain_http_request_to_a_proxy_keeps_the_absolute_form` fails.
+- **Workspace:** 0 failures.
+- **Side finding** (not changed): with a bot User-Agent, DuckDuckGo gives its 202 anti-bot page to requests that add browser headers (Content-Type set explicitly, Accept-Language, Referer). The plain client is fine.
+- **The live test is `#[ignore]`d** (network). The 520 run will be its field evidence.

@@ -96,5 +96,10 @@ mind-spec = { path = "crates/mind-spec" }
 # The published engine still reaches yantrik-ml through its historical git source; redirect that
 # one dependency to the companion workspace. The former yantrikdb-core patch was removed after the
 # package became `yantrikdb`: Cargo could never select the old 0.1.0 package and warned on every run.
+# E.EGRESS2: ureq 2.12.1 with one line changed -- through a CONNECT proxy an https request uses the
+# origin-form request line (RFC 7230 §5.3.2). See third_party/ureq-2.12.1/src/unit.rs.
+[patch.crates-io]
+ureq = { path = "third_party/ureq-2.12.1" }
+
 [patch."https://github.com/yantrikos/yantrik-ml.git"]
 yantrik-ml = { path = "../yantrik-companion/crates/yantrik-ml" }

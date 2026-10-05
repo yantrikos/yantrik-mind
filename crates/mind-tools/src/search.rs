@@ -386,3 +386,17 @@ mod tests {
         assert_eq!(s.search("q", 1).await.unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod live_probe {
+    /// E.EGRESS2, run by hand (network): the Mind's DuckDuckGo search returns results, also through a
+    /// CONNECT proxy -- `HTTPS_PROXY=http://127.0.0.1:7999` with a local CONNECT proxy listening.
+    /// Before the ureq patch every request through a proxy got 400 (VM 520's search, R1 probe).
+    #[tokio::test]
+    #[ignore]
+    async fn ddg_search_returns_results() {
+        use super::WebSearch;
+        let hits = super::DdgSearch::new().search("Abstract Meaning Representation", 5).await.expect("search");
+        assert!(!hits.is_empty(), "no results");
+    }
+}

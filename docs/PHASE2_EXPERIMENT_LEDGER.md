@@ -13884,3 +13884,48 @@ The contract is docs/harness.md "Forgetting: `redact`" on yantrik-os main. On Er
   - **both kinds of quote still quoted:** MASKED by the self-check (the parser finds a different span, so nothing is sent);
   - **over 4096 sent:** EQUIVALENT (no text that long can close inside the 1999 visible characters).
 - **Not yet:** a live accepted capture, which needs Pranab to press Erase once on a throwaway question, asked by me directly. A live refusal I can produce myself on 520 once this is installed after review.
+
+## E.SEARCH2 — PREREG: a SearXNG category set from configuration
+
+4c ran R1d1's planner query against the shared SearXNG:
+- `categories=general` reaches Bing only, which reads "machine" literally (Wikipedia "Machine", Merriam-Webster…);
+- `general,science` adds Google Scholar, Semantic Scholar and arXiv, ranks their results first (40 hits), and finds real prior art ("QNRs: Toward language for intelligent machines").
+
+The instance is fine; the request is the fix.
+
+- **The change:** `YM_SEARXNG_CATEGORIES`, when set, is sent as `categories` on every general search. Unset (everywhere but VM 520) means the request is unchanged. The news search keeps `news`.
+- **Why not per call:** the egress layer passes only `{query}` for a search (E.EGRESS3b L3), so a per-call scope argument would never leave. Why not always: science-first ranking would hurt everyday searches.
+- **VM 520:** set to `general,science` in its env file for the R-tasks, with 4c told, since 520 is shared.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- the setting not sent;
+- sent when unset;
+- news losing `news`.
+
+## E.EGRESS4 — PREREG: the fetch choice leak and mail links (sixth pass, PRIORITY; in every deployed Mind)
+
+**The hole (pre-existing, from ARCH-3's 2026-08-16 pass-through):** a `web_fetch` whose URL appears in this turn's outside results leaves exactly as the GROUNDED model chose it. Two ways that goes wrong:
+- A page listing `evil/?v=alice`, `?v=bob`, … lets the memory-aware model pick one: log2(N) private bits per fetch, invisible to the tripwire.
+- "Outside results" includes mail search, so a link from the person's mail (password reset, confirm, unsubscribe, one-time login) can be fetched. That is an action, not just a leak.
+
+**The rule:**
+1. A fetch URL that appears in the person's own words of this turn leaves as written (only `{url}`).
+2. Otherwise the grounded model's choice is DISCARDED. The candidates are the http(s) addresses in the person's words and in what the WEB tools returned this turn, never mail or any other tool. Dropped from the candidates:
+   - any address holding a local path;
+   - every member of a group of more than 20 variants: the same scheme, host and path up to the last segment, differing only in that last segment, query or fragment.
+3. No candidate: refused (`UrlNotFromSources`, "search first").
+4. The CLEAN planner picks one candidate, at temperature 0 with a fixed seed. It is shown only the person's request, the handed-over file text (capped), the result line of each candidate, and what was already fetched this turn. It answers `{"pick": n}`. Anything not a listed number is refused.
+5. **Interim cap:** at most 2 fetches per turn from one variant group; a third is refused.
+6. **The sixth pass's note 1:** `note_writes` skips a refusal only when the tool is the desktop's `os_act` and its answer starts with the full gate form "REFUSED — nothing was run. refused:".
+
+**What the model keeps:** whether to fetch and when, roughly one bit per call. Repeats are deterministic (temperature 0; the repeat guard sees the same call), and the cap bounds a variant family.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- a mail result as a candidate;
+- the grounded choice used;
+- the variant-group drop;
+- the cap;
+- the pick validated loosely (a number out of range, or a URL written instead of a number);
+- a person-typed URL not passed through;
+- the refusal skip for a non-os_act tool;
+- the short refusal form accepted.

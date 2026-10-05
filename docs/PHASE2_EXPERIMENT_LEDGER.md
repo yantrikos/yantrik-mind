@@ -14776,3 +14776,33 @@ The review is a commit comment on f1364f0.
   - Full suite 2328 passed, 0 failed.
   - Linux staging: mind-conversation 1137.
 - **Scope:** this only stops the "MDG USA" collision. Pranab's direction (via 4c) is a scoped grant for the model's own query words; that is E.GRANT1, to be preregistered against the OS's grant format.
+
+## E.MEM1 — PREREG: a new desktop chat starts without another chat's turns; memories show their age
+
+**Why (R1e, R1h):**
+- In a FRESH desktop chat, R1e2 said report.md "has sat at 34 lines" (it did not exist in its run), counted "twenty-plus" Continues from the first one, and wrote nothing.
+- The cause is in the code, not the model. `recent_messages` returns the latest transcript rows across ALL chats: it stops only at an operator "break" row, which a new desktop chat never writes. So R1e1's last turns reached R1e2 as "Recent conversation:".
+- The rolling summary ("EARLIER CONVERSATION") is one global summary.
+- Recalled memories reach the prompt with no age at all.
+- 4c asked for this on the Mind side. Hermes's personal-facts bleed is the OS side's.
+
+**Change:**
+1. **Transcript rows carry their desktop chat.**
+   - The `mind_transcript.chat` column is added (TEXT NOT NULL DEFAULT ''; existing rows keep '').
+   - A turn from the desktop (`TURN_CONVERSATION` set) writes its chat.
+   - Prompt assembly reads "Recent conversation" from THIS chat's rows only.
+   - A turn with no chat (Telegram, the CLI, the console, anything off the desktop) reads and writes as today. Viewer isolation and break rows still apply.
+   - Going back to an earlier desktop chat brings back that chat's turns, which a break row could not do.
+2. **The rolling summary**, in a desktop chat, is labelled as other, earlier conversations: history, not this chat's state. Nothing is said in it about what exists now.
+3. **Recalled memories show their age** in both renderers: "(noted <date>)" from `updated_ms`.
+4. **One rule in the agent loop's system message:** a claim about a file, a report or a task's progress in THIS chat must come from a tool result this turn; memories and other chats are history.
+
+**Kill criteria**, each a mutant that must be killed:
+- another chat's turns in this chat's recent window;
+- a chat-less turn losing its history;
+- returning to a chat losing its own turns;
+- the chat not written on append;
+- the summary unlabelled in a desktop chat;
+- a memory without its age.
+
+**The live check:** after it ships, an R1 pair (with the runner's folder fix) shows no claim about a previous run's files. That is a reading, not a gate.

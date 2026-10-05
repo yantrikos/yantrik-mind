@@ -2193,6 +2193,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
+ "icu_normalizer",
  "mind-agents",
  "mind-governance",
  "mind-inference",

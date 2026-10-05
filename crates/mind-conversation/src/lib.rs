@@ -67,6 +67,7 @@ mod emotion;
 mod ex4_shadow;
 mod guards;
 mod redact;
+pub mod erase_redact;
 pub use ex4_shadow::LegacyOutcome;
 mod browse;
 mod code;
@@ -1537,15 +1538,6 @@ pub(crate) async fn ask_person(request_id: String, prompt: String, options: Vec<
         return None;
     }
     answer.await.ok().flatten()
-}
-
-/// E.ERASE2: what the person is asked before an erase. Never the text itself: E.ERASE1 does not
-/// repeat it back, and it may be a credential.
-/// It says when it was asked: on VM 520 a stale card and a live one read the same, word for word.
-pub(crate) fn erase_question(places: usize, asked_at: &str) -> String {
-    format!(
-        "Erase the text you asked me to forget? It is in {places} place(s) in my memory, and this can't be undone. (Asked at {asked_at}.)"
-    )
 }
 
 /// E.ERASE2: the time now on the person's clock, as HH:MM.
@@ -12470,8 +12462,20 @@ WINDOW: all-time, latest 200
                     Ok(r) if can_ask() && !self.approvals_off_for_test(id).await => {
                         let request_id = format!("erase-{}", Self::now_ms());
                         let options = ERASE_OPTIONS.iter().map(|o| o.to_string()).collect();
-                        match ask_person(request_id, erase_question(r.remaining_cells.max(1), &person_clock_now()), options).await.as_deref() {
-                            Some("Erase") => self.erase_everywhere(&what).await,
+                        // E.ERASE4: the question quotes the text, so the desktop can erase this
+                        // conversation's copies too -- the needle is exactly that quote.
+                        let (question, needle) = erase_redact::forget_question(&what, r.remaining_cells.max(1), &person_clock_now());
+                        match ask_person(request_id.clone(), question, options).await.as_deref() {
+                            Some("Erase") => {
+                                let erased = self.erase_everywhere(&what).await;
+                                match needle {
+                                    Some(n) => {
+                                        let reply = erase_redact::send_redact(request_id, vec![n]).await;
+                                        format!("{erased}{}", erase_redact::conversation_outcome(reply.as_ref()))
+                                    }
+                                    None => format!("{erased}{}", erase_redact::NOT_QUOTABLE),
+                                }
+                            }
                             Some("Keep") => ERASE_KEPT.to_string(),
                             _ => ERASE_UNANSWERED.to_string(),
                         }

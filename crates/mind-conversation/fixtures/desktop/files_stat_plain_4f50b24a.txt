@@ -1,0 +1,2 @@
+accepted: True, settled: True
+{"changed": 1791202244, "exists": true, "kind": "file", "modified": 1791202244, "path": "/home/yantrik/captest/plain.txt", "real": "/home/yantrik/captest/plain.txt", "size": 13, "via_link": false}

@@ -1,0 +1,2 @@
+accepted: True, settled: True
+{"exists": "unknown", "path": "/home/yantrik/captest/twin.txt", "reason": "hard_link"}

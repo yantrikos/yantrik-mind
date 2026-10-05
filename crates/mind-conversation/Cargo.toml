@@ -22,6 +22,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["clock"] }
 chrono-tz = "0.10"
+# E.ERASE4: the desktop's redact needles -- SHA-256 of NFC text (icu_normalizer is already in the
+# tree through url/idna).
+sha2 = "0.10"
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 
 [dev-dependencies]
 mind-memory = { workspace = true, features = ["fixtures"] }

@@ -319,7 +319,8 @@ mod tests {
             ),
             PreVerdict::Refuse { msg, .. } => panic!("must proceed: {msg}"),
         }
-        // …while an invented one is re-authored by the clean planner.
+        // …while an invented one never leaves: the clean planner may only copy an address from a
+        // source, and the one it wrote is in none (E.EGRESS3g) -- refused, with the way forward.
         let v = pre(
             &eng,
             &state,
@@ -331,13 +332,8 @@ mod tests {
         )
         .await;
         match v {
-            PreVerdict::Proceed(args) => assert_eq!(
-                args["url"], "https://mangled.example/x",
-                "an unprovenanced URL must be clean-authored"
-            ),
-            PreVerdict::Refuse { msg, .. } => {
-                panic!("clean-authoring should have produced args: {msg}")
-            }
+            PreVerdict::Proceed(args) => panic!("an address from no source left: {args}"),
+            PreVerdict::Refuse { msg, .. } => assert!(msg.contains("search first"), "{msg}"),
         }
         // E.EGRESS3: a web tool's output becomes the web provenance a query may draw on; another
         // outside tool's (mail) does not.

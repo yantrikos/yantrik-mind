@@ -453,6 +453,9 @@ pub(crate) enum CleanArgsFailure {
     NoAnswer,
     /// It answered, but with no JSON argument object.
     NoUsableArgs,
+    /// E.EGRESS3g (R1d on VM 520): a fetch whose address came from neither the person's words nor
+    /// this turn's outside results -- the planner cannot write one, and wrote "" three times running.
+    UrlNotFromSources,
 }
 
 impl CleanArgsFailure {
@@ -461,6 +464,9 @@ impl CleanArgsFailure {
             CleanArgsFailure::NoAnswer => "the model that prepares outbound requests did not answer",
             CleanArgsFailure::NoUsableArgs => {
                 "the model that prepares outbound requests returned no usable arguments"
+            }
+            CleanArgsFailure::UrlNotFromSources => {
+                "that address is not in the person's words or in what a search returned this turn; search first, then fetch an address the results give"
             }
         }
     }
@@ -497,6 +503,12 @@ impl ConversationEngine {
     /// edit or save (the tab's file as the editor reports it, and a save_as target), and a terminal
     /// command or Files action that mentions a named file. Both loops call this after `guards::post`.
     pub(crate) fn note_writes(&self, id: &TurnIdentity, tool: &str, args: &serde_json::Value, obs: &str) {
+        // E.EGRESS3g (R1d on VM 520): a call the desktop refused ran nothing and wrote nothing -- the
+        // model's `editor.open_path` on the spec took it out of the hand-over. Only the desktop's own
+        // refusal line, at the very start, counts: a command's output could print the words.
+        if obs.trim_start().starts_with("REFUSED \u{2014} nothing was run") {
+            return;
+        }
         let key = Self::handed_key(id);
         if crate::desktop::changes_editor_text(tool, args) {
             let reported = crate::desktop::reported_path(obs);
@@ -513,7 +525,7 @@ impl ConversationEngine {
             if reported.is_none() && saved_as.is_none() {
                 if let Ok(mut h) = self.handed_over.lock() {
                     match crate::desktop::editor_tab_name(obs) {
-                        Some(name) if name.starts_with("Untitled") => {}
+                        Some(name) if name == crate::desktop::UNTITLED_TAB => {}
                         Some(name) => {
                             for p in h.note_written_if_mentioned(&key, &name) {
                                 eprintln!("[egress] {p}: its tab was edited -- no longer the person's text");
@@ -771,6 +783,13 @@ impl ConversationEngine {
                             if url_holds_path(&text, &named) {
                                 eprintln!("[egress] clean planner for {tool} wrote a url holding a local path \u{2014} refused");
                                 return Err(CleanArgsFailure::NoUsableArgs);
+                            }
+                            // E.EGRESS3g: the planner may only COPY an address from the literal request
+                            // or this turn's outside results; one it made up (or "") goes nowhere useful.
+                            let fetch = matches!(tool, "web_fetch" | "fetch" | "web");
+                            if fetch && (text.is_empty() || !(user_text.contains(&text) || external_provenance.contains(&text))) {
+                                eprintln!("[egress] clean planner for {tool} wrote an address from no source \u{2014} refused");
+                                return Err(CleanArgsFailure::UrlNotFromSources);
                             }
                             continue;
                         }

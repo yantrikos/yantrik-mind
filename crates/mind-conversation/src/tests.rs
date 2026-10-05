@@ -2535,15 +2535,28 @@ async fn egress_clean_planning_passes_through_urls_with_external_provenance() {
         "a user-typed URL must dispatch exactly as chosen"
     );
 
-    // 3. NO provenance: the URL might carry a private fact — the clean planner still re-authors.
-    let cleaned = conv
-        .egress_clean_args("web_fetch", "look that thing up", article.clone(), "")
-        .await
-        .unwrap();
-    assert_ne!(
-        cleaned, article,
-        "an unprovenanced URL must still be clean-authored"
+    // 3. NO provenance: the URL might carry a private fact -- it never leaves as the model wrote it.
+    //    E.EGRESS3g: and the planner may only COPY an address from a source, so with none the fetch
+    //    is refused with a reason that sends the model to search first (VM 520 R1d: "" three times).
+    let cleaned = conv.egress_clean_args("web_fetch", "look that thing up", article.clone(), "").await;
+    assert_eq!(
+        cleaned,
+        Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources),
+        "an unprovenanced URL left, or was made up"
     );
+    // ...but an address the planner COPIES from the person's words leaves: the model mangled the one
+    // the person typed (a trailing slash), and the planner restores it.
+    let copying = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"url":"https://example.com/a"}"#)) as Arc<dyn LLMBackend>, 1);
+    let mem2: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv2 = ConversationEngine::new(mem2, copying, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let restored = conv2.egress_clean_args("web_fetch", "fetch https://example.com/a for me", serde_json::json!({"url": "https://example.com/a/"}), "").await;
+    assert_eq!(restored, Ok(serde_json::json!({"url": "https://example.com/a"})), "the person's own address was refused");
+    // What VM 520 saw: the planner wrote "" -- which every text "contains".
+    let empty = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"url":""}"#)) as Arc<dyn LLMBackend>, 1);
+    let mem3: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv3 = ConversationEngine::new(mem3, empty, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let blank = conv3.egress_clean_args("web_fetch", "research the thing", serde_json::json!({"url": "https://arxiv.org/list/cs.CL/recent"}), "").await;
+    assert_eq!(blank, Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources), "an empty address left");
 
     // 4. Provenance from a PRIVATE tool must not launder: the caller only accumulates EXTERNAL
     //    observations, and this pins the contract that queries stay clean-authored regardless —
@@ -18202,6 +18215,16 @@ mod desktop_consent_and_stall_wiring {
         // E.EGRESS3f (S3): `open` is a look only in the editor -- in another app it may write.
         let other_open = Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "blender", "action": "open", "args": {"path": "~/mdg/spec-1.md"}}));
         assert!(run(other_open).await.is_empty(), "an open in another app was taken as a look");
+        // E.EGRESS3g (R1d on VM 520, verbatim): a call the desktop refused ran nothing and writes nothing.
+        let refused = "REFUSED \u{2014} nothing was run. refused: editor has no action open_path; its actions are: new, open, read, save, save_as, show";
+        let open_path = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "editor", "action": "open_path", "args": {"path": "/home/yantrik/mdg/spec-1.md"}}));
+        let kept = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), open_path(), Step::Say("ok")], vec![DESC, DESC, DESC, DESC], vec![OPEN, STAT_OK, refused, refused]).await.1;
+        assert!(!kept.is_empty(), "a refused call took the named file back");
+        // Only the desktop's own refusal line, first: output that merely prints the words is a write.
+        let echoed = "Done \u{2014} Terminal\nREFUSED \u{2014} nothing was run";
+        let echo = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": "sed -i s/a/b/ mdg/spec-1.md"}}));
+        let gone = run_handed("Read ~/mdg/spec-1.md and tell me what MDG is.", Some("/home/yantrik".into()), false, vec![open(), echo(), Step::Say("ok")], vec![DESC, DESC, DESC, DESC], vec![OPEN, STAT_OK, echoed, echoed]).await.1;
+        assert!(gone.is_empty(), "output printing the refusal words hid a write");
     }
 
     /// E.EGRESS3f (S2) through the loop: an editor edit whose answer names no file is placed by its
@@ -19080,19 +19103,44 @@ async fn erase_engine_on_desktop(tag: &str, approvals_off: bool) -> (mind_types:
 /// E.ERASE2: run `forget` in a turn that can ask, answering each question with `answer`. The
 /// questions asked come back with the reply.
 async fn forget_when_asked(conv: &ConversationEngine, answer: Option<&'static str>) -> (String, Vec<(String, Vec<String>)>) {
+    let (reply, asked, _) = forget_with_redact(conv, ERASE_SECRET, answer, serde_json::json!({"redacted": 2, "where": ["transcript", "runs"]})).await;
+    (reply, asked.into_iter().map(|(p, o, _)| (p, o)).collect())
+}
+
+/// E.ERASE4: `forget` in a turn that can ask AND redact: each question answered with `answer`, each
+/// redact with `desktop_says`. The questions (prompt, options, request id) and the redacts (request
+/// id, needles) come back with the reply.
+#[allow(clippy::type_complexity)]
+async fn forget_with_redact(
+    conv: &ConversationEngine,
+    what: &str,
+    answer: Option<&'static str>,
+    desktop_says: serde_json::Value,
+) -> (String, Vec<(String, Vec<String>, String)>, Vec<(String, Vec<(String, usize)>)>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::Ask>();
+    let (rtx, mut rrx) = tokio::sync::mpsc::unbounded_channel::<crate::erase_redact::Redact>();
     let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = asked.clone();
+    let redacts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (seen, sent) = (asked.clone(), redacts.clone());
     let answerer = tokio::spawn(async move {
         while let Some(a) = rx.recv().await {
-            seen.lock().unwrap().push((a.prompt, a.options));
+            seen.lock().unwrap().push((a.prompt, a.options, a.request_id));
             let _ = a.reply.send(answer.map(str::to_string));
         }
     });
-    let reply = crate::TURN_ASK.scope(tx, conv.run_agent_tool("forget", &serde_json::json!({ "what": ERASE_SECRET }))).await;
+    let desktop = tokio::spawn(async move {
+        while let Some(r) = rrx.recv().await {
+            sent.lock().unwrap().push((r.request_id, r.needles));
+            let _ = r.reply.send(Some(desktop_says.clone()));
+        }
+    });
+    let args = serde_json::json!({ "what": what });
+    let reply = crate::erase_redact::TURN_REDACT.scope(rtx, crate::TURN_ASK.scope(tx, conv.run_agent_tool("forget", &args))).await;
     answerer.await.unwrap();
+    desktop.await.unwrap();
     let asked = asked.lock().unwrap().clone();
-    (reply, asked)
+    let redacts = redacts.lock().unwrap().clone();
+    (reply, asked, redacts)
 }
 
 /// E.ERASE2 (Fable's sign-off, condition 2): on the desktop, forget asks Keep / Erase in the turn.
@@ -19106,7 +19154,8 @@ async fn on_the_desktop_forget_asks_keep_or_erase() {
         assert_eq!(asked.len(), 1, "[{tag}] {asked:?}");
         let (prompt, options) = &asked[0];
         assert_eq!(options, &vec!["Keep".to_string(), "Erase".to_string()], "[{tag}]");
-        assert!(prompt.contains("can't be undone") && !prompt.to_ascii_lowercase().contains(&ERASE_SECRET.to_ascii_lowercase()), "[{tag}] {prompt}");
+        // E.ERASE4: the question now quotes the text -- the desktop erases only what the person saw.
+        assert!(prompt.contains("can't be undone") && prompt.starts_with(&format!("Forget \"{ERASE_SECRET}\"?")), "[{tag}] {prompt}");
         // On VM 520 a stale card read the same as the live one: the prompt says when it was asked.
         let at = prompt.split("(Asked at ").nth(1).and_then(|r| r.strip_suffix(".)")).unwrap_or("");
         assert!(at.len() == 5 && at.as_bytes()[2] == b':' && at.chars().filter(|c| c.is_ascii_digit()).count() == 4, "[{tag}] no HH:MM: {prompt}");
@@ -19477,4 +19526,65 @@ async fn egress3e_a_member_scope_under_the_primary_name_is_another_key() {
     let a = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&me) }).await;
     let b = crate::TURN_CONVERSATION.scope("c1".into(), async { ConversationEngine::handed_key(&scoped) }).await;
     assert_ne!(a, b);
+}
+
+/// E.ERASE4 through `forget`: on a pressed Erase the Mind sends ONE redact for the question it asked,
+/// carrying the quoted text's digest only, and tells the person what the desktop said; on Keep, no
+/// answer, or a typed "erase", it sends none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pressed_erase_asks_the_desktop_to_erase_its_copies() {
+    let accepted = serde_json::json!({"redacted": 3, "where": ["transcript", "runs"]});
+    let (_db, _log, conv) = erase_engine_on_desktop("redact-erase", false).await;
+    let (reply, asked, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), accepted.clone()).await;
+    assert_eq!(asked.len(), 1);
+    assert_eq!(redacts.len(), 1, "{redacts:?}");
+    assert_eq!(redacts[0].0, asked[0].2, "the redact is not for the question asked");
+    assert_eq!(redacts[0].1, vec![crate::erase_redact::needle(ERASE_SECRET)]);
+    assert!(!format!("{redacts:?}").contains(ERASE_SECRET), "the words travelled");
+    assert!(reply.starts_with("Erased") && reply.contains("gone from this conversation (3 place(s))"), "{reply}");
+    for (tag, answer) in [("redact-keep", Some("Keep")), ("redact-none", None), ("redact-typed", Some("erase"))] {
+        let (_db, _log, conv) = erase_engine_on_desktop(tag, false).await;
+        let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, answer, accepted.clone()).await;
+        assert!(redacts.is_empty(), "[{tag}] a redact went out: {redacts:?}");
+        assert!(!reply.contains("this conversation ("), "[{tag}] {reply}");
+    }
+    // Refused: the person is told this conversation still holds it, never that it is gone.
+    let (_db, _log, conv) = erase_engine_on_desktop("redact-refused", false).await;
+    let refused = serde_json::json!({"refused": "a needle is not in the question the person answered"});
+    let (reply, _, redacts) = forget_with_redact(&conv, ERASE_SECRET, Some("Erase"), refused).await;
+    assert_eq!(redacts.len(), 1);
+    assert!(reply.contains("still holds it: a needle is not in the question") && !reply.contains("gone from this conversation"), "{reply}");
+}
+
+/// E.EGRESS3f-H1: the tab an editor answer names -- its first line only, to the last ", <n> line(s),",
+/// and untitled only by the editor's exact words.
+#[test]
+fn an_editor_answer_names_its_tab_from_the_first_line() {
+    use crate::desktop::{editor_tab_name as tab, UNTITLED_TAB};
+    assert_eq!(tab("Done \u{2014} Text Editor \u{2014} BRIEF, v2.md, 3 lines, saved \u{b7} tab 1 of 1").as_deref(), Some("BRIEF, v2.md"));
+    assert_eq!(tab("Done \u{2014} Text Editor \u{2014} spec-1.md, 1 line, unsaved \u{b7} tab 2 of 2").as_deref(), Some("spec-1.md"));
+    assert_eq!(tab("Done \u{2014} Text Editor \u{2014} a, 2 lines.md, 5 lines, saved").as_deref(), Some("a, 2 lines.md"), "cut at the first count");
+    assert_eq!(tab("Done \u{2014} Text Editor \u{2014} Untitled (no file yet), 2 lines, unsaved").as_deref(), Some(UNTITLED_TAB));
+    assert_ne!(tab("Done \u{2014} Text Editor \u{2014} Untitled.md, 2 lines, unsaved").as_deref(), Some(UNTITLED_TAB), "a file called Untitled.md is a file");
+    assert_eq!(tab("Done\nText Editor \u{2014} spec-1.md, 19 lines, saved"), None, "a header past the first line");
+    assert_eq!(tab("Done \u{2014} Text Editor \u{2014} spec-1.md"), None, "no line count to cut at");
+}
+
+/// E.EGRESS3g (the fifth pass's H2): 4c's captures from VM 520 on OS 4f50b24a -- the JSON verbatim,
+/// after the `accepted:` line every act answer carries. A plain file is vouched for; through a
+/// symlinked folder, outside home, and a hard link are not; a #658 read page is the file's text.
+#[test]
+fn the_real_files_stat_and_read_answers_parse_as_the_mind_expects() {
+    use crate::desktop::{files_stat_real, read_result};
+    let plain = include_str!("../fixtures/desktop/files_stat_plain_4f50b24a.txt");
+    assert_eq!(
+        files_stat_real(plain),
+        Some((true, false, "/home/yantrik/captest/plain.txt".to_string(), 1_791_202_244))
+    );
+    let linked = include_str!("../fixtures/desktop/files_stat_via_link_4f50b24a.txt");
+    assert!(matches!(files_stat_real(linked), Some((true, true, ref real, _)) if real == "/home/yantrik/captest/plain.txt"), "via a link");
+    assert_eq!(files_stat_real(include_str!("../fixtures/desktop/files_stat_outside_4f50b24a.txt")), None, "outside home");
+    assert_eq!(files_stat_real(include_str!("../fixtures/desktop/files_stat_hard_link_4f50b24a.txt")), None, "a hard link");
+    let read = include_str!("../fixtures/desktop/editor_read_plain_4f50b24a.txt");
+    assert_eq!(read_result(read), Some(("/home/yantrik/captest/plain.txt".to_string(), "capture file\n".to_string())));
 }

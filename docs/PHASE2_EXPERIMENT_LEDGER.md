@@ -13838,3 +13838,49 @@ The contract is docs/harness.md "Forgetting: `redact`" on yantrik-os main. On Er
 - each of the span parser's rules (opener context, closer context, whitespace edge, curly direction, unclosed opener continuing).
 
 **Not covered until 4c's 520 captures:** the real event reply shape (accepted and refused). Until then the reply is parsed as `{"redacted": N, ...}` / `{"refused": "..."}`, per the doc.
+
+## E.RES1 R1d1 — VOID (operator interference), with three defects found by driving
+
+- **Set-up:** VM 520, OS 4f50b24a, Mind 99dd2c1 (binary sha 0572076f…, verified on the box). Started 07:12:15 CDT. The opening message named BRIEF.md and MDG_spec.md exactly.
+- **VOID:** at ~07:17 I ran `yos act shell new_chat` by hand to check that it worked on the new OS, while turn 2 was in flight. The desktop added a "still working … a new chat would stop it" message to the conversation. The driver waits for the last message to be the Mind's, so it hung. I stopped the run at ~07:28 (approvals back to normal). **Lesson: never touch a desktop a run is driving; diagnose from the logs.**
+- **Found by driving:**
+  1. **A refused call took a file back.** The model called a nonexistent action, `editor.open_path`, on MDG_spec.md. The desktop answered "REFUSED — nothing was run", and E.EGRESS3e's write backstop counted the call as a write anyway. So the spec was never handed over; only BRIEF.md was (1412 chars).
+  2. **The planner's query found junk.** The model's query ("latent reasoning fewer tokens than natural language chain of thought compression") was no span of one source, so the planner wrote "machine-native semantic language models typed graph discrete codes", a fair query built from the brief. SearXNG answered with Wikipedia "Machine". The search quality is the shared SearXNG's, which is 4c's to look at; reported.
+  3. **A typed URL could not be fetched.** `web_fetch` of a URL the model typed (arxiv.org/list/cs.CL/recent) left as `{"url": ""}` three times. Under the policy, the planner cannot write an address from no source, so it wrote "", and the model looped.
+  - Also seen: memory from earlier R1 attempts bled in. The Mind said "the report exists, 92 lines" (no report.md existed), counted a "fourteenth" Continue, and believed it had about 60 s per turn. Not addressed here.
+
+## E.EGRESS3g — the R1d1 defects 1 and 3, and the real captures
+
+**Prereg discipline broken:** the two fixes below were drafted while diagnosing R1d1, before this entry. The kill criteria were set before the mutants ran, and the mutant results are recorded honestly.
+
+- **1:** `note_writes` ignores a call whose answer STARTS with the desktop's refusal line, "REFUSED — nothing was run". Output that merely prints those words elsewhere is still a write.
+- **3:** for `web_fetch`/`fetch`/`web`, the planner may only COPY an address that appears verbatim in the person's words or in this turn's outside results. An address from no source, or an empty one, is refused as `UrlNotFromSources`: "that address is not in the person's words or in what a search returned this turn; search first, then fetch an address the results give". This changes the earlier contract, in which an invented address left as the planner wrote it; two tests are updated to the new contract.
+- **H2:** 4c's 520 captures (files_stat plain, via a link, outside home, hard link; an editor read with `modified`) are stored verbatim as fixtures and parsed in a test.
+- **H1:** `editor_tab_name` reads only the first line, cuts at the LAST ", <n> line(s),", and treats a tab as untitled only on the exact "Untitled (no file yet)".
+- **Mutants:**
+  - Killed: the refusal counted as a write; the refusal words anywhere; a made-up address allowed; every address refused; the check applied to every tool; H1 header anywhere; H1 first cut. The empty-address mutant survived the first run (`contains("")` is always true) and is killed by a test with VM 520's exact `{"url": ""}`.
+  - "Missing `changed` read as 0" survives as EQUIVALENT: S1 refuses a ctime of 0.
+
+## E.ERASE4 — RESULT: built as preregistered; 15 of 17 mutants killed, the other two masked or equivalent
+
+- **New module `erase_redact`:**
+  - `canon` = lowercase(NFC), via `icu_normalizer` (already in the tree; default features off, so no new crate);
+  - `needle` (sha256 hex, scalar count after lowercasing);
+  - `quoted_spans`, mirroring the shell's parser;
+  - `forget_question`, which quotes the text in "…" or “…”, self-checks, and sends no needle when it cannot quote;
+  - `conversation_outcome`;
+  - `TURN_REDACT` with `send_redact`.
+- **The forget branch:** on a pressed Erase, the Mind erases its memory, sends ONE redact for the question it asked, and appends what the desktop said. A text it could not quote is said so plainly (`NOT_QUOTABLE`).
+- **The harness:** `send_redact`, which sends one `redact` event of digests and returns the reply as it is, or `{"unsent": …}`. Its log line names counts and reasons only (`redact_said`), never the needles.
+- **Tests:**
+  - both shared fixtures (yantrik-os 4f50b24a), all 5 needles and 18 span cases;
+  - an order-sensitive needle ("J" + caron, digest from Python's reference), because the fixture has none;
+  - the question for five texts, including a straight quote inside;
+  - what cannot be quoted;
+  - the outcome wording;
+  - the forget flow: Erase sends exactly one redact for the asked question and no words travel; Keep, no answer and a typed "erase" send none; a refusal says the conversation still holds it;
+  - the harness event shape.
+- **Mutants:** 17, all compiling (the first redact-after-Keep mutant did not compile and was rewritten). 15 killed: canon order, len before lowercasing, the quote choice, too-short sent, self-check skipped, redact after Keep, the accepted wording on a refusal, and each span rule (opener, closer, whitespace edge, curly backwards, unclosed opener, visible prefix). Two are not killed:
+  - **both kinds of quote still quoted:** MASKED by the self-check (the parser finds a different span, so nothing is sent);
+  - **over 4096 sent:** EQUIVALENT (no text that long can close inside the 1999 visible characters).
+- **Not yet:** a live accepted capture, which needs Pranab to press Erase once on a throwaway question, asked by me directly. A live refusal I can produce myself on 520 once this is installed after review.

@@ -1,0 +1,2 @@
+accepted: True, settled: True
+{"exists": "unknown", "path": "/etc/hostname", "reason": "outside"}

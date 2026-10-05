@@ -1150,12 +1150,22 @@ pub(crate) fn read_result(obs: &str) -> Option<(String, String)> {
 
 /// E.EGRESS3f (S2): the tab an editor answer's header names ("Text Editor — spec-1.md, 19 lines…",
 /// "Text Editor — Untitled (no file yet), 1 line…"). None when there is no such header.
+/// E.EGRESS3f-H1 (the fifth pass): only the answer's FIRST line is the header, and the name runs to
+/// the last ", <n> line(s)," -- a file may be called "BRIEF, v2.md". No such cut: None.
 pub(crate) fn editor_tab_name(obs: &str) -> Option<String> {
-    let header = obs.lines().find(|l| l.contains("Text Editor \u{2014} "))?;
+    let header = obs.lines().next()?;
     let after = header.split_once("Text Editor \u{2014} ")?.1;
-    let name = after.split(", ").next()?.trim();
+    let cut = after.match_indices(", ").map(|(i, _)| i).filter(|&i| {
+        let rest = &after[i + 2..];
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        digits > 0 && rest[digits..].starts_with(" line")
+    });
+    let name = after[..cut.last()?].trim();
     (!name.is_empty()).then(|| name.to_string())
 }
+
+/// E.EGRESS3f-H1: the editor's own words for a tab with no file, exactly.
+pub(crate) const UNTITLED_TAB: &str = "Untitled (no file yet)";
 
 /// E.EGRESS3f (S3): the calls that only look -- an explicit (app, action) list, never an action name
 /// alone (an `open` in another app may well write).

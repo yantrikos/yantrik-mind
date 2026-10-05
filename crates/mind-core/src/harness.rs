@@ -584,20 +584,25 @@ async fn serve(
             let watched = trail.clone();
             // E.ERASE2: a question the turn asks the person, put on the desktop and answered here.
             let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::Ask>();
+            // E.ERASE4: after a pressed Erase, the desktop's own copies -- digests only.
+            let (redact_tx, mut redact_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::erase_redact::Redact>();
             // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
             let chat = turn["conversation"].as_str().unwrap_or_default().to_string();
             let mut thinking = tokio::spawn(async move {
                 mind_conversation::TURN_CONVERSATION
                     .scope(
                         chat,
-                        mind_conversation::TURN_ASK.scope(
-                            ask_tx,
-                            mind_conversation::TURN_STAGE.scope(
-                                trail,
-                                mind_conversation::TURN_STATUS.scope(
-                                    status_tx,
-                                    mind_conversation::TURN_CALLS
-                                        .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                        mind_conversation::erase_redact::TURN_REDACT.scope(
+                            redact_tx,
+                            mind_conversation::TURN_ASK.scope(
+                                ask_tx,
+                                mind_conversation::TURN_STAGE.scope(
+                                    trail,
+                                    mind_conversation::TURN_STATUS.scope(
+                                        status_tx,
+                                        mind_conversation::TURN_CALLS
+                                            .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                                    ),
                                 ),
                             ),
                         ),
@@ -619,6 +624,13 @@ async fn serve(
                         let answer = ask_the_person(send, session, turn_id, conversation, &ask.request_id, &ask.prompt, &ask.options, ASK_WAIT, &mut held).await;
                         eprintln!("[harness] turn {turn_id}: question {} answered: {}", ask.request_id, answer.as_deref().unwrap_or("(nothing)"));
                         let _ = ask.reply.send(answer);
+                    }
+                    Some(r) = redact_rx.recv() => {
+                        let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
+                        let reply = send_redact(send, session, turn_id, &r.request_id, &r.needles).await;
+                        // Never the needles: only what the desktop said.
+                        eprintln!("[harness] turn {turn_id}: redact for {}: {}", r.request_id, redact_said(&reply));
+                        let _ = r.reply.send(Some(reply));
                     }
                     _ = beat.tick() => {
                         if let Some(line) = stalled_line(turn_id, started.elapsed(), &watched) {
@@ -809,6 +821,35 @@ where
     None
 }
 
+/// E.ERASE4: one `redact` event for the question `request_id` -- digests and lengths, never the
+/// words -- and the desktop's reply: `{"redacted": n, ...}` or `{"refused": why}`, or
+/// `{"unsent": why}` when it could not be delivered.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn send_redact<C, F>(send: C, session: &str, turn_id: u64, request_id: &str, needles: &[(String, usize)]) -> serde_json::Value
+where
+    C: Fn(&'static str, serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let needles: Vec<serde_json::Value> = needles.iter().map(|(sha256, len)| serde_json::json!({ "sha256": sha256, "len": len })).collect();
+    let ev = serde_json::json!({ "kind": "redact", "request_id": request_id, "needles": needles });
+    match send(EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev })).await {
+        Ok(reply) if reply.is_object() => reply,
+        Ok(other) => serde_json::json!({ "unsent": format!("the desktop answered {other}") }),
+        Err(e) => serde_json::json!({ "unsent": e }),
+    }
+}
+
+/// E.ERASE4: the log line for a redact's outcome -- counts and reasons only.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn redact_said(reply: &serde_json::Value) -> String {
+    match (reply.get("redacted"), reply.get("refused"), reply.get("unsent")) {
+        (Some(n), _, _) => format!("erased {n} place(s)"),
+        (_, Some(why), _) => format!("refused: {why}"),
+        (_, _, Some(why)) => format!("not sent: {why}"),
+        _ => "no answer".to_string(),
+    }
+}
+
 /// E.STALL3: from 60 s on, the line that says where a running turn is -- its last stage and the
 /// trail that led there. None before then, so ordinary long turns stay quiet for their first minute.
 pub(crate) fn stalled_line(turn_id: u64, elapsed: Duration, trail: &mind_conversation::StageTrail) -> Option<String> {
@@ -918,6 +959,43 @@ mod status_tests {
         let stop = serde_json::json!({ "turn_id": 100, "text": "/stop", "conversation": "c-main" });
         assert_eq!(read_while_asking(&stop, 5, "c-main", "erase-1", &mut held), Heard::Cancelled);
         assert_eq!(held.back().map(|t| t["turn_id"].clone()), Some(serde_json::json!(100)), "the /stop turn is closed after this one");
+    }
+
+    /// E.ERASE4: a redact goes out as ONE `redact` event on the turn, needles as {sha256, len} and
+    /// nothing else; the desktop's reply comes back as it is, and a failed send as `unsent`.
+    #[tokio::test]
+    async fn a_redact_goes_out_as_one_event_of_digests() {
+        type Calls = std::sync::Arc<std::sync::Mutex<Vec<(&'static str, serde_json::Value)>>>;
+        let run = |answer: Result<serde_json::Value, String>| async move {
+            let calls: Calls = Default::default();
+            let c = calls.clone();
+            let send = move |m: &'static str, params: serde_json::Value| {
+                let (c, a) = (c.clone(), answer.clone());
+                async move {
+                    c.lock().unwrap().push((m, params));
+                    a
+                }
+            };
+            let needles = vec![("de4eb651078a4b17390362aabb5461503693864b7ce52f05f4ff617278c1c709".to_string(), 16)];
+            let got = send_redact(send, "s1", 5, "erase-1", &needles).await;
+            let calls = calls.lock().unwrap().clone();
+            (got, calls)
+        };
+        let accepted = serde_json::json!({ "redacted": 2, "where": ["transcript", "runs"] });
+        let (got, calls) = run(Ok(accepted.clone())).await;
+        assert_eq!(got, accepted);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, EVENT);
+        assert_eq!(calls[0].1["turn_id"], 5);
+        assert_eq!(
+            calls[0].1["event"],
+            serde_json::json!({ "kind": "redact", "request_id": "erase-1", "needles": [{ "sha256": "de4eb651078a4b17390362aabb5461503693864b7ce52f05f4ff617278c1c709", "len": 16 }] })
+        );
+        assert_eq!(redact_said(&got), "erased 2 place(s)");
+        let (refused, _) = run(Ok(serde_json::json!({ "refused": "a needle is not in the question the person answered" }))).await;
+        assert!(redact_said(&refused).starts_with("refused:"));
+        let (unsent, _) = run(Err("no socket".to_string())).await;
+        assert_eq!(unsent, serde_json::json!({ "unsent": "no socket" }));
     }
 
     /// E.ERASE2: the question goes out as one `request` event with its options, a status line says

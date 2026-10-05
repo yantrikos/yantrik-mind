@@ -1,0 +1,2 @@
+accepted: True, settled: True
+{"from_line": 1, "how_to_see_the_rest": "", "lines_total": 2, "modified": false, "path": "/home/yantrik/captest/plain.txt", "text": "capture file\n", "to_line": 2}

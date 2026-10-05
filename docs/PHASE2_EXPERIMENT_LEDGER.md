@@ -14806,3 +14806,16 @@ The review is a commit comment on f1364f0.
 - a memory without its age.
 
 **The live check:** after it ships, an R1 pair (with the runner's folder fix) shows no claim about a previous run's files. That is a reading, not a gate.
+
+**E.MEM1 — prereg AMENDED before any code (4c's answer from yantrik-os main):**
+- Desktop chats have no ids. Every Lens turn is `conversation = "main"`, and New chat (`act shell new_chat`) sends an ordinary turn whose text is exactly `/new`. Only extra agents from the Agents panel get `c-xxxxxx` ids, and the Mind does not attach as one today. History in the Lens is a view, not a resume.
+- So item 1 becomes: **a `/new` turn ends the conversational window** with the existing break row, written in the turn's own scope after the `/new` exchange. The operator's `break`/`fresh` does the same. No chat column, no resume logic.
+- Item 2 becomes: **at a break, the rolling summary of the previous conversation is retired**. It is kept under `earlier_conversations_summary` for audit, never put in a prompt. Compaction skips the transcript up to the last break, so the old chat's tail does not flow back into the new summary. Typed memory and consolidation are untouched, so the Mind still knows what it learned.
+- Items 3 (memories show "(noted <date>)") and 4 (the rule) stand.
+- **Kill criteria now:**
+  - `/new` without a break;
+  - the summary kept after `/new`;
+  - compaction folding pre-break rows into the new summary;
+  - a memory without its age;
+  - a member's `/new` breaking the primary's window (scope).
+- **The test 4c asked for:** an R1e1-style exchange, then `/new`, then the next turn's prompt holds none of R1e1's turns and none of its summary.

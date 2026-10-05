@@ -15086,3 +15086,9 @@ Tests send a request to a local fake public door and read the request line it re
 - an expired or malformed grant honoured;
 - a session or run grant honoured off the desktop;
 - a version other than 1 read.
+
+**E.GRANT1 — prereg AMENDED before code (4c, #667 review-fix round):**
+- The Mind sends NO `run_id`; a `grant_request` that still sends one is refused.
+- The OS binds a run grant to the turns of that run. A run starter passes `run=` on `send_message` (from the person or root only), and the host stamps `turn["run"]`.
+- The Mind reads `turn["run"]` for its log line only. Item 5 is replaced by this.
+- The off-desktop reader still honours only `always`.

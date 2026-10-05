@@ -366,6 +366,55 @@ pub fn egress_trust() -> Option<EgressTrust> {
     egress_trust_from(std::path::Path::new(EGRESS_SIGNAL), &env)
 }
 
+/// E.NET1j: a v3 signal's public door. The outer None: malformed, so nothing in the signal is
+/// trusted. The inner None: null, an older proxy. A door is a URL like `proxy` ("http://127.0.0.1:7451",
+/// per #666's review) on a loopback address with its port written and nothing else; E.NET1k (L2): and
+/// never the endpoint door itself.
+fn public_door_of(said: &serde_json::Value, get: &dyn Fn(&str) -> Option<String>) -> Option<Option<String>> {
+    match said.get("public_proxy")? {
+        serde_json::Value::Null => Some(None),
+        serde_json::Value::String(door) => {
+            let u = url::Url::parse(door.trim()).ok()?;
+            let ip: std::net::IpAddr = match u.host()? {
+                url::Host::Ipv4(a) => a.into(),
+                url::Host::Ipv6(a) => a.into(),
+                url::Host::Domain(_) => return None,
+            };
+            let bare = u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() && u.path() == "/";
+            if u.scheme() != "http" || !ip.is_loopback() || !bare {
+                return None;
+            }
+            let at = std::net::SocketAddr::new(ip, u.port()?);
+            let endpoint = proxy_url(get).and_then(|p| url_host_port(&p));
+            if endpoint.is_some_and(|(h, p)| h.parse::<std::net::IpAddr>().is_ok_and(|eh| eh == ip) && p == at.port()) {
+                return None;
+            }
+            Some(Some(format!("http://{at}")))
+        }
+        _ => None,
+    }
+}
+
+/// E.NET1k (the review's L1): the OS's public door for the media children, even when the signal is
+/// not fully trusted (audit mode): the signal must still be root's, version 3, name our own proxy and
+/// a well-formed door -- but not `enforced`, since a door that refuses MORE is safe to use without the
+/// OS's enforcement. The ureq fetches keep checking for themselves whenever trust is missing.
+pub fn public_door() -> Option<String> {
+    public_door_from(std::path::Path::new(EGRESS_SIGNAL), &env)
+}
+
+fn public_door_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let said = serde_json::from_str::<serde_json::Value>(&read_root_file(file).ok()?).ok()?;
+    let same_proxy = match (said["proxy"].as_str(), proxy_url(get)) {
+        (Some(theirs), Some(ours)) => theirs.trim().trim_end_matches('/') == ours.trim_end_matches('/'),
+        _ => false,
+    };
+    if said["version"].as_u64() != Some(3) || !same_proxy {
+        return None;
+    }
+    public_door_of(&said, get)?
+}
+
 fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String>) -> Option<EgressTrust> {
     let text = read_root_file(file).ok()?;
     let said = serde_json::from_str::<serde_json::Value>(&text).ok()?;
@@ -378,29 +427,7 @@ fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String
     if !(matches!(version, Some(2) | Some(3)) && said["enforced"] == true && said["proxy_refuses_private"] == true && same_proxy) {
         return None;
     }
-    // A v3 signal must say whether there is a public door: a URL like `proxy` ("http://127.0.0.1:7451",
-    // per #666's review) on a loopback address with its port written and nothing else -- or null.
-    let public = if version == Some(3) {
-        match said.get("public_proxy")? {
-            serde_json::Value::Null => None,
-            serde_json::Value::String(door) => {
-                let u = url::Url::parse(door.trim()).ok()?;
-                let ip: std::net::IpAddr = match u.host()? {
-                    url::Host::Ipv4(a) => a.into(),
-                    url::Host::Ipv6(a) => a.into(),
-                    url::Host::Domain(_) => return None,
-                };
-                let bare = u.username().is_empty() && u.password().is_none() && u.query().is_none() && u.fragment().is_none() && u.path() == "/";
-                if u.scheme() != "http" || !ip.is_loopback() || !bare {
-                    return None;
-                }
-                Some(format!("http://{}", std::net::SocketAddr::new(ip, u.port()?)))
-            }
-            _ => return None,
-        }
-    } else {
-        None
-    };
+    let public = if version == Some(3) { public_door_of(&said, get)? } else { None };
     // `lan_hosts` must be there: a list of {host, ports}, or null when the OS could not list them.
     let lan = match said.get("lan_hosts")? {
         serde_json::Value::Null => None,
@@ -536,7 +563,8 @@ pub fn route_outside(builder: ureq::AgentBuilder, direct: bool, trust: Option<&E
 /// E.NET1j: the proxy a child fetching addresses from outside (yt-dlp, ffmpeg) must be given -- the
 /// public door when the OS has one, else the configured proxy.
 pub fn outside_proxy() -> Option<String> {
-    egress_trust().and_then(|t| t.public).or_else(configured_proxy)
+    // E.NET1k (L1): the door does not wait for enforce.
+    public_door().or_else(configured_proxy)
 }
 
 /// E.NET1g (L1): `builder` on a route already decided -- direct, or through the proxy when one is set.
@@ -653,6 +681,15 @@ mod tests {
         // E.NET1j: v3 carries the public door; null is an older proxy without one.
         say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1:7451""#));
         assert_eq!(egress_trust_from(&file, &ours).and_then(|t| t.public_door().map(str::to_string)).as_deref(), Some("http://127.0.0.1:7451"));
+        // E.NET1k (L1): the media children's door does not wait for enforce, and is never the endpoint door.
+        say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1:7451""#).replace(r#""enforced":true"#, r#""enforced":false"#));
+        assert!(egress_trust_from(&file, &ours).is_none(), "an unenforced signal was trusted");
+        assert_eq!(public_door_from(&file, &ours).as_deref(), Some("http://127.0.0.1:7451"), "the door waited for enforce");
+        say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1:7450""#).replace(r#""enforced":true"#, r#""enforced":false"#));
+        assert_eq!(public_door_from(&file, &ours), None, "the endpoint door was taken for the public one");
+        // And the media children's proxy is that door (the production line reads the real signal).
+        let src = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert!(src.contains("    public_door().or_else(configured_proxy)"), "the media children's door waits for enforce");
         say(&whole.replace(r#""version":2"#, r#""version":3,"public_proxy":null"#));
         assert_eq!(egress_trust_from(&file, &ours).map(|t| t.public_door().is_none()), Some(true), "a null public door");
         say(&whole.replace(r#"[{"host":"homeassistant.local","ports":[8123]}]"#, "null"));
@@ -668,6 +705,7 @@ mod tests {
             (r#""version":2"#, r#""version":3,"public_proxy":"http://10.0.0.5:7451""#, "a public door that is not this machine"),
             (r#""version":2"#, r#""version":3,"public_proxy":"127.0.0.1:7451""#, "a public door that is not a URL"),
             (r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1""#, "a public door without its port"),
+            (r#""version":2"#, r#""version":3,"public_proxy":"http://127.0.0.1:7450""#, "a public door that is the endpoint door"),
             (r#""version":2"#, r#""version":3,"public_proxy":"http://proxy.lan:7451""#, "a public door that is not an address"),
             (r#""lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],"#, "", "no lan_hosts"),
             (r#""ports":[8123]"#, r#""ports":["8123"]"#, "a malformed LAN rule"),

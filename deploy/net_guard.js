@@ -182,6 +182,8 @@ function egressTrust(deps = {}) {
         const loop = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h) || h === "::1";
         const bare = !d.username && !d.password && !d.search && !d.hash && d.pathname === "/";
         if (d.protocol !== "http:" || !loop || !d.port || !bare) return null;
+        // E.NET1k (L2): never the endpoint door itself.
+        if (new URL(ours).host === d.host) return null;
         pub = `http://${d.host}`;
       }
     }
@@ -433,8 +435,16 @@ function clearSavedSession(profileDir, f = fs) {
   }
 }
 
+// E.NET1k (the review's L3): a page's WebRTC sends no UDP outside a proxy -- the route guard sees only
+// http(s) and WebSockets.
+const WEBRTC = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+function hardened(options) {
+  const args = Array.isArray(options.args) ? options.args : [];
+  return args.includes(WEBRTC) ? options : { ...options, args: [...args, WEBRTC] };
+}
+
 async function launchGuarded(chromium, launchOptions = {}, contextOptions = {}, deps = {}) {
-  const browser = await launchAs("launch", chromium, withProxy(launchOptions, deps));
+  const browser = await launchAs("launch", chromium, hardened(withProxy(launchOptions, deps)));
   try {
     const ctx = await browser.newContext({ ...contextOptions, serviceWorkers: "block" });
     await guardContext(ctx);
@@ -447,7 +457,7 @@ async function launchGuarded(chromium, launchOptions = {}, contextOptions = {}, 
 
 async function launchPersistentGuarded(chromium, profileDir, options = {}, deps = {}) {
   clearSavedSession(profileDir, deps.fs || fs);
-  const ctx = await launchAs("launchPersistentContext", chromium, profileDir, { ...withProxy(options, deps), serviceWorkers: "block" });
+  const ctx = await launchAs("launchPersistentContext", chromium, profileDir, { ...hardened(withProxy(options, deps)), serviceWorkers: "block" });
   try {
     await guardContext(ctx);
     // Anything already open (a start page) starts again, under the guard.

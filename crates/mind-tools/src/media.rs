@@ -141,6 +141,11 @@ fn bounded_command(bin: &str, args: &[&str], proxy: Option<&str>, ytdlp: &str, f
     cmd.arg(PROC_TIMEOUT_SECS.to_string()).arg(bin);
     cmd.env_remove("NO_PROXY");
     cmd.env_remove("no_proxy");
+    // E.NET1k (the review's M1): ffmpeg's http input otherwise allows rtp and udp -- SDP served over
+    // http made it bind UDP and send RTCP to any address, outside -http_proxy. Before its input.
+    if bin == ffmpeg {
+        cmd.args(["-protocol_whitelist", "http,https,tls,tcp,crypto,httpproxy"]);
+    }
     if let Some(p) = proxy {
         cmd.env("HTTP_PROXY", p);
         cmd.env("http_proxy", p);
@@ -741,7 +746,13 @@ mod tests {
         assert!(has(&envs, "no_proxy", None), "NO_PROXY reached yt-dlp: {envs:?}");
         assert!(has(&envs, "https_proxy", Some(p)) && has(&envs, "http_proxy", Some(p)), "the env proxy was not set: {envs:?}");
         let f = super::bounded_command("ffmpeg", &["-y", "-i", "https://s.example/a.m3u8"], Some(p), "yt-dlp", "ffmpeg");
-        assert_eq!(args_of(&f)[1..4], ["ffmpeg", "-http_proxy", p], "ffmpeg was not given the proxy before its input");
+        assert_eq!(
+            args_of(&f)[1..6],
+            ["ffmpeg", "-protocol_whitelist", "http,https,tls,tcp,crypto,httpproxy", "-http_proxy", p],
+            "ffmpeg was not held to http(s) and the proxy before its input"
+        );
+        let bare = super::bounded_command("ffmpeg", &["-i", "https://s.example/a.m3u8"], None, "yt-dlp", "ffmpeg");
+        assert_eq!(args_of(&bare)[1..4], ["ffmpeg", "-protocol_whitelist", "http,https,tls,tcp,crypto,httpproxy"], "no proxy, and no whitelist either");
         assert!(has(&envs_of(&f), "no_proxy", None), "no_proxy reached ffmpeg");
         let w = super::bounded_command("whisper-cli", &["-m", "m.bin"], Some(p), "yt-dlp", "ffmpeg");
         assert_eq!(args_of(&w)[1..], ["whisper-cli", "-m", "m.bin"], "a local tool was given network flags");

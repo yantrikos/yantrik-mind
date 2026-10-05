@@ -584,6 +584,10 @@ async fn serve(
             let watched = trail.clone();
             // E.ERASE2: a question the turn asks the person, put on the desktop and answered here.
             let (ask_tx, mut ask_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::Ask>();
+            // E.GRANT1: a search in the model's own words, granted (or not) through the desktop.
+            let (grant_tx, mut grant_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::GrantAsk>();
+            // E.GRANT1: the run the OS stamped on this turn, for the log only (it binds run grants itself).
+            let run = turn["run"].as_str().map(|r| format!(" (run {r})")).unwrap_or_default();
             // E.ERASE4: after a pressed Erase, the desktop's own copies -- digests only.
             let (redact_tx, mut redact_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::erase_redact::Redact>();
             // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
@@ -601,7 +605,7 @@ async fn serve(
                                     mind_conversation::TURN_STATUS.scope(
                                         status_tx,
                                         mind_conversation::TURN_CALLS
-                                            .scope(cards, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context))),
+                                            .scope(cards, mind_conversation::TURN_GRANT.scope(grant_tx, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context)))),
                                     ),
                                 ),
                             ),
@@ -624,6 +628,14 @@ async fn serve(
                         let answer = ask_the_person(send, session, turn_id, conversation, &ask.request_id, &ask.prompt, &ask.options, ASK_WAIT, &mut held).await;
                         eprintln!("[harness] turn {turn_id}: question {} answered: {}", ask.request_id, answer.as_deref().unwrap_or("(nothing)"));
                         let _ = ask.reply.send(answer);
+                    }
+                    Some(g) = grant_rx.recv() => {
+                        let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
+                        let conversation = turn["conversation"].as_str().unwrap_or_default();
+                        let outcome = request_grant(send, session, turn_id, conversation, &g.request_id, &g.query, ASK_WAIT, &mut held).await;
+                        // The outcome only: the query itself is the search, logged where it leaves.
+                        eprintln!("[harness] turn {turn_id}{run}: own-words search {}: {outcome:?}", g.request_id);
+                        let _ = g.reply.send(outcome);
                     }
                     Some(r) = redact_rx.recv() => {
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
@@ -819,6 +831,64 @@ where
         }
     }
     None
+}
+
+/// E.GRANT1 (yantrik-os #667): one `grant_request` for the exact query, on the turn being answered,
+/// and what came of it. `{"granted":…}`: a grant in force. `{}`: the card is shown, and the answer
+/// comes on a later poll -- once / session / always let it leave; no, a typed answer, or nothing
+/// before the wait ends do not. `{"refused":…}`: not this. No run id is sent: the OS binds a run grant
+/// to the turns it stamped with the run.
+pub(crate) async fn request_grant<C, F>(
+    send: C,
+    session: &str,
+    turn_id: u64,
+    conversation: &str,
+    request_id: &str,
+    query: &str,
+    wait: Duration,
+    held: &mut std::collections::VecDeque<serde_json::Value>,
+) -> mind_conversation::GrantOutcome
+where
+    C: Fn(&'static str, serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    use mind_conversation::GrantOutcome::{Denied, Granted};
+    let ev = serde_json::json!({ "kind": "grant_request", "request_id": request_id, "capability": "web_search_own_words", "query": query });
+    let reply = match send(EVENT, serde_json::json!({ "session": session, "turn_id": turn_id, "event": ev })).await {
+        Ok(reply) => reply,
+        Err(e) => return Denied(format!("not sent: {e}")),
+    };
+    if let Some(g) = reply.get("granted") {
+        return Granted(format!("grant {}", g["id"].as_str().unwrap_or("(no id)")));
+    }
+    if let Some(why) = reply.get("refused") {
+        return Denied(format!("refused: {why}"));
+    }
+    if !reply.as_object().is_some_and(|o| o.is_empty()) {
+        return Denied(format!("an answer not in the format: {reply}"));
+    }
+    // The card is up. Keep the session present and the agent from looking stuck while it waits.
+    let waiting = |s: &str| send(EVENT, serde_json::json!({ "session": s, "turn_id": turn_id, "event": { "kind": "status", "text": ASK_STATUS } }));
+    let _ = waiting(session).await;
+    let started = std::time::Instant::now();
+    let mut beat = std::time::Instant::now();
+    while started.elapsed() < wait {
+        tokio::time::sleep(ASK_POLL).await;
+        if beat.elapsed() >= ASK_STATUS_EVERY {
+            let _ = waiting(session).await;
+            beat = std::time::Instant::now();
+        }
+        let Ok(reply) = send(POLL, serde_json::json!({ "session": session })).await else {
+            return Denied("the desktop could not be asked".into());
+        };
+        match read_while_asking(&reply, turn_id, conversation, request_id, held) {
+            Heard::Nothing => {}
+            Heard::Answer(Some(a)) if matches!(a.as_str(), "once" | "session" | "always") => return Granted(format!("the person's answer: {a}")),
+            Heard::Answer(a) => return Denied(format!("the person's answer: {}", a.as_deref().unwrap_or("(none)"))),
+            Heard::Cancelled => return Denied("the turn ended".into()),
+        }
+    }
+    Denied("no answer in time".into())
 }
 
 /// E.ERASE4: one `redact` event for the question `request_id` -- digests and lengths, never the
@@ -1035,6 +1105,58 @@ mod status_tests {
         assert_eq!(calls.iter().filter(|(m, _)| *m == POLL).count(), 3);
         let (none, _, _) = run(vec![], Duration::from_millis(20)).await;
         assert_eq!(none, None, "no answer, no answer");
+    }
+
+    /// E.GRANT1: `grant_request` goes out with the exact query and no run id; a grant in force, or a
+    /// pressed Once/This session/Always, lets it leave; No, a refusal, or no answer does not.
+    #[tokio::test]
+    async fn a_grant_is_asked_for_and_only_a_yes_lets_it_leave() {
+        use mind_conversation::GrantOutcome::{Denied, Granted};
+        let run = |first: serde_json::Value, polls: Vec<serde_json::Value>, wait: Duration| async move {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(&'static str, serde_json::Value)>::new()));
+            let polls = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(polls)));
+            let (c, p, f) = (calls.clone(), polls.clone(), std::sync::Arc::new(std::sync::Mutex::new(Some(first))));
+            let send = move |m: &'static str, params: serde_json::Value| {
+                let (c, p, f) = (c.clone(), p.clone(), f.clone());
+                async move {
+                    let is_grant = m == EVENT && params["event"]["kind"] == "grant_request";
+                    c.lock().unwrap().push((m, params));
+                    Ok(if m == POLL {
+                        p.lock().unwrap().pop_front().unwrap_or_else(|| serde_json::json!({}))
+                    } else if is_grant {
+                        f.lock().unwrap().take().unwrap_or_else(|| serde_json::json!({}))
+                    } else {
+                        serde_json::json!({})
+                    })
+                }
+            };
+            let mut held = std::collections::VecDeque::new();
+            let got = request_grant(send, "s1", 5, "main", "grant-0", "abstract meaning representation survey", wait, &mut held).await;
+            let calls = calls.lock().unwrap().clone();
+            (got, calls)
+        };
+        let (got, calls) = run(serde_json::json!({ "granted": { "id": "g-9b0d5e1a7c32", "scope": "always", "expires_at": null } }), vec![], Duration::from_secs(5)).await;
+        assert_eq!(got, Granted("grant g-9b0d5e1a7c32".into()));
+        assert_eq!(
+            calls[0].1["event"],
+            serde_json::json!({ "kind": "grant_request", "request_id": "grant-0", "capability": "web_search_own_words", "query": "abstract meaning representation survey" }),
+            "the event is not the exact request (and must carry no run id)"
+        );
+        let answer = |a: &str| serde_json::json!({ "answers": [{ "turn_id": 5, "request_id": "grant-0", "answer": a }] });
+        for yes in ["once", "session", "always"] {
+            let (got, _) = run(serde_json::json!({}), vec![serde_json::json!({}), answer(yes)], Duration::from_secs(5)).await;
+            assert!(matches!(got, Granted(_)), "{yes} did not let it leave: {got:?}");
+        }
+        for no in ["no", "Erase", "yes please"] {
+            let (got, _) = run(serde_json::json!({}), vec![answer(no)], Duration::from_secs(5)).await;
+            assert!(matches!(got, Denied(_)), "{no:?} let it leave: {got:?}");
+        }
+        let (refused, _) = run(serde_json::json!({ "refused": "another capability" }), vec![], Duration::from_secs(5)).await;
+        assert!(matches!(refused, Denied(_)), "a refusal let it leave");
+        let (silent, _) = run(serde_json::json!({}), vec![], Duration::from_millis(20)).await;
+        assert!(matches!(silent, Denied(_)), "no answer let it leave");
+        let (odd, _) = run(serde_json::json!({ "maybe": true }), vec![], Duration::from_secs(5)).await;
+        assert!(matches!(odd, Denied(_)), "a reply not in the format let it leave");
     }
 
     /// E.STALL3: quiet for the first minute; then the turn, its seconds, its last stage and trail.

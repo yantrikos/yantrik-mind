@@ -1528,6 +1528,40 @@ tokio::task_local! {
     pub static TURN_ASK: tokio::sync::mpsc::UnboundedSender<Ask>;
 }
 
+/// E.GRANT1 (yantrik-os #667): whether the person lets this search leave in the model's own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantOutcome {
+    /// It may: how (a grant's id, or the answer on the card).
+    Granted(String),
+    /// It may not, or nobody said: why.
+    Denied(String),
+}
+
+/// E.GRANT1: one `grant_request` for the exact query, answered through the desktop harness.
+pub struct GrantAsk {
+    pub request_id: String,
+    pub query: String,
+    pub reply: tokio::sync::oneshot::Sender<GrantOutcome>,
+}
+
+tokio::task_local! {
+    /// E.GRANT1: set by the desktop harness, which can put the grant card in front of the person.
+    /// Unset everywhere else -- there, only an `always` grant from the OS's file applies.
+    pub static TURN_GRANT: tokio::sync::mpsc::UnboundedSender<GrantAsk>;
+}
+
+/// E.GRANT1: ask the desktop. None when this turn has no desktop to ask.
+pub(crate) async fn ask_grant(query: &str) -> Option<GrantOutcome> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let request_id = format!("grant-{}", SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let sent = TURN_GRANT.try_with(|tx| tx.send(GrantAsk { request_id, query: query.to_string(), reply }).is_ok()).ok()?;
+    if !sent {
+        return Some(GrantOutcome::Denied("the request could not be sent".into()));
+    }
+    Some(answer.await.unwrap_or_else(|_| GrantOutcome::Denied("no answer".into())))
+}
+
 /// E.ERASE2: can this turn ask the person a question and wait for the answer?
 pub(crate) fn can_ask() -> bool {
     TURN_ASK.try_with(|_| ()).is_ok()

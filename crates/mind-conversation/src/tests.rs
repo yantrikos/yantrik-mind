@@ -20340,3 +20340,56 @@ async fn a_group_new_chat_says_nothing_changed() {
     assert!(mine.starts_with("New conversation"), "{mine}");
 }
 
+/// E.GRANT1: a query the model wrote leaves as written only under a grant -- on the desktop a yes from
+/// the harness, off it an always grant -- and never with a path in it or when it cannot be shown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_words_leave_only_under_a_grant() {
+    use crate::egress_planning::{own_words_under_grant as own, query_can_be_shown as shown};
+    let named: Vec<String> = vec![];
+    let none = || None;
+    let always = || Some("g-9b0d5e1a7c32".to_string());
+    // Off the desktop: only an always grant.
+    assert_eq!(own("abstract meaning representation survey", &named, &none).await, None, "it left without a grant");
+    assert_eq!(own("abstract meaning representation survey", &named, &always).await.as_deref(), Some("abstract meaning representation survey"));
+    assert_eq!(own("notes in ~/research/R1", &named, &always).await, None, "a path left under a grant");
+    for bad in ["", "a\u{202E}b", "a\u{0007}b", &"x".repeat(301)] {
+        assert!(!shown(bad), "{bad:?} was shown");
+    }
+    assert_eq!(own("  padded query  ", &named, &always).await.as_deref(), Some("padded query"), "the exact query is the trimmed one");
+    assert_eq!(own("a\u{202E}b reversed", &named, &always).await, None, "a query that cannot be shown exactly left under a grant");
+    // On the desktop: the harness's answer decides, and an always file grant does not stand in for it.
+    let desk = |outcome: crate::GrantOutcome| async move {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        tokio::spawn(async move {
+            if let Some(g) = rx.recv().await {
+                let _ = g.reply.send(outcome);
+            }
+        });
+        crate::TURN_GRANT.scope(tx, async { own("graph to text generation survey", &[], &|| Some("g-9b0d5e1a7c32".to_string())).await }).await
+    };
+    assert_eq!(desk(crate::GrantOutcome::Granted("grant g-x".into())).await.as_deref(), Some("graph to text generation survey"));
+    assert_eq!(desk(crate::GrantOutcome::Denied("no".into())).await, None, "a no on the desktop let it leave");
+}
+
+/// E.GRANT1 through the planner: with a yes, the model's own query is what is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_planner_sends_the_models_words_under_a_grant() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"MDG machine-native\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let ask = serde_json::json!({ "query": "Abstract Meaning Representation graph-to-text survey" });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+    tokio::spawn(async move {
+        while let Some(g) = rx.recv().await {
+            assert_eq!(g.query, "Abstract Meaning Representation graph-to-text survey", "the person was not shown the exact query");
+            let _ = g.reply.send(crate::GrantOutcome::Granted("the person's answer: session".into()));
+        }
+    });
+    let out = crate::TURN_GRANT.scope(tx, conv.egress_clean_args_with("search", "Continue.", ask.clone(), "", &[], &[], "primary|c1")).await.unwrap();
+    assert_eq!(out["query"], "Abstract Meaning Representation graph-to-text survey");
+    // Without one, the planner writes it, as before.
+    let planned = conv.egress_clean_args_with("search", "Continue.", ask, "", &[], &[], "primary|c1").await.unwrap();
+    assert_eq!(planned["query"], "MDG machine-native");
+}
+

@@ -15092,3 +15092,36 @@ Tests send a request to a local fake public door and read the request line it re
 - The OS binds a run grant to the turns of that run. A run starter passes `run=` on `send_message` (from the person or root only), and the host stamps `turn["run"]`.
 - The Mind reads `turn["run"]` for its log line only. Item 5 is replaced by this.
 - The off-desktop reader still honours only `always`.
+
+## E.GRANT1 — RESULT: the model's own search words leave only under a grant the person gave; 16 mutants killed
+
+- **The planner:** when a web search's query is not a span, `own_words_under_grant` runs before the clean planner. The query (trimmed) must be showable exactly: 1–300 characters, no control or bidi characters, and no path or named file. If it is, the query leaves as the model wrote it when:
+  - **on the desktop:** the harness answers yes. A grant in force, or Once / This session / Always pressed on the card. No, a typed answer, a refusal, a reply not in the format, the turn ending, or no answer in `ASK_WAIT` (110 s) is a no. An `always` grant in the file does NOT stand in for the desktop's answer, so the OS journals every use.
+  - **off the desktop:** an `always` grant in force from `/run/yantrik-mind-egress/grants.json`. The file is read with the signal's checks plus a 64 KiB cap (now on every root-file read) and version 1 only. Each grant is exactly #667's shape (8 keys, id format, agent "mind", the capability, scope rules, at most 24 h for run/session, not expired). Session and run grants never count here.
+- **Without a yes:** the planner writes the query, as before (with E.PLAN1).
+- **Kept under a grant:** the exact-value tripwire on whatever leaves (it runs after the planner), no paths, and the log line naming the grant or the answer. The query is logged where it leaves, not in the harness line.
+- **The harness:** a `TURN_GRANT` channel per turn; `request_grant` sends `{kind:"grant_request", request_id, capability:"web_search_own_words", query}` with NO `run_id` (the OS binds run grants to the turn's stamped run), and polls for the card's answer with the existing reader. `turn["run"]` goes into the log line only.
+- **Tests:**
+  - `only_an_always_grant_in_force_counts_off_the_desktop` (mind-net: the shapes, expiry, 24 h, version, extra keys, other agents; on Unix a writable file and one over 64 KiB);
+  - `a_grant_is_asked_for_and_only_a_yes_lets_it_leave` (mind-core: the exact event, each yes, each no, refused, silence, an odd reply);
+  - `own_words_leave_only_under_a_grant` and `the_planner_sends_the_models_words_under_a_grant` (mind-conversation).
+- **Mutants killed (16):**
+  - own words with no grant;
+  - the file standing in for the desktop;
+  - a path under a grant;
+  - an unshowable query under a grant (SURVIVED first: its test checked the predicate, not the path through it);
+  - no/typed as yes;
+  - a refusal as yes;
+  - no answer as yes;
+  - a run id sent;
+  - an expired grant;
+  - a grant over 24 h;
+  - a session or run grant off the desktop;
+  - another version;
+  - an extra key;
+  - another agent;
+  - on Linux: the file read without its trust checks, and no 64 KiB cap.
+- **Runs:**
+  - Full suite 2346 passed, 0 failed.
+  - Linux staging: mind-net 13, mind-core 140, mind-conversation 1149.
+- **Not built:** the live card. The desktop side is #667, unmerged. The first drive is on 520 after both are reviewed.

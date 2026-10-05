@@ -419,6 +419,67 @@ fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String
     Some(EgressTrust { lan, public })
 }
 
+/// E.GRANT1: the largest root-owned settings, signal or grants file read.
+const ROOT_FILE_MAX: u64 = 64 * 1024;
+
+/// E.GRANT1 (yantrik-os #667): the grants the person gave the Mind, written by root beside the signal.
+pub const GRANTS_FILE: &str = "/run/yantrik-mind-egress/grants.json";
+
+/// E.GRANT1: the id of an `always` grant in force for the Mind's own search words. Off the desktop
+/// only an `always` grant can apply -- a session grant belongs to a harness session, and a run grant
+/// to the turns the OS stamps with its run. On the desktop the OS answers `grant_request` itself.
+pub fn always_search_grant() -> Option<String> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    always_search_grant_from(std::path::Path::new(GRANTS_FILE), now)
+}
+
+fn always_search_grant_from(file: &std::path::Path, now: u64) -> Option<String> {
+    let text = read_root_file(file).ok()?;
+    let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    // A version other than 1 refuses the whole file.
+    if doc["version"] != 1 {
+        return None;
+    }
+    doc["grants"]
+        .as_array()?
+        .iter()
+        .filter_map(|g| grant_in_force(g, now))
+        .find(|(scope, _)| scope == "always")
+        .map(|(_, id)| id)
+}
+
+/// E.GRANT1: a grant exactly as #667's "Format for the Mind" writes it, and in force at `now` --
+/// (scope, id). Any other key, or a field out of shape, drops the grant.
+fn grant_in_force(g: &serde_json::Value, now: u64) -> Option<(String, String)> {
+    const KEYS: [&str; 8] = ["id", "agent", "capability", "scope", "scope_id", "granted_at", "expires_at", "granted_by"];
+    let o = g.as_object()?;
+    if o.len() != KEYS.len() || !KEYS.iter().all(|k| o.contains_key(*k)) {
+        return None;
+    }
+    let id = o["id"].as_str()?;
+    let hex = |s: &str, n: usize| s.len() == n && s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if !id.strip_prefix("g-").is_some_and(|h| hex(h, 12)) || o["agent"] != "mind" || o["capability"] != "web_search_own_words" {
+        return None;
+    }
+    let granted_at = o["granted_at"].as_u64()?;
+    let scope = o["scope"].as_str()?;
+    let window = |e: &serde_json::Value| e.as_u64().filter(|e| granted_at < *e && *e <= granted_at + 86_400 && now < *e);
+    let ok = match scope {
+        "always" => o["scope_id"].is_null() && o["expires_at"].is_null() && o["granted_by"] == "person",
+        "session" => {
+            o["scope_id"].as_str().is_some_and(|s| hex(s, 16)) && o["granted_by"] == "person" && window(&o["expires_at"]).is_some()
+        }
+        "run" => {
+            o["scope_id"].as_str().is_some_and(|s| {
+                (1..=64).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+            }) && o["granted_by"] == "run-starter"
+                && window(&o["expires_at"]).is_some()
+        }
+        _ => false,
+    };
+    ok.then(|| (scope.to_string(), id.to_string()))
+}
+
 /// E.EGRESS5d (the thirteenth pass): read a root-owned file without a race -- its folder must be a
 /// root-owned directory nobody else can write; the file is opened without following a link,
 /// checked on the open handle (a regular file, owned by root, nobody else can write), and read from
@@ -439,6 +500,10 @@ fn read_root_file(file: &std::path::Path) -> std::io::Result<String> {
         let m = f.metadata()?;
         if !m.is_file() || m.uid() != 0 || m.mode() & 0o022 != 0 {
             return Err(unsafe_file("it is not a root-owned regular file only root can write"));
+        }
+        // E.GRANT1 (#667): at most 64 KiB, on the open handle like the rest.
+        if m.len() > ROOT_FILE_MAX {
+            return Err(unsafe_file("it is larger than 64 KiB"));
         }
         let mut text = String::new();
         f.read_to_string(&mut text)?;
@@ -697,6 +762,56 @@ mod tests {
             std::os::unix::fs::symlink(&file, &link).unwrap();
             assert!(!egress_trust_from(&link, &ours).is_some(), "a link to the signal was followed");
             assert!(egress_trust_from(&file, &ours).is_some());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// E.GRANT1: the grants file is read like the signal, version 1 only, and off the desktop only an
+    /// `always` grant in force counts; a malformed or expired grant is dropped.
+    #[test]
+    fn only_an_always_grant_in_force_counts_off_the_desktop() {
+        let dir = std::env::temp_dir().join(format!("ym-grants-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("grants.json");
+        let now = 1_759_650_100;
+        let always = r#"{"id":"g-9b0d5e1a7c32","agent":"mind","capability":"web_search_own_words","scope":"always","scope_id":null,"granted_at":1759600000,"expires_at":null,"granted_by":"person"}"#;
+        let session = r#"{"id":"g-3fa29c07d1e4","agent":"mind","capability":"web_search_own_words","scope":"session","scope_id":"5f1c2a9e0b7d4c3e","granted_at":1759650000,"expires_at":1759736400,"granted_by":"person"}"#;
+        let run = r#"{"id":"g-71c0aa42e9d5","agent":"mind","capability":"web_search_own_words","scope":"run","scope_id":"research-42","granted_at":1759650000,"expires_at":1759664400,"granted_by":"run-starter"}"#;
+        let doc = |grants: &[&str]| format!(r#"{{"version":1,"written_at":1759650000,"grants":[{}]}}"#, grants.join(","));
+        let at = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            always_search_grant_from(&file, now)
+        };
+        assert_eq!(at(&doc(&[session, run, always])).as_deref(), Some("g-9b0d5e1a7c32"));
+        assert_eq!(at(&doc(&[session, run])), None, "a session or run grant counted off the desktop");
+        assert_eq!(at(&doc(&[always]).replace(r#""version":1"#, r#""version":2"#)), None, "another version was read");
+        for (from, to, why) in [
+            (r#""agent":"mind""#, r#""agent":"hermes""#, "another agent's grant"),
+            (r#""capability":"web_search_own_words""#, r#""capability":"web_fetch""#, "another capability"),
+            (r#""id":"g-9b0d5e1a7c32""#, r#""id":"g-9B0D5E1A7C32""#, "an id out of shape"),
+            (r#""granted_by":"person""#, r#""granted_by":"run-starter""#, "an always grant not the person's"),
+            (r#""expires_at":null"#, r#""expires_at":1759700000"#, "an always grant with an expiry"),
+            (r#""scope_id":null"#, r#""scope_id":null,"note":"x""#, "an extra key"),
+        ] {
+            assert_eq!(at(&doc(&[&always.replace(from, to)])), None, "honoured: {why}");
+        }
+        // The grant checks themselves: a session grant in force, then expired, then over 24 h.
+        let g = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(grant_in_force(&g(session), now).map(|(s, _)| s).as_deref(), Some("session"));
+        assert_eq!(grant_in_force(&g(session), 1_759_736_400), None, "an expired grant was honoured");
+        assert_eq!(grant_in_force(&g(&session.replace("1759736400", "1759736401")), now), None, "a grant over 24 h was honoured");
+        assert_eq!(grant_in_force(&g(&run.replace(r#""research-42""#, r#""research 42""#)), now), None, "a run id out of shape");
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(always_search_grant_from(&file, now), None, "a missing file granted something");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&file, doc(&[always])).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
+            assert_eq!(always_search_grant_from(&file, now), None, "a grants file others can write was read");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::write(&file, format!("{}{}", doc(&[always]), " ".repeat(70_000))).unwrap();
+            assert_eq!(always_search_grant_from(&file, now), None, "a grants file over 64 KiB was read");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

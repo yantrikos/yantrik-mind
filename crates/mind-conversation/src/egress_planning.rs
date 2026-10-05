@@ -459,6 +459,43 @@ pub(crate) fn write_out_acronyms(query: &str, acronyms: &[(String, String)]) -> 
     out.join(" ")
 }
 
+/// E.GRANT1: can this query be shown to the person exactly -- 1 to 300 characters, no control or
+/// bidirectional characters, no space at either end (#667)?
+pub(crate) fn query_can_be_shown(q: &str) -> bool {
+    let n = q.chars().count();
+    (1..=300).contains(&n)
+        && q == q.trim()
+        && !q.chars().any(|c| c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+}
+
+/// E.GRANT1: the model's own query, when the person grants it -- asked on the desktop (`grant_request`:
+/// a grant in force, or Once / This session / Always on the card), or off it an `always` grant from
+/// the OS's file (`offdesk`). Never a query holding a path or a named file; the exact-value tripwire
+/// still runs on whatever leaves. None: the planner writes it.
+pub(crate) async fn own_words_under_grant(q: &str, named: &[String], offdesk: &(dyn Fn() -> Option<String> + Sync)) -> Option<String> {
+    let q = q.trim();
+    if !query_can_be_shown(q) || has_path(q, named) {
+        return None;
+    }
+    let outcome = match crate::ask_grant(q).await {
+        Some(outcome) => outcome,
+        None => match offdesk() {
+            Some(id) => crate::GrantOutcome::Granted(format!("always grant {id}")),
+            None => crate::GrantOutcome::Denied("no grant off the desktop".into()),
+        },
+    };
+    match outcome {
+        crate::GrantOutcome::Granted(how) => {
+            eprintln!("[egress] a search leaves in the model's own words, under {how}");
+            Some(q.to_string())
+        }
+        crate::GrantOutcome::Denied(why) => {
+            eprintln!("[egress] own-words search not granted ({why}); the planner writes it");
+            None
+        }
+    }
+}
+
 /// E.EGRESS3b (the review's M1): is this word a path on this machine, or a named file?
 fn is_path_word(w: &str, named: &[String]) -> bool {
     let w = w.trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'));
@@ -1316,6 +1353,16 @@ impl ConversationEngine {
                     let out = own.map_or_else(|| q.to_string(), |s| write_out_acronyms(q, &defined_acronyms(&[s])));
                     let out = if has_path(&out, &named) { q.to_string() } else { out };
                     return Ok(serde_json::json!({ "query": out }));
+                }
+            }
+        }
+        // E.GRANT1 (yantrik-os #667): not a span -- the model's own words may leave as written if the
+        // person grants it; otherwise the planner writes the query as before.
+        if web_query {
+            let q = ["query", "q", "topic"].iter().find_map(|k| grounded.get(*k).and_then(|v| v.as_str()));
+            if let Some(own) = q {
+                if let Some(own) = own_words_under_grant(own, &named, &mind_net::always_search_grant).await {
+                    return Ok(serde_json::json!({ "query": own }));
                 }
             }
         }

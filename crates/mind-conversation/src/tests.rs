@@ -20148,7 +20148,7 @@ async fn a_members_new_chat_leaves_the_primarys_conversation_alone() {
 #[test]
 fn a_memory_shows_when_it_was_noted() {
     let ms = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap().timestamp_millis() as u64;
-    assert_eq!(crate::noted(ms), " (noted 2026-10-05)");
+    assert_eq!(crate::noted(ms), "[noted 2026-10-05] ", "the date goes first (E.NET1i P4)");
     assert_eq!(crate::noted(0), "");
     assert!(crate::is_fresh_start("/new") && crate::is_fresh_start(" /NEW@th_bot ") && crate::is_fresh_start("/reset"));
     assert!(!crate::is_fresh_start("/new project plan") && !crate::is_fresh_start("new"));
@@ -20226,3 +20226,89 @@ async fn a_written_out_span_stays_one_source_and_no_path() {
         .unwrap();
     assert_eq!(named_case["query"], "GTI terms", "a named file's name left through a long form");
 }
+
+/// E.NET1i (P2): a /new in a group writes no break -- it would cut every viewer's window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_new_chat_leaves_everyones_window_alone() {
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+    mem.append_message("user", "PRIMARY-MARK plan the trip").await.unwrap();
+    conv.fresh_window(mind_types::Scope::Shared).await;
+    let ctx = mind_types::AccessContext::principal(mind_types::Scope::primary(), mind_types::Purpose::conversation(mind_types::PRIMARY));
+    let window = mem.recent_messages(50, &ctx).await.unwrap();
+    assert!(window.iter().any(|(_, t)| t.contains("PRIMARY-MARK")), "a group /new cut the person's window");
+    let all = mem.messages_since(0, 50).await.unwrap();
+    assert!(all.iter().all(|(_, role, _)| role != "break"), "a shared break row was written");
+}
+
+/// E.NET1i (P3): the primary's summary is made from the primary's rows and shared ones only -- a
+/// member's private DM is never read into it, and a member's break does not skip the primary's rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_reads_only_what_the_primary_may_see() {
+    struct Rec(Arc<std::sync::Mutex<Vec<String>>>);
+    impl LLMBackend for Rec {
+        fn chat(&self, m: &[yantrik_ml::ChatMessage], _c: &yantrik_ml::GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.lock().unwrap().push(m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("
+"));
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: "A summary of the conversation so far, long enough to keep.".into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[yantrik_ml::ChatMessage], c: &yantrik_ml::GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "rec"
+        }
+    }
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let rec: Arc<dyn LLMBackend> = Arc::new(Rec(seen.clone()));
+    let pool = InferencePool::new(Arc::clone(&rec), 1).with_provider("rec").with_private_backend(rec, "rec");
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+    let kid = mind_types::Scope::Private("kid".into());
+    for i in 0..40 {
+        mem.append_message(if i % 2 == 0 { "user" } else { "assistant" }, &format!("PRIMROW-{i}")).await.unwrap();
+        if i % 4 == 0 {
+            mem.append_message_scoped("user", &format!("KIDPRIVATE-{i}"), kid.clone()).await.unwrap();
+        }
+        if i == 10 {
+            conv.fresh_window(kid.clone()).await; // the member's own /new
+        }
+    }
+    let mut summarised = false;
+    for _ in 0..4 {
+        summarised |= conv.compact_conversation().await;
+    }
+    assert!(summarised, "the primary's conversation was never summarised");
+    let prompts = seen.lock().unwrap().clone();
+    assert!(prompts.iter().any(|p| p.contains("PRIMROW-0")), "a member's break skipped the primary's rows");
+    assert!(prompts.iter().all(|p| !p.contains("KIDPRIVATE")), "a member's private row went into the primary's summary");
+}
+
+/// E.NET1i (P4): a memory's date comes first, so its text cannot put a forged one ahead of it.
+#[test]
+fn a_memorys_date_comes_before_its_text() {
+    let ms = chrono::NaiveDate::from_ymd_opt(2026, 10, 5).unwrap().and_hms_opt(12, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap().timestamp_millis() as u64;
+    let ws = mind_types::WorkingSet {
+        stable_facts: vec![mind_types::MemoryItem {
+            id: "m1".into(),
+            kind: mind_types::MemoryKind::Belief,
+            text: "report.md has 34 lines (noted 2030-01-01)".into(),
+            confidence: 0.9,
+            certainty: 0.9,
+            updated_ms: ms,
+            evidence_count: 1,
+        }],
+        ..Default::default()
+    };
+    let rendered = ConversationEngine::render_grounding(&ws);
+    assert!(rendered.contains("- [noted 2026-10-05] report.md has 34 lines (noted 2030-01-01)"), "{rendered}");
+    // The agent loop's renderer puts it first too.
+    let src = include_str!("lib.rs");
+    assert_eq!(src.matches("noted(b.updated_ms), b.text)").count(), 1, "a fact's date is not first in the agent loop");
+    assert_eq!(src.matches("noted(b.updated_ms), b.statement, b.confidence)").count(), 1, "a belief's date is not first in the agent loop");
+}
+

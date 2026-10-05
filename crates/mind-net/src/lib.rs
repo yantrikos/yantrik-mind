@@ -310,6 +310,10 @@ impl EgressTrust {
     fn leaves_to_proxy_with(&self, url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
         let (host, port) = host_port(url);
         let host = host.trim_end_matches('.');
+        // E.NET1i (P6): a URL that does not parse is never left to the proxy.
+        if host.is_empty() {
+            return false;
+        }
         let Some(lan) = &self.lan else {
             return false;
         };
@@ -547,6 +551,7 @@ mod tests {
             assert!(!leaves(odd), "{odd:?} went to the proxy under another name");
         }
         assert!(!EgressTrust::with_lan_rules(None).leaves_to_proxy_with("https://news.example.org/a", &e), "with no list, any name may be LAN");
+        assert!(!leaves("http://exa mple.org/"), "an unparseable url was left to the proxy");
     }
 
     /// E.NET1e (yantrik-os #662): a configured endpoint goes around the proxy only at a literal

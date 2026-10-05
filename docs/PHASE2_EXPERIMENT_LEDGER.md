@@ -14952,3 +14952,34 @@ The review is a commit comment on 9f7149c.
 - the date after the text;
 - P6 returning true.
 
+
+## E.NET1i — RESULT: P1–P6 fixed, and member DMs kept out of the primary's summary; 11 mutants killed
+
+- **P1:**
+  - `ssrf_check` (and so `ssrf_check_pub`) returns the canonical `Url::to_string()` it judged.
+  - `probe`, `captions`, `transcribe_segments_at` and `keyframes_at` rebind their URL to it before any child sees it.
+  - `checked_stream` (through `checked_stream_with`) returns it for ffmpeg: yt-dlp printing `http://news.example.org\@gpu.example.ts.net:11434/x.m3u8` makes ffmpeg get `http://news.example.org/@gpu.example.ts.net:11434/x.m3u8`, which it reads as news.example.org.
+  - Test `the_child_is_handed_the_form_that_was_judged`, plus a wiring count: 4 entries rebind, and no check's answer is thrown away.
+  - yt-dlp's own redirects and ffmpeg's segment hops still need the OS's public-only door; that is the next prereg, against its format.
+- **P2:** `fresh_window` returns at once for a shared scope, so a group `/new` writes no break. Test `a_group_new_chat_leaves_everyones_window_alone`.
+- **P3, and the leak:**
+  - `MemoryFacade::messages_since_visible(after_id, limit, viewer)` returns only the viewer's own and shared rows (SQL in mind-memory; the default for single-user stores is every row). Compaction reads through it for the primary.
+  - A member's private DM rows never reach the primary's summary, a member's break no longer skips the primary's rows, and the row limit counts only what the primary may see, so member traffic cannot stall it.
+  - Test `compaction_reads_only_what_the_primary_may_see`: 40 primary rows, member rows interleaved, a member `/new` at row 10. The summary prompt holds PRIMROW-0 and no KIDPRIVATE.
+  - **The leak was older than E.MEM1, and found reading P3:** compaction always read every scope.
+- **P4:** "[noted YYYY-MM-DD] " now comes BEFORE the memory text, in both renderers. Test `a_memorys_date_comes_before_its_text` uses a memory whose own text carries "(noted 2030-01-01)".
+- **P5:** recorded in E.NET1i's prereg. N2 is one-shot only; `exit` beside it would be redundant.
+- **P6:** `leaves_to_proxy` is false for an unparseable URL.
+- **Ledger:** the N4 prereg line no longer pairs the word with the person.
+- **Mutants killed (11):**
+  - `ssrf_check` returning the input;
+  - a media entry using the unchecked string;
+  - `checked_stream` returning the raw line (SURVIVED first: its test fed only a loopback line, refused either way; killed through the `checked_stream_with` seam with the `\@` line);
+  - a shared `/new` writing a break;
+  - compaction reading every scope;
+  - the plain renderer's date after the text (SURVIVED first: no renderer test; killed by the forged-date case), the agent loop's date after the text, and the date at the end;
+  - P6.
+- **Runs:**
+  - Full suite 2338 passed, 0 failed.
+  - Linux staging: mind-net 11, mind-tools 264, mind-memory 113, mind-conversation 1145.
+- **For 520:** P1 was this review's enforce blocker. The yt-dlp/ffmpeg hop exposure needs the OS public door first.

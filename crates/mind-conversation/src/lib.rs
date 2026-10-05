@@ -1988,9 +1988,10 @@ pub(crate) fn is_fresh_start(user_text: &str) -> bool {
 
 /// E.MEM1: when a memory was last noted, as a date -- a memory is history, and an undated one reads as
 /// the present (R1e2 took an earlier run's "report.md, 34 lines" for its own). Nothing when unknown.
+/// E.NET1i (P4): it goes FIRST, so a memory's own text cannot put a forged date ahead of it.
 pub(crate) fn noted(updated_ms: mind_types::UnixMillis) -> String {
     match i64::try_from(updated_ms).ok().filter(|ms| *ms > 0).and_then(chrono::DateTime::from_timestamp_millis) {
-        Some(at) => format!(" (noted {})", at.with_timezone(&chrono::Local).format("%Y-%m-%d")),
+        Some(at) => format!("[noted {}] ", at.with_timezone(&chrono::Local).format("%Y-%m-%d")),
         None => String::new(),
     }
 }
@@ -11375,6 +11376,11 @@ WINDOW: all-time, latest 200
     /// never put in a prompt -- and compaction starts after the break. Typed memory and consolidation
     /// are untouched: the mind still knows what it learned.
     pub(crate) async fn fresh_window(&self, scope: mind_types::Scope) {
+        // E.NET1i (the review's P2): a shared (group) break would cut EVERY viewer's window -- a
+        // member's /new@bot would erase the person's own context. A group has no window to restart.
+        if matches!(scope, mind_types::Scope::Shared) {
+            return;
+        }
         let primary = matches!(&scope, mind_types::Scope::Private(v) if v == mind_types::PRIMARY);
         let _ = self.memory.append_message_scoped("break", "— context break —", scope).await;
         if primary {
@@ -11392,7 +11398,7 @@ WINDOW: all-time, latest 200
         if !ws.stable_facts.is_empty() {
             s.push_str("What you know about the user (stable):\n");
             for f in &ws.stable_facts {
-                s.push_str(&format!("- {}{}\n", f.text, noted(f.updated_ms)));
+                s.push_str(&format!("- {}{}\n", noted(f.updated_ms), f.text));
             }
         }
         if !ws.uncertain_beliefs.is_empty() {
@@ -11419,8 +11425,8 @@ WINDOW: all-time, latest 200
                     | None => "low confidence — say \"I think\"",
                 };
                 s.push_str(&format!(
-                    "- {} (confidence {:.2}; {hedge}){}\n",
-                    b.statement, b.confidence, noted(b.updated_ms)
+                    "- {}{} (confidence {:.2}; {hedge})\n",
+                    noted(b.updated_ms), b.statement, b.confidence
                 ));
             }
         }
@@ -13062,7 +13068,7 @@ WINDOW: all-time, latest 200
             "What I know that may be relevant:",
         );
         for b in ws.stable_facts.iter().take(5) {
-            grounding.push(mind_types::Channel::Grounding, &format!("\n- {}{}", b.text, noted(b.updated_ms)));
+            grounding.push(mind_types::Channel::Grounding, &format!("\n- {}{}", noted(b.updated_ms), b.text));
         }
         for b in ws.uncertain_beliefs.iter().take(3) {
             let rtag = match b.uncertainty_reason {
@@ -13080,7 +13086,7 @@ WINDOW: all-time, latest 200
             };
             grounding.push(
                 mind_types::Channel::Grounding,
-                &format!("\n- {} (uncertain:{rtag} {:.2}){}", b.statement, b.confidence, noted(b.updated_ms)),
+                &format!("\n- {}{} (uncertain:{rtag} {:.2})", noted(b.updated_ms), b.statement, b.confidence),
             );
         }
         // ALWAYS ground the people in the user's life from the canonical people layer — it's clean +

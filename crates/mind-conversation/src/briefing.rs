@@ -308,9 +308,11 @@ impl super::ConversationEngine {
             .flatten()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        // E.NET1i (P3): the primary's summary is made from the primary's own rows and shared ones --
+        // a member's private DM is never read into it, and a member's break is not the primary's.
         let Ok(msgs) = self
             .memory
-            .messages_since(cursor, threshold + keep_tail)
+            .messages_since_visible(cursor, threshold + keep_tail, &mind_types::Scope::primary())
             .await
         else {
             return false;

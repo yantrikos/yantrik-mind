@@ -175,6 +175,12 @@ enum Cmd {
         viewer: Option<String>,
         reply: Reply<Vec<(String, String)>>,
     },
+    MessagesSinceVisible {
+        after_id: i64,
+        limit: usize,
+        viewer: String,
+        reply: Reply<Vec<(i64, String, String)>>,
+    },
     MessagesSince {
         after_id: i64,
         limit: usize,
@@ -4582,6 +4588,25 @@ fn user_turn_times(db: &YantrikDB, since_ms: i64) -> std::result::Result<Vec<i64
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// E.NET1i: `messages_since`, only the rows `viewer` (a scope tag) may see -- its own and shared.
+fn messages_since_visible(
+    db: &YantrikDB,
+    after_id: i64,
+    limit: usize,
+    viewer: &str,
+) -> std::result::Result<Vec<(i64, String, String)>, String> {
+    let conn = db.conn();
+    let mut stmt = conn
+        .prepare("SELECT id, role, text FROM mind_transcript WHERE id > ?1 AND (scope='shared' OR scope=?2) ORDER BY id ASC LIMIT ?3")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![after_id, viewer, limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 fn messages_since(
     db: &YantrikDB,
     after_id: i64,
@@ -5470,6 +5495,9 @@ impl MemoryHandle {
                         }
                         Cmd::MessagesSince { after_id, limit, reply } => {
                             let _ = reply.send(messages_since(&db, after_id, limit));
+                        }
+                        Cmd::MessagesSinceVisible { after_id, limit, viewer, reply } => {
+                            let _ = reply.send(messages_since_visible(&db, after_id, limit, &viewer));
                         }
                         Cmd::MemoryCurationBaseline {
                             cursor_id,
@@ -6754,6 +6782,15 @@ impl MemoryFacade for MemoryHandle {
             reply,
         })
         .await
+    }
+    async fn messages_since_visible(
+        &self,
+        after_id: i64,
+        limit: usize,
+        viewer: &mind_types::Scope,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let viewer = viewer.as_tag();
+        self.call(|reply| Cmd::MessagesSinceVisible { after_id, limit, viewer, reply }).await
     }
 
     async fn memory_curation_baseline(

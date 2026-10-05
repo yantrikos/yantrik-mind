@@ -173,13 +173,15 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
 
 /// The SSRF guard, reachable from sibling modules (the media pipeline hands untrusted URLs to
 /// external downloaders and must clear them through the same wall as `fetch`).
-pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<()> {
+/// E.NET1i (the review's P1): returns the URL in the canonical form it was judged in -- the only form
+/// a child (yt-dlp, ffmpeg) may be handed, since they do not read it the WHATWG way.
+pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<String> {
     ssrf_check(url)
 }
 
 /// Refuse to fetch internal/private targets (resolves the host first, so a public name that
 /// points at a private IP is also blocked).
-fn ssrf_check(url: &str) -> anyhow::Result<()> {
+fn ssrf_check(url: &str) -> anyhow::Result<String> {
     // E.NET1b: a host that does not resolve here is refused too -- a split-DNS name only a proxy
     // knows (homeassistant.lan) or a rebinding name must not slip past the check. E.NET1e: unless the
     // request takes a proxy the OS vouches for, which refuses private ranges itself.
@@ -190,17 +192,21 @@ fn ssrf_check(url: &str) -> anyhow::Result<()> {
 type IsDirect<'a> = &'a dyn Fn(&str, Option<&mind_net::EgressTrust>) -> bool;
 type Trust<'a> = &'a dyn Fn() -> Option<mind_net::EgressTrust>;
 
-/// `ssrf_check` with its resolver and route given (for tests).
-fn ssrf_check_routed(
+/// `ssrf_check` with its resolver and route given (for tests). Returns the canonical URL it judged.
+pub(crate) fn ssrf_check_routed(
     url: &str,
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
     is_direct: IsDirect,
     trust: Trust,
-) -> anyhow::Result<()> {
-    // E.NET1h (N1): every reading below (host, port, route) is `url::Url`'s, as ureq's is.
+) -> anyhow::Result<String> {
+    // E.NET1h (N1): every reading below (host, port, route) is `url::Url`'s, as ureq's is. E.NET1i
+    // (P1): and the canonical form is what is returned, for whoever fetches it next.
+    let canonical = url::Url::parse(url.trim()).map_err(|_| anyhow::anyhow!("not a url that can be fetched"))?.to_string();
+    let url = canonical.as_str();
     let trust = trust();
     let direct = is_direct(url, trust.as_ref());
-    ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), leaves_unresolved(url, direct, trust.as_ref())).map(|_| ())
+    ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), leaves_unresolved(url, direct, trust.as_ref()))?;
+    Ok(canonical)
 }
 
 /// E.NET1e / E.NET1g: may a name that does not resolve here go on? Only on the proxied path, through

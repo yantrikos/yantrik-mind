@@ -192,7 +192,9 @@ impl Drop for Scratch {
 
 /// Ask yt-dlp what this URL is, without downloading a byte of media.
 pub fn probe(url: &str) -> anyhow::Result<MediaProbe> {
-    crate::ssrf_check_pub(url)?;
+    // E.NET1i (P1): the child is handed only the form that was judged.
+    let url = crate::ssrf_check_pub(url)?;
+    let url = url.as_str();
     let bin = ytdlp_bin();
     if !have(&bin) {
         anyhow::bail!(
@@ -376,7 +378,9 @@ pub fn captions_window(text: &str, from_secs: u64, secs: u64) -> String {
 
 /// Fetch the publisher's own transcript. Prefers manual captions, falls back to auto.
 pub fn captions(url: &str) -> anyhow::Result<String> {
-    crate::ssrf_check_pub(url)?;
+    // E.NET1i (P1): the child is handed only the form that was judged.
+    let url = crate::ssrf_check_pub(url)?;
+    let url = url.as_str();
     let bin = ytdlp_bin();
     if !have(&bin) {
         anyhow::bail!("yt-dlp is not installed on this host");
@@ -457,13 +461,18 @@ fn stream_url(url: &str, want_audio: bool) -> anyhow::Result<String> {
 /// The stream address in yt-dlp's `-g` output. E.NET1g (review M2): yt-dlp chose it, not the person,
 /// so it is checked like any other address before ffmpeg is handed it.
 fn checked_stream(stdout: &str) -> anyhow::Result<String> {
+    checked_stream_with(stdout, &crate::ssrf_check_pub)
+}
+
+/// `checked_stream` with its check given (for tests).
+fn checked_stream_with(stdout: &str, check: &dyn Fn(&str) -> anyhow::Result<String>) -> anyhow::Result<String> {
     let stream = stdout
         .lines()
         .find(|l| l.starts_with("http"))
         .map(|l| l.trim().to_string())
         .ok_or_else(|| anyhow::anyhow!("no stream url returned"))?;
-    crate::ssrf_check_pub(&stream)?;
-    Ok(stream)
+    // E.NET1i (P1): the canonical form, which ffmpeg reads as it was judged.
+    check(&stream)
 }
 
 /// One thing that was said, and when — the unit that lets speech line up with pictures.
@@ -553,7 +562,9 @@ pub fn transcribe_segments_at(
     secs: u64,
     from_secs: u64,
 ) -> anyhow::Result<Vec<Utterance>> {
-    crate::ssrf_check_pub(url)?;
+    // E.NET1i (P1): the child is handed only the form that was judged.
+    let url = crate::ssrf_check_pub(url)?;
+    let url = url.as_str();
     if !have(&ytdlp_bin()) {
         anyhow::bail!("yt-dlp is not installed on this host");
     }
@@ -646,7 +657,9 @@ pub fn keyframes_at(
     within_secs: u64,
     from_secs: u64,
 ) -> anyhow::Result<Vec<(u64, Vec<u8>)>> {
-    crate::ssrf_check_pub(url)?;
+    // E.NET1i (P1): the child is handed only the form that was judged.
+    let url = crate::ssrf_check_pub(url)?;
+    let url = url.as_str();
     if !have(&ffmpeg_bin()) {
         anyhow::bail!("ffmpeg is not installed on this host");
     }
@@ -735,6 +748,29 @@ mod tests {
         assert_eq!(args_of(&none)[1..], ["yt-dlp", "-g", "u"], "no proxy configured, yet one was passed");
     }
 
+    /// E.NET1i (P1): what ffmpeg is handed is the form that was judged -- the `\\@` form a WHATWG
+    /// reading takes as news.example.org must not reach ffmpeg raw, where it means the LAN name.
+    #[test]
+    fn the_child_is_handed_the_form_that_was_judged() {
+        let public = |h: &str, p: u16| -> std::io::Result<Vec<std::net::SocketAddr>> {
+            match h {
+                "news.example.org" => Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], p))]),
+                _ => Err(std::io::Error::other("no DNS")),
+            }
+        };
+        let raw = "http://news.example.org\\@gpu.example.ts.net:11434/x.m3u8";
+        let check = |u: &str| crate::ssrf_check_routed(u, &public, &|_: &str, _: Option<&mind_net::EgressTrust>| false, &|| None);
+        let judged = check(raw).unwrap();
+        assert_eq!(judged, "http://news.example.org/@gpu.example.ts.net:11434/x.m3u8");
+        // yt-dlp's -g printed the raw form: ffmpeg gets the canonical one.
+        let handed = super::checked_stream_with(&format!("WARNING: something\n{raw}\n"), &check).unwrap();
+        assert_eq!(handed, judged, "ffmpeg would have been handed the raw line");
+        // Every media entry rebinds its URL to what the check returned.
+        let src = include_str!("media.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(src.matches("let url = crate::ssrf_check_pub(url)?;").count(), 4, "a media entry hands on the unchecked string");
+        assert_eq!(src.matches("crate::ssrf_check_pub(url)?;").count(), 4, "a check's answer is thrown away");
+    }
+
     /// E.NET1g (M2): a stream address yt-dlp hands back is checked before ffmpeg gets it.
     #[test]
     fn a_stream_address_from_yt_dlp_is_checked() {
@@ -742,6 +778,9 @@ mod tests {
             assert!(super::checked_stream(inside).is_err(), "ffmpeg would have been handed {inside:?}");
         }
         assert!(super::checked_stream("no address here\n").is_err());
+        // E.NET1i (P1): the line yt-dlp printed is not what ffmpeg gets -- the canonical form is.
+        let canon = super::checked_stream("http://127.0.0.1:8341/slots\n");
+        assert!(canon.is_err());
     }
 
     use super::*;

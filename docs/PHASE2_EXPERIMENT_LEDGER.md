@@ -13494,3 +13494,9 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
   2. **The model repeats an identical `search` in a turn** (seen in every probe), which is what trips the throttle. A repeated identical search should be answered from the work log.
   3. **In turn 0 the model said "no web access" from memory of the earlier failure, without trying.** Stale tool-health beliefs; not yet designed.
 - **Infrastructure question for Pranab:** keyless DuckDuckGo scraping is the Mind's only search on 520, and it throttles. A self-hosted SearXNG (the Mind already supports `YM_SEARXNG`) or a search API would make R-tasks repeatable.
+
+**E.RES1, the R1 blocker confirmed (VM 520, d9e7a8a, SearXNG on, 5 Oct 02:26):** the ARCH-3 clean planner re-authors every search from the person's literal message.
+- **What happened:** the model asked "Abstract Meaning Representation survey" three times, and what was sent was `{"query":"~/research/R1/BRIEF.md"}` and `{"query":"closest prior work to the specification described in ~/research/R1/BRIEF.md"}`.
+- **What came back:** Wikipedia "Research" and Vocabulary.com "closest". So R1b's empty searches were the planner, not (or not only) DuckDuckGo throttling.
+- **Side finding:** the planner put a LOCAL FILE PATH into an outbound query.
+- **The decision is Pranab's** (ARCH-3 is a privacy boundary). The options and worst-case leaks are put to him. R1c waits for it.

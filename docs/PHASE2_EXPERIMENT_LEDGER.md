@@ -13809,3 +13809,32 @@ Verdict on 0f79206: SAFE WITH CHANGES. Every earlier item is fixed, and the equi
   - S3 any app's open/read a look;
   - quoted ~~~, indent, On … wrote:, From:.
   - The first "named tab ignored" mutant was malformed: it filtered the returned list after the marking had already happened. The corrected one (an empty text) is killed.
+
+## E.ERASE4 — PREREG: the Mind's side of `redact` (yantrik-os #649, merged 4f50b24a)
+
+The contract is docs/harness.md "Forgetting: `redact`" on yantrik-os main. On Erase, the Mind erases its memory and asks the shell to erase this conversation's copies. Only digests travel; the question the person pressed Erase on must quote the words.
+
+- **The question:** `Forget "<text>"? It is in N place(s) in my memory, and Erase also removes it from this conversation; this can't be undone. (Asked at HH:MM.)`
+  - The text is the forget tool's `what`, already trimmed.
+  - Straight quotes, unless the text holds a `"`; then “…”.
+  - A text holding `"` and a curly double quote, under 4 scalars after canon, over 4096, or so long the quote would end past the card's visible 1999 characters, gets the old unquoted question and memory-only erase. The reply says the conversation keeps its copy.
+  - This reverses E.ERASE1/2's "never repeat it back". It is safe only because an accepted redact erases the question's own prompt too (4c, #649).
+- **The needle:** sha256 hex of canon(text) = lowercase(nfc(text)), and `len` = canon's scalar count after lowercasing. Exactly one needle, the quoted text.
+- **The Mind's own check:** before asking, it parses its own question with a mirror of the shell's span parser. It sends the needle only if the spans are exactly [canon(text)]; otherwise memory-only.
+- **The event:** a `redact` event on the same turn, sent only after a pressed Erase (the harness's existing answer path), never after Keep or no answer.
+- **The reply to the person:**
+  - accepted: memory erased, plus "and from this conversation (N places); earlier conversations keep their words";
+  - refused or unsent: memory erased, plus "this conversation still holds it: <reason>".
+  - It never claims more than the reply says.
+- **Fixtures:** redact_needles.json and redact_spans.json, copied verbatim from yantrik-os 4f50b24a. The Rust needle and span parser must match every case.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- lowercase before NFC; `len` counted before lowercasing;
+- the straight quote kept for a text holding `"`;
+- the both-quotes text still redacted; a too-short needle sent; an over-long quote sent;
+- the self-check skipped;
+- redact sent after Keep;
+- the accepted wording used on a refusal;
+- each of the span parser's rules (opener context, closer context, whitespace edge, curly direction, unclosed opener continuing).
+
+**Not covered until 4c's 520 captures:** the real event reply shape (accepted and refused). Until then the reply is parsed as `{"redacted": N, ...}` / `{"refused": "..."}`, per the doc.

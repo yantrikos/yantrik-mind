@@ -13368,3 +13368,8 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - `pending_questions` was 0 before and after: the two stale erase cards closed on the shell restart (#636).
 - Calendar notice empty, own-events file absent after, 0 arena events left, approvals back on, no pending card.
 - **Nit, passed to 4c:** the gate's turns added "Yantrik Mind finished · made N calls" notifications (942 → 950) to the person's list.
+
+**Mind gate on OS b39e578b (#637, #639–#644) + Mind 3416dda (VM 520, 5 Oct ~00:20 CDT): 7/7, 0 false claims, median 5.6 s. This is a gate.**
+- **#641 confirmed:** no notification was added during the run (the newest is id 950 before and after).
+- Calendar notice empty, own-events file absent, 0 arena events left, approvals back on, no pending card or question.
+- **#639 and #637 (request_approval refuses what it cannot show in full; grants are spent by app.act):** the Mind's code calls neither request_approval nor consume_approval, so there is no Mind change.

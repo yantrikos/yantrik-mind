@@ -13373,3 +13373,11 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **#641 confirmed:** no notification was added during the run (the newest is id 950 before and after).
 - Calendar notice empty, own-events file absent, 0 arena events left, approvals back on, no pending card or question.
 - **#639 and #637 (request_approval refuses what it cannot show in full; grants are spent by app.act):** the Mind's code calls neither request_approval nor consume_approval, so there is no Mind change.
+
+**E.ERASE2: the Erase click works end to end (VM 520, Mind 3416dda, OS b39e578b, 5 Oct 00:54 CDT).**
+- "Forget THROWAWAY-ERASE2" raised erase-1791179676248, "(Asked at 00:54.)", the only card.
+- Pranab clicked Erase, logged as `answered: Erase` at 00:54:58.
+- The reply was "Erased (2 belief(s) and 0 note(s) removed, 16 place(s) rewritten). … no copy is left in my memory, its search index, its history or its logs." The turn took 1 step and 27 s, and `pending_questions` was 0 after.
+- **Found by the check afterwards (open, not fixed):**
+  1. **Derived copies escape a literal erase.** The background reflection had written three "(hypothesis)" beliefs about the tokens ("9142 supersedes 7731"). They hold fragments of the erased text but not the literal string, so `erase_literal` left them. For a real secret this is a leak: forget should also reach beliefs derived from what it erases (or the reflection should not copy what may be secret). This needs a prereg.
+  2. **The desktop keeps its own copies.** `~/.local/share/yantrik/agents/mind:main.jsonl` (the agent pane's transcript) and `runs.db-wal` still hold the text. The Mind correctly names "the system's own log" as out of its reach. An OS-side forget, or a redaction hook, is 4c's.

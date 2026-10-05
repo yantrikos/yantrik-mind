@@ -13381,3 +13381,18 @@ The shape each time: the model repeats one call, the repeat counter reaches its 
 - **Found by the check afterwards (open, not fixed):**
   1. **Derived copies escape a literal erase.** The background reflection had written three "(hypothesis)" beliefs about the tokens ("9142 supersedes 7731"). They hold fragments of the erased text but not the literal string, so `erase_literal` left them. For a real secret this is a leak: forget should also reach beliefs derived from what it erases (or the reflection should not copy what may be secret). This needs a prereg.
   2. **The desktop keeps its own copies.** `~/.local/share/yantrik/agents/mind:main.jsonl` (the agent pane's transcript) and `runs.db-wal` still hold the text. The Mind correctly names "the system's own log" as out of its reach. An OS-side forget, or a redaction hook, is 4c's.
+
+## E.ERASE3 — DESIGN NOTE (not yet preregistered): forget reaches beliefs derived from what it erases
+
+**Seen** (E.ERASE2's check, VM 520): DMN "associate" (`proactive.rs`) wrote three "(hypothesis)" beliefs from its top-10 recall, which included the throwaway tokens. They hold "9142 supersedes 7731", fragments of the erased text, and `erase_literal` cannot see them.
+
+**Why it is not a patch:**
+- A hypothesis records only `source_event: "dmn_associate"`, not WHICH beliefs it was built from.
+- The memory facade has no "beliefs derived from X" query.
+- Fragment matching ("9142") would erase unrelated memories, so it is ruled out.
+
+**Options:**
+1. **Lineage.** Each derived belief records its source belief ids (DMN associate first; `consolidate` and `Pattern:` beliefs later). The memory layer offers `beliefs_derived_from(ids)`. `erase_everywhere` collects the ids of the beliefs it erases, then tombstones what was derived from them, and says how many. This needs a mind-memory change, and possibly a yantrikdb-core one if relation queries must live in the engine.
+2. **Quarantine.** The reflection does not read beliefs that are marked, or look, sensitive. It narrows the leak but does not close it.
+
+Option 1 is the right one. The three hypotheses already on 520 predate any lineage and would need a one-time erase (Pranab's call).

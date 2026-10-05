@@ -22,6 +22,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = "0.10"
 ureq = { version = "2", features = ["json"] }
+# E.NET1h (N1): URLs are read exactly as ureq reads them (WHATWG), never split by hand.
+url = "2"
 html2text = "0.12"
 imap = "2"
 native-tls = "0.2"

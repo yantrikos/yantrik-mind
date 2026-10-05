@@ -6,6 +6,8 @@ description = "The one way the Mind reaches the network: through the machine's e
 
 [dependencies]
 ureq = { version = "2", features = ["json"] }
+# E.NET1h (N1): URLs are read exactly as ureq reads them (WHATWG), never split by hand.
+url = "2"
 # E.NET1e: the shared private ranges and the OS's egress signal are JSON.
 serde_json = { workspace = true }
 

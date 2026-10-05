@@ -2359,6 +2359,7 @@ dependencies = [
  "libc",
  "serde_json",
  "ureq 2.12.1",
+ "url",
 ]
 
 [[package]]
@@ -2427,6 +2428,7 @@ dependencies = [
  "tokio",
  "tungstenite",
  "ureq 2.12.1",
+ "url",
  "urlencoding",
 ]
 

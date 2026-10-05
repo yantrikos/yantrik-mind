@@ -374,7 +374,12 @@ function lockBrowserTypes(proto) {
     const real = proto[name];
     if (typeof real !== "function" || real.netGuardLocked) continue;
     const locked = function (...args) {
-      if (LAUNCHING.getStore() !== name) throw new Error(`blocked: ${name} is only for net_guard's launchers`);
+      // E.NET1h (the review's N2): the permission is ONE call, spent at entry. AsyncLocalStorage carries
+      // the store into everything made during the launch (the transport, its events, a timer), so a
+      // page.on('load') callback used to find it still set and launch an unguarded browser.
+      const permit = LAUNCHING.getStore();
+      if (!permit || permit.method !== name || permit.used) throw new Error(`blocked: ${name} is only for net_guard's launchers`);
+      permit.used = true;
       return real.apply(this, args);
     };
     locked.netGuardLocked = true;
@@ -396,7 +401,7 @@ for (const mod of ["playwright-core", "playwright"]) {
 
 // Call `method` on `browserType` as a launcher may -- the one place the lock lets it through.
 function launchAs(method, browserType, ...args) {
-  return LAUNCHING.run(method, () => browserType[method](...args));
+  return LAUNCHING.run({ method, used: false }, () => browserType[method](...args));
 }
 
 // E.NET1f: a persistent profile restores nothing -- its saved session is removed before the launch, so

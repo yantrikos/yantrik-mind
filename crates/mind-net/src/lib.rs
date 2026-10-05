@@ -20,17 +20,23 @@ fn proxy_url(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
         .find_map(|k| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
 }
 
-/// The host part of a URL, lower-cased, without port or brackets.
-fn host_of(url: &str) -> String {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
+/// E.NET1h (the review's N1): a URL's host and port exactly as ureq will read them -- `url::Url`
+/// (WHATWG), never a hand split. `%2e`, a backslash before `@`, full-width letters and a tab before
+/// the port were judged as one host and fetched as another. The host is lower-cased, without brackets
+/// or a trailing dot. None when it does not parse.
+pub fn url_host_port(url: &str) -> Option<(String, u16)> {
+    let u = url::Url::parse(url.trim()).ok()?;
+    let host = match u.host()? {
+        url::Host::Domain(d) => d.trim_end_matches('.').to_ascii_lowercase(),
+        url::Host::Ipv4(a) => a.to_string(),
+        url::Host::Ipv6(a) => a.to_string(),
     };
-    host.to_ascii_lowercase()
+    Some((host, u.port_or_known_default().unwrap_or(80)))
+}
+
+/// The host part of a URL ("" when it does not parse).
+fn host_of(url: &str) -> String {
+    url_host_port(url).map(|(h, _)| h).unwrap_or_default()
 }
 
 fn is_loopback(host: &str) -> bool {
@@ -123,17 +129,12 @@ const DIRECT_ENDPOINT_VARS: [&str; 9] = [
     "YM_IMMICH_URL",
 ];
 
-/// E.NET1c: a URL's host and port (the scheme's when unwritten).
+/// E.NET1c: a URL's host and port (the scheme's when unwritten). E.NET1h: through `url::Url`; a
+/// configured value written without a scheme is read as http.
 fn host_port(url: &str) -> (String, u16) {
-    let (scheme, rest) = url.split_once("://").unwrap_or(("http", url));
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    let port = match authority.strip_prefix('[') {
-        Some(v6) => v6.split_once("]:").map(|(_, p)| p),
-        None => authority.split_once(':').map(|(_, p)| p),
-    };
-    let default = if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 };
-    (host_of(url), port.and_then(|p| p.parse().ok()).unwrap_or(default))
+    url_host_port(url)
+        .or_else(|| (!url.contains("://")).then(|| url_host_port(&format!("http://{}", url.trim()))).flatten())
+        .unwrap_or_default()
 }
 
 /// E.NET1c: is `url` on one of the person-configured endpoints (same host and port)?
@@ -322,7 +323,7 @@ impl EgressTrust {
             .iter()
             .filter_map(|k| get(k))
             .filter(|v| !v.trim().is_empty())
-            .any(|v| host_of(v.trim()).trim_end_matches('.') == host)
+            .any(|v| host_port(v.trim()).0 == host)
     }
 }
 
@@ -535,6 +536,16 @@ mod tests {
         assert!(leaves("http://evilhome.arpa/"), "a name that only ends the same was refused");
         assert!(!leaves("https://models.example.net/anything"), "a configured endpoint's host went to the proxy");
         assert!(leaves("https://news.example.org/a"), "an ordinary name was refused");
+        // E.NET1h (N1): the forms a hand split read as another host.
+        for odd in [
+            "http://gpu%2eexample.ts.net:11434/api/tags",
+            "http://gpu.example.ts.net:11434\\@news.example.org/",
+            "http://\u{ff47}\u{ff50}\u{ff55}.example.ts.net:11434/",
+            "http://gpu.example.ts.net\t:11434/",
+            "https://models%2eexample.net/v1",
+        ] {
+            assert!(!leaves(odd), "{odd:?} went to the proxy under another name");
+        }
         assert!(!EgressTrust::with_lan_rules(None).leaves_to_proxy_with("https://news.example.org/a", &e), "with no list, any name may be LAN");
     }
 
@@ -841,7 +852,16 @@ mod tests {
     fn hosts_are_read_the_way_urls_write_them() {
         assert_eq!(host_of("https://user:pw@API.Example.com:8443/path?q"), "api.example.com");
         assert_eq!(host_of("http://[::1]:7440/mcp"), "::1");
-        assert_eq!(host_of("example.com/x"), "example.com");
+        // E.NET1h (N1): read as ureq reads it -- a string with no scheme is no URL ureq would fetch.
+        assert_eq!(host_of("example.com/x"), "");
+        for odd in [
+            "http://gpu%2eexample.ts.net:11434/",
+            "http://gpu.example.ts.net:11434\\@news.example.org/",
+            "http://\u{ff47}\u{ff50}\u{ff55}.example.ts.net:11434/",
+            "http://gpu.example.ts.net\t:11434/",
+        ] {
+            assert_eq!(url_host_port(odd), Some(("gpu.example.ts.net".to_string(), 11434)), "{odd:?} was read as another host");
+        }
         assert!(no_proxy_matches("a.b.internal", "*.internal") && no_proxy_matches("x.com", "*"));
         assert!(!no_proxy_matches("notexample.com", "example.com"), "a suffix is a label boundary");
     }

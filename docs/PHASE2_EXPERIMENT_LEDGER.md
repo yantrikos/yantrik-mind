@@ -14749,7 +14749,7 @@ The review is a commit comment on f1364f0.
 - **Found by grading:**
   1. **R1h2 claims its table was "recomputed … with p1.html updated to match". It was not.** Run in node, the shipped script prints NL=161, C=264, G=99, GA=176 (pooled G 1.63, cheaper under G on 16/16). The report says 159, 267, 125, 152 (G 1.27, 12/16). The figures are the model's hand arithmetic. The conservative verdict survives; the generous readings are understated. R1h1's table was also hand-counted, and R1h2 itself found it does not reproduce.
   2. **R1h2 is not an independent sample.** My runner parks the previous report in the work folder (`report.prev-*`); Hermes found and revised R1h1's draft. The same flaw put R1e1's report beside R1e2. **Fix for the next pair:** move the previous run's files out of the work folder, not just rename them.
-  3. **Memory in research output:** "bentonville" (the person's city) appears in a test sentence and in the threats section. These are local files only.
+  3. **Memory in research output:** "bentonville" (a memory word) appears in a test sentence and in the threats section. These are local files only.
 - **Mind vs Hermes, the same model, same day:** Mind 4/12 and 0/12; Hermes 8/12 and 8/12 (the second dependent).
   - The difference in prior art is the Mind's egress planner: 4c's journal shows it rewrote every good query into words from the brief.
   - Hermes, outside that planner, reached the literature through the OS browser.
@@ -14883,3 +14883,36 @@ The review is a commit comment on 0a3f519.
 - a long form from another source;
 - the path check skipped on the rewrite;
 - a long form with a path character.
+
+## E.NET1h — RESULT: N1–N4 fixed; 9 mutants killed, 2 equivalent
+
+- **N1 (the parser differential):**
+  - mind-net's `url_host_port` reads host and port through `url::Url` (WHATWG), as ureq does: lower-cased, no brackets, no trailing dot. `host_of`, `host_port` (configured values without a scheme are read as http), the configured-endpoint match and `leaves_to_proxy` all take it.
+  - In mind-tools, `host_of` and `port_of` take it too, and `redirect_target` is `Url::join`. Each hop is parsed once; an unparseable one is refused ("not a url that can be fetched"); the canonical string is what is checked and what is requested.
+  - The review's four forms (`%2e`, `\@`, full-width letters, a tab before the port) all read as `gpu.example.ts.net:11434`. They are refused against its LAN rule on the first hop, through `ssrf_check`, and as a redirect target (the full-width one as "a redirect with no Location", since ureq drops a non-ASCII header). The backslash form is refused with no trust at all, and `news.example.org` is never the host judged.
+  - **Changed contract:** `host_of("example.com/x")` is now "", since ureq cannot fetch a string without a scheme, and a redirect's target is canonical ("HTTP://c.example/" becomes "http://c.example/").
+- **N2:** the browser-lock permission is a one-shot object `{method, used}`, spent at the locked method's entry. Tests:
+  - a timer set inside the real launch fires `launch()` again: blocked;
+  - a wrapper (playwright-extra's place) sets a timer before its own core launch: blocked once the permission is spent.
+  `LAUNCHING.exit()` was NOT added. With a one-shot permit it is redundant: a callback made during the launch finds the permit spent. Its mutant could not differ.
+- **N3:**
+  - On the span path, acronyms are written out only from the one source the span came from.
+  - The rewrite is checked with `has_path` and falls back to the span as written.
+  - A long form whose words hold anything but letters, digits and hyphens is no definition (`/home/pranab/Credit Notes (HCN)` gives nothing).
+  - Test `a_written_out_span_stays_one_source_and_no_path`.
+- **N4:** "the person's city" becomes "a memory word" in both Hermes gradings and the ledger. The pushed history keeps the old wording; rewriting it needs Pranab's word.
+- **Mutants killed (9):**
+  - the hand split restored in mind-net `host_of`, mind-net `host_port`, and mind-tools `host_of`;
+  - an unparseable URL allowed (SURVIVED first: no test tried one; killed by "http://exa mple.org/");
+  - the permission not one-shot, and the permission not spent;
+  - a long form from another source;
+  - the path check skipped on the rewrite;
+  - a long form with a path character.
+- **Equivalent (2), and the redundant code removed:**
+  - the hop's canonical re-serialisation, and `ssrf_check`'s re-parse: every check already reads through `url::Url`, as ureq does, so neither changes a reading.
+  - The hop keeps its re-serialisation (the review asked for it); `ssrf_check`'s redundant re-parse was removed.
+- **Runs:**
+  - Full suite 2334 passed, 0 failed.
+  - Linux staging: mind-net 11, mind-tools 263, mind-conversation 1142.
+  - net_guard.test.js on Linux as root (trusted: true) and as nobody (trusted: false).
+- **For 520:** N1 was the enforce blocker; it is fixed here, and enforce still waits for this batch's review.

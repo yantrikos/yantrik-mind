@@ -324,6 +324,45 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   assert.ok(viaLauncher.ctx.routes.includes("**/*"), "the launcher's own launch was blocked");
   await launchPersistentGuarded(typed, "/tmp/profile", {}, { fs: recordingFs, egressTrust: () => null });
   await assert.rejects(launchGuarded(typed, { sneak: true }, {}, { egressTrust: () => null }), /blocked: connectOverCDP/, "a launcher's permission reached another method");
+  // E.NET1h (N2): nothing made during a launch carries its permission -- an event fired later, from a
+  // resource the launch created, cannot launch again ...
+  let leaked = null;
+  class LeakType {
+    async launch() {
+      setTimeout(() => {
+        try {
+          this.launch();
+          leaked = "ran";
+        } catch (e) {
+          leaked = e.message;
+        }
+      }, 5);
+      return fakeChromium.launch();
+    }
+  }
+  lockBrowserTypes(LeakType.prototype);
+  await launchGuarded(new LeakType(), {}, {}, { egressTrust: () => null });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.match(String(leaked), /blocked/, "a callback made during the launch launched again");
+  // ... nor can a wrapper's own callback (playwright-extra's place) reuse a spent permission.
+  const core = new FakeType();
+  let wrapperLeak = null;
+  const wrapper = {
+    launch(o) {
+      setTimeout(() => {
+        try {
+          core.launch();
+          wrapperLeak = "ran";
+        } catch (e) {
+          wrapperLeak = e.message;
+        }
+      }, 5);
+      return core.launch(o);
+    },
+  };
+  await launchGuarded(wrapper, {}, {}, { egressTrust: () => null });
+  await new Promise((r) => setTimeout(r, 40));
+  assert.match(String(wrapperLeak), /blocked/, "a spent permission was used again");
 
   const noWs = { launch: async () => ({ newContext: async () => ({ route: async () => {} }), close: async function () { this.closed = true; } }) };
   await assert.rejects(launchGuarded(noWs), /WebSocket/, "a context that cannot be guarded was handed out");

@@ -397,6 +397,8 @@ pub(crate) fn defined_acronyms(sources: &[&str]) -> Vec<(String, String)> {
                     long_form(acr, &words).filter(|long| long.split_whitespace().count() == words.len()).map(|long| (acr.clone(), long))
                 })
             };
+            // E.NET1h (N3): a long form is words -- letters, digits and hyphens -- never a path's pieces.
+            let definition = definition.filter(|(_, long)| long.split_whitespace().all(|w| w.chars().all(|c| c.is_alphanumeric() || c == '-')));
             if let Some((acr, long)) = definition {
                 if !found.iter().any(|(a, _)| *a == acr) {
                     found.push((acr, long));
@@ -1306,8 +1308,14 @@ impl ConversationEngine {
                 sources.extend(handed.iter().map(String::as_str));
                 if query_is_a_span_of_one(q, &sources, &named) {
                     // The review's L3: the query, and nothing else the model put beside it.
-                    // E.PLAN1: with the sources' acronyms written out.
-                    return Ok(serde_json::json!({ "query": write_out_acronyms(q, &defined_acronyms(&sources)) }));
+                    // E.PLAN1: with the acronyms written out. E.NET1h (N3): only from the ONE source the
+                    // span came from (E.EGRESS3b H1), and the result is checked like the span itself --
+                    // when it would carry a path or a named file's name, the span leaves as it was.
+                    let needle = format!(" {} ", norm(q));
+                    let own = sources.iter().find(|s| format!(" {} ", norm(s)).contains(&needle)).copied();
+                    let out = own.map_or_else(|| q.to_string(), |s| write_out_acronyms(q, &defined_acronyms(&[s])));
+                    let out = if has_path(&out, &named) { q.to_string() } else { out };
+                    return Ok(serde_json::json!({ "query": out }));
                 }
             }
         }

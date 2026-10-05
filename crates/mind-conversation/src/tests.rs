@@ -20195,3 +20195,34 @@ async fn compaction_does_not_carry_the_last_chat_into_the_new_summary() {
     assert!(prompts.iter().any(|p| p.contains("NEWCHAT-0")), "the new conversation's turns were not what was summarised");
     assert!(prompts.iter().all(|p| !p.contains("OLDCHAT-")), "the last chat was folded into the new summary");
 }
+
+/// E.NET1h (the review's N3): on the span path a long form comes only from the span's own source,
+/// never holds path pieces, and a written-out query naming a named file leaves as the span was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_written_out_span_stays_one_source_and_no_path() {
+    use crate::egress_planning::defined_acronyms as found;
+    use mind_governance::egress::EgressBroker;
+    assert!(found(&["/home/pranab/Credit Notes (HCN)"]).is_empty(), "a path's pieces became a long form");
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{\"query\":\"unused\"}")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS")
+        .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+        .with_home_dir(Some("/home/p".into()));
+    let key = "primary|c1";
+    // Defined in the person's own words: written out.
+    let mine = conv.egress_clean_args_with("search", "look up Hard Credit Notes (HCN) rates", serde_json::json!({ "query": "HCN rates" }), "", &[], &[], key).await.unwrap();
+    assert_eq!(mine["query"], "\"Hard Credit Notes\" rates");
+    // Defined only in a handed-over file, while the span is the person's: left alone (one source).
+    conv.handed_over.lock().unwrap().note_named(key, "Read ~/research/defs.md", Some("/home/p"), ConversationEngine::now_ms());
+    conv.note_handed_over(key, "/home/p/research/defs.md", "Hard Credit Notes (HCN) are a kind of note.");
+    let other = conv.egress_clean_args_with("search", "check HCN rates", serde_json::json!({ "query": "HCN rates" }), "", &[], &[], key).await.unwrap();
+    assert_eq!(other["query"], "HCN rates", "a long form from another source joined the span");
+    // A written-out query that would name a named file leaves as the span was.
+    let key2 = "primary|c2";
+    conv.handed_over.lock().unwrap().note_named(key2, "Read ~/Glossary then Glossary Term Index (GTI) terms", Some("/home/p"), ConversationEngine::now_ms());
+    let named_case = conv
+        .egress_clean_args_with("search", "Read ~/Glossary then Glossary Term Index (GTI) terms", serde_json::json!({ "query": "GTI terms" }), "", &[], &[], key2)
+        .await
+        .unwrap();
+    assert_eq!(named_case["query"], "GTI terms", "a named file's name left through a long form");
+}

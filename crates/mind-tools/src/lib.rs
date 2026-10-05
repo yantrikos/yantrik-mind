@@ -161,15 +161,8 @@ pub trait Fetcher: Send + Sync {
 
 /// Pull the host out of an http(s) URL (handles userinfo + bracketed IPv6).
 fn host_of(url: &str) -> Option<String> {
-    let after = url.split_once("://")?.1;
-    let authority = after.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplit('@').next()?; // drop userinfo
-    let host = if let Some(rest) = authority.strip_prefix('[') {
-        rest.split(']').next()?.to_string() // IPv6 literal
-    } else {
-        authority.split(':').next()?.to_string()
-    };
-    (!host.is_empty()).then_some(host)
+    // E.NET1h (N1): as ureq reads it (WHATWG), never split by hand.
+    mind_net::url_host_port(url).map(|(h, _)| h).filter(|h| !h.is_empty())
 }
 
 /// SSRF guard: is this resolved IP private/internal and therefore off-limits? E.NET1e: judged in
@@ -204,6 +197,7 @@ fn ssrf_check_routed(
     is_direct: IsDirect,
     trust: Trust,
 ) -> anyhow::Result<()> {
+    // E.NET1h (N1): every reading below (host, port, route) is `url::Url`'s, as ureq's is.
     let trust = trust();
     let direct = is_direct(url, trust.as_ref());
     ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), leaves_unresolved(url, direct, trust.as_ref())).map(|_| ())
@@ -484,14 +478,8 @@ const MAX_REDIRECTS: usize = 5;
 
 /// E.NET1: a URL's port -- written, or the scheme's.
 fn port_of(url: &str) -> u16 {
-    let (scheme, after) = url.split_once("://").unwrap_or(("http", url));
-    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let port = match authority.strip_prefix('[') {
-        Some(rest) => rest.split_once("]:").map(|(_, p)| p),
-        None => authority.split_once(':').map(|(_, p)| p),
-    };
-    port.and_then(|p| p.parse().ok()).unwrap_or(if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 })
+    // E.NET1h (N1): as ureq reads it.
+    mind_net::url_host_port(url).map_or(80, |(_, p)| p)
 }
 
 /// E.NET1: the system's resolver, as the fetch uses it.
@@ -499,24 +487,11 @@ fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<std::net::Socket
     Ok((host, port).to_socket_addrs()?.collect())
 }
 
-/// E.NET1: where a redirect's `Location` points, from the URL that answered.
+/// E.NET1: where a redirect's `Location` points, from the URL that answered. E.NET1h (N1): joined the
+/// WHATWG way (`Url::join`), as a browser and ureq would -- the result is the canonical form every
+/// check and the next request use.
 fn redirect_target(base: &str, location: &str) -> Option<String> {
-    let loc = location.trim();
-    let lower = loc.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        return Some(loc.to_string());
-    }
-    let (scheme, rest) = base.split_once("://")?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    if let Some(net) = loc.strip_prefix("//") {
-        return Some(format!("{scheme}://{net}"));
-    }
-    if loc.starts_with('/') {
-        return Some(format!("{scheme}://{authority}{loc}"));
-    }
-    let path = rest[authority.len()..].split(['?', '#']).next().unwrap_or("");
-    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
-    Some(format!("{scheme}://{authority}{dir}/{loc}"))
+    url::Url::parse(base).ok()?.join(location.trim()).ok().map(|u| u.to_string())
 }
 
 /// E.NET1: resolve a URL's host once and check every address; refused when any is private/internal.
@@ -595,10 +570,13 @@ fn get_checked_with(
 ) -> anyhow::Result<ureq::Response> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        let lower = current.to_ascii_lowercase();
-        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        // E.NET1h (N1): parsed ONCE, the WHATWG way; every check below and the request itself use
+        // this canonical form, so what is judged is what is fetched.
+        let parsed = url::Url::parse(current.trim()).map_err(|_| anyhow::anyhow!("not a url that can be fetched"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
             anyhow::bail!("only http(s) urls are fetchable");
         }
+        current = parsed.to_string();
         // E.NET1g (L1): the OS's word is read ONCE per hop; the route is decided from it and the
         // agent built on that decision, so it cannot change between the check and the connection.
         let trust = trust();
@@ -1097,6 +1075,63 @@ mod tests {
         assert!(ssrf_check_routed("http://news.example.org/", &unresolvable, &proxied, &lan).is_ok(), "an ordinary name was refused");
     }
 
+    /// E.NET1h (the review's N1): the forms a hand split read as another host are judged as ureq
+    /// fetches them -- refused against a LAN rule on the first hop and as a redirect, and the
+    /// backslash form refused even with no trust at all.
+    #[test]
+    fn a_url_is_judged_as_it_is_fetched() {
+        use std::io::{Read as _, Write as _};
+        const ODD: [&str; 4] = [
+            "http://gpu%2eexample.ts.net:11434/api/tags",
+            "http://gpu.example.ts.net:11434\\@news.example.org/",
+            "http://\u{ff47}\u{ff50}\u{ff55}.example.ts.net:11434/",
+            "http://gpu.example.ts.net\t:11434/",
+        ];
+        let asked = std::sync::Mutex::new(Vec::<String>::new());
+        // news.example.org is public; the LAN name does not resolve here (enforce mode).
+        let resolve = |h: &str, p: u16| -> std::io::Result<Vec<std::net::SocketAddr>> {
+            asked.lock().unwrap().push(h.to_string());
+            match h {
+                "news.example.org" => Ok(vec![std::net::SocketAddr::from(([93, 184, 216, 34], p))]),
+                "127.0.0.1" => Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], p))]),
+                _ => Err(std::io::Error::other("no DNS for the Mind")),
+            }
+        };
+        let lan = || Some(mind_net::EgressTrust::with_lan_rules(Some(vec![("gpu.example.ts.net".to_string(), vec![11434])])));
+        let proxied = |_: &str, _: Option<&mind_net::EgressTrust>| false;
+        let refused = |out: &anyhow::Result<String>| out.as_ref().is_err_and(|e| e.to_string().contains("couldn't resolve"));
+        for odd in ODD {
+            let first = fetch_direct_with(odd, &resolve, &|_: &std::net::SocketAddr| false, &proxied, &lan);
+            assert!(refused(&first), "first hop {odd:?}: {first:?}");
+            assert!(ssrf_check_routed(odd, &resolve, &proxied, &lan).is_err(), "ssrf_check let {odd:?} through");
+        }
+        assert!(!asked.lock().unwrap().iter().any(|h| h == "news.example.org"), "a host ureq would not fetch was the one judged");
+        // A url that does not parse is refused before anything else.
+        let garbled = fetch_direct_with("http://exa mple.org/", &resolve, &|_: &std::net::SocketAddr| false, &proxied, &lan);
+        assert!(garbled.is_err_and(|e| e.to_string().contains("not a url that can be fetched")), "an unparseable url was fetched");
+        // The backslash form with NO trust: judged as the LAN name, which does not resolve here.
+        let untrusted = fetch_direct_with(ODD[1], &resolve, &|_: &std::net::SocketAddr| false, &proxied, &|| None);
+        assert!(refused(&untrusted), "untrusted backslash form: {untrusted:?}");
+        // As a redirect from a page the fetch may read (127.0.0.1 here, allowed for the test).
+        for odd in ODD {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            let loc = odd.to_string();
+            std::thread::spawn(move || {
+                if let Some(Ok(mut s)) = server.incoming().next() {
+                    let mut buf = [0u8; 2048];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes());
+                }
+            });
+            let direct_for_loopback = |u: &str, _: Option<&mind_net::EgressTrust>| u.starts_with("http://127.0.0.1");
+            let out = fetch_direct_with(&format!("http://127.0.0.1:{port}/start"), &resolve, &|_: &std::net::SocketAddr| false, &direct_for_loopback, &lan);
+            // (ureq drops a Location header that is not ASCII -- also a refusal before any request.)
+            let no_location = out.as_ref().is_err_and(|e| e.to_string().contains("a redirect with no Location"));
+            assert!(refused(&out) || no_location, "redirect to {odd:?}: {out:?}");
+        }
+    }
+
     /// E.NET1g (L1): the OS's word is read once per hop -- the route cannot be decided from one read
     /// and built from another.
     #[test]
@@ -1193,7 +1228,7 @@ mod tests {
         assert_eq!(redirect_target("https://a.example/x/y?q=1", "/z").as_deref(), Some("https://a.example/z"));
         assert_eq!(redirect_target("https://a.example/x/y", "z").as_deref(), Some("https://a.example/x/z"));
         assert_eq!(redirect_target("https://a.example/x", "//b.example/w").as_deref(), Some("https://b.example/w"));
-        assert_eq!(redirect_target("https://a.example/x", "HTTP://c.example/").as_deref(), Some("HTTP://c.example/"));
+        assert_eq!(redirect_target("https://a.example/x", "HTTP://c.example/").as_deref(), Some("http://c.example/"), "canonical, as ureq reads it");
         assert_eq!(port_of("https://a.example/x"), 443);
         assert_eq!(port_of("http://a.example/x"), 80);
         assert_eq!(port_of("http://u@a.example:8123/x"), 8123);

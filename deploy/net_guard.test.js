@@ -63,20 +63,72 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   await guardContext(newCtx);
   assert.ok(routed.includes("**/*"), "requests were not routed");
 
-  // E.NET1c: every browser script in deploy/ loads the guard and runs it on its context.
+  // E.NET1d: the launchers hand back only a guarded context, service workers blocked; a guard that
+  // cannot be installed closes the browser rather than returning it.
+  const { launchGuarded, launchPersistentGuarded } = require("./net_guard");
+  const fakeCtx = () => {
+    const c = { routes: [], opts: null, closed: false };
+    c.route = async (pattern) => c.routes.push(pattern);
+    c.routeWebSocket = async () => {};
+    c.close = async () => { c.closed = true; };
+    c.browser = () => ({ fake: true });
+    return c;
+  };
+  let made = null;
+  const fakeChromium = {
+    launch: async () => ({
+      closed: false,
+      newContext: async (opts) => { made = fakeCtx(); made.opts = opts; return made; },
+      close: async function () { this.closed = true; },
+    }),
+    launchPersistentContext: async (_dir, opts) => { made = fakeCtx(); made.opts = opts; return made; },
+  };
+  const g = await launchGuarded(fakeChromium, {}, { locale: "en-US" });
+  assert.strictEqual(g.ctx.opts.serviceWorkers, "block", "service workers were let in");
+  assert.ok(g.ctx.routes.includes("**/*"), "the context came back unguarded");
+  const pg = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {});
+  assert.strictEqual(pg.ctx.opts.serviceWorkers, "block");
+  assert.ok(pg.ctx.routes.includes("**/*"), "the persistent context came back unguarded");
+  const noWs = { launch: async () => ({ newContext: async () => ({ route: async () => {} }), close: async function () { this.closed = true; } }) };
+  await assert.rejects(launchGuarded(noWs), /WebSocket/, "a context that cannot be guarded was handed out");
+
+  // E.NET1d (the twelfth pass): repo-wide, .js and .mjs -- outside net_guard.js no code may make a
+  // browser, a context or a page any other way than through launchGuarded / launchPersistentGuarded.
+  // The listed files are test and CI harnesses that never run on a Mind box.
   const fs = require("fs");
   const path = require("path");
-  for (const f of fs.readdirSync(__dirname)) {
-    if (!f.endsWith(".js") || f.startsWith("net_guard")) continue;
-    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
-    if (!src.includes("playwright")) continue;
-    assert.ok(src.includes('require("./net_guard")'), `${f} browses without net_guard`);
-    // One guard per context the script creates -- a second, unguarded context is a way around it.
-    const contexts = (src.match(/\.newContext\(|launchPersistentContext\(|browser\.newPage\(/g) || []).length;
-    const guards = (src.match(/await guardContext\(ctx\)/g) || []).length;
-    assert.ok(contexts > 0 && guards >= contexts, `${f}: ${contexts} context(s) but ${guards} guard call(s)`);
-    assert.ok(src.includes('serviceWorkers: "block"'), `${f} lets service workers bypass the guard`);
+  const root = path.resolve(__dirname, "..");
+  const CI_ONLY = new Set([
+    "crates/mind-core/assets/xss_canary.mjs", // the web UI's XSS canary, run by CI against a local build
+    "crates/mind-evals/fixtures/cb2/checks/check_web.mjs", // eval fixtures, run in the eval sandbox
+    "crates/mind-evals/fixtures/cb2n/checks/check_web.mjs",
+    "tools/fresh-install-eval/eval_protocol.mjs", // a developer's install check
+    "deploy/net_guard.js", // the one place browsers are made
+    "deploy/net_guard.test.js", // this test (its fakes and patterns)
+  ]);
+  const FORBIDDEN = [
+    [/chromium\s*\.\s*(launch\w*|connect\w*)\s*\(/, "chromium.launch*/connect*"],
+    [/\.\s*launchServer\s*\(/, "launchServer"],
+    [/connectOverCDP/, "connectOverCDP"],
+    [/\.\s*newContext\s*\(/, "newContext"],
+    [/\.\s*contexts\s*\(\s*\)/, "contexts()"],
+    [/(?<!\bctx)\s*\.\s*newPage\s*\(/, "a browser's newPage"],
+  ];
+  const walk = (dir) =>
+    fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      if (["node_modules", ".git", "target"].includes(e.name)) return [];
+      const p = path.join(dir, e.name);
+      return e.isDirectory() ? walk(p) : /\.(m?js)$/.test(e.name) ? [p] : [];
+    });
+  const offences = [];
+  for (const file of walk(root)) {
+    const rel = path.relative(root, file).split(path.sep).join("/");
+    if (CI_ONLY.has(rel)) continue;
+    const src = fs.readFileSync(file, "utf8");
+    for (const [re, what] of FORBIDDEN) if (re.test(src)) offences.push(`${rel}: ${what}`);
+    if (/playwright/.test(src) && !/launch(Persistent)?Guarded/.test(src)) offences.push(`${rel}: uses playwright without net_guard's launchers`);
   }
+  assert.deepStrictEqual(offences, [], "a browser made around net_guard");
   console.log("net_guard: ok");
 })().catch((e) => {
   console.error(e);

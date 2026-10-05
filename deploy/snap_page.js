@@ -8,7 +8,7 @@ const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 // E.NET1c (the tenth pass): a screenshot of a LAN admin page would be described by vision -- every
 // request goes through net_guard.js (deployed beside), service workers blocked.
-const { guardContext } = require("./net_guard");
+const { launchGuarded } = require("./net_guard");
 chromium.use(stealth);
 
 (async () => {
@@ -18,12 +18,13 @@ chromium.use(stealth);
     console.error("usage: snap_page.js <url> <out.jpg>");
     process.exit(2);
   }
-  const browser = await chromium.launch({
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"], // --no-sandbox: unprivileged LXC
-  });
+  // E.NET1d: the browser comes guarded from net_guard, service workers blocked, or not at all.
+  const { browser, ctx } = await launchGuarded(
+    chromium,
+    { args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] }, // --no-sandbox: unprivileged LXC
+    { viewport: { width: 1280, height: 1800 } },
+  );
   try {
-    const ctx = await browser.newContext({ viewport: { width: 1280, height: 1800 }, serviceWorkers: "block" });
-    await guardContext(ctx);
     const page = await ctx.newPage();
     await page.goto(url, { waitUntil: "networkidle", timeout: 40000 }).catch(() => {});
     // A short scroll pass triggers lazy-loaded content, then back to the top for the shot.

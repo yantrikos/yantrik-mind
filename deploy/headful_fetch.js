@@ -13,7 +13,7 @@ const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 chromium.use(stealth);
 // E.NET1: every request the page makes is checked against private addresses (net_guard.js, deployed beside).
-const { guardContext } = require("./net_guard");
+const { launchGuarded } = require("./net_guard");
 
 (async () => {
   const url = process.argv[2];
@@ -21,21 +21,19 @@ const { guardContext } = require("./net_guard");
     console.error("usage: headful_fetch.js <url>");
     process.exit(2);
   }
-  const browser = await chromium.launch({
-    headless: false, // the whole point — a real browser, not the detectable headless shell
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
-  });
+  // Do NOT override the UA — let Chromium send its own, self-consistent with its real version +
+  // Sec-CH-UA client hints. A spoofed stale UA (Chrome 124) contradicts the real engine/hints and is
+  // itself a bot signal. Only set Accept-Language + a real viewport.
+  // E.NET1d: the browser comes guarded from net_guard, service workers blocked, or not at all.
+  const { browser, ctx } = await launchGuarded(
+    chromium,
+    {
+      headless: false, // the whole point — a real browser, not the detectable headless shell
+      args: ["--no-sandbox", "--disable-dev-shm-usage", "--start-maximized"],
+    },
+    { locale: "en-US", extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" }, viewport: { width: 1366, height: 900 } },
+  );
   try {
-    // Do NOT override the UA — let Chromium send its own, self-consistent with its real version +
-    // Sec-CH-UA client hints. A spoofed stale UA (Chrome 124) contradicts the real engine/hints and is
-    // itself a bot signal. Only set Accept-Language + a real viewport.
-    const ctx = await browser.newContext({
-      serviceWorkers: "block", // E.NET1: a service worker would bypass the route check
-      locale: "en-US",
-      extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
-      viewport: { width: 1366, height: 900 },
-    });
-    await guardContext(ctx); // E.NET1: before any request is made
     const page = await ctx.newPage();
     try {
       await page.goto(url, { waitUntil: "networkidle", timeout: 25000 });

@@ -8,19 +8,20 @@
 // NOTE: this does NOT beat network-level bot walls — Amazon/Walmart/Target return nothing even here;
 // those need a real product API or a scraping aggregator, not a browser.
 //
-// Deploy (on the box, as root, then chown to the service user):
+// Deploy (on the box, as root; E.NET1d: everything stays ROOT-owned and read-only to the Mind's
+// account -- a Mind that could rewrite these could remove its own guard):
 //   cd /opt/yantrik-mind
-//   npm install playwright@1.48.2 playwright-extra puppeteer-extra-plugin-stealth   (E.NET1c: >= 1.48 for WebSocket routing; net_guard refuses older)
-//   cp net_guard.js private_ranges.json /opt/yantrik-mind/   (E.NET1: the guard every browser script loads)
+//   cp package.json package-lock.json net_guard.js private_ranges.json *_fetch.js snap_page.js browser_agent.js .
+//   npm ci --ignore-scripts   (E.NET1d: the pinned versions from package-lock.json; net_guard refuses Playwright < 1.48)
 //   PLAYWRIGHT_BROWSERS_PATH=/opt/yantrik-mind/pw-browsers npx playwright install --with-deps chromium
-//   chown -R yantrikmind:yantrikmind node_modules pw-browsers headless_fetch.js
+//   chown -R root:root . && chmod -R go-w .   (never chown to the service user)
 // The Rust HttpFetcher spawns: `timeout 45 node headless_fetch.js <url>` with
 // PLAYWRIGHT_BROWSERS_PATH set (also in /etc/yantrik-mind.env) and cwd=/opt/yantrik-mind.
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 chromium.use(stealth);
 // E.NET1: every request the page makes is checked against private addresses (net_guard.js, deployed beside).
-const { guardContext } = require("./net_guard");
+const { launchGuarded } = require("./net_guard");
 
 (async () => {
   const url = process.argv[2];
@@ -28,18 +29,15 @@ const { guardContext } = require("./net_guard");
     console.error("usage: headless_fetch.js <url>");
     process.exit(2);
   }
-  const browser = await chromium.launch({
-    args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"], // --no-sandbox: unprivileged LXC
-  });
+  // Let Chromium send its own UA (self-consistent with its real version + Sec-CH-UA client hints);
+  // a spoofed stale UA contradicts the real engine and is itself a bot signal.
+  // E.NET1d: the browser comes guarded from net_guard, service workers blocked, or not at all.
+  const { browser, ctx } = await launchGuarded(
+    chromium,
+    { args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"] }, // --no-sandbox: unprivileged LXC
+    { locale: "en-US", extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" } },
+  );
   try {
-    // Let Chromium send its own UA (self-consistent with its real version + Sec-CH-UA client hints);
-    // a spoofed stale UA contradicts the real engine and is itself a bot signal.
-    const ctx = await browser.newContext({
-      serviceWorkers: "block", // E.NET1: a service worker would bypass the route check
-      locale: "en-US",
-      extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
-    });
-    await guardContext(ctx); // E.NET1: before any request is made
     const page = await ctx.newPage();
     // Prefer network-idle so client-side content (price grids, product tiles) has loaded; fall back to
     // domcontentloaded if the site keeps a connection open past the budget.

@@ -199,4 +199,31 @@ async function guardContext(ctx) {
   await ctx.routeWebSocket(/.*/, (ws) => ws.close());
 }
 
-module.exports = { privateIp, v6ToBigInt, checkedAddresses, hostIsPrivate, fetchPinned, guardContext };
+// E.NET1d (the twelfth pass): the ONLY ways a deployed script gets a browser -- every context made
+// here is guarded before it is returned, with service workers blocked. A scan holds every script in
+// the repository to these: no chromium.launch*, connect*, newContext, contexts() or a browser's
+// newPage anywhere else.
+async function launchGuarded(chromium, launchOptions = {}, contextOptions = {}) {
+  const browser = await chromium.launch(launchOptions);
+  try {
+    const ctx = await browser.newContext({ ...contextOptions, serviceWorkers: "block" });
+    await guardContext(ctx);
+    return { browser, ctx };
+  } catch (e) {
+    await browser.close().catch(() => {});
+    throw e;
+  }
+}
+
+async function launchPersistentGuarded(chromium, profileDir, options = {}) {
+  const ctx = await chromium.launchPersistentContext(profileDir, { ...options, serviceWorkers: "block" });
+  try {
+    await guardContext(ctx);
+    return { browser: ctx.browser(), ctx };
+  } catch (e) {
+    await ctx.close().catch(() => {});
+    throw e;
+  }
+}
+
+module.exports = { privateIp, v6ToBigInt, checkedAddresses, hostIsPrivate, fetchPinned, guardContext, launchGuarded, launchPersistentGuarded };

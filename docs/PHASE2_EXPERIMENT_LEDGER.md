@@ -14141,3 +14141,35 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
 - **Protocol change for the next pair** (not a code change): the opening message asks for the files to be read first, with each file named by its exact path:
   > Open and read /home/yantrik/research/R1/BRIEF.md and the spec /home/yantrik/research/R1/MDG_spec.md first, then carry out the research task the brief describes. Work in /home/yantrik/research/R1/. Say when the report is written.
 - The model is kept as deployed, so the pair measures the Mind as it ships. Changing the model is a configuration choice for the box's owners. Both runs of the pair are on one build; no comparison with R1d2 is claimed, because the build and the protocol both differ.
+
+## E.NET1b — PREREG: the ninth pass's E.NET1 fixes (before it ships)
+
+1. **One list of private and special-use ranges,** `deploy/private_ranges.json`, read by the Rust check (`include_str!`) and by net_guard.js (`require`):
+   - v4: 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12, 192.0.0/24, 192.0.2/24, 192.168/16, 198.18/15, 198.51.100/24, 203.0.113/24, 224/4, 240/4;
+   - v6: ::/96 (IPv4-compatible, covering :: and ::1), 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64), 100::/64, 2001:db8::/32, fc00::/7, fe80::/10, fec0::/10, ff00::/8.
+   - An IPv4-mapped v6 address (::ffff:0:0/96) is judged by its embedded v4.
+   - The JS parses IPv6 into its 16 bytes, so `[::ffff:7f00:1]`, `[::ffff:c0a8:407]` and `[::7f00:1]` are caught.
+2. **The proxy path:** a fetch whose host does not resolve locally is refused. The Mind has no signal that the egress proxy enforces, so it fails closed (split-DNS names such as homeassistant.lan, and rebinding names).
+3. **The browser:** each request is fetched by Node's own http(s) client, connected to the address the check approved (a custom `lookup` returning it), with no redirects followed. The route is fulfilled from that response; `route.fetch` (a second resolve) is gone.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- a mapped address not unwrapped (Rust and JS);
+- NAT64 or CGNAT allowed;
+- multicast allowed;
+- the JS v6 parse skipped;
+- a local resolve failure passing on the proxy path;
+- the browser fetch not pinned.
+
+## E.NET1b — RESULT: built as preregistered; 8 of 8 mutants killed
+
+- **One list:** `deploy/private_ranges.json` (14 v4 and 9 v6 ranges). mind-tools reads it with `include_str!` into (network, mask) pairs; net_guard.js `require`s it.
+- **Rust:** `is_blocked_ip` judges an IPv4-mapped v6 address by its v4 (`to_ipv4_mapped`) and everything else against the list. `ssrf_check` (browser, reader, media) and every `fetch_direct` hop now refuse a host that does not resolve here, on the proxy path too (fails closed: no sign the proxy enforces). The direct-or-proxied decision is injectable for tests.
+- **JS:**
+  - `v6ToBigInt` parses IPv6 to its 128 bits (with an embedded dotted v4); `privateIp` unwraps ::ffff:0:0/96 and fails closed on anything unparseable.
+  - `fetchPinned` resolves once (`checkedAddresses`), connects Node's own http(s) client to exactly that address (a custom `lookup`), follows no redirect, and caps the body at 20 MB.
+  - `guardContext` fulfils each route from it. `route.fetch` (a second resolve) is gone.
+- **Tests:**
+  - Rust: the ninth pass's addresses (::ffff:127.0.0.1, ::ffff:192.168.4.7, ::ffff:7f00:1, ::7f00:1, 64:ff9b::…, 100.64/10, 224/4, 240/4, 255.255.255.255, ff02::1 …); an unresolvable host refused both direct and through the proxy.
+  - JS: the same addresses as Node's URL parser writes them; a pinned fetch to a name only the check's lookup knows (exactly one lookup; a 302 returned, not followed); the loopback server refused with the real check.
+- **Mutants:** Rust mapped not unwrapped; NAT64, CGNAT and multicast dropped from the shared list (each killed in both Rust and JS); unresolved passing on the proxy path; JS v6 not parsed; JS mapped not unwrapped; JS fetch not pinned. All killed.
+- **Deploy:** net_guard.js and private_ranges.json go beside the browser scripts.

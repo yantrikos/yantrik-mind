@@ -172,23 +172,60 @@ fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then_some(host)
 }
 
+/// E.NET1b: the private and special-use ranges, from the ONE list the browser guard reads too
+/// (`deploy/private_ranges.json`) -- (network, mask) pairs, parsed once.
+fn private_ranges() -> &'static (Vec<(u32, u32)>, Vec<(u128, u128)>) {
+    static RANGES: std::sync::OnceLock<(Vec<(u32, u32)>, Vec<(u128, u128)>)> = std::sync::OnceLock::new();
+    RANGES.get_or_init(|| {
+        let list: serde_json::Value =
+            serde_json::from_str(include_str!("../../../deploy/private_ranges.json")).expect("deploy/private_ranges.json parses");
+        let cidrs = |key: &str| -> Vec<(String, u32)> {
+            list[key]
+                .as_array()
+                .expect("a list of ranges")
+                .iter()
+                .map(|c| {
+                    let (net, bits) = c.as_str().expect("a range").split_once('/').expect("a /prefix");
+                    (net.to_string(), bits.parse().expect("a prefix length"))
+                })
+                .collect()
+        };
+        let v4 = cidrs("v4")
+            .into_iter()
+            .map(|(net, bits)| {
+                let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+                (u32::from(net.parse::<std::net::Ipv4Addr>().expect("a v4 range")) & mask, mask)
+            })
+            .collect();
+        let v6 = cidrs("v6")
+            .into_iter()
+            .map(|(net, bits)| {
+                let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
+                (u128::from(net.parse::<std::net::Ipv6Addr>().expect("a v6 range")) & mask, mask)
+            })
+            .collect();
+        (v4, v6)
+    })
+}
+
 /// SSRF guard: is this resolved IP private/internal and therefore off-limits?
+/// E.NET1b (the ninth pass): judged against the shared list; an IPv4-mapped IPv6 address
+/// (`::ffff:192.168.4.7`) by the IPv4 it carries -- `is_loopback` alone let it through.
 fn is_blocked_ip(ip: IpAddr) -> bool {
+    let (v4, v6) = private_ranges();
+    let blocked_v4 = |a: std::net::Ipv4Addr| {
+        let n = u32::from(a);
+        a.is_broadcast() || v4.iter().any(|(net, mask)| n & mask == *net)
+    };
     match ip {
-        IpAddr::V4(v) => {
-            v.is_loopback()
-                || v.is_private()
-                || v.is_link_local()
-                || v.is_unspecified()
-                || v.is_broadcast()
-                || v.is_documentation()
-        }
-        IpAddr::V6(v) => {
-            let s = v.segments();
-            v.is_loopback() || v.is_unspecified()
-                || (s[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-        }
+        IpAddr::V4(a) => blocked_v4(a),
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(inner) => blocked_v4(inner),
+            None => {
+                let n = u128::from(a);
+                v6.iter().any(|(net, mask)| n & mask == *net)
+            }
+        },
     }
 }
 
@@ -201,15 +238,9 @@ pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<()> {
 /// Refuse to fetch internal/private targets (resolves the host first, so a public name that
 /// points at a private IP is also blocked).
 fn ssrf_check(url: &str) -> anyhow::Result<()> {
-    let host = host_of(url).ok_or_else(|| anyhow::anyhow!("bad url"))?;
-    if let Ok(addrs) = (host.as_str(), port_of(url)).to_socket_addrs() {
-        for a in addrs {
-            if is_blocked_ip(a.ip()) {
-                anyhow::bail!("refusing to fetch a private/internal address (SSRF guard): {host}");
-            }
-        }
-    }
-    Ok(())
+    // E.NET1b: a host that does not resolve here is refused too -- a split-DNS name only a proxy
+    // knows (homeassistant.lan) or a rebinding name must not slip past the check.
+    ssrf_resolve(url, &system_resolve, &|a| is_blocked_ip(a.ip())).map(|_| ())
 }
 
 /// Remove every `<tag …>…</tag>` block (case-insensitive, boundary-checked so `<nav>` ≠ `<navbar>`).
@@ -539,13 +570,14 @@ fn ssrf_resolve(
 /// client's own redirect-following went to wherever a page pointed (a LAN address included), and a
 /// second DNS lookup let a rebinding name pass the check and then connect inside.
 fn fetch_direct(url: &str) -> anyhow::Result<String> {
-    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()))
+    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct)
 }
 
 fn fetch_direct_with(
     url: &str,
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
     blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
+    is_direct: &dyn Fn(&str) -> bool,
 ) -> anyhow::Result<String> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
@@ -553,16 +585,15 @@ fn fetch_direct_with(
         if !(lower.starts_with("http://") || lower.starts_with("https://")) {
             anyhow::bail!("only http(s) urls are fetchable");
         }
-        let direct = mind_net::is_direct(&current);
+        let direct = is_direct(&current);
         let mut builder = mind_net::builder().redirects(0).timeout(std::time::Duration::from_secs(20));
-        match ssrf_resolve(&current, resolve, blocked) {
-            Ok(addrs) if direct => {
-                // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
-                builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
-            }
-            Ok(_) => {} // through the egress proxy, which resolves (and, enforcing, refuses the LAN) itself
-            Err(e) if direct || e.to_string().contains("SSRF guard") => return Err(e),
-            Err(_) => {} // a proxy-only network may not resolve here; the proxy does
+        // E.NET1b (the ninth pass): every hop resolves HERE or is refused -- also on the proxy path,
+        // where a name only the proxy could resolve (split DNS, rebinding) used to pass. The Mind has
+        // no sign the egress proxy enforces, so it fails closed.
+        let addrs = ssrf_resolve(&current, resolve, blocked)?;
+        if direct {
+            // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
+            builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
         }
         let agent = mind_net::route(builder, &current);
         let resp = agent
@@ -965,7 +996,7 @@ mod tests {
         let (inside, reached) = serve_once(page("the router's admin page"));
         let (outside, _) = serve_once(redirect(&format!("http://127.0.0.1:{inside}/admin")));
         let blocked = move |a: &std::net::SocketAddr| a.port() == inside;
-        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked);
+        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked, &|_: &str| true);
         assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{out:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the internal server was reached");
         let text = "A long enough article body to read as the page's text. ".repeat(4);
@@ -975,7 +1006,7 @@ mod tests {
         // so point it at the allowed server with an absolute one too.
         let _ = hop;
         let (hop2, _) = serve_once(redirect(&format!("http://127.0.0.1:{fine}/article")));
-        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false).unwrap();
+        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true).unwrap();
         assert!(got.contains("A long enough article body"), "{got}");
     }
 
@@ -991,9 +1022,37 @@ mod tests {
                 system_resolve(host, p)
             }
         };
-        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false);
+        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true);
         assert!(got.as_ref().is_ok_and(|t| t.contains("pinned and reached")), "{got:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_secs(1)).is_ok());
+    }
+
+    /// E.NET1b (the ninth pass, its own addresses): an IPv4-mapped IPv6 address is judged by the
+    /// IPv4 it carries; NAT64, IPv4-compatible, CGNAT, multicast and reserved ranges are refused.
+    #[test]
+    fn mapped_nat64_cgnat_and_multicast_addresses_are_private() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for s in [
+            "::ffff:127.0.0.1", "::ffff:192.168.4.7", "::ffff:7f00:1", "::7f00:1", "64:ff9b::c0a8:407",
+            "100.64.0.1", "100.127.255.254", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+            "0.1.2.3", "ff02::1", "fe80::1", "fd00::1", "::1", "::", "192.168.4.44", "10.1.2.3", "169.254.169.254",
+        ] {
+            assert!(is_blocked_ip(ip(s)), "{s} should be refused");
+        }
+        for s in ["8.8.8.8", "93.184.216.34", "100.128.0.1", "::ffff:8.8.8.8", "2606:4700::1111", "172.32.0.1"] {
+            assert!(!is_blocked_ip(ip(s)), "{s} should be allowed");
+        }
+    }
+
+    /// E.NET1b: through the egress proxy too, a host that does not resolve here is refused -- a name
+    /// only the proxy knows (split DNS, rebinding) used to go straight through.
+    #[test]
+    fn an_unresolvable_host_is_refused_on_the_proxy_path_too() {
+        let unresolvable = |_: &str, _: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Err(std::io::Error::other("no such host")) };
+        for direct in [true, false] {
+            let out = fetch_direct_with("http://homeassistant.lan:8123/", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct);
+            assert!(out.as_ref().is_err_and(|e| e.to_string().contains("couldn't resolve")), "direct={direct}: {out:?}");
+        }
     }
 
     #[test]

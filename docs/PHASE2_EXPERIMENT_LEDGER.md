@@ -15161,3 +15161,32 @@ The review is a commit comment on 9308899. Its verdict: from this code's side, 5
   - Full suite 2346 passed, 0 failed.
   - Linux staging: mind-net 13, mind-tools 265, mind-conversation 1149.
   - net_guard.test.js as root (trusted) and as nobody (not trusted).
+
+## E.GRANT2 — PREREG: the review of 980b054..6cf3b76 (UNSAFE on E.GRANT1): H1, M1, M2, L1, L2, Info
+
+The review is a commit comment on 6cf3b76. E.NET1k is verified.
+
+- **H1 (HIGH):** the grant block ran for the tool NAME "search", which `clean_outbound_fields` (weather.city, github.repo, …) and `clean_desktop_browser` (web_type, os_act browser type) reuse for their own fields. A grant for web searches would have let those words through too, with no card under an `always` grant.
+  - **Fix:** `egress_clean_args_with` keeps its signature and NEVER takes the grant path; its recursive callers and every test therefore cannot. A new `egress_clean_args_granted(…, id)`, called only by the guard, takes the grant path only when the TOP-level tool is a plain web search (`plans_from_handed`).
+  - **Test:** under a Granted harness and under an `always` file grant, weather.city, github.repo, web_type.text and an os_act browser type each go to the planner, and no GrantAsk is sent.
+- **M1:** `own_words_under_grant` runs the exact-value tripwire (`model_injected_private_value`) and `has_path` BEFORE it asks or reads the file. The guard's later run stays. Test: a stored identifier in a non-span query sends no GrantAsk.
+- **M2:** every yt-dlp call gets `--ignore-config` and `--downloader-args "ffmpeg_i:-protocol_whitelist http,https,tls,tcp,crypto,httpproxy"`, so an ffmpeg that yt-dlp starts itself (captions over HLS) is held to http(s) too. This goes in the `bounded_command` test.
+- **L1:** limits in the harness, per turn and per Mind, before anything is sent:
+  - after a No, a refusal or no answer in a turn, no further `grant_request` that turn;
+  - at most 2 cards per turn;
+  - at most 3 cards per 10 minutes.
+  A request over a limit is denied without a card, and the planner writes the query.
+- **L2:** `research` (its query plus three suffixed variants) is not a plain web search, so it never takes the grant path (H1's rule).
+- **Info:**
+  - `read_root_file` reads at most `ROOT_FILE_MAX + 1` bytes from the handle;
+  - the door-versus-proxy check treats `localhost` in the proxy URL as loopback, in Rust and JS;
+  - the E.NET1k ledger's L4 test name is corrected: it is `a_group_new_chat_says_nothing_changed`.
+- **#667's H1 screening allowlist:** mirrored as E.GRANT2b once FIXES #667's rule arrives verbatim.
+- **Kill criteria**, each a mutant that must be killed:
+  - the grant path for a non-search top-level tool;
+  - the grant path from a recursive call;
+  - the tripwire after the ask;
+  - no yt-dlp downloader whitelist;
+  - the turn's No not remembered;
+  - no per-turn cap;
+  - no 10-minute cap.

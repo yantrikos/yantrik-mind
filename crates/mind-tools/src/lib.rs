@@ -190,17 +190,29 @@ fn ssrf_check(url: &str) -> anyhow::Result<()> {
     // E.NET1b: a host that does not resolve here is refused too -- a split-DNS name only a proxy
     // knows (homeassistant.lan) or a rebinding name must not slip past the check. E.NET1e: unless the
     // request takes a proxy the OS vouches for, which refuses private ranges itself.
-    ssrf_check_routed(url, &system_resolve, &mind_net::is_direct, &mind_net::proxy_is_enforced)
+    ssrf_check_routed(url, &system_resolve, &mind_net::is_direct_under, &mind_net::egress_trust)
 }
+
+/// The route a check judges by (E.NET1g, L1): the trust is read once and the route decided from it.
+type IsDirect<'a> = &'a dyn Fn(&str, Option<&mind_net::EgressTrust>) -> bool;
+type Trust<'a> = &'a dyn Fn() -> Option<mind_net::EgressTrust>;
 
 /// `ssrf_check` with its resolver and route given (for tests).
 fn ssrf_check_routed(
     url: &str,
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
-    is_direct: &dyn Fn(&str) -> bool,
-    proxy_enforced: &dyn Fn() -> bool,
+    is_direct: IsDirect,
+    trust: Trust,
 ) -> anyhow::Result<()> {
-    ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), !is_direct(url) && proxy_enforced()).map(|_| ())
+    let trust = trust();
+    let direct = is_direct(url, trust.as_ref());
+    ssrf_resolve(url, resolve, &|a| is_blocked_ip(a.ip()), leaves_unresolved(url, direct, trust.as_ref())).map(|_| ())
+}
+
+/// E.NET1e / E.NET1g: may a name that does not resolve here go on? Only on the proxied path, through
+/// a proxy the OS vouches for, and when no LAN rule could let it in by name (M1).
+fn leaves_unresolved(url: &str, direct: bool, trust: Option<&mind_net::EgressTrust>) -> bool {
+    !direct && trust.is_some_and(|t| t.leaves_to_proxy(url))
 }
 
 /// Remove every `<tag …>…</tag>` block (case-insensitive, boundary-checked so `<nav>` ≠ `<navbar>`).
@@ -540,52 +552,81 @@ fn ssrf_resolve(
 /// client's own redirect-following went to wherever a page pointed (a LAN address included), and a
 /// second DNS lookup let a rebinding name pass the check and then connect inside.
 fn fetch_direct(url: &str) -> anyhow::Result<String> {
-    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct, &mind_net::proxy_is_enforced)
+    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust)
 }
+
+const BROWSER_HEADERS: [(&str, &str); 3] = [
+    ("User-Agent", BROWSER_UA),
+    ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"),
+    ("Accept-Language", "en-US,en;q=0.9"),
+];
 
 fn fetch_direct_with(
     url: &str,
     resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
     blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
-    is_direct: &dyn Fn(&str) -> bool,
-    proxy_enforced: &dyn Fn() -> bool,
+    is_direct: IsDirect,
+    trust: Trust,
 ) -> anyhow::Result<String> {
+    let resp = get_checked_with(url, resolve, blocked, is_direct, trust, std::time::Duration::from_secs(20), &BROWSER_HEADERS)?;
+    let mut bytes = Vec::new();
+    resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
+    Ok(extract_readable(&String::from_utf8_lossy(&bytes)))
+}
+
+/// E.NET1g (review L2): the one checked GET for an address from outside (a page, the model, a paper
+/// link) -- the fetch tool, images, papers. Redirects are followed HERE, each hop checked.
+pub(crate) fn get_checked(
+    url: &str,
+    timeout: std::time::Duration,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<ureq::Response> {
+    get_checked_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust, timeout, headers)
+}
+
+fn get_checked_with(
+    url: &str,
+    resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
+    blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
+    is_direct: IsDirect,
+    trust: Trust,
+    timeout: std::time::Duration,
+    headers: &[(&str, &str)],
+) -> anyhow::Result<ureq::Response> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
         let lower = current.to_ascii_lowercase();
         if !(lower.starts_with("http://") || lower.starts_with("https://")) {
             anyhow::bail!("only http(s) urls are fetchable");
         }
-        let direct = is_direct(&current);
-        let mut builder = mind_net::builder().redirects(0).timeout(std::time::Duration::from_secs(20));
+        // E.NET1g (L1): the OS's word is read ONCE per hop; the route is decided from it and the
+        // agent built on that decision, so it cannot change between the check and the connection.
+        let trust = trust();
+        let direct = is_direct(&current, trust.as_ref());
+        let mut builder = mind_net::builder().redirects(0).timeout(timeout);
         // E.NET1b (the ninth pass): every hop resolves HERE or is refused -- also on the proxy path,
         // where a name only the proxy could resolve (split DNS, rebinding) used to pass. E.NET1e: a
-        // name that does not resolve here goes on only through a proxy the OS vouches for (see
-        // `ssrf_resolve`); a direct hop always resolves and is pinned.
-        if let Some(addrs) = ssrf_resolve(&current, resolve, blocked, !direct && proxy_enforced())? {
+        // name that does not resolve here goes on only through a proxy the OS vouches for, and
+        // (E.NET1g) only when no LAN rule could let it in by name; a direct hop always resolves and
+        // is pinned.
+        if let Some(addrs) = ssrf_resolve(&current, resolve, blocked, leaves_unresolved(&current, direct, trust.as_ref()))? {
             if direct {
                 // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
                 builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
             }
         }
-        let agent = mind_net::route(builder, &current);
-        let resp = agent
-            .get(&current)
-            .set("User-Agent", BROWSER_UA)
-            .set(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            )
-            .set("Accept-Language", "en-US,en;q=0.9")
-            .call()?;
+        let agent = mind_net::route_decided(builder, direct);
+        let mut req = agent.get(&current);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        let resp = req.call()?;
         if (300..400).contains(&resp.status()) {
             let location = resp.header("location").ok_or_else(|| anyhow::anyhow!("a redirect with no Location"))?;
             current = redirect_target(&current, location).ok_or_else(|| anyhow::anyhow!("a redirect to nowhere"))?;
             continue;
         }
-        let mut bytes = Vec::new();
-        resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
-        return Ok(extract_readable(&String::from_utf8_lossy(&bytes)));
+        return Ok(resp);
     }
     anyhow::bail!("more than {MAX_REDIRECTS} redirects")
 }
@@ -987,7 +1028,7 @@ mod tests {
         let (inside, reached) = serve_once(page("the router's admin page"));
         let (outside, _) = serve_once(redirect(&format!("http://127.0.0.1:{inside}/admin")));
         let blocked = move |a: &std::net::SocketAddr| a.port() == inside;
-        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked, &|_: &str| true, &|| false);
+        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked, &|_: &str, _: Option<&mind_net::EgressTrust>| true, &|| trust_if(false));
         assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{out:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the internal server was reached");
         let text = "A long enough article body to read as the page's text. ".repeat(4);
@@ -997,7 +1038,7 @@ mod tests {
         // so point it at the allowed server with an absolute one too.
         let _ = hop;
         let (hop2, _) = serve_once(redirect(&format!("http://127.0.0.1:{fine}/article")));
-        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true, &|| false).unwrap();
+        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| true, &|| trust_if(false)).unwrap();
         assert!(got.contains("A long enough article body"), "{got}");
     }
 
@@ -1013,7 +1054,7 @@ mod tests {
                 system_resolve(host, p)
             }
         };
-        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false, &|_: &str| true, &|| false);
+        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| true, &|| trust_if(false));
         assert!(got.as_ref().is_ok_and(|t| t.contains("pinned and reached")), "{got:?}");
         assert!(reached.recv_timeout(std::time::Duration::from_secs(1)).is_ok());
     }
@@ -1036,6 +1077,76 @@ mod tests {
         }
     }
 
+    /// A trust with no LAN rules (or none at all).
+    fn trust_if(trusted: bool) -> Option<mind_net::EgressTrust> {
+        trusted.then(|| mind_net::EgressTrust::with_lan_rules(Some(vec![])))
+    }
+
+    /// E.NET1g (M1): a name a LAN rule covers never goes on unresolved -- the proxy would let it into
+    /// the LAN by name -- and neither does any name when the OS could not list its LAN rules.
+    #[test]
+    fn a_lan_rule_name_is_refused_even_through_a_trusted_proxy() {
+        let unresolvable = |_: &str, _: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Err(std::io::Error::other("no DNS for the Mind")) };
+        let proxied = |_: &str, _: Option<&mind_net::EgressTrust>| false;
+        let lan = || Some(mind_net::EgressTrust::with_lan_rules(Some(vec![("gpu.example.ts.net".to_string(), vec![11434])])));
+        let out = fetch_direct_with("http://gpu.example.ts.net:11434/api/tags", &unresolvable, &|_: &std::net::SocketAddr| false, &proxied, &lan);
+        assert!(out.as_ref().is_err_and(|e| e.to_string().contains("couldn't resolve")), "a LAN rule's name went to the proxy: {out:?}");
+        assert!(ssrf_check_routed("http://gpu.example.ts.net:11434/", &unresolvable, &proxied, &lan).is_err(), "ssrf_check let a LAN name go");
+        let unlisted = || Some(mind_net::EgressTrust::with_lan_rules(None));
+        assert!(ssrf_check_routed("http://news.example.org/", &unresolvable, &proxied, &unlisted).is_err(), "with no LAN list, a name went on");
+        assert!(ssrf_check_routed("http://news.example.org/", &unresolvable, &proxied, &lan).is_ok(), "an ordinary name was refused");
+    }
+
+    /// E.NET1g (L1): the OS's word is read once per hop -- the route cannot be decided from one read
+    /// and built from another.
+    #[test]
+    fn the_trust_is_read_once_per_hop() {
+        use std::io::{Read as _, Write as _};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for (i, stream) in server.incoming().take(2).enumerate() {
+                let mut s = stream.unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let reply = if i == 0 {
+                    format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/two\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<p>arrived</p>".to_string()
+                };
+                let _ = s.write_all(reply.as_bytes());
+            }
+        });
+        let reads = std::cell::Cell::new(0);
+        let counted = || {
+            reads.set(reads.get() + 1);
+            None
+        };
+        let out = fetch_direct_with(&format!("http://127.0.0.1:{port}/one"), &system_resolve, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| true, &counted);
+        assert!(out.is_ok(), "{out:?}");
+        assert_eq!(reads.get(), 2, "two hops, so two reads of the OS's word -- one each");
+    }
+
+    /// E.NET1g (residual a): the production lines hand the checks the OS's real word.
+    #[test]
+    fn the_checks_are_wired_to_the_os_signal() {
+        // Each line appears twice: where it runs, and here in this list.
+        let src = include_str!("lib.rs");
+        for line in [
+            "ssrf_check_routed(url, &system_resolve, &mind_net::is_direct_under, &mind_net::egress_trust)",
+            "fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust)",
+            "get_checked_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &mind_net::is_direct_under, &mind_net::egress_trust, timeout, headers)",
+            // E.NET1g (L2): the image fetch takes the checked GET.
+            "get_checked(&url, std::time::Duration::from_secs(30), &[])",
+        ] {
+            assert_eq!(src.matches(line).count(), 2, "not wired to the OS signal: {line}");
+        }
+        // E.NET1g (L2): the paper reader's two GETs of an outside address are the checked GET.
+        let paper = include_str!("paper.rs").split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(paper.matches("crate::get_checked(").count(), 2, "a paper GET is not checked");
+        assert!(!paper.contains("mind_net::get(&fetch_url)") && !paper.contains("mind_net::get(&abs_url)"), "a paper GET goes around the check");
+    }
+
     /// E.NET1e: a name that does not resolve here goes on only through a proxy the OS vouches for, and
     /// only on the proxied path; a name that DOES resolve here is checked as always -- also there.
     #[test]
@@ -1044,26 +1155,26 @@ mod tests {
         let refused = |e: &anyhow::Error| e.to_string().contains("couldn't resolve");
         // (direct, trusted) -> refused here?
         for (direct, trusted, refused_here) in [(false, true, false), (true, true, true), (false, false, true)] {
-            let out = fetch_direct_with("http://news.invalid/a", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct, &|| trusted);
+            let out = fetch_direct_with("http://news.invalid/a", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| direct, &|| trust_if(trusted));
             assert_eq!(out.as_ref().is_err_and(refused), refused_here, "direct={direct} trusted={trusted}: {out:?}");
         }
         // A name that resolves here (localhost, a hosts-file entry) and a literal are judged here even
         // through a trusted proxy.
         let to_loopback = |_: &str, port: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], port))]) };
         for url in ["http://localhost:7440/", "http://memory.lan/"] {
-            let out = fetch_direct_with(url, &to_loopback, &|a| is_blocked_ip(a.ip()), &|_: &str| false, &|| true);
+            let out = fetch_direct_with(url, &to_loopback, &|a| is_blocked_ip(a.ip()), &|_: &str, _: Option<&mind_net::EgressTrust>| false, &|| trust_if(true));
             assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{url} went to the proxy unchecked: {out:?}");
         }
         for url in ["http://192.168.4.1/admin", "http://[::ffff:127.0.0.1]:7440/"] {
-            let out = fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &|_: &str| false, &|| true);
+            let out = fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()), &|_: &str, _: Option<&mind_net::EgressTrust>| false, &|| trust_if(true));
             assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{url} went to the proxy unchecked: {out:?}");
         }
         // The fetch tool's own first check (and the media pipeline's) follows the same rule.
         for (direct, trusted, refused_here) in [(false, true, false), (true, true, true), (false, false, true)] {
-            let out = ssrf_check_routed("http://news.invalid/", &unresolvable, &|_: &str| direct, &|| trusted);
+            let out = ssrf_check_routed("http://news.invalid/", &unresolvable, &|_: &str, _: Option<&mind_net::EgressTrust>| direct, &|| trust_if(trusted));
             assert_eq!(out.is_err(), refused_here, "ssrf_check direct={direct} trusted={trusted}");
         }
-        assert!(ssrf_check_routed("http://localhost/", &to_loopback, &|_: &str| false, &|| true).is_err(), "ssrf_check let localhost through");
+        assert!(ssrf_check_routed("http://localhost/", &to_loopback, &|_: &str, _: Option<&mind_net::EgressTrust>| false, &|| trust_if(true)).is_err(), "ssrf_check let localhost through");
     }
 
     /// E.NET1b: through the egress proxy too, a host that does not resolve here is refused -- a name
@@ -1072,7 +1183,7 @@ mod tests {
     fn an_unresolvable_host_is_refused_on_the_proxy_path_too() {
         let unresolvable = |_: &str, _: u16| -> std::io::Result<Vec<std::net::SocketAddr>> { Err(std::io::Error::other("no such host")) };
         for direct in [true, false] {
-            let out = fetch_direct_with("http://homeassistant.lan:8123/", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str| direct, &|| false);
+            let out = fetch_direct_with("http://homeassistant.lan:8123/", &unresolvable, &|_: &std::net::SocketAddr| false, &|_: &str, _: Option<&mind_net::EgressTrust>| direct, &|| trust_if(false));
             assert!(out.as_ref().is_err_and(|e| e.to_string().contains("couldn't resolve")), "direct={direct}: {out:?}");
         }
     }
@@ -1280,11 +1391,9 @@ pub async fn fetch_image_bytes(url: &str) -> Option<Vec<u8>> {
     let url = url.to_string();
     tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
         use std::io::Read;
-        ssrf_check(&url).ok()?;
+        // E.NET1g (L2): every redirect checked too, not only the first address.
         let mut buf = Vec::new();
-        mind_net::get(&url)
-            .timeout(std::time::Duration::from_secs(30))
-            .call()
+        get_checked(&url, std::time::Duration::from_secs(30), &[])
             .ok()?
             .into_reader()
             .take(8_000_000)

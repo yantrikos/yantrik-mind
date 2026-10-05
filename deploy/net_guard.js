@@ -30,7 +30,7 @@ const http = require("http");
 const https = require("https");
 const RANGES = require("./private_ranges.json");
 
-const EGRESS_SIGNAL = "/run/yantrik/mind-egress.json";
+const EGRESS_SIGNAL = "/run/yantrik-mind-egress/mind-egress.json";
 
 const MAX_BODY = 20 * 1024 * 1024;
 
@@ -144,7 +144,7 @@ function configuredProxy(env = process.env) {
 function readRootFile(file, deps = {}) {
   const f = deps.fs || fs;
   const d = f.lstatSync(path.dirname(file));
-  if (!d.isDirectory() || d.uid !== 0 || d.mode & 0o022) throw new Error("its folder is not root's alone");
+  if (!d.isDirectory() || d.uid !== 0 || d.gid !== 0 || d.mode & 0o022) throw new Error("its folder is not root's alone");
   const fd = f.openSync(file, f.constants.O_RDONLY | (f.constants.O_NOFOLLOW || 0));
   try {
     const st = f.fstatSync(fd);
@@ -155,18 +155,44 @@ function readRootFile(file, deps = {}) {
   }
 }
 
-// E.NET1e: the proxy to leave the check to, or null. Trusted only whole: version 1, enforced, the
-// proxy refusing private ranges, and the proxy this process is configured with.
-function trustedProxy(deps = {}) {
+// E.NET1e: what the OS vouches for -- { proxy, lan } -- or null. Trusted only whole: version 2,
+// enforced, the proxy refusing private ranges, the proxy this process is configured with, and
+// (E.NET1g) `lan_hosts`: the LAN rules' hosts and ports, or null when the OS could not list them.
+function egressTrust(deps = {}) {
   try {
     const said = JSON.parse(readRootFile(deps.signal || EGRESS_SIGNAL, deps));
     const ours = configuredProxy(deps.env || process.env);
     if (!ours || typeof said.proxy !== "string") return null;
     const same = said.proxy.trim().replace(/\/+$/, "") === ours.replace(/\/+$/, "");
-    return said.version === 1 && said.enforced === true && said.proxy_refuses_private === true && same ? ours : null;
+    if (!(said.version === 2 && said.enforced === true && said.proxy_refuses_private === true && same)) return null;
+    if (said.lan_hosts === null) return { proxy: ours, lan: null };
+    const port = (p) => Number.isInteger(p) && p > 0 && p < 65536;
+    const rule = (r) => r && typeof r.host === "string" && Array.isArray(r.ports) && r.ports.every(port);
+    if (!Array.isArray(said.lan_hosts) || !said.lan_hosts.every(rule)) return null;
+    const lan = said.lan_hosts.map((r) => ({ host: r.host.trim().replace(/\.$/, "").toLowerCase(), ports: r.ports }));
+    return { proxy: ours, lan };
   } catch (_) {
     return null;
   }
+}
+
+// Does a LAN rule's host cover `host`? `*.example.com` as a suffix -- names under it and, wider than
+// the proxy's own match (safe here), example.com itself; anything else is the one name.
+function lanRuleCovers(pattern, host) {
+  if (pattern.startsWith("*.")) {
+    const d = pattern.slice(2);
+    return host === d || (host.length > d.length + 1 && host.endsWith(d) && host.slice(0, host.length - d.length).endsWith("."));
+  }
+  return pattern === host;
+}
+
+// E.NET1g (review M1): may a name that did not resolve here go on to the proxy? Not when a LAN rule
+// covers it -- the proxy would let it into the LAN by name -- nor when the OS could not list them.
+// Any port (4c, #665's review): a LAN service's other ports are no business of a fetch from outside.
+function leavesToProxy(trust, host) {
+  if (!trust.lan) return false;
+  const h = String(host).toLowerCase().replace(/\.$/, "");
+  return !trust.lan.some((r) => lanRuleCovers(r.host, h));
 }
 
 function collect(r, resolve, reject) {
@@ -195,13 +221,14 @@ function send(r, req, reject) {
 
 // E.NET1e: one request through the egress proxy -- absolute-form for http, a CONNECT tunnel and TLS
 // (verified against the host) for https. Nothing is resolved here.
-function fetchViaProxy(u, host, proxyText, req) {
+function fetchViaProxy(u, host, proxyText, req, deps = {}) {
   const p = new URL(proxyText);
   const proxy = { host: p.hostname.replace(/^\[|\]$/g, ""), port: Number(p.port) || 80 };
   const headers = { ...(req.headers || {}), host: u.host };
   if (u.protocol === "http:") {
     return new Promise((resolve, reject) => {
-      const r = http.request({ ...proxy, method: req.method || "GET", path: u.href, headers });
+      // E.NET1g (L4): the absolute form without userinfo -- a user:password in a URL is not the proxy's.
+      const r = http.request({ ...proxy, method: req.method || "GET", path: u.origin + u.pathname + u.search, headers });
       r.on("response", collect(r, resolve, reject));
       send(r, req, reject);
     });
@@ -210,12 +237,16 @@ function fetchViaProxy(u, host, proxyText, req) {
   const target = `${net.isIP(host) === 6 ? `[${host}]` : host}:${port}`;
   return new Promise((resolve, reject) => {
     const c = http.request({ ...proxy, method: "CONNECT", path: target, headers: { host: target } });
+    // The tunnel must open in time; once it is open the request's own timeout governs (E.NET1g, L4:
+    // the CONNECT's timer used to stay armed on the tunnelled socket and cut a slow page off).
+    const opening = setTimeout(() => c.destroy(new Error("timeout")), deps.connectTimeoutMs || 15000);
     c.on("connect", (res, socket) => {
+      clearTimeout(opening);
       if (res.statusCode !== 200) {
         socket.destroy();
         return reject(new Error(`blocked: the proxy refused ${target} (${res.statusCode})`));
       }
-      const secure = tls.connect({ socket, host, servername: net.isIP(host) ? undefined : host });
+      const secure = tls.connect({ socket, host, servername: net.isIP(host) ? undefined : host, ...(deps.tls || {}) });
       // A failed handshake (a certificate for another host) refuses this request; unheard, it would
       // end the whole process.
       secure.on("error", reject);
@@ -225,14 +256,17 @@ function fetchViaProxy(u, host, proxyText, req) {
         method: req.method || "GET",
         path: u.pathname + u.search,
         headers,
-        agent: false,
+        // No agent: Node then uses createConnection -- the tunnel. (`agent: false` made a fresh agent
+        // that ignored it and connected to the host directly; E.NET1g found it.)
         createConnection: () => secure,
       });
       r.on("response", collect(r, resolve, reject));
       send(r, req, reject);
     });
-    c.on("error", reject);
-    c.setTimeout(15000, () => c.destroy(new Error("timeout")));
+    c.on("error", (e) => {
+      clearTimeout(opening);
+      reject(e);
+    });
     c.end();
   });
 }
@@ -243,16 +277,17 @@ async function fetchPinned(urlText, req = {}, deps = {}) {
   const u = new URL(urlText);
   if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("blocked: not http(s)");
   const host = u.hostname.replace(/^\[|\]$/g, "");
-  const proxy = (deps.trustedProxy || trustedProxy)(deps);
-  if (proxy) {
+  const trust = (deps.egressTrust || egressTrust)(deps);
+  if (trust) {
     // Checked here as always -- localhost, a hosts-file name and a literal resolve with no DNS. Only a
-    // name that does not resolve here is left to the proxy, which refuses private ranges itself.
+    // name that does not resolve here is left to the proxy, which refuses private ranges itself --
+    // and (E.NET1g, M1) never one a LAN rule covers.
     try {
       await checkedAddresses(host, deps);
     } catch (e) {
-      if (!e.unresolved) throw e;
+      if (!e.unresolved || !leavesToProxy(trust, host)) throw e;
     }
-    return fetchViaProxy(u, host, proxy, req);
+    return fetchViaProxy(u, host, trust.proxy, req, deps);
   }
   const [pick] = await checkedAddresses(host, deps);
   const mod = u.protocol === "https:" ? https : http;
@@ -323,8 +358,8 @@ async function guardContext(ctx) {
 // E.NET1e: under the OS's enforced rules, the browser's own traffic (whatever the page guard does not
 // carry) meets the proxy rather than a reset.
 function withProxy(options, deps = {}) {
-  const proxy = (deps.trustedProxy || trustedProxy)(deps);
-  return proxy && !options.proxy ? { ...options, proxy: { server: proxy } } : options;
+  const trust = (deps.egressTrust || egressTrust)(deps);
+  return trust && !options.proxy ? { ...options, proxy: { server: trust.proxy } } : options;
 }
 
 // E.NET1f (the fourteenth pass): the lock at RUN time. Playwright's browser types (chromium, firefox,
@@ -404,7 +439,7 @@ module.exports = {
   checkedAddresses,
   hostIsPrivate,
   fetchPinned,
-  trustedProxy,
+  egressTrust,
   guardContext,
   lockBrowserTypes,
   launchGuarded,

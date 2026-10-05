@@ -14640,3 +14640,71 @@ The review is a commit comment on f1364f0.
   - Two runs on one build give a range (0–4), not a score.
   - No comparison with R1d2, since the protocol differs.
   - The search-collision cause is a hypothesis until the journal is read.
+
+## E.NET1g — RESULT: the review of 6a8531d..f1364f0 answered; 33 mutants killed, 1 equivalent; a hollow check in E.NET1e corrected
+
+**Built, as preregistered, with #665's changes (4c):**
+- **M1:**
+  - The signal is trusted only at version 2 with `lan_hosts` (a list of {host, ports}, or null).
+  - On the trusted-unresolved path, a name a LAN rule covers is refused on ANY port; `*.domain` covers the domain and every name under it.
+  - With `lan_hosts: null`, every unresolved name is refused.
+  - In Rust a configured endpoint's host is refused too.
+  - The signal is now at `/run/yantrik-mind-egress/mind-egress.json`, and its folder must be root:root as well as unwritable by others.
+- **M2:**
+  - yt-dlp and ffmpeg run without NO_PROXY/no_proxy, with the proxy in their env and as `--proxy` / `-http_proxy`.
+  - The stream address yt-dlp returns is checked (`checked_stream`) before ffmpeg gets it.
+  - YM_YTDLP_BIN and YM_FFMPEG_BIN are person-only, with built-in defaults.
+- **L1:** `egress_trust()` is read once per hop. The route is decided from it (`is_direct_under`) and the agent built on that decision (`route_decided`).
+- **L2:** one checked GET, `get_checked`, for the fetch tool, `fetch_image_bytes` and both of `fetch_paper`'s GETs. Redirects are followed in the hop loop, each hop checked.
+- **L3:** `BUILT_IN_DEFAULT_KEYS`: without the person's file, the browser scripts, the Playwright path and the media binaries take their built-in defaults, never the env. The env fallback for endpoints and routing carries its removal condition in the code.
+- **L4:**
+  - The proxy's request line is origin + path + query, without userinfo.
+  - The CONNECT gets its own timer, cleared once the tunnel opens. Note: with Node 24, the OLD `c.setTimeout` did not cut a tunnel off either; its mutant passed a 400 ms page through a 150 ms limit, so it is equivalent and the timer is hygiene.
+- **Residual (a):** `the_checks_are_wired_to_the_os_signal` asserts the production lines: ssrf_check, fetch_direct, get_checked, the image fetch, and no unchecked paper GET.
+- **Residual (b):** net_guard.test.js run on real Linux node (staging, node 20, 4c's go-ahead):
+  - as root: root's own signal is trusted; a link, a writable file and a writable folder are not;
+  - as nobody: nothing is trusted;
+  - three real-file mutants are killed as root.
+
+**Found while building:**
+1. **The https tunnel was bypassed.** `fetchViaProxy` passed `agent: false`, so Node made a fresh agent that IGNORED `createConnection` and resolved and connected to the site directly: the CONNECT reached the proxy and carried nothing. **Correction to E.NET1e:** its real-site check ("example.com: 200, no lookup") passed only because example.com resolved and the direct connection worked. Under enforcement it would have been reset. Fixed: no agent, so Node uses `createConnection`. An offline test now carries a whole https request to `tunnel.test` (a name that cannot resolve, with a test-only certificate trusted only through the test's `ca`) through a local tunnel, and refuses that certificate without the `ca`. The `agent: false` mutant is killed.
+2. **The scan's own rule** caught the proxy keys written in an array in media.rs. They are written as literal `.env("K", p)` / `.env_remove("K")` calls instead, and `.env_remove(` is an allowed form (taking a key away from a child, not reading it).
+
+**Mutants:**
+- Rust, 17 locally:
+  - a LAN name left to the proxy;
+  - a wildcard missing a subdomain, or the domain;
+  - a configured endpoint's host;
+  - no LAN list trusted;
+  - no `lan_hosts`;
+  - version 1;
+  - a browser script from the env;
+  - the media binaries not person-only;
+  - NO_PROXY kept;
+  - no `--proxy`;
+  - no `-http_proxy`;
+  - the stream unchecked;
+  - the image fetch unchecked;
+  - a second trust read;
+  - ssrf_check without trust;
+  - `leaves_unresolved` ignoring the LAN rules.
+- Rust, 4 on Linux staging: O_NOFOLLOW, the folder check, the handle check, and the folder's group. The group mutant SURVIVED first and is killed by a chown case.
+- JS, 9 locally:
+  - a LAN name;
+  - no LAN list;
+  - a malformed `lan_hosts`;
+  - a wildcard (subdomain, domain);
+  - version 1;
+  - a folder of another group;
+  - userinfo;
+  - the agent bypass.
+- JS, 3 on Linux as root: real-file link, file and folder.
+- Equivalent, 1: the old socket timeout (above).
+- **Removed as dead:** the JS `hasOwnProperty("lan_hosts")` line. The array check already refuses a missing list, and its mutant passed for that reason.
+
+**Runs:**
+- Full suite 2325 passed, 0 failed.
+- Linux staging: mind-net 11, mind-tools 262, mind-core 139, mind-conversation 1134.
+- net_guard.test.js on Windows and on Linux (root and nobody).
+
+**Residual:** the signal says what was LAST loaded. A hand-run `nft flush ruleset` leaves it stale until the next apply (4c); the proxy's own refusal still holds then.

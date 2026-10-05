@@ -56,7 +56,7 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
 
   // E.NET1e (yantrik-os #662): under the OS's enforced rules a request goes THROUGH the proxy and
   // nothing is looked up here; a literal private address is still refused here.
-  const { trustedProxy } = require("./net_guard");
+  const { egressTrust } = require("./net_guard");
   const seen = [];
   const proxyServer = http.createServer((req, res) => {
     seen.push(`${req.method} ${req.url}`);
@@ -78,7 +78,7 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
       if (h === "inside.test") return [{ address: "127.0.0.1", family: 4 }]; // a hosts-file name
       throw new Error(`ENOTFOUND ${h}`); // enforce mode: no DNS for the Mind
     },
-    trustedProxy: () => proxyAt,
+    egressTrust: () => ({ proxy: proxyAt, lan: [] }),
   };
   const got1e = await fetchPinned("http://news.invalid/a?b=1", {}, viaProxy);
   assert.strictEqual(got1e.body.toString(), "via the proxy");
@@ -89,23 +89,91 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   assert.strictEqual(seen.length, 2);
   await assert.rejects(fetchPinned("http://inside.test/", {}, viaProxy), /private/, "a name resolving inside went to the proxy");
   assert.strictEqual(seen.length, 2);
+  // E.NET1g (M1): a name a LAN rule covers never goes on unresolved -- the proxy would let it into the
+  // LAN by name -- and with no LAN list, no name does.
+  const lanTrust = { proxy: proxyAt, lan: [{ host: "gpu.example.ts.net", ports: [11434] }, { host: "*.home.arpa", ports: [80] }] };
+  const viaLan = { ...viaProxy, egressTrust: () => lanTrust };
+  await assert.rejects(fetchPinned("http://gpu.example.ts.net:11434/api/tags", {}, viaLan), /does not resolve/, "a LAN rule's name went to the proxy");
+  await assert.rejects(fetchPinned("http://GPU.example.ts.net.:11434/", {}, viaLan), /does not resolve/, "case or a trailing dot slipped a LAN name through");
+  await assert.rejects(fetchPinned("http://ha.home.arpa/", {}, viaLan), /does not resolve/, "a wildcard LAN rule did not cover its subdomain");
+  await assert.rejects(fetchPinned("http://home.arpa/", {}, viaLan), /does not resolve/, "a wildcard LAN rule did not cover its domain");
+  await assert.rejects(fetchPinned("http://gpu.example.ts.net:22/", {}, viaLan), /does not resolve/, "a LAN rule's host on another port went to the proxy");
+  await assert.rejects(fetchPinned("http://news.invalid/", {}, { ...viaProxy, egressTrust: () => ({ proxy: proxyAt, lan: null }) }), /does not resolve/, "with no LAN list, a name went on");
+  assert.strictEqual(seen.length, 2, "a LAN name reached the proxy");
+  // E.NET1g (L4): no userinfo in the request line the proxy sees.
+  await fetchPinned("http://someone:secret@news.invalid/u", {}, viaProxy);
+  assert.strictEqual(seen[2], "GET http://news.invalid/u", "userinfo went to the proxy");
+  seen.splice(2, 1);
   // A failed handshake refuses the request -- it does not end the process.
   await assert.rejects(fetchPinned("https://garbled.invalid/", {}, viaProxy));
   assert.strictEqual(seen[2], "CONNECT garbled.invalid:443");
+
+  // E.NET1g (L4): a whole https request through the tunnel, offline -- a local TLS server for
+  // tunnel.test (a test-only certificate, trusted here and nowhere else) that answers slowly. The
+  // CONNECT's timer must not cut it off once the tunnel is open.
+  const tls = require("tls");
+  const net = require("net");
+  const TEST_CERT = `-----BEGIN CERTIFICATE-----
+MIIBnDCCAUGgAwIBAgIUXPj9AoTYblc/oXvQFiJrAf4iFzQwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLdHVubmVsLnRlc3QwIBcNMjYxMDA1MTc1NTQyWhgPMjA1NjA5
+MjcxNzU1NDJaMBYxFDASBgNVBAMMC3R1bm5lbC50ZXN0MFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEZ0wRCEpVx76T+9ZLaRlmEbtNH8n87Oe+bZr0NrHO14D7QyIm
+/51maYD0IzNr4n7WdJSwKJ/QZ+hThwE0Df2JXKNrMGkwHQYDVR0OBBYEFE3lbdOC
+RAVqLtFuvPz8jK6XUNNSMB8GA1UdIwQYMBaAFE3lbdOCRAVqLtFuvPz8jK6XUNNS
+MA8GA1UdEwEB/wQFMAMBAf8wFgYDVR0RBA8wDYILdHVubmVsLnRlc3QwCgYIKoZI
+zj0EAwIDSQAwRgIhAMxwPNtdVjrpK9Hd3TWnbJjtyBf8Av54Y1W/ANajaO+9AiEA
+iUSrMBMHYt0LyZLnbar65F0FL3hvwH6aw37yv23mKNs=
+-----END CERTIFICATE-----`;
+  const TEST_KEY = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgVJ4x8vls/GRhfm6l
+waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
+575tmvQ2sc7XgPtDIib/nWZpgPQjM2viftZ0lLAon9Bn6FOHATQN/Ylc
+-----END PRIVATE KEY-----`;
+  const site = tls.createServer({ cert: TEST_CERT, key: TEST_KEY }, (s) => {
+    s.once("data", () => setTimeout(() => s.end("HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntunnels"), 400));
+  });
+  await new Promise((r) => site.listen(0, "127.0.0.1", r));
+  const tunneller = http.createServer();
+  tunneller.on("connect", (req, client) => {
+    seen.push(`CONNECT ${req.url}`);
+    const up = net.connect(site.address().port, "127.0.0.1", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      up.pipe(client);
+      client.pipe(up);
+    });
+    // A refused handshake resets the pipe; that is the test's fixture, not the code under test.
+    up.on("error", () => client.destroy());
+    client.on("error", () => up.destroy());
+  });
+  await new Promise((r) => tunneller.listen(0, "127.0.0.1", r));
+  const viaTunnel = {
+    lookup: async (h) => {
+      throw new Error(`ENOTFOUND ${h}`);
+    },
+    egressTrust: () => ({ proxy: `http://127.0.0.1:${tunneller.address().port}`, lan: [] }),
+    tls: { ca: TEST_CERT },
+    connectTimeoutMs: 150,
+  };
+  const tunnelled = await fetchPinned("https://tunnel.test/page", {}, viaTunnel);
+  assert.strictEqual(tunnelled.body.toString(), "tunnels", "the tunnel was cut off after it opened");
+  await assert.rejects(fetchPinned("https://tunnel.test/page", {}, { ...viaTunnel, tls: {} }), /self.signed|certificate/i, "an unknown certificate was accepted");
+  tunneller.close();
+  site.close();
   proxyServer.close();
 
   // E.NET1e: the signal is trusted only whole -- root's file, opened without following a link, in
   // root's folder; version 1, enforced, the proxy refusing private ranges, and our own proxy.
   const WHOLE = JSON.stringify({
     enforced: true, table: "inet yantrik_mind_egress", proxy: "http://127.0.0.1:7450", proxy_refuses_private: true,
-    mode: "enforce", private: false, dns_allowed: false, loaded_at: 1790000000, version: 1,
+    mode: "enforce", private: false, dns_allowed: false, loaded_at: 1790000000,
+    lan_hosts: [{ host: "homeassistant.local", ports: [8123] }], version: 2,
   });
   const NOFOLLOW = 0o400000;
   const signalFs = (o = {}) => {
     const st = (s) => ({ isDirectory: () => !!s.dir, isFile: () => !!s.file, uid: s.uid, mode: s.mode });
     return {
       constants: { O_RDONLY: 0, O_NOFOLLOW: NOFOLLOW },
-      lstatSync: () => st({ dir: true, uid: o.dirUid ?? 0, mode: o.dirMode ?? 0o755 }),
+      lstatSync: () => ({ ...st({ dir: true, uid: o.dirUid ?? 0, mode: o.dirMode ?? 0o755 }), gid: o.dirGid ?? 0 }),
       openSync: (_f, flags) => {
         if (o.missing) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
         if (o.link && flags & NOFOLLOW) throw Object.assign(new Error("ELOOP"), { code: "ELOOP" });
@@ -118,8 +186,9 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     };
   };
   const ourEnv = { HTTPS_PROXY: "http://127.0.0.1:7450" };
-  const trust = (o, env = ourEnv) => trustedProxy({ fs: signalFs(o), env, signal: "/run/yantrik/mind-egress.json" });
-  assert.strictEqual(trust({}), "http://127.0.0.1:7450", "the whole signal was not trusted");
+  const trust = (o, env = ourEnv) => egressTrust({ fs: signalFs(o), env, signal: "/run/yantrik/mind-egress.json" });
+  assert.deepStrictEqual(trust({}), { proxy: "http://127.0.0.1:7450", lan: [{ host: "homeassistant.local", ports: [8123] }] }, "the whole signal was not trusted");
+  assert.deepStrictEqual(trust({ text: WHOLE.replace('[{"host":"homeassistant.local","ports":[8123]}]', "null") }), { proxy: "http://127.0.0.1:7450", lan: null });
   for (const [o, why] of [
     [{ missing: true }, "no file"],
     [{ link: true }, "a link"],
@@ -127,15 +196,46 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     [{ uid: 1000 }, "a file not root's"],
     [{ dirMode: 0o777 }, "a folder others can write"],
     [{ dirUid: 1000 }, "a folder not root's"],
+    [{ dirGid: 1000 }, "a folder whose group is not root's"],
     [{ text: WHOLE.replace('"enforced":true', '"enforced":false') }, "not enforced"],
     [{ text: WHOLE.replace('"proxy_refuses_private":true', '"proxy_refuses_private":false') }, "a proxy letting private ranges through"],
-    [{ text: WHOLE.replace('"version":1', '"version":2') }, "an unknown version"],
+    [{ text: WHOLE.replace('"version":2', '"version":1') }, "the version before lan_hosts"],
+    [{ text: WHOLE.replace('"version":2', '"version":3') }, "an unknown version"],
+    [{ text: WHOLE.replace('"lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],', "") }, "no lan_hosts"],
+    [{ text: WHOLE.replace('"ports":[8123]', '"ports":["8123"]') }, "a malformed LAN rule"],
     [{ text: "enforced: true" }, "not JSON"],
   ]) {
     assert.strictEqual(trust(o), null, `trusted: ${why}`);
   }
   assert.strictEqual(trust({}, {}), null, "trusted with no proxy configured");
   assert.strictEqual(trust({}, { HTTPS_PROXY: "http://10.0.0.9:3128" }), null, "trusted for another proxy");
+
+  // E.NET1g (review residual b): the same read against REAL files, on Linux -- run as root, root's
+  // own 0644 signal in a 0755 folder is trusted; run as any other uid, nothing is (the file is not
+  // root's). A link, a file others can write and a folder others can write never are.
+  if (process.platform === "linux") {
+    const fsr = require("fs");
+    const pth = require("path");
+    const base = fsr.mkdtempSync(pth.join(require("os").tmpdir(), "ym-signal-"));
+    fsr.chmodSync(base, 0o755);
+    const file = pth.join(base, "mind-egress.json");
+    fsr.writeFileSync(file, WHOLE);
+    fsr.chmodSync(file, 0o644);
+    const real = (f) => egressTrust({ env: ourEnv, signal: f });
+    const root = process.getuid() === 0;
+    assert.strictEqual(real(file) !== null, root, root ? "root's own signal was not trusted" : "a signal not owned by root was trusted");
+    const link = pth.join(base, "linked.json");
+    fsr.symlinkSync(file, link);
+    assert.strictEqual(real(link), null, "a link to the signal was followed");
+    fsr.chmodSync(file, 0o666);
+    assert.strictEqual(real(file), null, "a signal others can write was trusted");
+    fsr.chmodSync(file, 0o644);
+    fsr.chmodSync(base, 0o777);
+    assert.strictEqual(real(file), null, "a signal in a folder others can write was trusted");
+    fsr.chmodSync(base, 0o755);
+    fsr.rmSync(base, { recursive: true, force: true });
+    console.log(`net_guard: the real signal read checked as uid ${process.getuid()} (trusted: ${root})`);
+  }
 
   // E.NET1c: without WebSocket routing the guard refuses to run at all; with it, it routes.
   const { guardContext } = require("./net_guard");
@@ -178,11 +278,11 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   // E.NET1e: under the OS's enforced rules the browser itself is pointed at the proxy.
   let launchedWith = null;
   const proxiedChromium = { ...fakeChromium, launch: async (opts) => { launchedWith = opts; return fakeChromium.launch(); } };
-  await launchGuarded(proxiedChromium, {}, {}, { trustedProxy: () => "http://127.0.0.1:7450" });
+  await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => ({ proxy: "http://127.0.0.1:7450", lan: [] }) });
   assert.deepStrictEqual(launchedWith.proxy, { server: "http://127.0.0.1:7450" }, "the browser was not pointed at the proxy");
-  const pp = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {}, { trustedProxy: () => "http://127.0.0.1:7450" });
+  const pp = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {}, { egressTrust: () => ({ proxy: "http://127.0.0.1:7450", lan: [] }) });
   assert.deepStrictEqual(pp.ctx.opts.proxy, { server: "http://127.0.0.1:7450" }, "the persistent browser was not pointed at the proxy");
-  await launchGuarded(proxiedChromium, {}, {}, { trustedProxy: () => null });
+  await launchGuarded(proxiedChromium, {}, {}, { egressTrust: () => null });
   assert.strictEqual(launchedWith.proxy, undefined, "a proxy was set without the OS's word");
   // E.NET1f: a persistent profile restores nothing (its saved session is removed first), and a page
   // already open starts again at about:blank under the guard.
@@ -220,10 +320,10 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     assert.throws(() => typed[m](), /blocked/, `${m} ran outside the launchers`);
   }
   assert.throws(() => Object.defineProperty(FakeType.prototype, "launch", { value: async () => "unlocked" }), TypeError, "the lock could be replaced");
-  const viaLauncher = await launchGuarded(typed, {}, {}, { trustedProxy: () => null });
+  const viaLauncher = await launchGuarded(typed, {}, {}, { egressTrust: () => null });
   assert.ok(viaLauncher.ctx.routes.includes("**/*"), "the launcher's own launch was blocked");
-  await launchPersistentGuarded(typed, "/tmp/profile", {}, { fs: recordingFs, trustedProxy: () => null });
-  await assert.rejects(launchGuarded(typed, { sneak: true }, {}, { trustedProxy: () => null }), /blocked: connectOverCDP/, "a launcher's permission reached another method");
+  await launchPersistentGuarded(typed, "/tmp/profile", {}, { fs: recordingFs, egressTrust: () => null });
+  await assert.rejects(launchGuarded(typed, { sneak: true }, {}, { egressTrust: () => null }), /blocked: connectOverCDP/, "a launcher's permission reached another method");
 
   const noWs = { launch: async () => ({ newContext: async () => ({ route: async () => {} }), close: async function () { this.closed = true; } }) };
   await assert.rejects(launchGuarded(noWs), /WebSocket/, "a context that cannot be guarded was handed out");

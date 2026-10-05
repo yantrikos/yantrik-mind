@@ -103,11 +103,12 @@ pub fn live_window_secs() -> u64 {
 }
 
 fn ytdlp_bin() -> String {
-    std::env::var("YM_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".into())
+    // E.NET1g: the person's to set (a wrapper could drop the proxy); otherwise the built-in default.
+    mind_net::person_var("YM_YTDLP_BIN").unwrap_or_else(|_| "yt-dlp".into())
 }
 
 fn ffmpeg_bin() -> String {
-    std::env::var("YM_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into())
+    mind_net::person_var("YM_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".into())
 }
 
 /// Is an external binary actually present?
@@ -124,13 +125,36 @@ pub fn have(bin: &str) -> bool {
 /// Run a command under a hard wall-clock kill, so a hung download can never wedge the mind.
 /// Mirrors the headless-fetch pattern: `timeout` owns the deadline, argv owns the safety.
 fn run_bounded(bin: &str, args: &[&str]) -> anyhow::Result<std::process::Output> {
-    let out = Command::new("timeout")
-        .arg(PROC_TIMEOUT_SECS.to_string())
-        .arg(bin)
-        .args(args)
+    let out = bounded_command(bin, args, mind_net::configured_proxy().as_deref(), &ytdlp_bin(), &ffmpeg_bin())
         .output()
         .map_err(|e| anyhow::anyhow!("could not run {bin}: {e}"))?;
     Ok(out)
+}
+
+/// E.NET1g (review M2): yt-dlp and ffmpeg follow redirects and extractor- or playlist-chosen URLs the
+/// Mind never sees, so every hop they make must meet the egress proxy (which refuses loopback and
+/// the LAN): NO_PROXY is taken away from them, and the proxy is set explicitly -- in the env, and as
+/// yt-dlp's `--proxy` and ffmpeg's `-http_proxy`.
+fn bounded_command(bin: &str, args: &[&str], proxy: Option<&str>, ytdlp: &str, ffmpeg: &str) -> Command {
+    let mut cmd = Command::new("timeout");
+    cmd.arg(PROC_TIMEOUT_SECS.to_string()).arg(bin);
+    cmd.env_remove("NO_PROXY");
+    cmd.env_remove("no_proxy");
+    if let Some(p) = proxy {
+        cmd.env("HTTP_PROXY", p);
+        cmd.env("http_proxy", p);
+        cmd.env("HTTPS_PROXY", p);
+        cmd.env("https_proxy", p);
+        cmd.env("ALL_PROXY", p);
+        cmd.env("all_proxy", p);
+        if bin == ytdlp {
+            cmd.args(["--proxy", p]);
+        } else if bin == ffmpeg {
+            cmd.args(["-http_proxy", p]);
+        }
+    }
+    cmd.args(args);
+    cmd
 }
 
 /// A scratch directory for one media job, removed when the guard drops — the download is a means,
@@ -427,11 +451,19 @@ fn stream_url(url: &str, want_audio: bool) -> anyhow::Result<String> {
                 .trim()
         );
     }
-    let s = String::from_utf8_lossy(&out.stdout);
-    s.lines()
+    checked_stream(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The stream address in yt-dlp's `-g` output. E.NET1g (review M2): yt-dlp chose it, not the person,
+/// so it is checked like any other address before ffmpeg is handed it.
+fn checked_stream(stdout: &str) -> anyhow::Result<String> {
+    let stream = stdout
+        .lines()
         .find(|l| l.starts_with("http"))
-        .map(|l| l.to_string())
-        .ok_or_else(|| anyhow::anyhow!("no stream url returned"))
+        .map(|l| l.trim().to_string())
+        .ok_or_else(|| anyhow::anyhow!("no stream url returned"))?;
+    crate::ssrf_check_pub(&stream)?;
+    Ok(stream)
 }
 
 /// One thing that was said, and when — the unit that lets speech line up with pictures.
@@ -677,6 +709,41 @@ pub fn keyframes_at(
 
 #[cfg(test)]
 mod tests {
+    /// E.NET1g (M2): the media tools never get NO_PROXY, and are handed the proxy three ways.
+    #[test]
+    fn media_tools_meet_the_proxy_on_every_hop() {
+        let p = "http://127.0.0.1:7450";
+        let args_of = |c: &std::process::Command| c.get_args().map(|a| a.to_string_lossy().to_string()).collect::<Vec<_>>();
+        let envs_of = |c: &std::process::Command| {
+            c.get_envs().map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect::<Vec<_>>()
+        };
+        let y = super::bounded_command("yt-dlp", &["-g", "https://v.example/x"], Some(p), "yt-dlp", "ffmpeg");
+        assert_eq!(args_of(&y)[1..], ["yt-dlp", "--proxy", p, "-g", "https://v.example/x"], "yt-dlp was not given the proxy");
+        // (Env names are case-insensitive on Windows, where both spellings are one variable.)
+        let has = |envs: &[(String, Option<String>)], key: &str, val: Option<&str>| {
+            envs.iter().any(|(k, v)| k.eq_ignore_ascii_case(key) && v.as_deref() == val)
+        };
+        let envs = envs_of(&y);
+        assert!(has(&envs, "no_proxy", None), "NO_PROXY reached yt-dlp: {envs:?}");
+        assert!(has(&envs, "https_proxy", Some(p)) && has(&envs, "http_proxy", Some(p)), "the env proxy was not set: {envs:?}");
+        let f = super::bounded_command("ffmpeg", &["-y", "-i", "https://s.example/a.m3u8"], Some(p), "yt-dlp", "ffmpeg");
+        assert_eq!(args_of(&f)[1..4], ["ffmpeg", "-http_proxy", p], "ffmpeg was not given the proxy before its input");
+        assert!(has(&envs_of(&f), "no_proxy", None), "no_proxy reached ffmpeg");
+        let w = super::bounded_command("whisper-cli", &["-m", "m.bin"], Some(p), "yt-dlp", "ffmpeg");
+        assert_eq!(args_of(&w)[1..], ["whisper-cli", "-m", "m.bin"], "a local tool was given network flags");
+        let none = super::bounded_command("yt-dlp", &["-g", "u"], None, "yt-dlp", "ffmpeg");
+        assert_eq!(args_of(&none)[1..], ["yt-dlp", "-g", "u"], "no proxy configured, yet one was passed");
+    }
+
+    /// E.NET1g (M2): a stream address yt-dlp hands back is checked before ffmpeg gets it.
+    #[test]
+    fn a_stream_address_from_yt_dlp_is_checked() {
+        for inside in ["http://127.0.0.1:8341/slots\n", "https://192.168.4.10:8123/x.m3u8\n", "WARNING: x\nhttp://[::1]:7440/mcp\n"] {
+            assert!(super::checked_stream(inside).is_err(), "ffmpeg would have been handed {inside:?}");
+        }
+        assert!(super::checked_stream("no address here\n").is_err());
+    }
+
     use super::*;
 
     fn probe_of(dur: u64, live: bool, caps: bool) -> MediaProbe {

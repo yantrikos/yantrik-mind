@@ -162,6 +162,11 @@ impl BrowserSession {
     pub fn start(headful: bool, profile: Option<&str>) -> anyhow::Result<BrowserSession> {
         let script = mind_net::person_var("YM_BROWSER_AGENT")
             .unwrap_or_else(|_| "/opt/yantrik-mind/browser_agent.js".into());
+        Self::start_with(&script, headful, profile)
+    }
+
+    fn start_with(script: &str, headful: bool, profile: Option<&str>) -> anyhow::Result<BrowserSession> {
+        let script = script.to_string();
         if !std::path::Path::new(&script).exists() {
             anyhow::bail!("the browser driver is not installed at {script}");
         }
@@ -356,12 +361,11 @@ mod tests {
 
     #[test]
     fn a_missing_driver_is_an_honest_error() {
-        std::env::set_var("YM_BROWSER_AGENT", "/nonexistent/browser_agent.js");
-        let e = match BrowserSession::start(false, None) {
+        // E.NET1g: the driver's path is the person's (never the env), so the test names it directly.
+        let e = match BrowserSession::start_with("/nonexistent/browser_agent.js", false, None) {
             Ok(_) => panic!("a missing driver must not yield a session"),
             Err(e) => e.to_string(),
         };
         assert!(e.contains("not installed"), "{e}");
-        std::env::remove_var("YM_BROWSER_AGENT");
     }
 }

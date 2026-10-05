@@ -148,7 +148,7 @@ fn configured_endpoint(url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool 
 }
 
 /// Should a request to `url` go direct rather than through the proxy?
-fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>, enforced: &dyn Fn() -> bool) -> bool {
+fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>, enforced: bool) -> bool {
     if proxy_url(get).is_none() {
         return true;
     }
@@ -162,7 +162,7 @@ fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>, enforced: &dyn F
         match host.parse::<std::net::IpAddr>() {
             Ok(ip) if is_special_ip(ip) => return true,
             Ok(_) => {}
-            Err(_) if !enforced() => return true,
+            Err(_) if !enforced => return true,
             Err(_) => {}
         }
     }
@@ -210,11 +210,27 @@ pub const PERSON_ONLY_KEYS: &[&str] = &[
     "YM_BROWSER_AGENT",
     "YM_HEADFUL_SCRIPT",
     "YM_SNAP_SCRIPT",
+    // E.NET1g: the media tools -- a wrapper could drop the proxy they are given.
+    "YM_YTDLP_BIN",
+    "YM_FFMPEG_BIN",
 ];
 
 /// E.EGRESS5d (the thirteenth pass): what may leave the Mind is the person's word alone -- these are
 /// unset until the person's file exists, never taken from the Mind's own env.
 pub const FAIL_CLOSED_KEYS: &[&str] = &["YM_SHAREABLE_FACTS", "YM_WORK_RADAR"];
+
+/// E.NET1g (review L3): which code runs is the person's word too -- pointing a browser script or a
+/// media binary at another copy would bypass net_guard or the proxy. Without the person's file these
+/// are unset, so their callers use their BUILT-IN defaults, never the Mind's env.
+pub const BUILT_IN_DEFAULT_KEYS: &[&str] = &[
+    "YM_HEADLESS_SCRIPT",
+    "YM_HEADFUL_SCRIPT",
+    "YM_SNAP_SCRIPT",
+    "YM_BROWSER_AGENT",
+    "PLAYWRIGHT_BROWSERS_PATH",
+    "YM_YTDLP_BIN",
+    "YM_FFMPEG_BIN",
+];
 
 /// E.EGRESS5b: where the OS writes the person's settings -- root:root 0644, made by a root helper from
 /// the person's own Settings, never writable by the Mind's account.
@@ -238,10 +254,12 @@ pub fn person_var_from(
     }
     match read_root_file(file) {
         Ok(text) => env_file_value(&text, key).ok_or(std::env::VarError::NotPresent),
-        // No file yet (an OS before it ships it): what may leave stays unset; routing and endpoints
-        // come from the env for now, said once. Once the OS writes the file it always exists.
+        // No file yet (an OS before it ships it): what may leave stays unset, and code paths take
+        // their built-in defaults; routing and endpoints come from the env for now, said once.
+        // REMOVE this env fallback once yantrik-os ships /etc/yantrik/mind-person.env (4c: after the
+        // egress status file) -- from then on the file always exists (E.NET1g, review L3).
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if FAIL_CLOSED_KEYS.contains(&key) {
+            if FAIL_CLOSED_KEYS.contains(&key) || BUILT_IN_DEFAULT_KEYS.contains(&key) {
                 return Err(std::env::VarError::NotPresent);
             }
             static SAID: std::sync::Once = std::sync::Once::new();
@@ -258,30 +276,103 @@ pub fn person_var_from(
 }
 
 /// E.NET1e (yantrik-os #662): where the OS says its kernel egress rules for the Mind's account are
-/// loaded -- root:root 0644 in root-owned /run/yantrik, written by `yantrik-update mind-egress apply`
-/// only after the rules took.
-pub const EGRESS_SIGNAL: &str = "/run/yantrik/mind-egress.json";
+/// loaded -- root:root 0644 in its own root:root 0755 folder, written by `yantrik-update mind-egress
+/// apply` only after the rules took. (E.NET1g: moved out of /run/yantrik, which another root service
+/// makes 0700.) It says what was LAST loaded: a hand-run `nft flush ruleset` leaves it stale until the
+/// next apply -- the proxy's own refusal still holds then.
+pub const EGRESS_SIGNAL: &str = "/run/yantrik-mind-egress/mind-egress.json";
+
+/// E.NET1e: what the OS vouches for about the egress proxy, read ONCE per decision (E.NET1g, L1: a
+/// signal read twice could flip a request judged proxied to direct and unchecked in between).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EgressTrust {
+    /// E.NET1g (M1): the hosts and ports of every LAN rule, seeded and the person's -- the proxy
+    /// lets a request matching one reach the LAN by NAME. `None`: the OS could not list them (over
+    /// its cap, or unreadable), so any name may be one.
+    lan: Option<Vec<(String, Vec<u16>)>>,
+}
+
+impl EgressTrust {
+    /// A trust with these LAN rules (the signal reader's, and tests').
+    pub fn with_lan_rules(lan: Option<Vec<(String, Vec<u16>)>>) -> EgressTrust {
+        EgressTrust { lan }
+    }
+
+    /// E.NET1g (M1): may a request to `url`, whose host did not resolve here, be left to the proxy?
+    /// Not when a LAN rule covers it (the proxy would let it into the LAN by name), not when the OS
+    /// could not say which names those are, and not when it is the host of an endpoint the person
+    /// configured (any port).
+    pub fn leaves_to_proxy(&self, url: &str) -> bool {
+        self.leaves_to_proxy_with(url, &env)
+    }
+
+    fn leaves_to_proxy_with(&self, url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
+        let (host, port) = host_port(url);
+        let host = host.trim_end_matches('.');
+        let Some(lan) = &self.lan else {
+            return false;
+        };
+        // Any port (4c, #665's review): the proxy's own match is host AND port, but a LAN service's
+        // other ports are no business of a fetch from outside either.
+        let _ = port;
+        if lan.iter().any(|(rule, _ports)| lan_rule_covers(rule, host)) {
+            return false;
+        }
+        !DIRECT_ENDPOINT_VARS
+            .iter()
+            .filter_map(|k| get(k))
+            .filter(|v| !v.trim().is_empty())
+            .any(|v| host_of(v.trim()).trim_end_matches('.') == host)
+    }
+}
+
+/// Does a LAN rule's host cover `host`? `*.example.com` as a suffix -- every name under it, and (wider
+/// than the proxy's own match, which is safe here) `example.com` itself; anything else is the one name.
+fn lan_rule_covers(pattern: &str, host: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(domain) => {
+            host == domain
+                || (host.len() > domain.len() + 1 && host.ends_with(domain) && host[..host.len() - domain.len()].ends_with('.'))
+        }
+        None => pattern == host,
+    }
+}
 
 /// E.NET1e: may the Mind leave the private-range check to the egress proxy? Only when the OS says, in
 /// a file only root can write, that its rules are enforced and that the proxy refuses private ranges
-/// -- and that proxy is the very one the Mind routes through. Anything else (no file, an unsafe file,
-/// an unknown version, another proxy) is no: the Mind checks for itself, as before.
-pub fn proxy_is_enforced() -> bool {
-    proxy_is_enforced_from(std::path::Path::new(EGRESS_SIGNAL), &env)
+/// -- and that proxy is the very one the Mind routes through -- and (E.NET1g) says which names its LAN
+/// rules let in. Anything else (no file, an unsafe file, another version, another proxy, no
+/// `lan_hosts`) is no: the Mind checks for itself, as before.
+pub fn egress_trust() -> Option<EgressTrust> {
+    egress_trust_from(std::path::Path::new(EGRESS_SIGNAL), &env)
 }
 
-fn proxy_is_enforced_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String>) -> bool {
-    let Ok(text) = read_root_file(file) else {
-        return false;
-    };
-    let Ok(said) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
+fn egress_trust_from(file: &std::path::Path, get: &dyn Fn(&str) -> Option<String>) -> Option<EgressTrust> {
+    let text = read_root_file(file).ok()?;
+    let said = serde_json::from_str::<serde_json::Value>(&text).ok()?;
     let same_proxy = match (said["proxy"].as_str(), proxy_url(get)) {
         (Some(theirs), Some(ours)) => theirs.trim().trim_end_matches('/') == ours.trim_end_matches('/'),
         _ => false,
     };
-    said["version"] == 1 && said["enforced"] == true && said["proxy_refuses_private"] == true && same_proxy
+    if !(said["version"] == 2 && said["enforced"] == true && said["proxy_refuses_private"] == true && same_proxy) {
+        return None;
+    }
+    // `lan_hosts` must be there: a list of {host, ports}, or null when the OS could not list them.
+    let lan = match said.get("lan_hosts")? {
+        serde_json::Value::Null => None,
+        serde_json::Value::Array(rules) => Some(
+            rules
+                .iter()
+                .map(|r| {
+                    let host = r["host"].as_str()?.trim().trim_end_matches('.').to_ascii_lowercase();
+                    let ports = r["ports"].as_array()?.iter().map(|p| p.as_u64().and_then(|p| u16::try_from(p).ok())).collect::<Option<Vec<u16>>>()?;
+                    Some((host, ports))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    };
+    Some(EgressTrust { lan })
 }
 
 /// E.EGRESS5d (the thirteenth pass): read a root-owned file without a race -- its folder must be a
@@ -297,8 +388,8 @@ fn read_root_file(file: &std::path::Path) -> std::io::Result<String> {
         let unsafe_file = |why: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, why.to_string());
         let dir = file.parent().unwrap_or(std::path::Path::new("/"));
         let d = std::fs::symlink_metadata(dir)?;
-        if !d.is_dir() || d.uid() != 0 || d.mode() & 0o022 != 0 {
-            return Err(unsafe_file("its folder is not a root-owned directory only root can write"));
+        if !d.is_dir() || d.uid() != 0 || d.gid() != 0 || d.mode() & 0o022 != 0 {
+            return Err(unsafe_file("its folder is not a root:root directory only root can write"));
         }
         let mut f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(file)?;
         let m = f.metadata()?;
@@ -351,12 +442,23 @@ fn proxied() -> &'static ureq::Agent {
 /// E.NET1: does a request to `url` connect to its host itself (true), or through the egress proxy?
 /// Only a direct connection can be pinned to the address the SSRF check approved.
 pub fn is_direct(url: &str) -> bool {
-    goes_direct(url, &env, &proxy_is_enforced)
+    is_direct_under(url, egress_trust().as_ref())
+}
+
+/// E.NET1g (L1): [`is_direct`] under a trust already read -- decide once, then build with
+/// [`route_decided`].
+pub fn is_direct_under(url: &str, trust: Option<&EgressTrust>) -> bool {
+    goes_direct(url, &env, trust.is_some())
+}
+
+/// E.NET1g (M2): the proxy the Mind's children must use, if one is configured.
+pub fn configured_proxy() -> Option<String> {
+    proxy_url(&env)
 }
 
 /// The agent a request to `url` should use.
 pub fn agent_for(url: &str) -> &'static ureq::Agent {
-    if goes_direct(url, &env, &proxy_is_enforced) {
+    if is_direct(url) {
         direct()
     } else {
         proxied()
@@ -371,7 +473,12 @@ pub fn builder() -> ureq::AgentBuilder {
 
 /// `builder` with the route to `url` applied: the proxy unless `url` goes direct.
 pub fn route(builder: ureq::AgentBuilder, url: &str) -> ureq::Agent {
-    if goes_direct(url, &env, &proxy_is_enforced) {
+    route_decided(builder, is_direct(url))
+}
+
+/// E.NET1g (L1): `builder` on a route already decided -- direct, or through the proxy when one is set.
+pub fn route_decided(builder: ureq::AgentBuilder, direct: bool) -> ureq::Agent {
+    if direct {
         return builder.build();
     }
     match proxy_url(&env).and_then(|p| ureq::Proxy::new(p).ok()) {
@@ -407,7 +514,28 @@ mod tests {
 
     /// The routing tests before E.NET1e: no OS rules in force.
     fn goes_direct(url: &str, get: &dyn Fn(&str) -> Option<String>) -> bool {
-        super::goes_direct(url, get, &|| false)
+        super::goes_direct(url, get, false)
+    }
+
+    /// E.NET1g (M1): a name that did not resolve here is left to the proxy only when no LAN rule
+    /// covers it (host AND port, the proxy's own matching), the OS listed those rules, and it is no
+    /// configured endpoint's host.
+    #[test]
+    fn a_name_the_lan_rules_cover_is_never_left_to_the_proxy() {
+        let e = env_of(&[("HTTPS_PROXY", "http://127.0.0.1:7450"), ("YM_NIM_BASE_URL", "https://models.example.net/v1")]);
+        let lan = vec![("gpu.example.ts.net".to_string(), vec![11434]), ("*.home.arpa".to_string(), vec![80, 8123])];
+        let t = EgressTrust::with_lan_rules(Some(lan));
+        let leaves = |url: &str| t.leaves_to_proxy_with(url, &e);
+        assert!(!leaves("http://gpu.example.ts.net:11434/api/tags"), "a seeded LAN name went to the proxy");
+        assert!(!leaves("http://GPU.example.ts.net.:11434/"), "case or a trailing dot slipped a LAN name through");
+        assert!(!leaves("http://ha.home.arpa:8123/api/states"), "a wildcard LAN rule did not cover its subdomain");
+        assert!(!leaves("http://a.b.home.arpa/"), "a wildcard did not cover a deeper name");
+        assert!(!leaves("http://gpu.example.ts.net:22/"), "a LAN rule's host on another port went to the proxy");
+        assert!(!leaves("http://home.arpa/"), "`*.home.arpa` did not cover the domain itself");
+        assert!(leaves("http://evilhome.arpa/"), "a name that only ends the same was refused");
+        assert!(!leaves("https://models.example.net/anything"), "a configured endpoint's host went to the proxy");
+        assert!(leaves("https://news.example.org/a"), "an ordinary name was refused");
+        assert!(!EgressTrust::with_lan_rules(None).leaves_to_proxy_with("https://news.example.org/a", &e), "with no list, any name may be LAN");
     }
 
     /// E.NET1e (yantrik-os #662): a configured endpoint goes around the proxy only at a literal
@@ -422,7 +550,7 @@ mod tests {
             ("YM_CRITIC_URL", "http://8.8.8.8:9000"),
         ]);
         for enforced in [false, true] {
-            let direct = |url: &str| super::goes_direct(url, &e, &|| enforced);
+            let direct = |url: &str| super::goes_direct(url, &e, enforced);
             assert!(direct("http://192.168.4.42:8888/search?q=x"), "enforced={enforced}: the LAN SearXNG took the proxy");
             assert!(direct("http://[fd00::10]:8123/api/states"), "enforced={enforced}: a v6 LAN endpoint took the proxy");
             assert!(!direct("http://8.8.8.8:9000/"), "enforced={enforced}: a public address went around the proxy");
@@ -439,39 +567,52 @@ mod tests {
         let file = dir.join("mind-egress.json");
         let ours = env_of(&[("HTTPS_PROXY", "http://127.0.0.1:7450")]);
         let say = |json: &str| std::fs::write(&file, json).unwrap();
-        let whole = r#"{"enforced":true,"table":"inet yantrik_mind_egress","proxy":"http://127.0.0.1:7450","proxy_refuses_private":true,"mode":"enforce","private":false,"dns_allowed":false,"loaded_at":1790000000,"version":1}"#;
+        let whole = r#"{"enforced":true,"table":"inet yantrik_mind_egress","proxy":"http://127.0.0.1:7450","proxy_refuses_private":true,"mode":"enforce","private":false,"dns_allowed":false,"loaded_at":1790000000,"lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],"version":2}"#;
         let _ = std::fs::remove_file(&file);
-        assert!(!proxy_is_enforced_from(&file, &ours), "trusted with no file");
+        assert!(!egress_trust_from(&file, &ours).is_some(), "trusted with no file");
         say(whole);
-        assert!(proxy_is_enforced_from(&file, &ours), "the whole signal was not trusted");
-        assert!(!proxy_is_enforced_from(&file, &env_of(&[])), "trusted with no proxy configured");
-        assert!(!proxy_is_enforced_from(&file, &env_of(&[("HTTPS_PROXY", "http://10.0.0.9:3128")])), "trusted for another proxy");
+        assert_eq!(
+            egress_trust_from(&file, &ours),
+            Some(EgressTrust::with_lan_rules(Some(vec![("homeassistant.local".to_string(), vec![8123])]))),
+            "the whole signal was not trusted, or its LAN rules were lost"
+        );
+        say(&whole.replace(r#"[{"host":"homeassistant.local","ports":[8123]}]"#, "null"));
+        assert_eq!(egress_trust_from(&file, &ours), Some(EgressTrust::with_lan_rules(None)), "lan_hosts: null is a trust with no list");
+        assert!(!egress_trust_from(&file, &env_of(&[])).is_some(), "trusted with no proxy configured");
+        assert!(!egress_trust_from(&file, &env_of(&[("HTTPS_PROXY", "http://10.0.0.9:3128")])).is_some(), "trusted for another proxy");
         for (from, to, why) in [
             (r#""enforced":true"#, r#""enforced":false"#, "not enforced"),
             (r#""proxy_refuses_private":true"#, r#""proxy_refuses_private":false"#, "a proxy that lets private ranges through"),
-            (r#""version":1"#, r#""version":2"#, "an unknown version"),
+            (r#""version":2"#, r#""version":1"#, "the version before lan_hosts"),
+            (r#""version":2"#, r#""version":3"#, "an unknown version"),
+            (r#""lan_hosts":[{"host":"homeassistant.local","ports":[8123]}],"#, "", "no lan_hosts"),
+            (r#""ports":[8123]"#, r#""ports":["8123"]"#, "a malformed LAN rule"),
             (r#""proxy":"http://127.0.0.1:7450","#, "", "no proxy named"),
         ] {
             say(&whole.replace(from, to));
-            assert!(!proxy_is_enforced_from(&file, &ours), "trusted: {why}");
+            assert!(!egress_trust_from(&file, &ours).is_some(), "trusted: {why}");
         }
         say("enforced: true");
-        assert!(!proxy_is_enforced_from(&file, &ours), "trusted: not JSON");
+        assert!(!egress_trust_from(&file, &ours).is_some(), "trusted: not JSON");
         say(whole);
         #[cfg(unix)]
         {
             // (Run as root on staging, so the files are root's.)
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o666)).unwrap();
-            assert!(!proxy_is_enforced_from(&file, &ours), "a signal others can write was trusted");
+            assert!(!egress_trust_from(&file, &ours).is_some(), "a signal others can write was trusted");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-            assert!(!proxy_is_enforced_from(&file, &ours), "a signal in a folder others can write was trusted");
+            assert!(!egress_trust_from(&file, &ours).is_some(), "a signal in a folder others can write was trusted");
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // E.NET1g (#665): the folder's group must be root's too.
+            std::os::unix::fs::chown(&dir, None, Some(1)).unwrap();
+            assert!(!egress_trust_from(&file, &ours).is_some(), "a signal in a folder of another group was trusted");
+            std::os::unix::fs::chown(&dir, None, Some(0)).unwrap();
             let link = dir.join("linked.json");
             std::os::unix::fs::symlink(&file, &link).unwrap();
-            assert!(!proxy_is_enforced_from(&link, &ours), "a link to the signal was followed");
-            assert!(proxy_is_enforced_from(&file, &ours));
+            assert!(!egress_trust_from(&link, &ours).is_some(), "a link to the signal was followed");
+            assert!(egress_trust_from(&file, &ours).is_some());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -522,6 +663,7 @@ mod tests {
             "YM_SHAREABLE_FACTS" => Ok("weather: Attacker City".to_string()),
             "YM_SEARXNG_URL" => Ok("http://192.168.4.42:8888".to_string()),
             "YM_SNAP_SCRIPT" => Ok("/tmp/unguarded_snap.js".to_string()),
+            "YM_YTDLP_BIN" => Ok("/tmp/yt-dlp-without-proxy".to_string()),
             "YM_MAX_STEPS" => Ok("40".to_string()),
             _ => Err(std::env::VarError::NotPresent),
         };
@@ -535,6 +677,12 @@ mod tests {
         assert_eq!(person_var_from("YM_MAX_STEPS", &file, &env).as_deref(), Ok("40"), "an ordinary key stopped reading the env");
         // E.EGRESS5d: the browser scripts are the person's too -- an unguarded copy cannot be swapped in.
         assert_eq!(person_var_from("YM_SNAP_SCRIPT", &file, &env), Err(std::env::VarError::NotPresent), "a browser script path came from the Mind's env");
+        // E.NET1g (L3): without the person's file too -- the built-in default, never the env.
+        let _ = std::fs::rename(&file, dir.join("aside.env"));
+        assert_eq!(person_var_from("YM_SNAP_SCRIPT", &file, &env), Err(std::env::VarError::NotPresent), "no file: a browser script came from the Mind's env");
+        assert_eq!(person_var_from("YM_YTDLP_BIN", &file, &env), Err(std::env::VarError::NotPresent), "no file: a media binary came from the Mind's env");
+        assert_eq!(person_var_from("YM_SEARXNG_URL", &file, &env).as_deref(), Ok("http://192.168.4.42:8888"), "no file: routing lost its endpoint");
+        let _ = std::fs::rename(dir.join("aside.env"), &file);
         #[cfg(unix)]
         {
             // (Run as root on staging, so the files are root's.) A file others can write, a folder
@@ -596,6 +744,7 @@ mod tests {
                         let before = src[..at].trim_end();
                         let allowed_form = before.ends_with("person_var(") // the one way to read it
                             || before.ends_with(".env(") // handed to a child process, not read
+                            || before.ends_with(".env_remove(") // taken away from a child, not read
                             || before.ends_with("upsert_env_line(&existing,") // setup WRITES the Mind's env;
                             || before.ends_with("upsert(&existing,") //  ignored once the person's file exists
                             || (name.ends_with("config_panel.rs") && before.ends_with("key:")); // the schema

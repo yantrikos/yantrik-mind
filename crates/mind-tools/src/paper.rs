@@ -127,10 +127,12 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
     } else {
         url.to_string()
     };
-    let resp = mind_net::get(&fetch_url)
-        .set("User-Agent", "Mozilla/5.0 (yantrik-mind research reader)")
-        .timeout(std::time::Duration::from_secs(45))
-        .call()?;
+    // E.NET1g (review L2): a paper link is an address from outside -- checked, every redirect too.
+    let resp = crate::get_checked(
+        &fetch_url,
+        std::time::Duration::from_secs(45),
+        &[("User-Agent", "Mozilla/5.0 (yantrik-mind research reader)")],
+    )?;
     let ctype = resp.header("content-type").unwrap_or("").to_lowercase();
     let text = if ctype.contains("pdf") || fetch_url.ends_with(".pdf") {
         // PDF: write to tmp, try pdftotext
@@ -173,11 +175,11 @@ pub fn fetch_paper(url: &str) -> anyhow::Result<(String, String)> {
     // /abs/ page — an abstract-grounded study is thinner but honest.
     if clean.len() < 5000 && fetch_url.contains("ar5iv") && url.contains("arxiv.org/") {
         let abs_url = url.replace("/pdf/", "/abs/");
-        if let Ok(resp2) = mind_net::get(&abs_url)
-            .set("User-Agent", "Mozilla/5.0 (yantrik-mind research reader)")
-            .timeout(std::time::Duration::from_secs(30))
-            .call()
-        {
+        if let Ok(resp2) = crate::get_checked(
+            &abs_url,
+            std::time::Duration::from_secs(30),
+            &[("User-Agent", "Mozilla/5.0 (yantrik-mind research reader)")],
+        ) {
             if let Ok(html2) = resp2.into_string() {
                 let alt = strip_html(&html2);
                 if alt.len() > clean.len() {

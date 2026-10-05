@@ -14983,3 +14983,35 @@ The review is a commit comment on 9f7149c.
   - Full suite 2338 passed, 0 failed.
   - Linux staging: mind-net 11, mind-tools 264, mind-memory 113, mind-conversation 1145.
 - **For 520:** P1 was this review's enforce blocker. The yt-dlp/ffmpeg hop exposure needs the OS public door first.
+
+## E.NET1j — PREREG: addresses from outside go through the OS's public-only door (yantrik-os #666)
+
+**Why:** the Mind cannot check the hops yt-dlp and ffmpeg follow on their own (redirects, HLS segments), and the endpoint proxy (7450) admits any LAN-rule name. #666 adds a PUBLIC door, 127.0.0.1:7451, that never honours a LAN rule and refuses every non-internet address, in audit and in enforce. The format is 4c's "For the Mind" section (verbatim in their message of 2026-10-05):
+- signal version 3;
+- `public_proxy`: "host:port" or null, set only when the binary prints `public-door`.
+
+**Change:**
+1. **The signal (Rust and JS):**
+   - versions 2 and 3 are read;
+   - a v3 signal must carry `public_proxy` (a loopback "ip:port", or null);
+   - anything else (missing, malformed, not loopback, another version) means no trust;
+   - a v2 signal has no public door.
+2. **Rust:**
+   - `EgressTrust` carries the public door;
+   - `mind_net::route_outside(builder, direct, trust)` sends a proxied request for an address from outside through the public door when there is one, and otherwise as before;
+   - `get_checked_with` (the fetch tool, search-result fetches, images, papers) uses it;
+   - yt-dlp and ffmpeg get the public door as their proxy (env, `--proxy`, `-http_proxy`) when there is one;
+   - configured-endpoint clients and model calls stay on 7450.
+3. **JS (net_guard):** `egressTrust` returns the public door. `fetchViaProxy` and the browser's own proxy use it when it is set, and the endpoint proxy otherwise.
+4. **With no public door** (null, or v2), every LAN-name check stays as it is. With one, they stay too (defence in depth).
+
+**Kill criteria**, each a mutant that must be killed:
+- v3 refused;
+- v3 without `public_proxy` trusted;
+- a non-loopback public door trusted;
+- an outside fetch on the endpoint door when a public one exists;
+- the media children on the endpoint door;
+- net_guard on the endpoint door;
+- an unknown version trusted.
+
+Tests send a request to a local fake public door and read the request line it receives.

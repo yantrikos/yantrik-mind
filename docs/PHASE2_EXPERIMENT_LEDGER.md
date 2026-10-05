@@ -13551,3 +13551,16 @@ Option 1 is the right one. The three hypotheses already on 520 predate any linea
   9. every tool counts as web.
 - **Workspace:** 0 failures.
 - **Not tested at loop level:** the two capture hooks and the `/new` clear in `handle_turn_as`. The 520 run shows them by the "[egress] …: handed over by the person" line.
+
+**E.EGRESS3 (87e102c): security review BLOCK (4c's reviewer, 5 Oct).** It is wider than option B.
+- **H1:** the as-written pass-through matched content words as SUBSTRINGS of the whole corpus ("hiv" in "archive"), never checked tokens under 3 characters, and pooled all sources. A fetched page carrying word lists could let a memory-written query leave verbatim.
+- **H2:** "named folder" was purely textual: no `..`, no realpath, the model's path argument and not the opened file's, Mind-written files, and dotfiles. "Named files" was widened to "anything under a named folder", which Pranab did not choose; 4c is asking him.
+- **H3:** the store was Mind-wide, not per identity. The desktop's New chat never reaches the engine, so it carried across chats.
+- **M1:** path stripping was narrow, applied to `query` only.
+- **L1–L3:** logging (`asked` may carry private values), the lapse sliding on re-reads, and no total cap; the pass-through returned the whole object.
+
+**R1c was stopped at turn 3 on that review** (03:02–03:09).
+- Audit of what left: every search and fetch was re-authored, none passed as written, and all were MDG-shaped. Fetches had an empty url. Nothing private reached SearXNG.
+- **R1c is VOID** (the run was stopped). 520 is to be rolled back to d9e7a8a.
+- **Seen in R1c:** the planner writes long sentence-like queries ("machine-native semantic language for language models meaning as typed graph …") that Bing answers with Wikipedia "Machine". To address with H1's planner change.
+- **Lesson:** my nine mutants all checked the rule I wrote. None checked the rule against an adversary, which a review does.

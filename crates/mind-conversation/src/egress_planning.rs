@@ -423,9 +423,32 @@ fn variant_group(url: &str) -> String {
 
 /// E.EGRESS4: a page offering more variants of one address than this is a menu, not a source.
 const VARIANT_MENU: usize = 20;
-/// E.EGRESS4: the most candidates the planner is shown (the newest), and fetches per query-variant.
+/// E.EGRESS4: the most candidates the planner is shown (the newest).
 const FETCH_CANDIDATES: usize = 40;
-const FETCHES_PER_PAGE: usize = 2;
+/// E.EGRESS4b (the seventh pass): what a turn may fetch -- with deterministic picks, the COUNT and
+/// the positions of fetches are what an attacker reads, so both are bounded.
+const FETCH_TURN_BUDGET: usize = 6;
+const FETCH_HOST_BUDGET: usize = 2;
+
+/// E.EGRESS4b: an address's host, lower case (its authority without user info).
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    authority.rsplit('@').next().unwrap_or(authority).to_ascii_lowercase()
+}
+
+/// E.EGRESS4b: the addresses the person wrote themselves -- not inside quoted, fenced or forwarded
+/// text (the paths' rule), whole tokens only.
+pub(crate) fn person_urls(user_text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for u in urls_in(user_text) {
+        let own = user_text.match_indices(u.as_str()).any(|(at, _)| !in_quoted_text(user_text, at));
+        if own && !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    out
+}
 
 /// E.EGRESS4: the addresses a fetch may go to, newest last -- those in the person's words and in what
 /// the WEB tools returned this turn, never another tool's. From each result page, a group of more
@@ -539,8 +562,8 @@ pub(crate) enum CleanArgsFailure {
     /// E.EGRESS3g (R1d on VM 520): a fetch whose address came from neither the person's words nor
     /// this turn's outside results -- the planner cannot write one, and wrote "" three times running.
     UrlNotFromSources,
-    /// E.EGRESS4: a third fetch this turn of one page that differs only in its query or fragment.
-    FetchCapReached,
+    /// E.EGRESS4b (the seventh pass): over this turn's fetch budget -- 6 in all, 2 per host.
+    FetchBudget,
 }
 
 impl CleanArgsFailure {
@@ -550,8 +573,8 @@ impl CleanArgsFailure {
             CleanArgsFailure::NoUsableArgs => {
                 "the model that prepares outbound requests returned no usable arguments"
             }
-            CleanArgsFailure::FetchCapReached => {
-                "two pages that differ only in their query were already fetched from that address this turn; use what they gave"
+            CleanArgsFailure::FetchBudget => {
+                "this turn has fetched as many pages as it may (6, and 2 from one site); use what they gave"
             }
             CleanArgsFailure::UrlNotFromSources => {
                 "that address is not in the person's words or in what a search returned this turn; search first, then fetch an address the results give"
@@ -699,14 +722,17 @@ impl ConversationEngine {
                 .map(|mut h| (h.texts(key, Self::now_ms()), h.named_names(key)))
                 .unwrap_or_default()
         };
-        let capped = |url: &str| {
-            let page = without_query(url);
-            fetched.iter().filter(|f| without_query(f) == page).count() >= FETCHES_PER_PAGE
+        let over_budget = |url: &str| {
+            let host = host_of(url);
+            fetched.len() >= FETCH_TURN_BUDGET || fetched.iter().filter(|f| host_of(f) == host).count() >= FETCH_HOST_BUDGET
         };
+        // E.EGRESS4b: as written only when the person's own message holds exactly ONE address and this
+        // is it, as a whole token -- a pasted list (?v=alice, ?v=bob) is the planner's to choose from.
         if let Some(url) = grounded.get("url").and_then(|u| u.as_str()) {
-            if !url.is_empty() && user_text.contains(url) {
-                if capped(url) {
-                    return Err(CleanArgsFailure::FetchCapReached);
+            let mine = person_urls(user_text);
+            if mine.len() == 1 && mine[0] == url {
+                if over_budget(url) {
+                    return Err(CleanArgsFailure::FetchBudget);
                 }
                 return Ok(serde_json::json!({ "url": url }));
             }
@@ -756,8 +782,8 @@ impl ConversationEngine {
             eprintln!("[egress] fetch planner for {tool} picked no listed address \u{2014} refused");
             return Err(CleanArgsFailure::NoUsableArgs);
         };
-        if capped(url) {
-            return Err(CleanArgsFailure::FetchCapReached);
+        if over_budget(url) {
+            return Err(CleanArgsFailure::FetchBudget);
         }
         Ok(serde_json::json!({ "url": url }))
     }
@@ -875,9 +901,11 @@ impl ConversationEngine {
         if web_query {
             let q = ["query", "q", "topic"].iter().find_map(|k| grounded.get(*k).and_then(|v| v.as_str()));
             if let Some(q) = q {
+                // E.EGRESS4b (the seventh pass): a span of the person's words or a handed-over file,
+                // never of web text -- an injected page could list `site:evil.com alice` / `... bob`.
+                // The planner still sees the web text and may follow a lead from it.
                 let mut sources: Vec<&str> = vec![user_text];
                 sources.extend(handed.iter().map(String::as_str));
-                sources.extend(web_obs.iter().map(String::as_str));
                 if query_is_a_span_of_one(q, &sources, &named) {
                     // The review's L3: the query, and nothing else the model put beside it.
                     return Ok(serde_json::json!({ "query": q }));

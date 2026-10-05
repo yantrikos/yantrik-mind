@@ -13995,3 +13995,12 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
   - the pinned IP not used;
   - the browser's private-range block off.
   Tested against local servers: a redirect to 127.0.0.1, and a host resolving to a private address.
+
+## E.EGRESS4b — RESULT: built as preregistered; 6 of 6 mutants killed
+
+- **Budgets:** 6 fetches per turn and 2 per host (`FetchBudget`). They replace the per-page cap: 2 per host covers it, and the per-page mutant would have been equivalent, so `FetchCapReached` is gone.
+- **The person's URL:** `person_urls`, whole tokens outside quoted, fenced and forwarded text. It passes as written only when it is the ONE such address and equals the model's. A pasted ?v= list, a prefix, or quoted text goes to the planner's pick.
+- **Query spans:** the sources are the person's words and the handed-over files only. A web-text span goes to the planner (`a_span_of_web_text_is_the_planners_to_write`).
+- **Tests:** the fetch test gained the budgets and the three pass-through cases.
+- **Mutants:** no turn budget; no host budget; a prefix accepted; any listed URL passing; a quoted URL counting; a web span passing. All killed.
+- Full suite 2289 passed; mind-conversation 1117 passed on Linux staging.

@@ -155,6 +155,7 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     c.routeWebSocket = async () => {};
     c.close = async () => { c.closed = true; };
     c.browser = () => ({ fake: true });
+    c.pages = () => c.openPages || [];
     return c;
   };
   let made = null;
@@ -169,7 +170,9 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   const g = await launchGuarded(fakeChromium, {}, { locale: "en-US" });
   assert.strictEqual(g.ctx.opts.serviceWorkers, "block", "service workers were let in");
   assert.ok(g.ctx.routes.includes("**/*"), "the context came back unguarded");
-  const pg = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {});
+  const removed = [];
+  const recordingFs = { rmSync: (p) => removed.push(p.split(require("path").sep).join("/")) };
+  const pg = await launchPersistentGuarded(fakeChromium, "/tmp/profile", {}, { fs: recordingFs });
   assert.strictEqual(pg.ctx.opts.serviceWorkers, "block");
   assert.ok(pg.ctx.routes.includes("**/*"), "the persistent context came back unguarded");
   // E.NET1e: under the OS's enforced rules the browser itself is pointed at the proxy.
@@ -181,6 +184,47 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
   assert.deepStrictEqual(pp.ctx.opts.proxy, { server: "http://127.0.0.1:7450" }, "the persistent browser was not pointed at the proxy");
   await launchGuarded(proxiedChromium, {}, {}, { trustedProxy: () => null });
   assert.strictEqual(launchedWith.proxy, undefined, "a proxy was set without the OS's word");
+  // E.NET1f: a persistent profile restores nothing (its saved session is removed first), and a page
+  // already open starts again at about:blank under the guard.
+  assert.ok(removed.includes("/tmp/profile/Default/Sessions"), `the saved session was kept: ${removed}`);
+  assert.ok(removed.includes("/tmp/profile/Default/Last Tabs"), "an older session file was kept");
+  let sentTo = null;
+  const restoring = {
+    launchPersistentContext: async (_dir, opts) => {
+      made = fakeCtx();
+      made.opts = opts;
+      made.openPages = [{ url: () => "https://restored.example/inbox", goto: async (u) => { sentTo = u; } }];
+      return made;
+    },
+  };
+  await launchPersistentGuarded(restoring, "/tmp/profile", {}, { fs: recordingFs });
+  assert.strictEqual(sentTo, "about:blank", "an open page was left where it was");
+
+  // E.NET1f (the fourteenth pass): the lock at run time -- a browser type launches or connects only
+  // inside a launcher, and only by that launcher's own method.
+  const { lockBrowserTypes } = require("./net_guard");
+  class FakeType {
+    async launch(o = {}) {
+      if (o.sneak) await this.connectOverCDP("ws://127.0.0.1:9222");
+      return fakeChromium.launch();
+    }
+    async launchPersistentContext(dir, o) { return fakeChromium.launchPersistentContext(dir, o); }
+    async launchServer() { return "server"; }
+    async connect() { return "connected"; }
+    async connectOverCDP() { return "cdp"; }
+  }
+  lockBrowserTypes(FakeType.prototype);
+  lockBrowserTypes(FakeType.prototype); // twice is harmless
+  const typed = new FakeType();
+  for (const m of ["launch", "launchPersistentContext", "launchServer", "connect", "connectOverCDP"]) {
+    assert.throws(() => typed[m](), /blocked/, `${m} ran outside the launchers`);
+  }
+  assert.throws(() => Object.defineProperty(FakeType.prototype, "launch", { value: async () => "unlocked" }), TypeError, "the lock could be replaced");
+  const viaLauncher = await launchGuarded(typed, {}, {}, { trustedProxy: () => null });
+  assert.ok(viaLauncher.ctx.routes.includes("**/*"), "the launcher's own launch was blocked");
+  await launchPersistentGuarded(typed, "/tmp/profile", {}, { fs: recordingFs, trustedProxy: () => null });
+  await assert.rejects(launchGuarded(typed, { sneak: true }, {}, { trustedProxy: () => null }), /blocked: connectOverCDP/, "a launcher's permission reached another method");
+
   const noWs = { launch: async () => ({ newContext: async () => ({ route: async () => {} }), close: async function () { this.closed = true; } }) };
   await assert.rejects(launchGuarded(noWs), /WebSocket/, "a context that cannot be guarded was handed out");
 
@@ -199,13 +243,29 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     "deploy/net_guard.test.js", // this test (its fakes and patterns)
   ]);
   const FORBIDDEN = [
-    [/chromium\s*\.\s*(launch\w*|connect\w*)\s*\(/, "chromium.launch*/connect*"],
-    [/\.\s*launchServer\s*\(/, "launchServer"],
+    // E.NET1f: any launch but the two launchers, any connect -- on chromium, firefox, webkit or any
+    // other handle -- by dot or by bracket.
+    [/\.\s*launch(?!Guarded\b|PersistentGuarded\b)\w*\s*\(/, ".launch*("],
+    [/\.\s*connect\w*\s*\(/, ".connect*("],
     [/connectOverCDP/, "connectOverCDP"],
     [/\.\s*newContext\s*\(/, "newContext"],
     [/\.\s*contexts\s*\(\s*\)/, "contexts()"],
     [/(?<!\bctx)\s*\.\s*newPage\s*\(/, "a browser's newPage"],
+    [/\[\s*["'`](launch\w*|connect\w*|newContext|newPage|contexts)["'`]\s*\]/, "a browser method by bracket"],
+    // E.NET1f: a module chosen at run time could be anything -- only plain string names.
+    [/\b(require|import)\s*\(\s*(?!["'][^"'`$]*["']\s*\))(?!`[^`$]*`\s*\))/, "a require/import of a computed name"],
   ];
+  const offencesIn = (src) => FORBIDDEN.filter(([re]) => re.test(src)).map(([, what]) => what);
+  for (const src of [
+    'chromium["launch"]()', "chromium[`connectOverCDP`](u)", "firefox.launch()", "webkit.launchPersistentContext(d)",
+    "pw.chromium.connect(ws)", "bt.connect(ws)", "bt.launchServer()", "x.launchPersistentContext(d, o)", "require(name)",
+    "require(`./${m}`)", "await import(which)", "browser.newContext()", "browser.newPage()",
+  ]) {
+    assert.ok(offencesIn(src).length > 0, `the scan missed: ${src}`);
+  }
+  for (const src of ['require("./net_guard")', "require('playwright-extra')", "launchGuarded(chromium, {})", "ng.launchGuarded(c)", "ng.launchPersistentGuarded(c, d)", "ctx.newPage()", "await import(\"./x.mjs\")"]) {
+    assert.deepStrictEqual(offencesIn(src), [], `the scan refused a plain form: ${src}`);
+  }
   const walk = (dir) =>
     fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
       if (["node_modules", ".git", "target"].includes(e.name)) return [];
@@ -217,7 +277,7 @@ const { privateIp, hostIsPrivate, fetchPinned } = require("./net_guard");
     const rel = path.relative(root, file).split(path.sep).join("/");
     if (CI_ONLY.has(rel)) continue;
     const src = fs.readFileSync(file, "utf8");
-    for (const [re, what] of FORBIDDEN) if (re.test(src)) offences.push(`${rel}: ${what}`);
+    for (const what of offencesIn(src)) offences.push(`${rel}: ${what}`);
     if (/playwright/.test(src) && !/launch(Persistent)?Guarded/.test(src)) offences.push(`${rel}: uses playwright without net_guard's launchers`);
   }
   assert.deepStrictEqual(offences, [], "a browser made around net_guard");

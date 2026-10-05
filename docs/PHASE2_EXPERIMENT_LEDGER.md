@@ -14544,3 +14544,28 @@ The shared ranges moved from mind-tools into mind-net, so routing and the SSRF c
 The lock is also checked once against the REAL playwright-core from the lockfile, in a scratch install with `--ignore-scripts`, so no browsers are downloaded:
 - a direct `chromium.launch()` throws "blocked";
 - through `launchGuarded`, it gets past the lock (to the missing-browser error).
+
+## E.NET1f — RESULT: the fourteenth pass's items on E.NET1d built; 12 of 12 mutants killed; the lock checked against the real playwright-core
+
+1. **The runtime lock.** `lockBrowserTypes` wraps launch, launchPersistentContext, launchServer, connect and connectOverCDP on playwright-core's BrowserType prototype; net_guard locks it at load when the module resolves. A wrapped method throws "blocked" unless the call runs inside `launchAs(method, …)`, an AsyncLocalStorage scope naming that one method. The wrappers are non-writable and non-configurable.
+   **Checked against the real playwright-core 1.48.2** (a scratch `npm ci --ignore-scripts` from deploy/package-lock.json, so no browsers):
+   - blocked: playwright-extra's `chromium.launch`, core `chromium.launch`, `firefox.connect`, `chromium.connectOverCDP`, `webkit["launch" + "Server"]()`, and a `launch` handle bound BEFORE net_guard loaded;
+   - through `launchGuarded`, the launch got past the lock to "Executable doesn't exist".
+2. **The scan:** any `.launch*(` except the two launchers; any `.connect*(`; bracket forms; any `require(`/`import(` whose argument is not a plain string. Each pattern is tested against samples both ways, and the repository passes as it stands.
+   The old `chromium|firefox|webkit.launch*/connect*` pattern is REMOVED. The generic patterns catch everything it caught (its mutant survived for that reason), so it was dead.
+3. **A clean persistent profile:** before the launch, `Default/Sessions` and the older `Current Session`, `Current Tabs`, `Last Session` and `Last Tabs` are removed. After the guard, any open page not at about:blank is sent there.
+
+**Mutants killed:**
+- the lock letting anything through;
+- a launcher allowed any method;
+- the launchers blocked by their own lock;
+- the lock replaceable;
+- the session kept;
+- an older session file kept;
+- an open page left;
+- the scan without the bracket form, `.launch*(`, `.connect*(`, the computed-require rule, or the `${}` template rule.
+
+**Residuals, named:**
+- (a) A reference to the CORE prototype's method taken before net_guard loads (not through playwright-extra, which looks it up at call time) escapes the lock. Every deploy script loads net_guard straight after playwright-extra.
+- (b) The loop that locks the real module runs only where playwright-core is installed. Its proof is the one-off check above, not the unit test.
+- (c) A future Chromium session format would not be cleared. The about:blank step still resets such a page, but only after it loaded.

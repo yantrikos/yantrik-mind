@@ -20,6 +20,7 @@
 // process is configured with, a request goes THROUGH the proxy. It is still checked here first: an
 // address, or a name that resolves here, is judged as above; only a name that does not resolve here is
 // left to the proxy. Otherwise everything above holds unchanged.
+const { AsyncLocalStorage } = require("async_hooks");
 const dns = require("dns").promises;
 const fs = require("fs");
 const net = require("net");
@@ -326,8 +327,53 @@ function withProxy(options, deps = {}) {
   return proxy && !options.proxy ? { ...options, proxy: { server: proxy } } : options;
 }
 
+// E.NET1f (the fourteenth pass): the lock at RUN time. Playwright's browser types (chromium, firefox,
+// webkit -- one prototype, which playwright-extra calls into) may launch or connect only inside the
+// launchers below, each allowed the one method it uses; anywhere else the call throws. A computed name
+// or a script the textual scan misses meets the same wall.
+const LAUNCHING = new AsyncLocalStorage();
+const LOCKED = ["launch", "launchPersistentContext", "launchServer", "connect", "connectOverCDP"];
+
+function lockBrowserTypes(proto) {
+  for (const name of LOCKED) {
+    const real = proto[name];
+    if (typeof real !== "function" || real.netGuardLocked) continue;
+    const locked = function (...args) {
+      if (LAUNCHING.getStore() !== name) throw new Error(`blocked: ${name} is only for net_guard's launchers`);
+      return real.apply(this, args);
+    };
+    locked.netGuardLocked = true;
+    Object.defineProperty(proto, name, { value: locked, writable: false, configurable: false, enumerable: false });
+  }
+}
+
+// Lock the real playwright-core when it is installed beside this file (a Mind box). Without it, nothing
+// here could launch anyway.
+for (const mod of ["playwright-core", "playwright"]) {
+  let types = null;
+  try {
+    types = require(mod);
+  } catch (_) {
+    continue;
+  }
+  for (const t of [types.chromium, types.firefox, types.webkit]) if (t) lockBrowserTypes(Object.getPrototypeOf(t));
+}
+
+// Call `method` on `browserType` as a launcher may -- the one place the lock lets it through.
+function launchAs(method, browserType, ...args) {
+  return LAUNCHING.run(method, () => browserType[method](...args));
+}
+
+// E.NET1f: a persistent profile restores nothing -- its saved session is removed before the launch, so
+// no page loads before the guard is in place.
+function clearSavedSession(profileDir, f = fs) {
+  for (const p of ["Default/Sessions", "Default/Current Session", "Default/Current Tabs", "Default/Last Session", "Default/Last Tabs"]) {
+    f.rmSync(path.join(profileDir, p), { recursive: true, force: true });
+  }
+}
+
 async function launchGuarded(chromium, launchOptions = {}, contextOptions = {}, deps = {}) {
-  const browser = await chromium.launch(withProxy(launchOptions, deps));
+  const browser = await launchAs("launch", chromium, withProxy(launchOptions, deps));
   try {
     const ctx = await browser.newContext({ ...contextOptions, serviceWorkers: "block" });
     await guardContext(ctx);
@@ -339,9 +385,12 @@ async function launchGuarded(chromium, launchOptions = {}, contextOptions = {}, 
 }
 
 async function launchPersistentGuarded(chromium, profileDir, options = {}, deps = {}) {
-  const ctx = await chromium.launchPersistentContext(profileDir, { ...withProxy(options, deps), serviceWorkers: "block" });
+  clearSavedSession(profileDir, deps.fs || fs);
+  const ctx = await launchAs("launchPersistentContext", chromium, profileDir, { ...withProxy(options, deps), serviceWorkers: "block" });
   try {
     await guardContext(ctx);
+    // Anything already open (a start page) starts again, under the guard.
+    for (const page of ctx.pages()) if (page.url() !== "about:blank") await page.goto("about:blank");
     return { browser: ctx.browser(), ctx };
   } catch (e) {
     await ctx.close().catch(() => {});
@@ -357,6 +406,7 @@ module.exports = {
   fetchPinned,
   trustedProxy,
   guardContext,
+  lockBrowserTypes,
   launchGuarded,
   launchPersistentGuarded,
 };

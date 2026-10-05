@@ -15231,3 +15231,12 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
 - **Measured, not reasoned:** T7 was replayed offline (`t7_replay_names_the_save_at_every_repeat`) with the journal's own lines and steps: `new`, the refused `set_content`, then `new` again. After step 1, EVERY repeat was answered with `The next call is: os_act {"app": "editor", "action": "save_as", "args": {"path": "~/arena-min09n-friday.txt"}}`, and the unsaved nudge fired. The loop did its part; on 520 the model (deepseek-v4.1-flash, as deployed) did not take it, eight times.
 - **What is NOT established:** whether this is a regression in 54bd13f..72b579d (something that changed what the model chooses) or model variance. T7 passed in 5 earlier gates, so this needs repetitions, not one run. Next: T7 alone, several reps, on the same build, before any conclusion.
 - **Lesson** (already in memory as "true mechanism, unmeasured impact"): I preregistered a fix from a quoted line instead of replaying the real one first.
+
+**The gate on OS fb2f27f3 (yantrik-os #662/#665/#666, egress in audit) with Mind 72b579d (branch mind-520-net1k: NET1j plus NET1k, no grant code), VM 520, 5 Oct 2026:**
+- **Run 1:** 6/7, 0 false claims, median 5.7 s.
+  - T7 failed: the titles were written into the editor, never saved, and the reply said so honestly.
+  - The loop named the exact `save_as` at every repeat; the model repeated `new` eight times (F66, withdrawn above).
+- **T7 alone ×5, same build:** 5/5 (10.6–16.6 s), 0 false claims. The 95% interval on those five is 57–100%.
+- **Run 2:** 7/7, 0 false claims, median 4.8 s.
+- **Reading:** T7 is 6/7 over the seven runs on this build. One failure is the model not taking an explicit instruction, not a code path, and is recorded rather than dropped. Recorded as "gate 7/7 on fb2f27f3 (run 2), run 1 6/7".
+- Pranab's windows (Calendar, Blender, a terminal) were open before and after.

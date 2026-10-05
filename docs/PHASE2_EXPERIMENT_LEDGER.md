@@ -14569,3 +14569,52 @@ The lock is also checked once against the REAL playwright-core from the lockfile
 - (a) A reference to the CORE prototype's method taken before net_guard loads (not through playwright-extra, which looks it up at call time) escapes the lock. Every deploy script loads net_guard straight after playwright-extra.
 - (b) The loop that locks the real module runs only where playwright-core is installed. Its proof is the one-off check above, not the unit test.
 - (c) A future Chromium session format would not be cleared. The about:blank step still resets such a page, but only after it loaded.
+
+## E.NET1g — PREREG: the review of 6a8531d..f1364f0 (SAFE WITH CHANGES): M1, M2, L1–L4, residuals (a) and (b)
+
+The review is a commit comment on f1364f0.
+
+**M1. Named LAN rules.** The proxy matches a LAN rule by the requested NAME. So a name that does not resolve here, left to the trusted proxy, could reach a seeded LAN service (`gpu.example.ts.net:11434`).
+- The signal is trusted only when it also carries `lan_hosts`, an array of strings: the host names of every LAN rule, seeded and the person's. 4c adds it; a signal without it is untrusted.
+- On the trusted-unresolved path (Rust `ssrf_resolve`'s caller, JS `fetchPinned`), a host is refused when it is covered by a `lan_hosts` entry:
+  - exact, case-insensitive, trailing dot ignored;
+  - or `*.suffix` / `.suffix` covering the suffix and its subdomains.
+- In Rust it is also refused when it is the host of any configured endpoint, on any port. JS has no access to the person's settings and relies on `lan_hosts`: the OS seeds LAN rules from the same configuration.
+
+**M2. yt-dlp and ffmpeg.** `run_bounded` runs both with NO_PROXY / no_proxy removed from their environment. When a proxy is configured, it is set explicitly: in the env, as `--proxy` for yt-dlp, and as `-http_proxy` (before the first input) for ffmpeg. So every hop they make meets the proxy, which refuses loopback and private ranges. `stream_url`'s result goes through `ssrf_check` before ffmpeg gets it.
+- YM_YTDLP_BIN and YM_FFMPEG_BIN become person-only keys with built-in defaults, like the browser scripts. A wrapper from the Mind's env could drop the proxy.
+
+**L1. One trust read per hop.** `mind_net::egress_trust()` returns the trust once. The hop decides `direct` from it (`is_direct_under(url, trust)`), and the agent is built from that decision (`route_decided`). The signal is never read again within a hop. `ssrf_check` does the same.
+
+**L2. No unchecked redirects.**
+- `fetch_image_bytes` and `fetch_paper` use one checked GET: redirects(0), each hop resolved and checked by the same rule as the fetch tool, and a direct hop pinned.
+- `fetch_paper` gains the check it lacked.
+
+**L3. Browser-script keys fall back to built-in defaults, never the env.** YM_HEADLESS_SCRIPT, YM_HEADFUL_SCRIPT, YM_SNAP_SCRIPT, YM_BROWSER_AGENT and PLAYWRIGHT_BROWSERS_PATH, plus YM_YTDLP_BIN and YM_FFMPEG_BIN, are unset without the person's file, so their callers use their defaults. The remaining env fallback (endpoints and routing) carries its removal condition in the code and here: delete it once yantrik-os ships `/etc/yantrik/mind-person.env` (4c: after the status file).
+
+**L4. Two nits in net_guard.js:**
+- the CONNECT request's timeout is cleared once the tunnel is up;
+- the absolute-form request line is `origin + pathname + search`, so no userinfo goes to the proxy.
+
+**Residual (a):** a source-text test asserts that the production lines pass `mind_net::egress_trust` (`ssrf_check`, `fetch_direct`, the checked GET).
+
+**Residual (b):** net_guard.test.js gains a real-file section on Linux.
+- As root, a root-owned 0644 file in a 0755 folder is trusted; a link, a 0666 file and a 0777 folder are not.
+- As any other uid, nothing is trusted.
+- It must run on real Linux node as root AND as the mind uid before the enforce apply on 520. I have no root on 520 and staging has no node, so I'll ask 4c to run it, or to agree that I install node on staging.
+
+**Kill criteria**, each a mutant that must be killed:
+- a `lan_hosts` name left to the proxy (Rust, JS);
+- a wildcard entry not covering a subdomain;
+- a configured endpoint's host left to the proxy;
+- a signal without `lan_hosts` trusted (Rust, JS);
+- NO_PROXY kept for a child;
+- no `--proxy` / `-http_proxy`;
+- the stream URL unchecked;
+- the image redirect followed unchecked;
+- the paper unchecked;
+- a browser-script key or a media binary read from the env;
+- the route decided from a second signal read (a test where the trust closure answers differently on a second call);
+- the tunnel timeout left armed;
+- userinfo sent to the proxy;
+- the wiring check missing a line.

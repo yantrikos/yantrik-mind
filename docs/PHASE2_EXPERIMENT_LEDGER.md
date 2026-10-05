@@ -14708,3 +14708,27 @@ The review is a commit comment on f1364f0.
 - net_guard.test.js on Windows and on Linux (root and nobody).
 
 **Residual:** the signal says what was LAST loaded. A hand-run `nft flush ruleset` leaves it stale until the next apply (4c); the proxy's own refusal still holds then.
+
+## E.RES1 R1e — the search collision, VERIFIED: the clean planner, not the model
+
+- **Source:** 4c pulled the mind unit's journal on 520 read-only (12:49:50–13:10:00, egress and search lines). The extract is in 4c's scratchpad (journal-520.txt, 161 lines).
+- **Finding:** in 30+ cases with no exception, the model's own queries were good and the clean planner (`egress_planning:egress-clean`) replaced each with words from BRIEF.md and MDG_spec.md:
+  - "latent reasoning continuous chain of thought Coconut fewer tokens than natural language" → "MDG machine-native multidimensional semantic representation transformer reasoning" → MDG USA Inc.'s sign-in page;
+  - "Abstract Meaning Representation AMR graph-to-text generation survey" → "MDG multidimensional semantic representation transformer discrete semantic codes" → MDG USA.
+- **Why:**
+  - Under the span rule, a query leaves as written only as a span of the person's words, the task message or a handed-over file. AMR, UMR, Coconut, latent, graph-to-text and survey are in none of them, so they never left.
+  - The planner put the bare acronym "MDG" first, and that is the collision.
+- This replaces the "NOT VERIFIED" line in the R1e result. The R1e1 report's honest "prior art incomplete" was the planner's limit, not the model's.
+
+## E.PLAN1 — PREREG: under the current rule, no bare acronym first; acronyms written out from the sources (option A)
+
+- **Why:** R1e's collision. The broader question, whether any of the model's own words may leave, changes what leaves the machine. It is put to Pranab as options B/C/D (via 4c) and NOT decided here.
+- **Change (no widening of what may leave):**
+  1. **An acronym map from the sources the planner may already use** (the person's words, the task message, handed-over text): "Long Form (LF)" and "LF (Long Form)" patterns, where the initials of the long form spell the acronym, case-insensitively, over 2–6 letters.
+  2. **The planner is told** to write a source's acronym out as its long form, never to lead with a bare acronym, and to prefer the technical terms the handed text itself uses.
+  3. **A deterministic pass on the planner's query:** each bare acronym in the map is replaced by its long form (quoted when it is several words). The long form is a span of a source, so the rule holds.
+- **Test:** a fixture from 4c's exact pairs. The R1 brief (which has "Multidimensional Grammar (MDG)") and the planner's real outputs give queries that never start with "MDG" and carry "Multidimensional Grammar".
+- **Kill criteria:**
+  - the map missing "Multidimensional Grammar (MDG)";
+  - an acronym kept bare;
+  - an expansion that is not a source span (initials that do not match).

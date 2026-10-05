@@ -15224,3 +15224,10 @@ The review is a commit comment on 6cf3b76. E.NET1k is verified.
 - a save without ", unsaved" not counted as taken.
 
 **Then:** a fix bundle on the 520 branch, installed by 4c, and the gate again: 7/7 is required before the enforce flip and anything public.
+
+**E.ARENA1-F66 — WITHDRAWN before any code: its premise was wrong.**
+- The prereg rested on a step-4 line quoted without "Text Editor —". 4c corrected it from the journal, re-pulled exactly: "Done — Text Editor — Untitled (no file yet), 3 lines, unsaved · tab 3 of 3 accepted: True, settled: True revision: 0445d…", a shape `update_unsaved` reads (an existing test covers it).
+- 4c also checked `git log 4f50b24a..fb2f27f3`: no change to the editor, the app runtime, control or yos-mcp.
+- **Measured, not reasoned:** T7 was replayed offline (`t7_replay_names_the_save_at_every_repeat`) with the journal's own lines and steps: `new`, the refused `set_content`, then `new` again. After step 1, EVERY repeat was answered with `The next call is: os_act {"app": "editor", "action": "save_as", "args": {"path": "~/arena-min09n-friday.txt"}}`, and the unsaved nudge fired. The loop did its part; on 520 the model (deepseek-v4.1-flash, as deployed) did not take it, eight times.
+- **What is NOT established:** whether this is a regression in 54bd13f..72b579d (something that changed what the model chooses) or model variance. T7 passed in 5 earlier gates, so this needs repetitions, not one run. Next: T7 alone, several reps, on the same build, before any conclusion.
+- **Lesson** (already in memory as "true mechanism, unmeasured impact"): I preregistered a fix from a quoted line instead of replaying the real one first.

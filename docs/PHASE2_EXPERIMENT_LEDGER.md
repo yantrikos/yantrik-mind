@@ -14209,3 +14209,28 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
 - the gender prepend back;
 - work_radar running when off;
 - the task message picked from a turn that did not search.
+
+## E.EGRESS5 phase 1 — RESULT: built to the amended prereg, minus (b) and (c); 12 of 12 mutants killed
+
+- **`classify`** falls back to `OUTBOUND`, so every table tool is External: the broker's credential tripwire and the exact-value tripwire (g) run for all of them.
+- **`clean_outbound_fields`** (every table tool outside the original list):
+  - a query goes through the search rule (a span of the person's words, their task message or a handed-over file, otherwise the planner);
+  - an address goes through the fetch planner and the turn budget;
+  - a token passes only if it is a shareable fact for THIS tool kind (`YM_SHAREABLE_FACTS`, set by the person in settings) or a whole-word span of the person's words, task message or a handed-over file (`token_is_a_span`, where `owner/repo` is allowed and path forms are not); otherwise the planner rewrites it.
+  - Trading tools now carry symbol, symbols and ticker as tokens.
+  - `mcp.*` arguments are not rewritten yet (phase 2: the desktop server is this machine; other servers need their fields declared). MCP tools are classified outbound and their output never joins web_obs (e).
+- **work_radar (Pranab):** opt-in via `YM_WORK_RADAR=on`, a settings toggle whose description says what it sends. Off, the tool answers `WORK_RADAR_OFF`, the scheduled pass does nothing, and the egress layer refuses it (`NotOptedIn`).
+- **The research sub-agent:** no inbox, no recall, and `RESEARCHER_PERSONA` (no fact about the person, not their name). Its own searches are not routed through `guards::pre`: with no private input they have nothing private to carry; argued to the reviewer rather than built.
+- **deals:** no gender prepend, in both the finder and the price watch.
+- **Background re-sends (d):** the tools receive the cleaned args from `guards::pre` and store those. A test shows track_news is handed the cleaned topic.
+- **E.EGRESS4c fix (ninth pass):** the task message is the latest 4+ word person message whose turn sent a web search or fetch (`note_searched` in `guards::pre`). An aside never is.
+- **Audit (a):** all the flagged LOCAL tools are local, except `ask_whois`, whose follow-up reaches Immich and Telegram; it moves to the table (no fields).
+- **Tests:**
+  - `every_outbound_tools_fields_are_cleaned_as_their_kind`: query, url, token, shareable fact to the right and wrong kinds, an unlisted fact, work_radar off;
+  - `a_background_tool_is_handed_the_cleaned_arguments`, `an_mcp_tools_output_never_becomes_web_text`, `a_shopping_search_carries_no_profile_attribute`, `the_tripwire_covers_every_outbound_tool`;
+  - mind-core `the_researcher_holds_nothing_private`;
+  - the aside case in the task-message test;
+  - the old "a non-eligible tool keeps its grounded args" contract is replaced: github's repo is a token now.
+- **Mutants:** fields not cleaned; query, url and token kinds passing raw; a fact to any kind; classify ignoring the table (first SURVIVED, then killed by the new tripwire test); work_radar running when off (egress and tool); the researcher's persona back; inbox back; the gender back. All killed.
+- Full suite 2306 passed; on Linux staging mind-conversation 1128 and mind-core 139.
+- **Next:** (b) ask-only-if-from-memory cards for share, photo_send, onedrive and coder (Pranab decided); (c) the call-site scan.

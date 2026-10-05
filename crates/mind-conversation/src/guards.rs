@@ -46,6 +46,14 @@ pub(crate) struct GuardState {
     fetched: Vec<String>,
 }
 
+impl GuardState {
+    /// E.EGRESS5: the web text a query may draw on, for tests.
+    #[cfg(test)]
+    pub(crate) fn web_obs_for_test(&self) -> &[String] {
+        &self.web_obs
+    }
+}
+
 /// E.EGRESS3b: the most web text kept this turn as query sources (the newest kept).
 const WEB_OBS_CAP: usize = 32_000;
 
@@ -153,6 +161,12 @@ pub(crate) async fn pre(
             kind: RefusalKind::EgressUnsafe,
             msg,
         };
+    }
+    // E.EGRESS4c (the ninth pass): this turn's message set a task -- a web search or fetch went out on it.
+    if crate::egress_planning::plans_from_handed(tool) || matches!(tool, "web_fetch" | "fetch" | "web") {
+        if let Ok(mut h) = engine.handed_over.lock() {
+            h.note_searched(&ConversationEngine::handed_key(id), user_text);
+        }
     }
     // E.EGRESS4: a fetch that goes out is one the next fetch planner knows of, and the cap counts.
     if matches!(tool, "web_fetch" | "fetch" | "web") {
@@ -510,6 +524,7 @@ mod tests {
         let id = TurnIdentity::primary();
         let key = ConversationEngine::handed_key(&id);
         eng.handed_over.lock().unwrap().note_named(&key, "Look up who alice.private@example.com works for", None, ConversationEngine::now_ms());
+        eng.handed_over.lock().unwrap().note_searched(&key, "Look up who alice.private@example.com works for");
         let state = Mutex::new(GuardState::default());
         let v = pre(&eng, &state, &id, "Continue.", "search", serde_json::json!({"query": "alice.private@example.com"}), "t").await;
         assert!(matches!(v, PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, .. }), "the task message exempted a stored private value");

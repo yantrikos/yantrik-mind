@@ -9726,6 +9726,7 @@ WINDOW: all-time, latest 200
                 let subj = if subject.is_empty() { mode } else { subject };
                 self.research_ops_run(m, subj).await
             }
+            "radar" if !crate::code::work_radar_opted_in() => crate::code::WORK_RADAR_OFF.to_string(),
             "radar" => match self.work_radar_run().await {
                 Some(m) => {
                     self.notify_queue.lock().unwrap().push(m.clone());
@@ -12199,6 +12200,7 @@ WINDOW: all-time, latest 200
             "festival_calendar" | "festivals" => self.festivals_list().await,
             "traditions" | "tradition" => self.traditions_list().await,
             "nightly_dream" | "dream" => self.dream_run().await.unwrap_or_else(|| "Nothing earned a dream right now.".to_string()),
+            "work_radar" | "radar" if !crate::code::work_radar_opted_in() => crate::code::WORK_RADAR_OFF.to_string(),
             "work_radar" | "radar" => self.work_radar_run().await.unwrap_or_else(|| "Radar ran — no belief-changing findings; stayed silent.".to_string()),
             "self_limits" | "limits" | "capabilities" => self.limits_report().await,
             "onedrive" => {

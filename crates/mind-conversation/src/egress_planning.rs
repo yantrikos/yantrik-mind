@@ -38,6 +38,9 @@ struct Said {
     text: String,
     canon: String,
     at: u64,
+    /// E.EGRESS4c (the ninth pass): this message's turn ran a web search or fetch -- it set a task,
+    /// rather than being an aside ("btw my sister was diagnosed with ...").
+    searched: bool,
 }
 
 /// E.EGRESS4c: a message this short ("Continue.", "go on") sets no task of its own.
@@ -169,7 +172,7 @@ impl HandedOver {
         // E.ERASE4: the person's message, once (both loops note the same turn).
         let canon = crate::erase_redact::canon(user_text);
         if store.said.last().map(|s| &s.canon) != Some(&canon) {
-            store.said.push(Said { text: user_text.to_string(), canon, at: now });
+            store.said.push(Said { text: user_text.to_string(), canon, at: now, searched: false });
             let over = store.said.len().saturating_sub(SAID_MAX);
             store.said.drain(..over);
         }
@@ -284,21 +287,33 @@ impl HandedOver {
         !needle.is_empty() && self.stores.get(key).is_some_and(|s| s.said.iter().any(|m| m.canon.contains(&needle)))
     }
 
-    /// E.EGRESS4c (narrowed by the eighth pass): on a turn whose message is too short to set a task
-    /// ("Continue."), the message that DID set it -- the latest earlier one of the person's with
-    /// [`TASK_MIN_WORDS`] or more, said within [`HANDED_OVER_MS`], without its quoted parts. One
-    /// message, never the whole history.
+    /// E.EGRESS4c (narrowed by the eighth and ninth passes): on a turn whose message is too short to
+    /// set a task ("Continue."), the message that DID set it -- the latest earlier one of the person's
+    /// with [`TASK_MIN_WORDS`] or more words WHOSE TURN SEARCHED OR FETCHED, said within
+    /// [`HANDED_OVER_MS`], without its quoted parts. One message, never the whole history, never an aside.
     pub(crate) fn task_message(&self, key: &str, user_text: &str, now: u64) -> Option<String> {
         if words_of(user_text).split_whitespace().count() >= TASK_MIN_WORDS {
             return None;
         }
         let store = self.stores.get(key)?;
-        let said = store.said.iter().rev().find(|s| words_of(&s.text).split_whitespace().count() >= TASK_MIN_WORDS)?;
+        let said = store
+            .said
+            .iter()
+            .rev()
+            .find(|s| s.searched && words_of(&s.text).split_whitespace().count() >= TASK_MIN_WORDS)?;
         if now.saturating_sub(said.at) >= HANDED_OVER_MS {
             return None;
         }
         let own = own_words(&said.text);
         (!own.trim().is_empty()).then_some(own)
+    }
+
+    /// E.EGRESS4c (the ninth pass): a web search or fetch went out on the turn of this message.
+    pub(crate) fn note_searched(&mut self, key: &str, user_text: &str) {
+        let canon = crate::erase_redact::canon(user_text);
+        if let Some(s) = self.stores.get_mut(key).and_then(|st| st.said.iter_mut().rev().find(|s| s.canon == canon)) {
+            s.searched = true;
+        }
     }
 
     /// E.EGRESS4c: an erase takes every kept message holding the erased words out of every
@@ -443,6 +458,59 @@ pub(crate) fn unchanged_since(changed: u64, named_at_ms: Option<u64>) -> bool {
 /// E.EGRESS3e: the tools whose query may be planned from the handed-over text.
 pub(crate) fn plans_from_handed(tool: &str) -> bool {
     matches!(tool, "search" | "web_search" | "google" | "ddg" | "wikipedia" | "wiki")
+}
+
+/// E.EGRESS5: may this token (a city, a ticker, a repo) leave as written? Only as a whole-word span of
+/// one source, and never in a form that names a file on this machine. Unlike a query, a slash inside
+/// is allowed -- `owner/repo` is a repository, not a path.
+pub(crate) fn token_is_a_span(token: &str, sources: &[&str], named: &[String]) -> bool {
+    let t = token.trim();
+    let lower = t.to_ascii_lowercase();
+    if t.is_empty()
+        || t.starts_with(['/', '~', '.'])
+        || t.contains('\\')
+        || lower.starts_with("file:")
+        || named.iter().any(|n| n.eq_ignore_ascii_case(t))
+    {
+        return false;
+    }
+    let words = norm(t);
+    if words.is_empty() {
+        return false;
+    }
+    let needle = format!(" {words} ");
+    sources.iter().any(|s| format!(" {} ", norm(s)).contains(&needle))
+}
+
+/// E.EGRESS5 (Pranab, 5 Oct): the facts the person marked OK to send to a kind of service, from
+/// `YM_SHAREABLE_FACTS` -- set only by the person, through settings (the Mind never writes its own
+/// config) -- as `kind: value, value; kind: value`, e.g. `weather: Bentonville`. The kind is the
+/// tool family's first name.
+pub(crate) fn shareable_facts() -> Vec<(String, String)> {
+    shareable_facts_from(&std::env::var("YM_SHAREABLE_FACTS").unwrap_or_default())
+}
+
+/// E.EGRESS5: the shareable-facts setting, parsed.
+pub(crate) fn shareable_facts_from(raw: &str) -> Vec<(String, String)> {
+    raw.split(';')
+        .filter_map(|entry| entry.split_once(':'))
+        .flat_map(|(kind, values)| {
+            let kind = kind.trim().to_ascii_lowercase();
+            values.split(',').map(move |v| (kind.clone(), v.trim().to_string()))
+        })
+        .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+        .collect()
+}
+
+/// E.EGRESS5: is `value` a fact the person marked shareable with tools of this `kind`?
+pub(crate) fn shareable_fact(kind: &str, value: &str) -> bool {
+    shareable_fact_in(&std::env::var("YM_SHAREABLE_FACTS").unwrap_or_default(), kind, value)
+}
+
+/// E.EGRESS5: `shareable_fact` against a given setting.
+pub(crate) fn shareable_fact_in(raw: &str, kind: &str, value: &str) -> bool {
+    let want = crate::erase_redact::canon(value.trim());
+    shareable_facts_from(raw).iter().any(|(k, v)| k.eq_ignore_ascii_case(kind) && crate::erase_redact::canon(v) == want)
 }
 
 /// E.EGRESS4: the http(s) addresses in a text, in order, without trailing punctuation.
@@ -625,6 +693,8 @@ pub(crate) enum CleanArgsFailure {
     UrlNotFromSources,
     /// E.EGRESS4b (the seventh pass): over this turn's fetch budget -- 6 in all, 2 per host.
     FetchBudget,
+    /// E.EGRESS5 (Pranab, 5 Oct): a tool the person has not turned on (the work radar).
+    NotOptedIn,
 }
 
 impl CleanArgsFailure {
@@ -633,6 +703,9 @@ impl CleanArgsFailure {
             CleanArgsFailure::NoAnswer => "the model that prepares outbound requests did not answer",
             CleanArgsFailure::NoUsableArgs => {
                 "the model that prepares outbound requests returned no usable arguments"
+            }
+            CleanArgsFailure::NotOptedIn => {
+                "the work radar sends topics from your messages to search engines, so it is off until you turn it on in settings (Work radar)"
             }
             CleanArgsFailure::FetchBudget => {
                 "this turn has fetched as many pages as it may (6, and 2 from one site); use what they gave"
@@ -759,6 +832,71 @@ impl ConversationEngine {
                 self.note_mind_written(key, &abs);
             }
         }
+    }
+
+    /// E.EGRESS5 (the eighth review's HIGH): the outbound fields of a tool outside the original list,
+    /// each cleaned as its kind -- a query or a token through the search rule (a span of the person's
+    /// words, their task message or a handed-over file, else the clean planner's words); an address
+    /// through the fetch planner and its budget. Fields that carry no model-written text pass. `mcp.*`
+    /// tools are not cleaned here yet: the desktop's own server is this machine (terminal commands,
+    /// editor text), and other servers need their fields declared first (phase 2).
+    async fn clean_outbound_fields(
+        &self,
+        tool: &str,
+        user_text: &str,
+        grounded: serde_json::Value,
+        external_provenance: &str,
+        web_obs: &[String],
+        fetched: &[String],
+        key: &str,
+    ) -> Result<serde_json::Value, CleanArgsFailure> {
+        if tool.starts_with("mcp.") {
+            return Ok(grounded);
+        }
+        let Some(o) = mind_governance::egress::outbound(tool) else { return Ok(grounded) };
+        // E.EGRESS5 (Pranab, 5 Oct): the work radar sends topics from the person's messages to search
+        // engines, so it runs only when the person has turned it on.
+        if o.names.contains(&"work_radar") && !crate::code::work_radar_opted_in() {
+            return Err(CleanArgsFailure::NotOptedIn);
+        }
+        // E.EGRESS5: the sources a token may come from -- the person's words, their task message, and
+        // the files they handed over.
+        let (handed, named, task) = if key.is_empty() {
+            (Vec::new(), Vec::new(), None)
+        } else {
+            self.handed_over
+                .lock()
+                .map(|mut h| (h.texts(key, Self::now_ms()), h.named_names(key), h.task_message(key, user_text, Self::now_ms())))
+                .unwrap_or_default()
+        };
+        let mut token_sources: Vec<&str> = vec![user_text];
+        if let Some(t) = &task {
+            token_sources.push(t);
+        }
+        token_sources.extend(handed.iter().map(String::as_str));
+        let mut out = grounded.clone();
+        for (name, kind) in o.fields {
+            let Some(value) = grounded.get(*name).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()) else { continue };
+            let cleaned = match kind {
+                mind_governance::egress::FieldKind::Url => {
+                    let r = Box::pin(self.plan_fetch(tool, user_text, &serde_json::json!({ "url": value }), web_obs, fetched, key)).await?;
+                    r.get("url").and_then(|u| u.as_str()).unwrap_or_default().to_string()
+                }
+                // E.EGRESS5 (Pranab, 5 Oct): a fact the person marked shareable with THIS kind of
+                // service passes as it is; any other token goes the way of a query.
+                mind_governance::egress::FieldKind::Token if shareable_fact(o.names[0], value) => value.to_string(),
+                mind_governance::egress::FieldKind::Token if token_is_a_span(value, &token_sources, &named) => value.to_string(),
+                mind_governance::egress::FieldKind::Query | mind_governance::egress::FieldKind::Token => {
+                    let r = Box::pin(self.egress_clean_args_with("search", user_text, serde_json::json!({ "query": value }), external_provenance, web_obs, fetched, key)).await?;
+                    r.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string()
+                }
+            };
+            if cleaned.trim().is_empty() {
+                return Err(CleanArgsFailure::NoUsableArgs);
+            }
+            out[*name] = serde_json::Value::String(cleaned);
+        }
+        Ok(out)
     }
 
     /// E.EGRESS4: where a fetch goes. An address in the person's own words of this turn leaves as
@@ -927,7 +1065,8 @@ impl ConversationEngine {
                 | "tr"
         );
         if !eligible {
-            return Ok(grounded);
+            // E.EGRESS5: any other outbound tool -- its model-written fields are cleaned as their kind.
+            return Box::pin(self.clean_outbound_fields(tool, user_text, grounded, external_provenance, web_obs, fetched, key)).await;
         }
         if !matches!(
             mind_governance::egress::classify(tool),

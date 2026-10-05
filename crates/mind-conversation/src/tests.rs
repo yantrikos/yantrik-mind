@@ -2458,13 +2458,23 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
         "the private detail must not reach the connector"
     );
 
-    // A NON-eligible egress tool (github) keeps its grounded args (documented not-yet-covered).
-    let g = serde_json::json!({ "repo": "owner/repo" });
-    let kept = conv
+    // E.EGRESS5 (the eighth review's HIGH): the github tool is no longer "documented not-yet-covered" --
+    // its repo is a token, and one the person did not write is the planner's to write.
+    let g = serde_json::json!({ "repo": "owner/private-repo" });
+    let cleaned = conv
         .egress_clean_args("github_repo_items", "my open PRs", g.clone(), "")
         .await
         .unwrap();
-    assert_eq!(kept, g, "a non-eligible tool keeps its grounded args");
+    assert_ne!(cleaned, g, "a repo the person never named left as the model wrote it");
+    // A repo the person named leaves as they wrote it.
+    let named = conv
+        .egress_clean_args("github_repo_items", "show my open PRs in owner/repo", serde_json::json!({ "repo": "owner/repo" }), "")
+        .await
+        .unwrap();
+    assert_eq!(named, serde_json::json!({ "repo": "owner/repo" }));
+    // A LOCAL tool keeps its args: nothing leaves.
+    let local = serde_json::json!({ "expr": "6*7" });
+    assert_eq!(conv.egress_clean_args("calc", "what is 6*7", local.clone(), "").await.unwrap(), local);
 
     // With NO egress broker wired, planning is inert (legacy path unchanged).
     let mem2: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
@@ -19639,7 +19649,7 @@ const LOCAL_TOOLS: &[&str] = &[
     "about_person", "person", "self_report", "week_review", "life_horizon", "horizon", "anticipate",
     "festival_calendar", "festivals", "traditions", "tradition", "nightly_dream", "dream", "self_limits", "limits",
     "capabilities", "plugin_registry", "plugin_search", "plugins", "family_book", "book", "event_ledger", "events",
-    "event", "bill_autopay", "autopay", "mail_rule", "mailrule", "enhance_photo", "ask_whois", "calendar_remove",
+    "event", "bill_autopay", "autopay", "mail_rule", "mailrule", "enhance_photo", "calendar_remove",
     "remove_event", "forget_date", "remove_date", "calendar_add", "add_event", "calendar_view", "calendar", "sources",
     "source_standing", "trust", "forget", "erase", "drop_reminder", "drop_thread", "stop_tracking", "add_reminder",
     "discover_tools", "search_skills", "build_capability", "calc", "calculate", "math", "money", "subscriptions",
@@ -19710,7 +19720,11 @@ fn a_continue_turn_has_the_message_that_set_the_task() {
     let k = "primary|c1";
     let mut h = HandedOver::default();
     h.note_named(k, "Research prior art on typed meaning graphs", None, 1_000);
+    h.note_searched(k, "Research prior art on typed meaning graphs");
     h.note_named(k, "Now look at semantic token compression instead\n> forwarded: my bank PIN is 4821", None, 2_000);
+    h.note_searched(k, "Now look at semantic token compression instead\n> forwarded: my bank PIN is 4821");
+    // The ninth pass: an aside -- long, but its turn searched nothing -- is never the task.
+    h.note_named(k, "btw my sister Priya was diagnosed with lupus last week", None, 2_500);
     h.note_named(k, "Continue.", None, 3_000);
     let task = h.task_message(k, "Continue.", 3_000).expect("no task message on a Continue turn");
     assert!(task.contains("semantic token compression"), "not the latest task: {task}");
@@ -19752,7 +19766,9 @@ async fn a_continue_turn_searches_from_the_task_message() {
     {
         let mut h = conv.handed_over.lock().unwrap();
         h.note_named(key, "Find prior art on typed meaning graphs", None, ConversationEngine::now_ms());
+        h.note_searched(key, "Find prior art on typed meaning graphs");
         h.note_named(key, "Research semantic token compression for language models", None, ConversationEngine::now_ms());
+        h.note_searched(key, "Research semantic token compression for language models");
         h.note_named(key, "Continue.", None, ConversationEngine::now_ms());
     }
     let out = conv.egress_clean_args_with("search", "Continue.", serde_json::json!({"query": "semantic token compression"}), "", &[], &[], key).await;
@@ -19762,4 +19778,94 @@ async fn a_continue_turn_searches_from_the_task_message() {
     let prompt = seen.lock().unwrap().last().cloned().unwrap_or_default();
     assert!(prompt.contains("The task they set earlier in this conversation: Research semantic token compression"), "{prompt}");
     assert!(!prompt.contains("typed meaning graphs"), "the planner saw more than the task message: {prompt}");
+}
+
+/// E.EGRESS5 (the eighth review's HIGH): every outbound tool's model-written fields are cleaned as
+/// their kind -- a query or token the person did not write is the planner's, an address from no
+/// source is refused -- and a fact the person marked shareable reaches only its own kind of service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_outbound_tools_fields_are_cleaned_as_their_kind() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"query":"planned words"}"#)) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    // A query field (deals) the model filled from memory: the planner's words leave.
+    let out = conv.egress_clean_args("deals", "find deals on headphones", serde_json::json!({"query": "lupus medication for Priya"}), "").await;
+    assert_eq!(out, Ok(serde_json::json!({"query": "planned words"})), "a memory-written query left");
+    // ...and the person's own words leave as written.
+    let own = conv.egress_clean_args("deals", "find deals on noise cancelling headphones", serde_json::json!({"query": "noise cancelling headphones"}), "").await;
+    assert_eq!(own, Ok(serde_json::json!({"query": "noise cancelling headphones"})));
+    // An address field (see_page) from no source: refused.
+    let out = conv.egress_clean_args("see_page", "look at that page", serde_json::json!({"url": "https://evil.example/?v=alice"}), "").await;
+    assert_eq!(out, Err(crate::egress_planning::CleanArgsFailure::UrlNotFromSources));
+    // A token (weather) the person did not write: the planner's, unless marked shareable for weather.
+    let out = conv.egress_clean_args("weather", "what's the weather today", serde_json::json!({"place": "Bentonville"}), "").await;
+    assert_eq!(out, Ok(serde_json::json!({"place": "planned words"})), "an unmarked memory token left");
+    assert!(crate::egress_planning::shareable_facts_from("weather: Bentonville, Rogers; quote: AAPL").contains(&("weather".to_string(), "Bentonville".to_string())));
+    assert!(crate::egress_planning::shareable_fact_in("weather: Bentonville", "weather", "bentonville"));
+    assert!(!crate::egress_planning::shareable_fact_in("weather: Bentonville", "quote", "Bentonville"), "a fact reached another kind of service");
+    assert!(!crate::egress_planning::shareable_fact_in("weather: Bentonville", "weather", "Fayetteville"), "an unlisted fact passed");
+    // work_radar is opt-in: refused while it is off.
+    assert_eq!(conv.egress_clean_args("work_radar", "run the radar", serde_json::json!({}), "").await, Err(crate::egress_planning::CleanArgsFailure::NotOptedIn));
+    assert_eq!(conv.run_agent_tool("work_radar", &serde_json::json!({})).await, crate::code::WORK_RADAR_OFF);
+}
+
+/// E.EGRESS5 (the ninth pass, d): a background tool's later polls send what was cleaned, because the
+/// tool is handed the cleaned arguments and stores those.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_background_tool_is_handed_the_cleaned_arguments() {
+    use mind_governance::egress::EgressBroker;
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new(r#"{"query":"planned topic"}"#)) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let state = std::sync::Mutex::new(crate::guards::GuardState::default());
+    let v = crate::guards::pre(&conv, &state, &TurnIdentity::primary(), "keep me posted on that", "track_news", serde_json::json!({"topic": "Priya's lupus trial"}), "t").await;
+    match v {
+        crate::guards::PreVerdict::Proceed(args) => assert_eq!(args, serde_json::json!({"topic": "planned topic"}), "the stored topic would be the raw one"),
+        crate::guards::PreVerdict::Refuse { msg, .. } => panic!("{msg}"),
+    }
+}
+
+/// E.EGRESS5 (the ninth pass, e): an MCP tool's output is never web text a query may draw on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mcp_tools_output_never_becomes_web_text() {
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "JARVIS");
+    let state = std::sync::Mutex::new(crate::guards::GuardState::default());
+    let _ = crate::guards::post(&conv, &state, "mcp.notes.search", "1. My diary -- https://notes.example/diary?id=7").await;
+    assert!(state.lock().unwrap().web_obs_for_test().is_empty(), "an MCP tool's output joined the web text");
+    assert!(mind_governance::egress::classify("mcp.anything.read").is_some(), "an MCP tool is not outbound");
+}
+
+/// E.EGRESS5 (Pranab's "your words + named files"): no profile attribute joins a shopping search.
+#[test]
+fn a_shopping_search_carries_no_profile_attribute() {
+    const SRC: &str = include_str!("deals.rs");
+    assert!(!SRC.contains("format!(\"{gender} {query}\")"), "a family member's gender is prepended to a search again");
+}
+
+/// E.EGRESS5 (the ninth pass, g): the exact-value tripwire runs on every outbound tool in the table,
+/// not only the ones the classifier used to name -- a stored private value in a shopping query is caught.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tripwire_covers_every_outbound_tool() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    mem.remember_as_belief(mind_types::BeliefAssertion {
+        statement: "Alice's email is alice.private@example.com".into(),
+        polarity: 1.0,
+        weight: 1.0,
+        source_event: Some("test".into()),
+        provenance: "told".into(),
+    })
+    .await
+    .unwrap();
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS");
+    let id = TurnIdentity::primary();
+    for tool in ["deals", "track_subject", "learn_about", "watch_price"] {
+        let hit = conv.model_injected_private_value(tool, &serde_json::json!({"query": "alice.private@example.com"}), "find me something", &id).await;
+        assert!(hit.is_some(), "{tool} skipped the tripwire");
+    }
+    let local = conv.model_injected_private_value("calc", &serde_json::json!({"expr": "alice.private@example.com"}), "x", &id).await;
+    assert!(local.is_none(), "a local tool was treated as outbound");
 }

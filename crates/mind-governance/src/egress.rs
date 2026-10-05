@@ -94,7 +94,7 @@ use FieldKind::{Query, Token, Url};
 
 /// E.EGRESS5 (the eighth egress review's HIGH): EVERY tool that can reach the network, in one table.
 /// A source-scan test in mind-conversation holds the dispatchers to it: a tool not here and not on its
-/// LOCAL list fails the build. (Not yet read by `classify` -- that waits on the reviewed scope.)
+/// LOCAL list fails the build. `classify` falls back to it, and the clean planner cleans its fields.
 pub const OUTBOUND: &[Outbound] = &[
     // ── the web: search, fetch, and the tools built on them ──
     Outbound { names: &["search", "web_search", "google", "ddg"], connector: || Connector::Web, fields: &[("query", Query), ("q", Query)] },
@@ -153,9 +153,12 @@ pub const OUTBOUND: &[Outbound] = &[
             "crypto_agent", "trading_cockpit", "hunt", "scan_movers", "portfolio", "holdings", "my_stocks",
         ],
         connector: || Connector::ThirdParty,
-        fields: &[],
+        // The ninth pass (b): a ticker or a symbol is a token.
+        fields: &[("symbol", Token), ("symbols", Token), ("ticker", Token)],
     },
     Outbound { names: &["share_with_member", "share"], connector: || Connector::ThirdParty, fields: &[] },
+    // The audit (a): no model text, but its follow-up reaches Immich and Telegram from the poll loop.
+    Outbound { names: &["ask_whois"], connector: || Connector::ThirdParty, fields: &[] },
     Outbound { names: &["code", "coder"], connector: || Connector::Coder, fields: &[] },
 ];
 
@@ -196,7 +199,8 @@ pub fn classify(tool: &str) -> Option<EgressClass> {
         "home" | "home_status" | "house" | "smart_home" => ext(HomeAssistant),
         "translate" | "tr" | "wikipedia" | "wiki" | "crypto" | "coin" | "stock" | "ticker" | "weather" | "wx" => ext(ThirdParty),
         "code" | "coder" => ext(Coder),
-        _ => None,
+        // E.EGRESS5: every other outbound tool, from the one table -- none reaches the network unseen.
+        _ => outbound(tool).map(|o| EgressClass::External((o.connector)())),
     }
 }
 

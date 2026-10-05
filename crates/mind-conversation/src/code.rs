@@ -36,6 +36,12 @@ impl super::ConversationEngine {
     /// One radar pass. Returns Some(message) only when research revised beliefs; None = silence
     /// (nothing new, or nothing to research). Always stamps radar_last so failures don't hot-loop.
     pub async fn work_radar_run(&self) -> Option<String> {
+        // E.EGRESS5 (Pranab, 5 Oct): opt-in only -- it researches topics mined from the person's own
+        // messages, which sends them to search engines. Off, it does nothing, scheduled or asked.
+        if !work_radar_opted_in() {
+            eprintln!("[radar] off (YM_WORK_RADAR is not on) -- nothing sent");
+            return None;
+        }
         let now_ms = chrono::Utc::now().timestamp_millis();
         let _ = self
             .memory
@@ -2624,3 +2630,12 @@ impl super::ConversationEngine {
         }
     }
 }
+
+
+/// E.EGRESS5 (Pranab, 5 Oct): the work radar runs only when the person turned it on (`YM_WORK_RADAR=on`).
+pub(crate) fn work_radar_opted_in() -> bool {
+    std::env::var("YM_WORK_RADAR").map(|v| v.trim().eq_ignore_ascii_case("on")).unwrap_or(false)
+}
+
+/// E.EGRESS5: what the person is told when they ask for the radar and it is off.
+pub(crate) const WORK_RADAR_OFF: &str = "The work radar is off. It researches topics from your recent messages, which sends those topics to search engines, so it runs only if you turn it on in settings (Work radar).";

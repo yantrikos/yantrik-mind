@@ -378,11 +378,10 @@ impl super::ConversationEngine {
                 }
             })
             .unwrap_or("");
-        let sq = if gender.is_empty() {
-            query.clone()
-        } else {
-            format!("{gender} {query}")
-        };
+        // E.EGRESS5 (Pranab's "your words + named files"): a family member's gender, from their profile,
+        // is a private attribute -- it never joins a search the person did not word that way.
+        let _ = gender;
+        let sq = query.clone();
         // 1. Multi-source search — two angles (buy + deal) merged and deduped.
         let mut hits: Vec<mind_tools::SearchHit> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -503,11 +502,9 @@ impl super::ConversationEngine {
         gender: &str,
     ) -> Option<(String, f64, String, String)> {
         let searcher = self.searcher.as_ref()?;
-        let sq = if gender.is_empty() {
-            query.to_string()
-        } else {
-            format!("{gender} {query}")
-        };
+        // E.EGRESS5: no profile attribute in a search (see the finder).
+        let _ = gender;
+        let sq = query.to_string();
         let mut hits: Vec<mind_tools::SearchHit> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for q in [format!("{sq} best price buy online"), format!("{sq} price")] {

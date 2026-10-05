@@ -109,6 +109,10 @@ pub(crate) const SCHEMA: &[Setting] = &[
     Setting { key: "YM_HOME_WATCH", label: "Home watch", group: "Switches", kind: "toggle", desc: "Grounded home-anomaly alerts.", restart: true },
     Setting { key: "YM_HA_EVENTS", label: "Fast-twitch ear", group: "Switches", kind: "toggle", desc: "Home Assistant websocket event subscription.", restart: true },
     Setting { key: "YM_WEB", label: "Web dashboards", group: "Switches", kind: "toggle", desc: "The read-only static dashboard server.", restart: true },
+    // E.EGRESS5 (Pranab, 5 Oct): opt-in, and says plainly what turning it on sends.
+    // E.EGRESS5 (Pranab, 5 Oct): the only memory facts that may reach a service, each to one kind.
+    Setting { key: "YM_SHAREABLE_FACTS", label: "Facts I allow services to receive", group: "Switches", kind: "string", desc: "Everything the Mind knows about you stays private unless it is listed here, bound to the one kind of service it may go to -- e.g. `weather: Bentonville`. Anything else leaves only in your own words.", restart: true },
+    Setting { key: "YM_WORK_RADAR", label: "Work radar", group: "Switches", kind: "toggle", desc: "Off unless set to on. On, the radar takes topics from your recent messages and sends them to search engines to research them.", restart: true },
     // ── Channels & keys (masked) ─────────────────────────────────────────
     Setting { key: "YM_TELEGRAM_TOKEN", label: "Telegram bot token", group: "Channels & keys", kind: "secret", desc: "The family chat surface.", restart: true },
     Setting { key: "YM_HA_URL", label: "Home Assistant URL", group: "Channels & keys", kind: "string", desc: "http://host:8123 on the LAN.", restart: true },

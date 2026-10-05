@@ -553,6 +553,10 @@ pub fn mind_name_from(get: &dyn Fn(&str) -> Option<String>, chosen_at_setup: Opt
         .unwrap_or_else(|| mind_types::LEGACY_MIND_NAME.to_string())
 }
 
+/// E.EGRESS5 (the ninth pass, f): the research sub-agent's persona -- it knows nothing about the
+/// person, so nothing about them can reach the searches and fetches it writes.
+pub(crate) const RESEARCHER_PERSONA: &str = "You are a research assistant. You find and read public sources on the web and report what they say, with their addresses. You know nothing about the person who asked, and you never guess at them.";
+
 /// The persona this Mind runs with: its name (`mind_name_from`) and its person (`YM_OPERATOR`).
 fn engine_persona(get: &dyn Fn(&str) -> Option<String>, chosen_at_setup: Option<String>) -> String {
     let operator = get("YM_OPERATOR").unwrap_or_default();
@@ -822,16 +826,17 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_egress(egress.clone()),
     );
 
-    // A research sub-agent: web search + fetch + the mind's own read tools. Bounded ReAct, read-only.
+    // A research sub-agent: web search + fetch + GitHub. Bounded ReAct, read-only. E.EGRESS5 (the eighth
+    // review's HIGH): no inbox and no recall -- a sub-agent that holds no private context cannot write
+    // any into the searches and fetches it makes.
     let researcher = mind_agents::SubAgent::new(
         research_pool,
         host.clone(),
-        persona.clone(),
+        // The ninth pass (f): no profile fact in its persona either -- not the person's name.
+        RESEARCHER_PERSONA.to_string(),
         vec![
             "web_search".into(),
             "fetch".into(),
-            "recall".into(),
-            "inbox".into(),
             "github".into(),
         ],
         6,
@@ -1611,6 +1616,22 @@ mod mind_name_tests {
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
         assert!(body.contains("engine_persona("), "engine() no longer takes its persona from engine_persona");
         assert!(!body.contains("default_persona("), "engine() fell back to the legacy persona");
+    }
+
+    /// E.EGRESS5 (the eighth and ninth passes): the research sub-agent holds no private context -- no
+    /// inbox, no recall, and a persona with no fact about the person -- so nothing private can reach
+    /// the searches and fetches it writes.
+    #[test]
+    fn the_researcher_holds_nothing_private() {
+        const SRC: &str = include_str!("lib.rs");
+        let body = SRC.split("let researcher = mind_agents::SubAgent::new(").nth(1).expect("the researcher is built");
+        let body = &body[..body.find(");").unwrap_or(body.len())];
+        assert!(body.contains("RESEARCHER_PERSONA"), "the researcher runs with the Mind's persona (the person's name in it)");
+        assert!(!body.contains("persona.clone()"), "the researcher runs with the Mind's persona");
+        for tool in ["\"inbox\"", "\"recall\"", "\"mail\"", "\"mail_search\""] {
+            assert!(!body.contains(tool), "the researcher can read {tool}");
+        }
+        assert!(!super::RESEARCHER_PERSONA.contains("Yantrik Live") && !super::RESEARCHER_PERSONA.contains("{"));
     }
 
     /// A name is one line and at most 40 characters, so a value cannot carry instructions into the

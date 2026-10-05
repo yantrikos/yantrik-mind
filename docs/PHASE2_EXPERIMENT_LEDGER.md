@@ -14018,3 +14018,23 @@ Verdict on 54bd13f: SAFE WITH CHANGES. (a), (b), (c) and note 1 are fixed. The r
   2. A named file the model never opens gives the planner nothing. Research quality now rests on the model choosing to read the files, which it did not.
   Also seen again: memory bleed from earlier R1 attempts, and asking the person instead of proceeding under the Continue protocol.
 - **Not claimed:** one run is not a score for 54bd13f. The next pair goes on the build that carries lesson 1, twice on one build before any comparison.
+
+## E.NET1 — RESULT: built as preregistered; 7 of 7 mutants killed
+
+- **The Rust fetch (`fetch_direct`):**
+  - Redirects are off in the client (`redirects(0)`). Each hop is followed here, up to `MAX_REDIRECTS` (5); its host is resolved once (`ssrf_resolve`), and every address is checked.
+  - A direct connection is pinned to the checked addresses with a custom `resolver`, so there is no second lookup.
+  - Through the egress proxy no pin is possible (the proxy resolves; in enforce mode it refuses the LAN). That stays as before, except that a guard refusal is never ignored.
+  - `ssrf_check` (browser, reader, media) now resolves with the URL's own port instead of 443.
+  - New helpers `port_of` and `redirect_target`, and `mind_net::is_direct`.
+- **The browser fallback:** `deploy/net_guard.js`, loaded by both `headless_fetch.js` and `headful_fetch.js`.
+  - Every request the page makes is routed: refused when its host is a private, loopback, link-local, unique-local, CGNAT or multicast literal, resolves to any such address, or does not resolve.
+  - Allowed requests are fetched with `maxRedirects: 0` and fulfilled, so each redirect hop is routed and checked again.
+  - Service workers are blocked, and WebSockets are closed where Playwright can route them.
+  - Deploy note: net_guard.js must be copied beside the scripts. Neither staging nor VM 520 has the scripts installed; production is unknown and was not probed.
+- **Residual, stated:** in the browser, the check resolves and the fetch resolves again (a rebinding window); WebSockets are closed only on Playwright versions that offer `routeWebSocket`.
+- **Tests:**
+  - local one-shot servers: a public page redirecting to an "internal" one is refused at the hop, and the internal server is never reached; a redirect to an allowed server is followed; a name only the test resolver knows (`pinned.invalid`) connects, which proves the pin; redirect targets and ports;
+  - `deploy/net_guard.test.js` in plain Node: private ranges, mixed-address hosts, lookup failure.
+  - The browser routing itself is not run here (no Playwright on any box I can reach).
+- **Mutants:** Rust: hop unchecked, the client following redirects, not pinned, a relative redirect resolved wrongly. JS: 192.168 public, lookup failing open, one public address being enough. All killed.

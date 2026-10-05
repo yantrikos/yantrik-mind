@@ -18,6 +18,8 @@
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 chromium.use(stealth);
+// E.NET1: every request the page makes is checked against private addresses (net_guard.js, deployed beside).
+const { guardContext } = require("./net_guard");
 
 (async () => {
   const url = process.argv[2];
@@ -32,9 +34,11 @@ chromium.use(stealth);
     // Let Chromium send its own UA (self-consistent with its real version + Sec-CH-UA client hints);
     // a spoofed stale UA contradicts the real engine and is itself a bot signal.
     const ctx = await browser.newContext({
+      serviceWorkers: "block", // E.NET1: a service worker would bypass the route check
       locale: "en-US",
       extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
     });
+    await guardContext(ctx); // E.NET1: before any request is made
     const page = await ctx.newPage();
     // Prefer network-idle so client-side content (price grids, product tiles) has loaded; fall back to
     // domcontentloaded if the site keeps a connection open past the budget.

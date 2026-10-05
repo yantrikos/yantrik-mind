@@ -202,7 +202,7 @@ pub(crate) fn ssrf_check_pub(url: &str) -> anyhow::Result<()> {
 /// points at a private IP is also blocked).
 fn ssrf_check(url: &str) -> anyhow::Result<()> {
     let host = host_of(url).ok_or_else(|| anyhow::anyhow!("bad url"))?;
-    if let Ok(addrs) = (host.as_str(), 443u16).to_socket_addrs() {
+    if let Ok(addrs) = (host.as_str(), port_of(url)).to_socket_addrs() {
         for a in addrs {
             if is_blocked_ip(a.ip()) {
                 anyhow::bail!("refusing to fetch a private/internal address (SSRF guard): {host}");
@@ -476,20 +476,114 @@ fn compact_blanks(text: &str) -> String {
     compact
 }
 
-/// Direct fetch with real browser headers + redirect-following → declutter → readable text.
+/// E.NET1: the most redirects a fetch follows.
+const MAX_REDIRECTS: usize = 5;
+
+/// E.NET1: a URL's port -- written, or the scheme's.
+fn port_of(url: &str) -> u16 {
+    let (scheme, after) = url.split_once("://").unwrap_or(("http", url));
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let port = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once("]:").map(|(_, p)| p),
+        None => authority.split_once(':').map(|(_, p)| p),
+    };
+    port.and_then(|p| p.parse().ok()).unwrap_or(if scheme.eq_ignore_ascii_case("https") { 443 } else { 80 })
+}
+
+/// E.NET1: the system's resolver, as the fetch uses it.
+fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// E.NET1: where a redirect's `Location` points, from the URL that answered.
+fn redirect_target(base: &str, location: &str) -> Option<String> {
+    let loc = location.trim();
+    let lower = loc.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(loc.to_string());
+    }
+    let (scheme, rest) = base.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    if let Some(net) = loc.strip_prefix("//") {
+        return Some(format!("{scheme}://{net}"));
+    }
+    if loc.starts_with('/') {
+        return Some(format!("{scheme}://{authority}{loc}"));
+    }
+    let path = rest[authority.len()..].split(['?', '#']).next().unwrap_or("");
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+    Some(format!("{scheme}://{authority}{dir}/{loc}"))
+}
+
+/// E.NET1: resolve a URL's host once and check every address; refused when any is private/internal.
+fn ssrf_resolve(
+    url: &str,
+    resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
+    blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
+) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    let host = host_of(url).ok_or_else(|| anyhow::anyhow!("bad url"))?;
+    let addrs = resolve(&host, port_of(url)).map_err(|e| anyhow::anyhow!("couldn't resolve {host}: {e}"))?;
+    if addrs.is_empty() {
+        anyhow::bail!("couldn't resolve {host}");
+    }
+    if addrs.iter().any(|a| blocked(a)) {
+        anyhow::bail!("refusing to fetch a private/internal address (SSRF guard): {host}");
+    }
+    Ok(addrs)
+}
+
+/// Direct fetch with real browser headers → declutter → readable text.
+/// E.NET1 (the seventh pass's item 4): redirects are followed HERE, one hop at a time, each hop's host
+/// resolved once and checked, and a direct connection made to exactly the addresses checked -- the
+/// client's own redirect-following went to wherever a page pointed (a LAN address included), and a
+/// second DNS lookup let a rebinding name pass the check and then connect inside.
 fn fetch_direct(url: &str) -> anyhow::Result<String> {
-    let resp = mind_net::get(url)
-        .timeout(std::time::Duration::from_secs(20))
-        .set("User-Agent", BROWSER_UA)
-        .set(
-            "Accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        )
-        .set("Accept-Language", "en-US,en;q=0.9")
-        .call()?;
-    let mut bytes = Vec::new();
-    resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
-    Ok(extract_readable(&String::from_utf8_lossy(&bytes)))
+    fetch_direct_with(url, &system_resolve, &|a| is_blocked_ip(a.ip()))
+}
+
+fn fetch_direct_with(
+    url: &str,
+    resolve: &dyn Fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>,
+    blocked: &dyn Fn(&std::net::SocketAddr) -> bool,
+) -> anyhow::Result<String> {
+    let mut current = url.to_string();
+    for _ in 0..=MAX_REDIRECTS {
+        let lower = current.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            anyhow::bail!("only http(s) urls are fetchable");
+        }
+        let direct = mind_net::is_direct(&current);
+        let mut builder = mind_net::builder().redirects(0).timeout(std::time::Duration::from_secs(20));
+        match ssrf_resolve(&current, resolve, blocked) {
+            Ok(addrs) if direct => {
+                // Pinned: the connection goes to the addresses just checked, never a fresh lookup.
+                builder = builder.resolver(move |_: &str| Ok(addrs.clone()));
+            }
+            Ok(_) => {} // through the egress proxy, which resolves (and, enforcing, refuses the LAN) itself
+            Err(e) if direct || e.to_string().contains("SSRF guard") => return Err(e),
+            Err(_) => {} // a proxy-only network may not resolve here; the proxy does
+        }
+        let agent = mind_net::route(builder, &current);
+        let resp = agent
+            .get(&current)
+            .set("User-Agent", BROWSER_UA)
+            .set(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            )
+            .set("Accept-Language", "en-US,en;q=0.9")
+            .call()?;
+        if (300..400).contains(&resp.status()) {
+            let location = resp.header("location").ok_or_else(|| anyhow::anyhow!("a redirect with no Location"))?;
+            current = redirect_target(&current, location).ok_or_else(|| anyhow::anyhow!("a redirect to nowhere"))?;
+            continue;
+        }
+        let mut bytes = Vec::new();
+        resp.into_reader().take(2_000_000).read_to_end(&mut bytes)?; // 2 MB cap (memory wall)
+        return Ok(extract_readable(&String::from_utf8_lossy(&bytes)));
+    }
+    anyhow::bail!("more than {MAX_REDIRECTS} redirects")
 }
 
 /// Tier-3 fetch: a LOCAL headless Chromium (Playwright + stealth) renders the page with a real browser
@@ -832,6 +926,86 @@ mod tests {
     async fn scripted_fetcher_returns_canned() {
         let f = ScriptedFetcher::new("hello world");
         assert_eq!(f.fetch("https://anything").await.unwrap(), "hello world");
+    }
+
+    /// E.NET1: a local server answering ONE request with `reply`; the receiver says whether it was reached.
+    fn serve_once(reply: String) -> (u16, std::sync::mpsc::Receiver<()>) {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let _ = tx.send(());
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).map(|n| n > 2).unwrap_or(false) {
+                    line.clear();
+                }
+                let mut s = stream;
+                let _ = s.write_all(reply.as_bytes());
+            }
+        });
+        (port, rx)
+    }
+
+    fn page(text: &str) -> String {
+        let body = format!("<html><body><article><p>{text}</p></article></body></html>");
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn redirect(to: &str) -> String {
+        format!("HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    /// E.NET1: every redirect hop is checked -- a public page that redirects inside never reaches it --
+    /// and a redirect to an allowed address is followed by hand.
+    #[test]
+    fn a_redirect_into_the_lan_is_refused_at_the_hop() {
+        let (inside, reached) = serve_once(page("the router's admin page"));
+        let (outside, _) = serve_once(redirect(&format!("http://127.0.0.1:{inside}/admin")));
+        let blocked = move |a: &std::net::SocketAddr| a.port() == inside;
+        let out = fetch_direct_with(&format!("http://127.0.0.1:{outside}/"), &system_resolve, &blocked);
+        assert!(out.as_ref().is_err_and(|e| e.to_string().contains("SSRF guard")), "{out:?}");
+        assert!(reached.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "the internal server was reached");
+        let text = "A long enough article body to read as the page's text. ".repeat(4);
+        let (fine, _) = serve_once(page(&text));
+        let (hop, _) = serve_once(redirect(&format!("/moved?to={fine}")));
+        // A relative Location resolves against the page that answered; here, to the same server's port,
+        // so point it at the allowed server with an absolute one too.
+        let _ = hop;
+        let (hop2, _) = serve_once(redirect(&format!("http://127.0.0.1:{fine}/article")));
+        let got = fetch_direct_with(&format!("http://127.0.0.1:{hop2}/"), &system_resolve, &|_: &std::net::SocketAddr| false).unwrap();
+        assert!(got.contains("A long enough article body"), "{got}");
+    }
+
+    /// E.NET1: the connection goes to the address the check approved -- a name only the check's
+    /// resolver knows still connects, so no second lookup happens.
+    #[test]
+    fn the_connection_goes_to_the_checked_address() {
+        let (port, reached) = serve_once(page("pinned and reached"));
+        let resolve = move |host: &str, p: u16| -> std::io::Result<Vec<std::net::SocketAddr>> {
+            if host == "pinned.invalid" {
+                Ok(vec![std::net::SocketAddr::from(([127, 0, 0, 1], p))])
+            } else {
+                system_resolve(host, p)
+            }
+        };
+        let got = fetch_direct_with(&format!("http://pinned.invalid:{port}/"), &resolve, &|_: &std::net::SocketAddr| false);
+        assert!(got.as_ref().is_ok_and(|t| t.contains("pinned and reached")), "{got:?}");
+        assert!(reached.recv_timeout(std::time::Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn redirect_targets_and_ports_resolve_as_a_browser_would() {
+        assert_eq!(redirect_target("https://a.example/x/y?q=1", "/z").as_deref(), Some("https://a.example/z"));
+        assert_eq!(redirect_target("https://a.example/x/y", "z").as_deref(), Some("https://a.example/x/z"));
+        assert_eq!(redirect_target("https://a.example/x", "//b.example/w").as_deref(), Some("https://b.example/w"));
+        assert_eq!(redirect_target("https://a.example/x", "HTTP://c.example/").as_deref(), Some("HTTP://c.example/"));
+        assert_eq!(port_of("https://a.example/x"), 443);
+        assert_eq!(port_of("http://a.example/x"), 80);
+        assert_eq!(port_of("http://u@a.example:8123/x"), 8123);
+        assert_eq!(port_of("http://[::1]:9000/"), 9000);
     }
 
     #[test]

@@ -84,6 +84,12 @@ fn proxied() -> &'static ureq::Agent {
     })
 }
 
+/// E.NET1: does a request to `url` connect to its host itself (true), or through the egress proxy?
+/// Only a direct connection can be pinned to the address the SSRF check approved.
+pub fn is_direct(url: &str) -> bool {
+    goes_direct(url, &env)
+}
+
 /// The agent a request to `url` should use.
 pub fn agent_for(url: &str) -> &'static ureq::Agent {
     if goes_direct(url, &env) {

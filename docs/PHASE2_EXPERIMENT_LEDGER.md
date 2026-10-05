@@ -14257,3 +14257,25 @@ R1d2 lesson 1: on a "Continue." turn the clean planner had only "Continue." and 
 - **The direct list:** `mind_net::goes_direct` sends a URL direct when its host AND port match a person-configured endpoint (`DIRECT_ENDPOINT_VARS`: SearXNG, Home Assistant, the local and NIM model URLs, face-ML, critic, Weft, Immich). Another port, or an unconfigured LAN host, still takes the proxy. The fetch tools still refuse these addresses.
 - **OS side (4c):** kernel enforcement is coming (nftables for the yantrik-mind uid). Direct connections will then reach only loopback and person-made literal-IP lan rules, so a configured LAN endpoint also needs such a rule. 4c adds one for 520's SearXNG first.
 - **Mutants:** snap_page unguarded; browser_agent's fresh context unguarded; WebSockets allowed without routing; 6to4 and Teredo allowed (each killed in Rust and JS); a configured endpoint not direct; any port of a configured host direct. All killed.
+
+## E.EGRESS5b — PREREG: the eleventh pass's 1–4, and Pranab's (b)
+
+Verdict on c6f9379: SAFE WITH CHANGES. (f) is accepted, with GitHub removed from the researcher.
+
+1. **The researcher:** its tools are `web_search` and `fetch` only; `github` (notifications, private repos) is removed. The mind-core scan test forbids it. Its existing step limit of 6 caps its fetches.
+2. **MCP (MUST FIX):**
+   - The desktop's browser tools (`mcp.yantrik-os.web_*`, desktop.rs ~1712) and any `os_act` browser action that navigates: the navigation URL is an Url field (fetch planner and turn budget), and text typed into a page is a Query field.
+   - Every other MCP server: per-call approval on EVERY call, reads included, until its fields are declared.
+3. **Person-only settings (MUST FIX):** the keys sent to 4c are read ONLY from root-owned `/etc/yantrik/mind-person.env` once it exists, and ignored in the Mind's own env file. Until the file exists they are read from the env, logged once as a transition. The keys: YM_SHAREABLE_FACTS, YM_WORK_RADAR, YM_SEARXNG_URL, YM_SEARXNG_CATEGORIES, the nine direct endpoints, the proxy variables, YM_WEB_READER, YM_HEADLESS_SCRIPT and PLAYWRIGHT_BROWSERS_PATH.
+4. **Recheck:** `recheck_handed` runs before any table tool with query or token fields, not only searches.
+- **(b), Pranab:** share_with_member, photo_send/send_photo, onedrive and code/coder show an "OK to send?" card with the exact content when that content is not a span of the person's words, a named file, or the task message. In his words, they send without a card.
+
+**Kill criteria:** a compiling mutant killed for each of:
+- github back in the researcher;
+- a desktop navigation URL unplanned;
+- page-typed text unplanned;
+- a non-desktop MCP read without approval;
+- a person-only key read from the Mind's env when the root file exists;
+- the recheck skipped for a token tool;
+- a memory-content share without a card;
+- an own-words share with a card.

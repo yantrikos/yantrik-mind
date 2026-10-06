@@ -15404,3 +15404,9 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - Mutating the module itself is the OS's job, and its tests come with it.
 
 **If the OS re-review changes the file:** 4c sends the new blob, the copy is redone, and K1's constant moves with it. Nothing ships until both reviews are SAFE.
+
+**Gate on OS e8903b08 (main with #671, the boot-test fix) + Mind 72b579d, VM 520, 2026-10-05: 7/7, 0 false claims, median 5.8 s.**
+- The first try did not start: the shell had restarted for the install and come back to the lock screen. A locked shell takes no approvals switch, so the harness refused rather than put cards in front of the person.
+- 4c unlocked it (Pranab's leave for 520). Then CONTROL OK, PREFLIGHT OK, and T1–T7 all passed.
+- Pranab's Blender was untouched; approvals were back off after the run.
+- Sent to 4c as "gate 7/7 on e8903b08".

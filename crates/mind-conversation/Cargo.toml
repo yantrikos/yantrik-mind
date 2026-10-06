@@ -37,6 +37,8 @@ unicode-properties = { version = "=0.1.4", default-features = false, features = 
 unicode-script = "=0.5.8"
 # E.GRANT2c: the round-2 screen's NFKC and mark checks, pinned to the OS's version.
 unicode-normalization = "=0.1.25"
+# E.GRANT2c (#667 round 3): the UTS #39 skeleton, pinned to the OS's version.
+unicode-security = "=0.1.2"
 
 [dev-dependencies]
 # E.GRANT2c: the copied screen's git blob hash (already in the tree, 0.10.7).

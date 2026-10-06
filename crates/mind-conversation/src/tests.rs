@@ -20597,11 +20597,11 @@ async fn own_words_are_screened_by_the_cards_rule() {
         "naïve Bayes 2027",
         "C++ std::vector",
         "pizza 🍕 near me",
-        "it's 3/4 – ok?",
+        "it's 3/4 - ok?",
         "हिन्दी समाचार",
         "a b c",
         "a  b",
-        "it's ‘fine’ «ok»",
+        "it's «ok»",
         "rust 1.97 release notes",
     ] {
         assert!(shown(ok), "{ok:?} refused");
@@ -20634,7 +20634,10 @@ async fn own_words_are_screened_by_the_cards_rule() {
     }
     refused.extend(["foo\u{201d} bar", "\u{201c}foo", "say \"hi\""].map(String::from));
     refused.extend(["\u{440}\u{430}ypal login", "g\u{3bf}ogle", "Αpple", "abcабв", "東京tokyo"].map(String::from));
-    assert_eq!(refused.len(), 63, "every OS case is here");
+    // E.GRANT2c (#667 round 3): an en dash and curly quotes read as ASCII ones (the UTS #39 skeleton),
+    // so these two, which round 1 passed, are now the OS's over-refusals and ours.
+    refused.extend(["it's 3/4 \u{2013} ok?", "it's \u{2018}fine\u{2019} «ok»"].map(String::from));
+    assert_eq!(refused.len(), 65, "every OS case is here");
     let named: Vec<String> = vec![];
     let offdesk_used = std::sync::atomic::AtomicUsize::new(0);
     let always = || {
@@ -20674,13 +20677,13 @@ async fn own_words_are_screened_by_the_cards_rule() {
 #[test]
 fn the_grant_screen_is_the_oss_file() {
     use sha1::{Digest, Sha1};
-    const OS_BLOB: &str = "3815e3ee74e52a1f49a2b8afe6ba2815c121a085";
+    const OS_BLOB: &str = "a1a82b10a380bd319e53725175256d6b5832fbf5";
     let bytes: Vec<u8> = include_bytes!("grant_screen.rs").iter().copied().filter(|b| *b != b'\r').collect();
     let mut h = Sha1::new();
     h.update(format!("blob {}\0", bytes.len()).as_bytes());
     h.update(&bytes);
     let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(got, OS_BLOB, "grant_screen.rs is not yantrik-os's screen.rs at 835282d5");
+    assert_eq!(got, OS_BLOB, "grant_screen.rs is not yantrik-os's screen.rs at e24baed6");
 }
 
 /// E.GRANT2c: each class the round-2 screen adds never reaches a card or an always grant, and what it
@@ -20701,6 +20704,13 @@ async fn the_round_two_screen_holds_the_minds_own_words() {
         "\u{43e}\u{440}",
         "\u{5e9}\u{5dc}\u{5d5}\u{5dd} 2024",
         "北京 Москва",
+        // #667 round 3: lookalikes from any script (UTS #39), Latin outside its blocks, and the known
+        // over-refusal of a Turkish word whose only non-ASCII letter is the dotless i.
+        "rust \u{585}",
+        "\u{13aa}",
+        "g\u{585}\u{585}gle",
+        "\u{261}oogle",
+        "k\u{131}z",
     ];
     let named: Vec<String> = vec![];
     let used = std::sync::atomic::AtomicUsize::new(0);
@@ -20724,7 +20734,18 @@ async fn the_round_two_screen_holds_the_minds_own_words() {
     }
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused query reached a card");
     assert_eq!(used.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused query reached the grants file");
-    for q in ["site:example.com rust", "a!b", "C++ std::vector", "\u{1ec7}", "東京 天気", "Москва погода"] {
+    for q in [
+        "site:example.com rust",
+        "a!b",
+        "C++ std::vector",
+        "\u{1ec7}",
+        "東京 天気",
+        "Москва погода",
+        "Ελλάδα και Κύπρος",
+        "Größe Straße",
+        "नई दिल्ली में मौसम कैसा है",
+        "site:docs.rs a!b",
+    ] {
         assert!(shown(q), "{q:?} refused");
         assert_eq!(own(q, &named, &always).await.as_deref(), Some(q), "{q:?} did not leave under an always grant");
     }

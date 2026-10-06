@@ -15462,3 +15462,15 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - K3′: `rust \u{585}`, `\u{13aa}`, `g\u{585}\u{585}gle`, `\u{261}oogle` and `kız` reach neither a card nor an always grant.
 - K4′: `Ελλάδα και Κύπρος`, `Größe Straße`, `नई दिल्ली में मौसम कैसा है` and `site:docs.rs a!b` leave exactly as written.
 - No other change in this round: I1 and I3 stay as committed in f6aa771.
+
+**E.GRANT2c — RESULT (round-3 copy): the copy is the OS's e24baed6 screen.rs, blob a1a82b10; every amended criterion held.**
+- K1′: `git hash-object` gives a1a82b10a380bd319e53725175256d6b5832fbf5 on Windows and on Linux staging. The hash test's constant moved with it; the `mod` comment names e24baed6.
+- K2′: the module's 31 tests pass here. `unicode-security =0.1.2` is pinned; no other pin moved (normalization 0.1.25, script 0.5.8, properties 0.1.4).
+- K3′: `rust օ`, `Ꭺ`, `gօօgle`, `ɡoogle` and `kız` reach neither a card nor an always grant.
+- K4′: `Ελλάδα και Κύπρος`, `Größe Straße`, `नई दिल्ली में मौसम कैसा है` and `site:docs.rs a!b` leave as written, with E.GRANT2c's six from round 2.
+- The known over-refusals, in E.GRANT2b's table:
+  - `it's 3/4 – ok?` and `it's ‘fine’ «ok»` moved to the refused side (65 refused, asserted exactly); the old test failed on the first until moved, as predicted.
+  - `it's 3/4 - ok?` and `it's «ok»` are on the passing side, as in the OS.
+- Mutants on the new copy: the screen not consulted is killed by three tests; the copy edited is killed by the hash test. I1 stays equivalent (as before), and I3 is unchanged.
+- Full suite: 2387 passed, 0 failed (2384 + the module's 3 new tests).
+- Linux staging: mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1187, all passed; net_guard ok; target/debug removed.

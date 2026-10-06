@@ -15444,3 +15444,21 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 **Linux staging (.95):** mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1184, all passed; net_guard ok; target/debug removed.
 
 **Not reviewed yet:** the OS's round-3 review runs against this same blob. If it changes the file, the copy and the hash constant move together.
+
+**E.GRANT2c — prereg AMENDED before that code: yantrik-os #667 round 3 (SAFE WITH CHANGES; M5) changes the screen, so the copy moves to its new blob.**
+
+**The new file:** feat/mind-search-grants e24baed6, `crates/yantrik-harness/src/host/screen.rs`, 644 lines, 31 tests, git blob a1a82b10a380bd319e53725175256d6b5832fbf5.
+- It replaces the fixed Cyrillic/Greek lookalike set with the UTS #39 skeleton (`unicode-security =0.1.2`, `confusable_detection::skeleton`). A word that is not ASCII but whose skeleton is ASCII is refused: Armenian օ, Cherokee Ꭺ, Cyrillic `расе`, an en dash.
+- It refuses Latin letters outside Basic Latin, Latin-1, Extended-A/-B and Extended Additional, such as IPA ɡ U+0261.
+- unicode-security depends only on unicode-normalization and unicode-script, both already pinned, so no existing pin moves.
+
+**Known over-refusals, the OS's and so ours:** curly apostrophes and quotes (it’s, ‘fine’), – − ‐ × (1920×1080) ′, and Turkish words whose only non-ASCII letter is ı (kız). The planner writes those searches.
+- E.GRANT2b's table had `it's 3/4 – ok?` and `it's ‘fine’ «ok»` on its passing side, copied from the round-1 OS tests. The OS now has `it's 3/4 - ok?` and `it's «ok»`, and the Mind's table moves the same way. The two old strings move to the refused side, each with its reason.
+- Greek such as `Ελλάδα και Κύπρος` now passes.
+
+**Added kill criteria:**
+- K1′: the copy's blob is a1a82b10… (it replaces 3815e3ee…).
+- K2′: all 31 module tests pass here.
+- K3′: `rust \u{585}`, `\u{13aa}`, `g\u{585}\u{585}gle`, `\u{261}oogle` and `kız` reach neither a card nor an always grant.
+- K4′: `Ελλάδα και Κύπρος`, `Größe Straße`, `नई दिल्ली में मौसम कैसा है` and `site:docs.rs a!b` leave exactly as written.
+- No other change in this round: I1 and I3 stay as committed in f6aa771.

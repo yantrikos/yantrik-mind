@@ -15361,3 +15361,16 @@ Cs cannot be reached: a Rust char is never a surrogate.
 
 **Full suite:** 2354 passed, 0 failed; net_guard ok.
 **Linux staging (.95):** mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1154, all passed; net_guard ok. target/debug removed afterwards.
+
+**E.GRANT2b — REVIEW of 1d16e8a^..76629bb: SAFE** (commit comment on 76629bb). No High, Medium or Low findings.
+- Verified: the bytes approved are the bytes sent, end to end; the pins match the OS lock checksums.
+
+Info items, folded into E.GRANT2c with the round-2 screen copy:
+- I1: `search_will_run` also requires the handler's id to be `web_search`.
+- I3: net_guard.js strips every trailing dot (`/\.+$/`), as Rust does.
+
+Kept as is:
+- I2: the Mind trims before screening, so `" padded "` leaves as `"padded"`. The trimmed string is the one shown and the one sent, so there is no gap.
+- I4: SearXNG falling back to DDG with the same approved words is noted for the card's wording, which is the OS's.
+
+E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the screen as one self-contained module).

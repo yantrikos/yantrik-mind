@@ -15374,3 +15374,33 @@ Kept as is:
 - I4: SearXNG falling back to DDG with the same approved words is noted for the card's wording, which is the OS's.
 
 E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the screen as one self-contained module).
+
+## E.GRANT2c — PREREG: the OS's whole query screen, copied byte for byte (yantrik-os #667 round 2), plus the E.GRANT2b review's I1 and I3
+
+**Why:**
+- yantrik-os #667 round 2 (UNSAFE) rewrote the card's query screen as one self-contained module: feat/mind-search-grants 835282d5, `crates/yantrik-harness/src/host/screen.rs`, 577 lines, git blob 3815e3ee74e52a1f49a2b8afe6ba2815c121a085, entry `query(&str) -> Result<(), String>`.
+- It adds NFKC equality; U+2800, U+FFFC and U+FFFD; mark limits (Me, overlay marks, a mark on nothing, at most 2 Mn per base, a repeated Mn, a dot above a dotted letter); search-engine syntax (a word starting with `!`, `:` or `<`, from this repo's E.GRANT2b note); one non-Latin script per query; Cyrillic or Greek words made only of Latin lookalikes; and RTL letters mixed with digits or Latin.
+- The Mind's copy (E.GRANT2b) is the round-1 subset. Under an `always` grant off the desktop no card is shown, so the Mind's screen is the only one that query meets.
+- Known cost, as the OS has it: Russian one-letter words (а, с, о) are refused, and the planner writes those searches.
+
+**What is built:**
+1. The file is copied byte for byte as `crates/mind-conversation/src/grant_screen.rs`, with its own tests (`use super::*` only). The OS's commit and blob go in the `mod` line's comment and in this ledger, not in the file.
+2. A test pins the copy: the git blob hash (SHA-1 of `blob <len>\0` + the bytes, after removing any `\r` a Windows checkout adds) must be 3815e3ee…. Any edit to the copy fails it.
+3. Pins: `unicode-normalization = "=0.1.25"` (new to this tree), plus `unicode-properties =0.1.4` and `unicode-script =0.5.8` as before.
+4. `query_can_be_shown(q)` becomes `grant_screen::query(q).is_ok()`. The round-1 copies of `unshowable` and `mixed_script_word` are removed from egress_planning.rs. It still runs before the card and before an always grant; the trim before it stays (I2, kept).
+5. I1: `search_will_run` also requires the handler's id to be `web_search`.
+6. I3: net_guard.js strips every trailing dot (`/\.+$/`).
+
+**Kill criteria (each one fails the build):**
+- K1: the copy's hash differs from 3815e3ee… (on Windows, or on Linux staging).
+- K2: any of the module's own tests fails in this tree.
+- K3: one query from each new class reaches a card or an always grant: `!wp foo`, `:fr x`, `<3 x`, NFD `cafe\u{301}`, `ﬁle`, fullwidth `ｇｏｏｇｌｅ`, `a\u{20dd}`, `e\u{301}\u{301}`, `\u{2800}x`, `\u{43e}\u{440}` (Cyrillic lookalikes), `שלום 2024`, `北京 Москва`.
+- K4: a query the module passes is refused by the Mind: `site:example.com rust`, `a!b`, `C++ std::vector`, `ệ`, `東京 天気`, `Москва погода`.
+- K5: these mutants survive:
+  - `query_can_be_shown` not calling `grant_screen::query`;
+  - the I1 id check;
+  - the I3 regex back to one dot (its JS test watched to fail);
+  - the hash test given a wrong constant.
+- Mutating the module itself is the OS's job, and its tests come with it.
+
+**If the OS re-review changes the file:** 4c sends the new blob, the copy is redone, and K1's constant moves with it. Nothing ships until both reviews are SAFE.

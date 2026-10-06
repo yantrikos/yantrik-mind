@@ -198,7 +198,7 @@ waEkWGQbbyzcGS/aUlcoWt7eZgihRANCAARnTBEISlXHvpP71ktpGWYRu00fyfzs
   assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":"http://127.0.0.1:7451"') }).public, "http://127.0.0.1:7451");
   assert.strictEqual(trust({ text: WHOLE.replace('"version":2', '"version":3,"public_proxy":null') }).public, null);
   // E.GRANT2b (the review's Info): an endpoint door written as localhost is this machine's loopback.
-  for (const host of ["localhost", "localhost."]) {
+  for (const host of ["localhost", "localhost.", "localhost.."]) {
     const proxy = `http://${host}:7450`;
     const said = (door) => WHOLE.replace('"http://127.0.0.1:7450"', JSON.stringify(proxy)).replace('"version":2', `"version":3,"public_proxy":"${door}"`);
     assert.strictEqual(trust({ text: said("http://127.0.0.1:7450") }, { HTTPS_PROXY: proxy }), null, `the endpoint door under ${host} trusted as the public door`);

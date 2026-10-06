@@ -62,6 +62,10 @@ mod deals;
 mod decisions;
 mod dream;
 mod egress_planning;
+// E.GRANT2c: yantrik-os feat/mind-search-grants 835282d5, crates/yantrik-harness/src/host/screen.rs,
+// copied byte for byte (git blob 3815e3ee74e52a1f49a2b8afe6ba2815c121a085; a test holds it there).
+// Never edit it here: take the OS's next blob instead.
+mod grant_screen;
 mod emissary;
 mod emotion;
 mod ex4_shadow;

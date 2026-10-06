@@ -20581,7 +20581,8 @@ async fn no_grant_is_asked_where_the_os_has_none() {
 /// reaches a card or an always grant here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn own_words_are_screened_by_the_cards_rule() {
-    use crate::egress_planning::{mixed_script_word, own_words_under_grant as own, query_can_be_shown as shown, unshowable};
+    use crate::egress_planning::{own_words_under_grant as own, query_can_be_shown as shown};
+    use crate::grant_screen::{mixed_script_word, unshowable};
     for ok in [
         "weather in Pune",
         "café crème brûlée recipe",
@@ -20666,4 +20667,65 @@ async fn own_words_are_screened_by_the_cards_rule() {
     assert_eq!((word.as_str(), scripts), ("\u{440}\u{430}ypal", vec!["Cyrillic", "Latin"]));
     assert_eq!(mixed_script_word("g\u{3bf}ogle").unwrap().1, vec!["Latin", "Greek"]);
     assert_eq!(mixed_script_word("Москва weather"), None, "two words, one script each");
+}
+
+/// E.GRANT2c: the copied screen is the OS's file, byte for byte -- its git blob hash, with any `\r` a
+/// Windows checkout adds taken out first. A changed copy fails here; take the OS's next blob instead.
+#[test]
+fn the_grant_screen_is_the_oss_file() {
+    use sha1::{Digest, Sha1};
+    const OS_BLOB: &str = "3815e3ee74e52a1f49a2b8afe6ba2815c121a085";
+    let bytes: Vec<u8> = include_bytes!("grant_screen.rs").iter().copied().filter(|b| *b != b'\r').collect();
+    let mut h = Sha1::new();
+    h.update(format!("blob {}\0", bytes.len()).as_bytes());
+    h.update(&bytes);
+    let got: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(got, OS_BLOB, "grant_screen.rs is not yantrik-os's screen.rs at 835282d5");
+}
+
+/// E.GRANT2c: each class the round-2 screen adds never reaches a card or an always grant, and what it
+/// passes still leaves under a grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_round_two_screen_holds_the_minds_own_words() {
+    use crate::egress_planning::{own_words_under_grant as own, query_can_be_shown as shown};
+    let refused = [
+        "!wp foo",
+        ":fr x",
+        "<3 x",
+        "cafe\u{301}",
+        "\u{fb01}le",
+        "\u{ff47}\u{ff4f}\u{ff4f}\u{ff47}\u{ff4c}\u{ff45}",
+        "a\u{20dd}",
+        "e\u{301}\u{301}",
+        "\u{2800}x",
+        "\u{43e}\u{440}",
+        "\u{5e9}\u{5dc}\u{5d5}\u{5dd} 2024",
+        "北京 Москва",
+    ];
+    let named: Vec<String> = vec![];
+    let used = std::sync::atomic::AtomicUsize::new(0);
+    let always = || {
+        used.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some("g-9b0d5e1a7c32".to_string())
+    };
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for q in refused {
+        assert!(!shown(q), "{q:?} would be shown");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::GrantAsk>();
+        let counter = asked.clone();
+        tokio::spawn(async move {
+            while let Some(g) = rx.recv().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = g.reply.send(crate::GrantOutcome::Granted("grant g-x".into()));
+            }
+        });
+        assert_eq!(crate::TURN_GRANT.scope(tx, own(q, &named, &always)).await, None, "{q:?} left from the desk");
+        assert_eq!(own(q, &named, &always).await, None, "{q:?} left under an always grant");
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused query reached a card");
+    assert_eq!(used.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused query reached the grants file");
+    for q in ["site:example.com rust", "a!b", "C++ std::vector", "\u{1ec7}", "東京 天気", "Москва погода"] {
+        assert!(shown(q), "{q:?} refused");
+        assert_eq!(own(q, &named, &always).await.as_deref(), Some(q), "{q:?} did not leave under an always grant");
+    }
 }

@@ -469,78 +469,11 @@ pub(crate) struct Grantable<'a> {
     pub(crate) os_grants: &'a (dyn Fn() -> bool + Sync),
 }
 
-/// E.GRANT1: can this query be shown to the person exactly -- 1 to 300 characters, no control or
-/// bidirectional characters, no space at either end (#667)?
+/// E.GRANT1: can this query be shown to the person exactly (#667)?
+/// E.GRANT2c: the OS card's whole screen, copied byte for byte as `grant_screen` (yantrik-os #667
+/// round 2), so a query the card would refuse is never asked, and never leaves under an always grant.
 pub(crate) fn query_can_be_shown(q: &str) -> bool {
-    let n = q.chars().count();
-    // E.GRANT2b: the OS card's own screen (yantrik-os FIXES #667, host/grant.rs `screen`), so a
-    // query the card would refuse is never asked, and never leaves under an always grant either.
-    (1..=300).contains(&n) && q == q.trim() && !q.chars().any(|c| unshowable(c).is_some()) && mixed_script_word(q).is_none()
-}
-
-// E.GRANT2b: copied verbatim from yantrik-os crates/yantrik-harness/src/host/grant.rs (feat/mind-search-grants,
-// b5c6394), with the same unicode-properties and unicode-script versions, so both sides read the same tables.
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
-use unicode_script::{Script, UnicodeScript};
-
-/// Why `c` may not be in a query the card shows, if it may not: what it is, for the refusal.
-///
-/// An allowlist by category: letters, marks, numbers, punctuation, symbols and the one space
-/// U+0020. Refused are the categories that draw as nothing or as something else (Cc control,
-/// Cf format, Zl and Zp separators, Co private use, Cn unassigned, Cs surrogates), every space
-/// but U+0020, the variation selectors, the tag characters, the other default-ignorable marks
-/// that draw as nothing, and the card's own quote marks, which would close its quote.
-pub(crate) fn unshowable(c: char) -> Option<&'static str> {
-    match c {
-        ' ' => return None,
-        '\u{201c}' | '\u{201d}' | '"' => return Some("a quote mark, which would end the card's quote"),
-        '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}' => return Some("a variation selector"),
-        '\u{e0000}'..='\u{e007f}' => return Some("a tag character"),
-        // Default-ignorable, so drawn as nothing, though not Cf: the combining grapheme joiner,
-        // the Hangul fillers, the Khmer inherent vowels and the Mongolian variation selectors.
-        '\u{034f}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180f}' | '\u{3164}' | '\u{ffa0}' => {
-            return Some("a character that draws as nothing")
-        }
-        _ => {}
-    }
-    match c.general_category() {
-        GeneralCategory::Control => Some("a control character"),
-        GeneralCategory::Format => Some("an invisible format character"),
-        GeneralCategory::LineSeparator => Some("a line separator"),
-        GeneralCategory::ParagraphSeparator => Some("a paragraph separator"),
-        GeneralCategory::PrivateUse => Some("a private-use character"),
-        GeneralCategory::Unassigned => Some("an unassigned code point"),
-        GeneralCategory::Surrogate => Some("a surrogate"),
-        GeneralCategory::SpaceSeparator => Some("a space other than U+0020"),
-        _ if c.is_whitespace() => Some("whitespace other than U+0020"),
-        _ => None,
-    }
-}
-
-/// The first word (split at U+0020) whose letters come from more than one script, with the
-/// scripts' names: `раypal` (Cyrillic and Latin), `ΑpplΕ` (Greek and Latin). Common and
-/// inherited characters (digits, punctuation, marks) belong to every script. Han with Hiragana
-/// and Katakana, Han with Bopomofo, and Han with Hangul are each one writing system, as UTS #39
-/// has it, so Japanese, Chinese and Korean words pass.
-pub(crate) fn mixed_script_word(query: &str) -> Option<(String, Vec<&'static str>)> {
-    const ONE_SYSTEM: [&[Script]; 3] = [
-        &[Script::Han, Script::Hiragana, Script::Katakana],
-        &[Script::Han, Script::Bopomofo],
-        &[Script::Han, Script::Hangul],
-    ];
-    for word in query.split(' ') {
-        let mut seen: Vec<Script> = Vec::new();
-        for c in word.chars() {
-            let script = c.script();
-            if !matches!(script, Script::Common | Script::Inherited | Script::Unknown) && !seen.contains(&script) {
-                seen.push(script);
-            }
-        }
-        if seen.len() > 1 && !ONE_SYSTEM.iter().any(|system| seen.iter().all(|s| system.contains(s))) {
-            return Some((word.to_string(), seen.iter().map(|s| s.full_name()).collect()));
-        }
-    }
-    None
+    crate::grant_screen::query(q).is_ok()
 }
 
 /// E.GRANT1: the model's own query, when the person grants it -- asked on the desktop (`grant_request`:
@@ -1354,9 +1287,10 @@ impl ConversationEngine {
     /// when that search will run: the plugin enabled, a searcher configured. Not google or ddg (no plugin
     /// runs them), not wikipedia or wiki (another service, ThirdParty in governance).
     pub(crate) fn search_will_run(&self, tool: &str) -> bool {
+        // (E.GRANT2c, the review's I1: and that handler is the web search plugin's own.)
         matches!(tool, "search" | "web_search")
             && self.searcher.is_some()
-            && self.plugins.lock().is_ok_and(|p| p.handler_for_tool(tool).is_some())
+            && self.plugins.lock().is_ok_and(|p| p.handler_for_tool(tool).is_some_and(|h| h.id() == "web_search"))
     }
 
     /// E.GRANT2: the guard's entry. The model's own words may go out under the person's grant only

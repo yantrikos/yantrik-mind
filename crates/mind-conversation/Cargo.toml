@@ -35,8 +35,12 @@ icu_normalizer = { version = "2", default-features = false, features = ["compile
 # E.GRANT2b: the OS card's query screen, pinned to the OS's versions (yantrik-os FIXES #667).
 unicode-properties = { version = "=0.1.4", default-features = false, features = ["general-category"] }
 unicode-script = "=0.5.8"
+# E.GRANT2c: the round-2 screen's NFKC and mark checks, pinned to the OS's version.
+unicode-normalization = "=0.1.25"
 
 [dev-dependencies]
+# E.GRANT2c: the copied screen's git blob hash (already in the tree, 0.10.7).
+sha1 = "0.10"
 mind-memory = { workspace = true, features = ["fixtures"] }
 # E.ARENA1-F1: scripted MCP tools, so the desktop-calendar wiring is tested through the real engine.
 mind-tools = { workspace = true, features = ["test-support"] }

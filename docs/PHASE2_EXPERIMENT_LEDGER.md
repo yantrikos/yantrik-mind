@@ -15410,3 +15410,37 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - 4c unlocked it (Pranab's leave for 520). Then CONTROL OK, PREFLIGHT OK, and T1–T7 all passed.
 - Pranab's Blender was untouched; approvals were back off after the run.
 - Sent to 4c as "gate 7/7 on e8903b08".
+
+## E.GRANT2c — RESULT: the OS's whole query screen, byte for byte; the round-1 copy removed; I1 and I3 in
+
+**The copy:**
+- `crates/mind-conversation/src/grant_screen.rs` is yantrik-os feat/mind-search-grants 835282d5 `crates/yantrik-harness/src/host/screen.rs`, unedited. `git hash-object` gives 3815e3ee74e52a1f49a2b8afe6ba2815c121a085 on Windows and on Linux staging (K1 held).
+- `the_grant_screen_is_the_oss_file` pins that hash; an edited comment word fails it.
+- The module's own 28 tests pass in this tree (K2 held).
+- `unicode-normalization =0.1.25` is new here; `unicode-properties =0.1.4` and `unicode-script =0.5.8` are unchanged. `sha1` is a dev-dependency only (0.10.7, already in the tree).
+
+**`query_can_be_shown`** is `grant_screen::query(q).is_ok()`. The round-1 `unshowable` and `mixed_script_word` copies are gone from egress_planning.rs, and E.GRANT2b's tests now import the module's own.
+
+**`the_round_two_screen_holds_the_minds_own_words`:**
+- These 12 never reach a card or an always grant (K3 held): `!wp foo`, `:fr x`, `<3 x`, NFD `cafe\u{301}`, `ﬁle`, fullwidth `ｇｏｏｇｌｅ`, `a\u{20dd}`, `e\u{301}\u{301}`, `\u{2800}x`, Cyrillic `ор`, `שלום 2024`, `北京 Москва`.
+- These 6 leave under an always grant exactly as written (K4 held): `site:example.com rust`, `a!b`, `C++ std::vector`, `ệ`, `東京 天気`, `Москва погода`.
+- E.GRANT2b's 15 passing and 63 refused queries still hold under the new screen.
+
+**I1:** `search_will_run` also requires `handler_for_tool(tool).is_some_and(|h| h.id() == "web_search")`.
+- Its mutant (back to `is_some()`) SURVIVES, and is an equivalent mutant today. `handler_for_tool` finds the handler by its plugin's id, so the two ids are equal by construction. The built-in web_search spec is first in the registry and so always owns `search`, and the registry's fields are private, so no test can build the other case.
+- K5's I1 item could not be met; the check stays as defense in depth, as the review asked.
+
+**I3:** net_guard.js strips every trailing dot (`/\.+$/`). Its test adds `localhost..`; the one-dot regex is killed by it (watched).
+
+**Mutants:**
+- the round-2 screen not consulted: killed by three tests;
+- the copy edited: killed by the hash test;
+- I3's one dot: killed;
+- I1: equivalent, as above.
+
+**Full suite:** 2384 passed, 0 failed (2354 + the module's 28 + 2). net_guard ok.
+- The first run died on a full disk: the dev box's C: had 300 KB free, with 54 GB in target/debug/incremental. That cache was removed, and the run repeated with CARGO_INCREMENTAL=0.
+
+**Linux staging (.95):** mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1184, all passed; net_guard ok; target/debug removed.
+
+**Not reviewed yet:** the OS's round-3 review runs against this same blob. If it changes the file, the copy and the hash constant move together.

@@ -15521,3 +15521,16 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
   - the date exclusion dropped (K3's first case);
   - `is_embedded` dropped.
 - K6: the import re-run on the Mac does not store exactly the recovered set; any rid lands twice.
+
+**E.SEC19 — prereg AMENDED before code: an IBAN's country code is not "embedded".**
+- Checking K2 against the rule as written found a hole. In `iban DE89 3704 0044 0532 0130 00` the digit run starts right after the letters `DE`, so `is_embedded` (a letter on either side) would call it part of some other token, and a real IBAN would pass.
+- **The fix, measured on the snapshot:**
+  - In the card-context branch a run is embedded if `is_embedded` says so, UNLESS the letters before it are exactly two uppercase ASCII letters starting a token (an IBAN country code) and no letter follows the run.
+  - With only "a letter after" as the test it would be 39 refused, the 8 extra all commit hashes like `db94…`.
+  - With this rule it is 32 refused; the one extra over plain `is_embedded` is a TypeScript error code `TS2…`, which has the same shape.
+- **K4 now reads:** card-context refusals 614 → exactly 32; total refusals 718 − 582 = 136; 582 memories recovered.
+- **Added to K3:**
+  - `merged as db94a1c2 after review`, a hash with letters before the digits only.
+- **Added to K5:**
+  - the IBAN exemption dropped, which K2's IBAN case kills;
+  - the exemption widened to any letters before, which K3's hash case kills.

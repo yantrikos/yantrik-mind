@@ -15767,3 +15767,52 @@ All three versions missed them; they are not regressions.
 **Not in scope, recorded:** E.SEC20, the pre-existing misses: snake_case and camelCase keys in egress JSON, 3-digit CVVs, and `4111_1111…` / `4111/1111…`.
 
 **Full suite:** 2405 passed, 0 failed.
+
+## E.SEC19d — PREREG: the third independent review of E.SEC19c (SAFE WITH CHANGES, nothing High or Medium), before its code
+
+**The third review:** a third fresh reviewer agent. It ran ~230 inputs through four versions side by side, 1.1M fuzz inputs (no panic, every span on a char boundary), 800k binary-search-versus-pairwise comparisons (one difference, the intended word-boundary rule), timing up to 1 MB (linear), and 23 mutants.
+
+**Findings:**
+- **L1:** an IBAN with a wrong or truncated checksum is now missed: `iban DE89 3704 0044 0532 0130 01`, `iban ES91 2100 0418 4502 0005 1333`. Its digits are glued to the country letters, so only the IBAN rule can see them, and the checksum turns it away. A typo exposes the bank code and the account.
+- **L2:** the escape view is one level deep. Double-encoded JSON (a JSON body inside a tool argument) still hides numbers behind `\f`, `\b`, `\u000a`, `\u000b`.
+- **L3:** the view's spaces JOIN digit runs that decoded text would break: `approval card dates:\n2026-10-05\n2026-10-06` is refused, and a small numeric table in JSON can read as a PAN.
+- **L4:** surviving mutants:
+  - the farthest PIN word instead of the nearest (the before side);
+  - a byte bound of 2× or 3× instead of 4× (the `é` test is 2-byte only);
+  - no 15-character IBAN test;
+  - no AWS-key witness for the harm gate's raw check.
+
+**What is built:**
+1. **L1:** an IBAN shape is refused when its checksum is valid OR its compact form holds at least 12 digits. Sentences of words never do.
+   - It ends at the LONGEST valid boundary: the longest checksum-valid one if any; otherwise the longest whose last group holds a digit, so a trailing word does not join the span.
+   - E.SEC19c's `iban DE88 …` test (a one-digit-off IBAN that passes) flips to refused, on purpose.
+2. **L2 + L3:** `json_escapes_blanked` takes a whole run of backslashes plus the escape it introduces as ONE escape, and writes the DECODED character into its last byte, spaces before it:
+   - `n`, `t` and `r` become themselves;
+   - `b`, `f`, and any `\u00XX` control or whitespace code become `\n`;
+   - `\u` ASCII printable becomes that character (so `4` is a `4`);
+   - `\u` of a letter becomes `a`; anything else becomes a space;
+   - `\"`, `\/` and `\` become `"`, `/` and `\`.
+   Runs then break where decoded text breaks. The length stays the same and only ASCII changes.
+3. **L4 tests:**
+   - `4821 is my pin` followed by 20 filler words and ` pin`;
+   - the window test with 4-byte characters (46 of 🔑: 48 characters, 186 bytes);
+   - `iban NO93 8601 1117 947` (15 characters);
+   - the harm gate denying `aws key AKIAIOSFODNN7EXAMPLE`, which only the raw check can see, since the gate lowercases.
+
+**Kill criteria (each one fails the build):**
+- **K1:** any of these is not refused:
+  - L1's five inputs;
+  - L2's three double-encoded inputs that the original refused;
+  - the 15-character IBAN;
+  - the AWS key through the harm gate.
+- **K2:** any of these is refused: L3's two inputs, any earlier negative, or the four L2-review word sentences. This is a check that the digit rule does not reach words.
+- **K3:** on the real snapshot, card-context refusals rise above 42, or anything the old rule passed is newly refused.
+- **K4:** a mutant of each new piece survives:
+  - checksum-or-digits reduced to checksum only;
+  - the digit floor lowered to 6;
+  - the longest boundary changed to the first;
+  - the nested backslash run reduced to one;
+  - the decoded byte back to a space;
+  - and the two L4 survivors.
+- **K5:** the suite or Linux staging fails.
+- **Then:** Pranab decides between a fourth review and shipping.

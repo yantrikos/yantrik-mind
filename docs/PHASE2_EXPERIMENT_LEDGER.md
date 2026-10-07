@@ -15622,3 +15622,43 @@ So E.SEC19's narrowing weakened all four.
 - **K3:** on the real snapshot, card-context refusals above 60 (E.SEC19 had 29 at 32 bytes). The number is measured and reported either way.
 - **K4:** a mutant of each new piece survives, and the window bound is not pinned at exactly 48 (in) and 49 (out).
 - **K5:** the full suite or the Linux staging run fails, or a fresh independent re-review is not SAFE.
+
+## E.SEC19b — RESULT: every review finding fixed but the accepted L3; 14 mutants killed; the snapshot loses 43 to the card rule, not 614
+
+**Built** (mind-types safety.rs):
+- escapes `\n`, `\t` and `\r` are separators in `is_embedded` and `at_token_start` (every rule);
+- a 4–8 digit run within 24 characters BEFORE pin/pins/cvv/cvc;
+- IBAN recognized by its shape (any case, spaces allowed, 15–34 alphanumerics) within the window after `iban`, replacing E.SEC19's uppercase country-code exemption;
+- a 48-character window, counted in characters;
+- dotted 4-digit groups as one number, for the card-context and PAN rules;
+- `x`/`X` masking before a run, in the card-context branch;
+- `is_iso_date` checks month 01–12 and day 01–31.
+L3 is accepted and pinned by a test (`pin:abc1234`, `card v4471` pass), so any change to it shows.
+
+**Kill criteria:**
+- **K1 held:** every input the review listed as "missed now" is refused:
+  - H1's five JSON strings, plus `Note\npin 4821`, through `contains_secret` too;
+  - M1's three, plus `4821\n(that's the garage pin)`;
+  - M2's IBANs, upper and lower case, without spaces, with letters in the account part;
+  - the four M3 sentences;
+  - dotted and masked cards;
+  - every E.SEC19 positive.
+- **K2b held:** `card 4471-93-02` and `card expires 2028-13-45` are refused.
+- **K2 held:** dates, the far version line, hashes, `a 4090 card`, `card bottom - 12` and `released 2028-09-30, the card is due` all pass. K2's first two bullets in the prereg were drafting slips that K2b superseded.
+- **K3 held:** on the real snapshot, card-context refusals are 43 (limit 60). In all, 160 refused (43 card-context, 104 credential-phrase, 11 token, 1 PEM, 1 national-id). 558 memories are recovered against the old rule, and none is newly refused.
+- **K4 held:** 14 mutants, all killed:
+  - each escape helper;
+  - the before-word rule, the before-word rule widened to card, the 8-digit cap;
+  - each bound: 24/25 before, 48/49 after;
+  - counting bytes instead of characters;
+  - no IBAN shape, and uppercase-only IBAN;
+  - dotted groups dropped in either rule;
+  - masking dropped;
+  - any date shape excused.
+  The bounds are pinned at exactly 48/49 and 24/25.
+
+**Test fixes the review asked for:**
+- `a_luhn_card_number_is_caught_wherever_it_stands` replaces the test that tested nothing.
+- The window-bound test's first construction glued the filler's "a" to "pin", making "pina". It is rebuilt with spaces.
+
+**Full suite:** 2398 passed, 0 failed.

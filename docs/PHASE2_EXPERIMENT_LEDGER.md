@@ -15474,3 +15474,50 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - Mutants on the new copy: the screen not consulted is killed by three tests; the copy edited is killed by the hash test. I1 stays equivalent (as before), and I3 is unchanged.
 - Full suite: 2387 passed, 0 failed (2384 + the module's 3 new tests).
 - Linux staging: mind-net 14, mind-tools 265, mind-core 142, mind-conversation 1187, all passed; net_guard ok; target/debug removed.
+
+## E.SEC19 — PREREG: a number is card-shaped only when it FOLLOWS the card word, close by, as itself (the Mac mini memory import)
+
+**Why:**
+- On 2026-10-07 Pranab's 8,060-memory YantrikDB clone was imported into the Mind on his Mac mini (72b579d).
+- The write gate (`first_sensitive`, mind-types safety.rs) refused 718 of them. 614 of those were `card-context-number`: any run of 4+ digits ANYWHERE in a text that ALSO holds card, cards, pin, pins, cvv, cvc, iban or pan ANYWHERE.
+- This project's vocabulary trips it constantly: "grant card", "approval card", "pin the version", "PCIe card", next to dates (2026-10-05 is an 8-digit run), ports, years, PR numbers and GPU models.
+- Measured with the real gate on the real snapshot (local F: copy, sha256 dfb5505e…, the same as the Mac's), printing counts and digit-masked windows only. Rule candidates:
+  - a run of 4+ digits, not embedded in a token, starting within W bytes AFTER a context word, ISO dates (dddd-dd-dd) excluded: W=16 leaves 16 refused, W=24 leaves 26, W=32 leaves 31;
+  - both sides of the word instead of after-only: 47 with W=32, the extra hits all false (hex colours, ports, coordinates).
+- Every candidate keeps refusing the one plainly real PIN in the set (`PIN NNNN unlocked`).
+- After-only matches the detector's own design: CREDENTIAL_PHRASES also require the value to follow the phrase (`value_follows`).
+
+**What is built (mind-types `first_sensitive`, the card-context branch only):**
+- A digit run counts only if it has 4+ digits, `is_embedded` is false for it (no letter pressed against either end; not a decimal's fraction), it is not an ISO date `dddd-dd-dd`, and it starts within 32 bytes after the end of a context word (a whole word, as `has_ctx` already requires).
+- W=32 rather than 24: a realistic "my debit card number, the one from Chase, is 4471 …" (32 bytes between) stays refused, at a cost of 5 more false refusals on the snapshot.
+- Unchanged: the PAN rule (13–19 digits, Luhn, a 3–6 lead), which catches a real card number anywhere with or without context; the SSN branch; the token, PEM and credential-phrase rules.
+
+**Where it ships:**
+- Branch `mind-mac-sec19` cut from 72b579d (the Mind on the Mac and on 520), so no unreviewed E.GRANT2c code rides along to the Mac.
+- Cherry-picked onto os-shared-memory.
+- Bundle from that branch, installed on the Mac only after the review is SAFE.
+- Then the 583 recovered memories are re-imported: their rids are removed from `clone-import.done` and the import re-run; the gate decides again.
+
+**Kill criteria (each one fails the build):**
+- K1: any existing positive in safety.rs or mind-memory stops being refused: `my card pin is 4471-9302-1122-8890`, `my card is 4471 9302 1122 8890`, `charge 4111 1111 1111 1111 today`, `ssn 123-45-6789 on file`, and every token, phrase and PEM case.
+- K2: these are not refused:
+  - `my card ends in 4242`
+  - `the PIN for the garage door is 4821`
+  - `my debit card number, the one from Chase, is 4471 9302 1122 8890`
+  - `cvv 1234`
+  - `iban DE89 3704 0044 0532 0130 00`
+  - `PIN 4821 unlocked`
+- K3: these are refused:
+  - `approval card shipped 2026-10-05`
+  - `pin the version to 0.23.0 in 2026`
+  - `the status card reads 192.168.4.35:8094` (embedded in the dotted address)
+  - `a 4090 card` (the number before the word)
+  - `card bottom - 12` (under 4 digits)
+  - `green card timeline ~2030`
+- K4: on the real snapshot the card-context refusals are not exactly 614 → 31 (asserted from the profiler at W=32, ISO dates excluded); total refusals become 718 − 583 = 135.
+- K5: these mutants survive:
+  - the window dropped;
+  - after-only made both-sided;
+  - the date exclusion dropped (K3's first case);
+  - `is_embedded` dropped.
+- K6: the import re-run on the Mac does not store exactly the recovered set; any rid lands twice.

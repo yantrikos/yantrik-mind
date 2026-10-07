@@ -15571,3 +15571,54 @@ Each appeared among the 29 the profiler had already shown as still refused. I wr
 **K5:** all six mutants killed: window dropped, both-sided, date exclusion dropped, `is_embedded` dropped, IBAN exemption dropped, exemption widened.
 
 **Full suite:** 2391 passed, 0 failed (2387 + 4).
+
+## E.SEC19b — PREREG: the independent review of E.SEC19 (SAFE WITH CHANGES), before any of its code
+
+**The review:** a fresh reviewer agent, at Pranab's direction, since the cloud-review peer was gone. It worked from the diff and ~150 adversarial inputs run through the old and new code side by side. It found what I had missed: `first_sensitive` is not only the memory write gate. Through `contains_secret` it also guards:
+- the OUTWARD tool-call check on canonical JSON (mind-governance egress.rs:391);
+- the harm gate, which lowercases its input first (mind-governance lib.rs:163,211);
+- log redaction (mind-observability lib.rs:269, mind-conversation proactive.rs:189).
+So E.SEC19's narrowing weakened all four.
+
+**Findings to fix:**
+- **H1:** JSON escapes. In `{"text":"Card details\n4111 1111 1111 1111"}` the `n` of `\n` sits against the number, so `is_embedded` drops it, and a valid PAN passed the outward check. The same happens for `Card PIN:\n4821`, `New PIN\t4821`, `cvv\n1234` and `iban\nDE89…`.
+- **M1:** a PIN or CVV BEFORE its word: `4821 is my pin`, `Remember 4821, that's my ATM PIN.`, `1234 is the cvv on my amex`.
+- **M2:** IBANs in lower case (the harm gate's form), without spaces, or with letters in the account: `iban de89…`, `my iban is gb29nwbk…`, `iban NL91ABNA0417164300`, `iban FR14 2004 1010 0505 0001 3M02 606`.
+- **M3:** a 32-byte window tuned to its own test sentence, and counted in bytes, so non-ASCII text shrinks it.
+- **L1:** dotted card numbers `card 4111.1111.1111.1111`.
+- **L2:** masked last four `card x4242`, `card xxxx4242`.
+- **Info:** `is_iso_date` checks no month or day ranges.
+- **Tests:** `a_luhn_card_number_is_caught_without_the_word` contains "the card" and tests nothing, and the window bound was pinned only between 32 and 55.
+
+**What is built:**
+1. **Escapes are separators.**
+   - `is_embedded` does not count a letter before the run when it is `n`, `t` or `r` after a backslash.
+   - `at_token_start` treats `\n`, `\t` and `\r` the same way, so `Note\npin 4821` has its word.
+   - Both helpers serve every rule (PAN, tokens, phrases), so the fix reaches the old PAN miss too.
+2. **Before the word, for pin/pins/cvv/cvc only:** a standalone run of 4–8 digits whose end is within 24 characters before the word's start. card/cards/iban/pan stay after-only, so `a 4090 card` stays clear.
+3. **IBAN by shape:** within the window after `iban`, separators skipped, a case-insensitive IBAN shape is refused. The shape is 2 letters, 2 digits, then letters, digits and spaces whose alphanumerics bring the total to 15–34. This replaces E.SEC19's uppercase country-code exemption.
+4. **A wider window, counted in characters:** 48 characters after the word.
+5. **Dotted groups:** `dddd(.dddd){2,4}`, standalone, is one grouped number for the card-context and PAN rules.
+6. **Masked digits:** in the card-context branch, `x`, `X` or `*` immediately before a run (back to a token start) is masking, not letters.
+7. **Real dates only:** `is_iso_date` requires month 01–12 and day 01–31.
+8. **L3 is accepted and documented,** not fixed: `pin:abc1234`, `card v4471`, a trailing letter O. Real PINs are numeric.
+
+**Kill criteria (each one fails the build):**
+- **K1:** any of these is not refused:
+  - H1's five JSON strings;
+  - M1's three;
+  - M2's four;
+  - from M3: `my debit card number, the one from Chase Bank, is 4471 9302 1122 8890`, `Mom's PIN for her Bank of America ATMs is 4821`, `My PIN is something I keep forgetting. It is 4821.`, `my pin — the one for the café — is 4821`;
+  - `card 4111.1111.1111.1111`;
+  - `card x4242`;
+  - `card XXXX4242`;
+  - `pin 1987`;
+  - every E.SEC19 positive.
+- **K2:** any E.SEC19 negative is refused (dates, the far version line, the hashes, `a 4090 card`, `card bottom - 12`), or any of these is refused:
+  - `card 4471-93-02` (invalid date shape, still refused as before: card digits) — no, see K2b;
+  - `card expires 2028-13-45`: not a date, so refused — K2b;
+  - `released 2028-09-30, the card is due`: before the word, not a pin word, so passes.
+- **K2b:** these ARE refused: `card 4471-93-02` and `card expires 2028-13-45` (not real dates).
+- **K3:** on the real snapshot, card-context refusals above 60 (E.SEC19 had 29 at 32 bytes). The number is measured and reported either way.
+- **K4:** a mutant of each new piece survives, and the window bound is not pinned at exactly 48 (in) and 49 (out).
+- **K5:** the full suite or the Linux staging run fails, or a fresh independent re-review is not SAFE.

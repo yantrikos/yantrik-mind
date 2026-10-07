@@ -303,10 +303,12 @@ fn is_iso_date(run: &str) -> bool {
     (1..=12).contains(&num(5)) && (1..=31).contains(&num(8))
 }
 
-/// E.SEC19b (M2) / E.SEC19c (L1, L2): an IBAN starting at `at`, in any case: two letters, two digits,
-/// then groups of letters and digits joined by single spaces or hyphens, ending at a group boundary
-/// with 15 to 34 alphanumerics in all AND an ISO 7064 mod-97 checksum of 1 -- so "iban de12
-/// something about the form" is words, not an account. The span, if one is there.
+/// E.SEC19b (M2) / E.SEC19c (L1, L2) / E.SEC19d (L1): an IBAN starting at `at`, in any case: two
+/// letters, two digits, then groups of letters and digits joined by single spaces or hyphens, ending
+/// at a group boundary with 15 to 34 alphanumerics in all, and EITHER an ISO 7064 mod-97 checksum of
+/// 1 OR at least 12 digits -- a mistyped or cut-off IBAN still carries the bank and the account, and
+/// "iban de12 something about the form" is words, never 12 digits. The longest such span: a valid
+/// checksum first; else the longest whose last group holds a digit, so a trailing word stays out.
 fn iban_at(text: &str, at: usize) -> Option<(usize, usize)> {
     let b = text.as_bytes();
     if !(at + 4 <= b.len()
@@ -319,22 +321,32 @@ fn iban_at(text: &str, at: usize) -> Option<(usize, usize)> {
         return None;
     }
     let mut compact: Vec<u8> = Vec::with_capacity(34);
-    let mut i = at;
+    let (mut i, mut digits, mut group_has_digit) = (at, 0usize, false);
+    let (mut by_checksum, mut by_digits) = (None, None);
     while i < b.len() && compact.len() < 34 {
         if b[i].is_ascii_alphanumeric() {
             compact.push(b[i].to_ascii_uppercase());
+            if b[i].is_ascii_digit() {
+                digits += 1;
+                group_has_digit = true;
+            }
             i += 1;
             let boundary = i == b.len() || !b[i].is_ascii_alphanumeric();
-            if boundary && (15..=34).contains(&compact.len()) && iban_checksum_ok(&compact) {
-                return Some((at, i - at));
+            if boundary && (15..=34).contains(&compact.len()) {
+                if iban_checksum_ok(&compact) {
+                    by_checksum = Some((at, i - at));
+                } else if digits >= 12 && group_has_digit {
+                    by_digits = Some((at, i - at));
+                }
             }
         } else if matches!(b[i], b' ' | b'-') && i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric() {
+            group_has_digit = false;
             i += 1;
         } else {
             break;
         }
     }
-    None
+    by_checksum.or(by_digits)
 }
 
 /// ISO 7064 mod 97-10 over an upper-case IBAN: the first four moved to the end, letters as 10..35.
@@ -443,8 +455,13 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
     first_sensitive_raw(text).or_else(|| json_escapes_blanked(text).and_then(|view| first_sensitive_raw(&view)))
 }
 
-/// `text` with every JSON escape -- `\n \t \r \b \f \" \\ \/` and `\uXXXX` -- replaced by as many
-/// spaces, or `None` when it holds none.
+/// `text` with every JSON escape decoded IN PLACE, or `None` when it holds none: the escape's bytes
+/// become spaces and its last byte the character it stands for, so the length -- and every offset --
+/// is unchanged. E.SEC19d: a RUN of backslashes before the escape letter is one escape (`\\f` is a
+/// form feed in JSON inside JSON), and the decoded character, not a space, ends it: a newline breaks
+/// a digit run where the decoded text would (`dates:\n2026-10-05\n2026-10-06` is two dates, not one
+/// 16-digit number). `4` becomes a `4`; a `\u` letter becomes `a`; any control or whitespace a
+/// newline.
 fn json_escapes_blanked(text: &str) -> Option<String> {
     if !text.contains('\\') {
         return None;
@@ -452,21 +469,54 @@ fn json_escapes_blanked(text: &str) -> Option<String> {
     let b = text.as_bytes();
     let mut out = b.to_vec();
     let (mut i, mut changed) = (0usize, false);
-    while i + 1 < b.len() {
-        if b[i] == b'\\' {
-            let width = match b[i + 1] {
-                b'n' | b't' | b'r' | b'b' | b'f' | b'"' | b'\\' | b'/' => 2,
-                b'u' if i + 6 <= b.len() && b[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit) => 6,
-                _ => 0,
-            };
-            if width > 0 {
-                out[i..i + width].fill(b' ');
-                changed = true;
-                i += width;
-                continue;
-            }
+    while i < b.len() {
+        if b[i] != b'\\' {
+            i += 1;
+            continue;
         }
-        i += 1;
+        let mut j = i;
+        while j < b.len() && b[j] == b'\\' {
+            j += 1;
+        }
+        let decoded = match b.get(j) {
+            Some(b'n') => Some((1, b'\n')),
+            Some(b't') => Some((1, b'\t')),
+            Some(b'r') => Some((1, b'\r')),
+            Some(b'b' | b'f') => Some((1, b'\n')),
+            Some(&c @ (b'"' | b'/')) => Some((1, c)),
+            Some(b'u') if j + 5 <= b.len() && b[j + 1..j + 5].iter().all(u8::is_ascii_hexdigit) => {
+                let code = u32::from_str_radix(std::str::from_utf8(&b[j + 1..j + 5]).unwrap_or("0"), 16).unwrap_or(0);
+                let c = char::from_u32(code).unwrap_or(' ');
+                let byte = if c.is_ascii_graphic() {
+                    c as u8
+                } else if c.is_control() || c.is_whitespace() {
+                    b'\n'
+                } else if c.is_alphabetic() {
+                    b'a'
+                } else {
+                    b' '
+                };
+                Some((5, byte))
+            }
+            _ => None,
+        };
+        match decoded {
+            Some((len, byte)) => {
+                let end = j + len;
+                out[i..end].fill(b' ');
+                out[end - 1] = byte;
+                changed = true;
+                i = end;
+            }
+            None if j - i >= 2 => {
+                // `\\` alone: an escaped backslash, decoded to one.
+                out[i..j].fill(b' ');
+                out[j - 1] = b'\\';
+                changed = true;
+                i = j;
+            }
+            None => i = j,
+        }
     }
     changed.then(|| String::from_utf8(out).expect("only ASCII bytes were replaced, by ASCII"))
 }
@@ -1659,6 +1709,8 @@ mod sec19c {
             "IBAN DE89-3704-0044-0532-0130-00",
             "card DE89 3704 0044 0532 0130 00",
             "iban DE89 3704 0044 0532 0130 00 thanks",
+            // E.SEC19d (L1): a typo or a cut-off still carries the bank and the account.
+            "iban DE88 3704 0044 0532 0130 00",
         ] {
             assert!(refused(text), "MISSED: {text:?}");
         }
@@ -1667,8 +1719,6 @@ mod sec19c {
             "iban de12 something about the form",
             "iban check: see ab12 and the docs for details please",
             "iban field width is ab12 cd34 ef56 gh78",
-            // One digit off: the checksum fails, so it is not an IBAN (and not refused as one).
-            "iban DE88 3704 0044 0532 0130 00",
         ] {
             assert!(!refused(text), "FALSE POSITIVE on {text:?}");
         }
@@ -1725,5 +1775,65 @@ mod sec19c {
     fn the_nearest_word_decides() {
         let text = "card".to_string() + &" lorem".repeat(20) + " pin 4821";
         assert_eq!(first_sensitive(&text).map(|f| f.kind), Some(SensitiveKind::CardContextNumber));
+    }
+}
+
+/// E.SEC19d -- the third independent review of E.SEC19c, as tests.
+#[cfg(test)]
+mod sec19d {
+    use super::*;
+
+    fn refused(text: &str) -> bool {
+        first_sensitive(text).is_some()
+    }
+
+    /// L1: a mistyped or cut-off IBAN, and the shortest real one (Norway, 15).
+    #[test]
+    fn a_mistyped_or_short_iban_is_refused() {
+        for text in [
+            "iban DE89 3704 0044 0532 0130 01",
+            "iban de89 3704 0044 0532 0130 0",
+            "iban ES91 2100 0418 4502 0005 1333",
+            "IBAN: FR14 2004 1010 0505 0001 3M02 607",
+            "iban GB29NWBK60161331926818",
+            "iban NO93 8601 1117 947",
+        ] {
+            assert!(refused(text), "MISSED: {text:?}");
+        }
+        // The span ends at the IBAN, not at the word after it.
+        let text = "iban DE89 3704 0044 0532 0130 01 thanks";
+        let f = first_sensitive(text).unwrap();
+        assert_eq!(&text[f.start..f.start + f.len], "DE89 3704 0044 0532 0130 01");
+    }
+
+    /// L2: JSON inside JSON.
+    #[test]
+    fn a_double_encoded_escape_is_a_separator() {
+        for text in [
+            r#"{"body":"{\"text\":\"Card details\\f4111 1111 1111 1111\"}"}"#,
+            r#"{"body":"{\"text\":\"Card PIN:\\u000a4821\"}"}"#,
+            r#"{"body":"{\"text\":\"iban\\u000aDE89370400440532013000\"}"}"#,
+        ] {
+            assert!(refused(text), "MISSED: {text}");
+        }
+    }
+
+    /// L3: decoded escapes break digit runs where the decoded text does.
+    #[test]
+    fn an_escaped_newline_breaks_a_digit_run() {
+        for text in [r#"{"text":"approval card dates:\n2026-10-05\n2026-10-06"}"#, r#"{"rows":"id\tqty\n5105\t1051\n0510\t5100"}"#] {
+            assert!(!refused(text), "FALSE POSITIVE on {text}");
+        }
+        // And an escaped digit is a digit.
+        assert!(refused(r#"{"text":"pin 4821"}"#));
+    }
+
+    /// L4: the before side's NEAREST pin word decides; the byte bound is 4 per character.
+    #[test]
+    fn the_before_side_and_the_byte_bound_are_pinned() {
+        let text = "4821 is my pin".to_string() + &" lorem".repeat(20) + " pin";
+        assert!(refused(&text), "the nearest pin word after the number decides");
+        // 46 four-byte characters plus two spaces: 48 characters, 186 bytes.
+        assert!(refused(&format!("pin {} 4821", "\u{1f511}".repeat(46))), "the byte bound is under 4 per char");
     }
 }

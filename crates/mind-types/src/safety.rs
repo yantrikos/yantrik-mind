@@ -303,8 +303,10 @@ fn is_iso_date(run: &str) -> bool {
     (1..=12).contains(&num(5)) && (1..=31).contains(&num(8))
 }
 
-/// E.SEC19b (M2): an IBAN starting at `at`, in any case, spaces allowed: two letters, two digits,
-/// then letters, digits and single spaces, 15 to 34 alphanumerics in all. The span, if one is there.
+/// E.SEC19b (M2) / E.SEC19c (L1, L2): an IBAN starting at `at`, in any case: two letters, two digits,
+/// then groups of letters and digits joined by single spaces or hyphens, ending at a group boundary
+/// with 15 to 34 alphanumerics in all AND an ISO 7064 mod-97 checksum of 1 -- so "iban de12
+/// something about the form" is words, not an account. The span, if one is there.
 fn iban_at(text: &str, at: usize) -> Option<(usize, usize)> {
     let b = text.as_bytes();
     if !(at + 4 <= b.len()
@@ -316,17 +318,36 @@ fn iban_at(text: &str, at: usize) -> Option<(usize, usize)> {
     {
         return None;
     }
-    let (mut i, mut alnum, mut end) = (at, 0usize, at);
-    while i < b.len() && alnum < 34 {
+    let mut compact: Vec<u8> = Vec::with_capacity(34);
+    let mut i = at;
+    while i < b.len() && compact.len() < 34 {
         if b[i].is_ascii_alphanumeric() {
-            alnum += 1;
-            end = i + 1;
-        } else if !(b[i] == b' ' && i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric()) {
+            compact.push(b[i].to_ascii_uppercase());
+            i += 1;
+            let boundary = i == b.len() || !b[i].is_ascii_alphanumeric();
+            if boundary && (15..=34).contains(&compact.len()) && iban_checksum_ok(&compact) {
+                return Some((at, i - at));
+            }
+        } else if matches!(b[i], b' ' | b'-') && i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric() {
+            i += 1;
+        } else {
             break;
         }
-        i += 1;
     }
-    (15..=34).contains(&alnum).then_some((at, end - at))
+    None
+}
+
+/// ISO 7064 mod 97-10 over an upper-case IBAN: the first four moved to the end, letters as 10..35.
+fn iban_checksum_ok(iban: &[u8]) -> bool {
+    let mut r = 0u32;
+    for &c in iban[4..].iter().chain(&iban[..4]) {
+        r = if c.is_ascii_digit() {
+            (r * 10 + u32::from(c - b'0')) % 97
+        } else {
+            (r * 100 + u32::from(c - b'A') + 10) % 97
+        };
+    }
+    r == 1
 }
 
 /// E.SEC19b (L1): `dddd.dddd.dddd(.dddd)` standing on its own -- a card number written with dots --
@@ -413,7 +434,44 @@ fn digit_runs(text: &str) -> Vec<(usize, usize, String)> {
 ///
 /// Order is deliberate: the cheapest and most certain shapes first, so a finding names the most
 /// specific reason it could.
+///
+/// E.SEC19c (M1): and the same text with its JSON escapes blanked. In `Card PIN:\u000a4821` or
+/// `Card details\f4111 …` an escape stands against the number and makes it look like part of a
+/// word; JSON written into a field (a body inside an argument, a blob in a memory, a log line)
+/// carries them. The view has the same length and only ASCII changed, so every offset is the same.
 pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
+    first_sensitive_raw(text).or_else(|| json_escapes_blanked(text).and_then(|view| first_sensitive_raw(&view)))
+}
+
+/// `text` with every JSON escape -- `\n \t \r \b \f \" \\ \/` and `\uXXXX` -- replaced by as many
+/// spaces, or `None` when it holds none.
+fn json_escapes_blanked(text: &str) -> Option<String> {
+    if !text.contains('\\') {
+        return None;
+    }
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let (mut i, mut changed) = (0usize, false);
+    while i + 1 < b.len() {
+        if b[i] == b'\\' {
+            let width = match b[i + 1] {
+                b'n' | b't' | b'r' | b'b' | b'f' | b'"' | b'\\' | b'/' => 2,
+                b'u' if i + 6 <= b.len() && b[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit) => 6,
+                _ => 0,
+            };
+            if width > 0 {
+                out[i..i + width].fill(b' ');
+                changed = true;
+                i += width;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    changed.then(|| String::from_utf8(out).expect("only ASCII bytes were replaced, by ASCII"))
+}
+
+fn first_sensitive_raw(text: &str) -> Option<SensitiveFinding> {
     // ASCII-only lowering, and it MUST stay that way. Every offset below is found in `lower` and
     // then used to slice `text`, so the two must agree byte for byte. `to_lowercase()` is not
     // length-preserving — `İ` (U+0130, 2 bytes) lowers to 3 — which shifts every later offset and
@@ -517,29 +575,41 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
         })
         .collect();
     if !card_words.is_empty() {
+        // E.SEC19c (H1): only the NEAREST word on each side can be within its window, so find it by
+        // binary search instead of measuring every (run, word) pair -- that was cubic: 48 KB of
+        // "card ... 1234 x ..." took 13.7 s. And a char is at most 4 bytes, so a byte distance past
+        // 4x the window is out without counting a char.
+        let mut word_ends: Vec<usize> = card_words.iter().map(|&(_, end, _)| end).collect();
+        word_ends.sort_unstable();
+        // E.SEC19c (L3): not "pins" -- a number before "pins" is a count ("2048 pins to the board").
+        let mut pin_starts: Vec<usize> = card_words
+            .iter()
+            .filter(|&&(_, _, w)| matches!(w, "pin" | "cvv" | "cvc"))
+            .map(|&(at, _, _)| at)
+            .collect();
+        pin_starts.sort_unstable();
+        let within = |from: usize, to: usize, window: usize| to - from <= 4 * window && text[from..to].chars().count() <= window;
+        let tb = text.as_bytes();
         for (start, len, digits) in digit_runs(text).into_iter().chain(dotted_groups(text)) {
             let n = digits.len();
             let standalone = !is_embedded(text, start, len) || masked_lead(text, start);
             if n < 4 || !standalone || is_iso_date(&text[start..start + len]) {
                 continue;
             }
-            let follows = card_words
-                .iter()
-                .any(|&(_, end, _)| start >= end && text[end..start].chars().count() <= CARD_VALUE_WINDOW);
+            let before = word_ends.partition_point(|&end| end <= start);
+            let follows = before > 0 && within(word_ends[before - 1], start, CARD_VALUE_WINDOW);
+            let after = pin_starts.partition_point(|&at| at < start + len);
+            // (E.SEC19c L3: `#5021` is an issue or a PR, never a PIN said before its word.)
             let precedes = n <= 8
-                && card_words.iter().any(|&(at, _, w)| {
-                    matches!(w, "pin" | "pins" | "cvv" | "cvc")
-                        && start + len <= at
-                        && text[start + len..at].chars().count() <= PIN_BEFORE_WINDOW
-                });
+                && !(start > 0 && tb[start - 1] == b'#')
+                && after < pin_starts.len()
+                && within(start + len, pin_starts[after], PIN_BEFORE_WINDOW);
             if follows || precedes {
                 return find(SensitiveKind::CardContextNumber, start, len);
             }
         }
-        for &(_, end, w) in &card_words {
-            if w != "iban" {
-                continue;
-            }
+        // E.SEC19c: an IBAN after ANY card word ("card DE89 …" too); its checksum keeps words out.
+        for &(_, end, _) in &card_words {
             for (offset, _) in text[end..].char_indices().take(CARD_VALUE_WINDOW + 1) {
                 if let Some((at, len)) = iban_at(text, end + offset) {
                     return find(SensitiveKind::CardContextNumber, at, len);
@@ -1553,5 +1623,107 @@ mod sec19b {
         for text in ["pin:abc1234", "card v4471"] {
             assert!(!refused(text), "{text:?}: L3 changed -- update the ledger");
         }
+    }
+}
+
+/// E.SEC19c -- the independent re-review of E.SEC19b, as tests.
+#[cfg(test)]
+mod sec19c {
+    use super::*;
+
+    fn refused(text: &str) -> bool {
+        first_sensitive(text).is_some()
+    }
+
+    /// M1: every JSON escape, not only \n \t \r, is a separator -- and \r on its own (L4).
+    #[test]
+    fn every_json_escape_is_a_separator() {
+        for text in [
+            r#"{"body":"Card PIN:\u000a4821"}"#,
+            r#"{"text":"Card details\f4111 1111 1111 1111"}"#,
+            r#"{"text":"Card details\b4111 1111 1111 1111"}"#,
+            r#"{"text":"Card details\u000b4111 1111 1111 1111"}"#,
+            r#"{"text":"pin 4821"}"#,
+            r#"{"body":"New PIN\r4821"}"#,
+        ] {
+            assert!(refused(text), "MISSED: {text}");
+        }
+        // A view changes nothing for text without escapes, and never finds what is not there.
+        assert!(!refused(r#"{"text":"approval card\nshipped 2026-10-05"}"#));
+    }
+
+    /// L1, L2: an IBAN by its checksum, spaced or hyphenated, after any card word; words are not one.
+    #[test]
+    fn an_iban_is_a_valid_checksum_not_a_shape() {
+        for text in [
+            "IBAN DE89-3704-0044-0532-0130-00",
+            "card DE89 3704 0044 0532 0130 00",
+            "iban DE89 3704 0044 0532 0130 00 thanks",
+        ] {
+            assert!(refused(text), "MISSED: {text:?}");
+        }
+        for text in [
+            "the iban parser moved to py39 runtime last week",
+            "iban de12 something about the form",
+            "iban check: see ab12 and the docs for details please",
+            "iban field width is ab12 cd34 ef56 gh78",
+            // One digit off: the checksum fails, so it is not an IBAN (and not refused as one).
+            "iban DE88 3704 0044 0532 0130 00",
+        ] {
+            assert!(!refused(text), "FALSE POSITIVE on {text:?}");
+        }
+        // The window: the IBAN starting 48 characters after the word is in, 49 out (L4).
+        assert!(refused(&format!("iban{}DE89370400440532013000", " ".repeat(48))));
+        assert!(!refused(&format!("iban{}DE89370400440532013000", " ".repeat(49))));
+        // Glued into a word is the accepted L3: `xDE89…` is not at a token start (L4).
+        assert!(!refused("iban xDE89370400440532013000"));
+    }
+
+    /// L3: a count before "pins", an issue number before "pin".
+    #[test]
+    fn counts_and_issue_numbers_before_pin_pass() {
+        for text in ["uploaded 2048 pins to the board", "PR #5021: pin tokio to 1.38"] {
+            assert!(!refused(text), "FALSE POSITIVE on {text:?}");
+        }
+        assert!(refused("1234 is the cvc"), "cvc before its word (L4)");
+    }
+
+    /// L4: what the re-review's surviving mutants changed, each pinned.
+    #[test]
+    fn the_rereview_mutants_each_have_a_witness() {
+        assert!(refused("card expires 2028-09-45"), "a good month, a bad day: not a date");
+        assert!(!refused("card 1234.5678"), "two dotted groups are not a card");
+        assert!(!refused("card ax4242"), "masking must start a token");
+    }
+
+    /// H1: linear, not cubic. E.SEC19b took 13.7 s on the first of these, 22.5 s on the second.
+    #[test]
+    fn many_words_and_many_numbers_are_checked_in_linear_time() {
+        let inputs = [
+            "card ".repeat(4000) + &"lorem ".repeat(20) + &"1234 x ".repeat(4000),
+            "approval card noted. ".repeat(300) + &(0..20_000).map(|i| format!("row {:04} x ", i % 10_000)).collect::<String>(),
+            "1234 x ".repeat(2000) + &"lorem ".repeat(20) + &"pin ".repeat(2000),
+        ];
+        for input in &inputs {
+            let t = std::time::Instant::now();
+            let _ = first_sensitive(input);
+            assert!(t.elapsed() < std::time::Duration::from_secs(1), "{} KB took {:?}", input.len() / 1024, t.elapsed());
+        }
+        // One word, then numbers ever farther from it: counting the chars of each distance would be
+        // ~35 billion steps (quadratic; std counts fast, so it takes this many to show); the byte
+        // bound answers each in one comparison. (Every number out of the window, or the first one
+        // would end the scan.)
+        let far = "card ".to_string() + &"lorem ".repeat(20) + &"1234 x ".repeat(100_000);
+        let t = std::time::Instant::now();
+        let _ = first_sensitive(&far);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "one word, 100,000 numbers took {:?}", t.elapsed());
+    }
+
+    /// H1: the NEAREST word decides -- a number close after a later word is caught though an earlier
+    /// word is far away.
+    #[test]
+    fn the_nearest_word_decides() {
+        let text = "card".to_string() + &" lorem".repeat(20) + " pin 4821";
+        assert_eq!(first_sensitive(&text).map(|f| f.kind), Some(SensitiveKind::CardContextNumber));
     }
 }

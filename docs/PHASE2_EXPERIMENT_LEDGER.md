@@ -15534,3 +15534,8 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - **Added to K5:**
   - the IBAN exemption dropped, which K2's IBAN case kills;
   - the exemption widened to any letters before, which K3's hash case kills.
+
+**E.SEC19 — K4 corrected before code: 32 → 29.**
+- The profiler split words on letters and digits only, but the detector's `at_token_start` / `token_at` count `_` and `-` as word characters. So `lock_pin` is not "pin" and `card-context` is not "card".
+- Re-measured with the real word rules (W=32 after the word, ISO dates excluded, IBAN-aware embedded check), the card-context refusals go from 614 to exactly 29.
+- Total refusals become 718 − 585 = 133; 585 memories are recovered.

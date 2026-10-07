@@ -15722,3 +15722,48 @@ L3 is accepted and pinned by a test (`pin:abc1234`, `card v4471` pass), so any c
 - 3-digit CVVs;
 - `4111_1111…` and `4111/1111…`.
 All three versions missed them; they are not regressions.
+
+## E.SEC19c — RESULT: linear time, every JSON escape, the harm gate's raw text, IBAN by checksum; 13 mutants killed; the snapshot loses 42 to the card rule
+
+**Built:**
+- **mind-types safety.rs:**
+  - The nearest card word before and the nearest PIN/CVV word after each run are found by binary search over sorted positions, with a byte bound (4 per char) before chars are counted.
+  - `first_sensitive` also scans a same-length view with every JSON escape blanked.
+  - IBAN by ISO 7064 mod-97, with a space or hyphen between groups and an end at any group boundary, after any card word.
+  - `pins` is out of the before-word set, and a run after `#` is never a before-word PIN.
+- **mind-governance lib.rs:** the harm gate checks `contains_secret` on the raw text as well as the normalized one.
+
+**Kill criteria:**
+- **K1 held:** every re-review "missed" input is refused: `\u000a`, `\f`, `\b`, `\u000b`, ` `, `\r`; the harm gate's `\u{200b}` and `\r` glue; `IBAN DE89-3704-…`; `card DE89 …`.
+- **K2 held:** the four L2 sentences, a one-digit-off IBAN, `uploaded 2048 pins to the board` and `PR #5021: pin tokio to 1.38` all pass.
+- **K3 held:**
+  - The reviewer's three inputs (13.7 s, 22.5 s and 1.5 s under E.SEC19b) each take under 1 s in a debug build; the whole module's tests run in 0.3 s.
+  - A fourth witness: one word followed by 100,000 numbers, all out of the window.
+- **K4 held:** on the real snapshot:
+  - card-context refusals: 42 (E.SEC19b had 43);
+  - all refusals: 159;
+  - recovered from the old rule: 559;
+  - newly refused: none.
+- **K5 held:** 13 mutants, all killed:
+  - the farthest word instead of the nearest;
+  - every pair again (cubic);
+  - the byte pre-check dropped;
+  - no escape view;
+  - `\f`, `\b` and `\u` each not blanked;
+  - no raw harm check;
+  - no checksum;
+  - no hyphen;
+  - `pins` restored;
+  - no `#` skip;
+  - IBAN only after `iban`.
+
+**Two survivors at first, both from tests that could not see them:**
+- **"Farthest word":** no test had two card words where only the later one was close. Added `the_nearest_word_decides`.
+- **"Byte pre-check dropped":** survived twice.
+  - First, std's `chars().count()` is optimized even in debug builds, so 3 billion steps still fit in 1 s.
+  - Then, the witness `card 1234 x …` put its FIRST number inside the window, so the scan returned at once.
+  - The witness is now 20 words of filler then 100,000 numbers, all out of the window.
+
+**Not in scope, recorded:** E.SEC20, the pre-existing misses: snake_case and camelCase keys in egress JSON, 3-digit CVVs, and `4111_1111…` / `4111/1111…`.
+
+**Full suite:** 2405 passed, 0 failed.

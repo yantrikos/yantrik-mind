@@ -208,7 +208,10 @@ impl HarmGate for RealHarmGate {
                     | Capability::LocalControl
             )
         });
-        if outward && mind_types::contains_secret(&norm) {
+        // E.SEC19c (M2): and the raw text. `normalize` DROPS zero-width and control characters,
+        // gluing `Card details\u{200b}4111 …` into one token the card rule calls embedded. Checking
+        // both can only add a denial.
+        if outward && (mind_types::contains_secret(&norm) || mind_types::contains_secret(&raw)) {
             return Decision::Deny { reason: "outward action appears to contain a secret/credential".into() };
         }
 
@@ -690,6 +693,28 @@ mod sec1b_boundary {
         };
         if let Decision::Deny { reason } = g.evaluate(&i) {
             assert!(!reason.contains("secret/credential"), "inward recall must not trip the exfiltration clause: {reason}");
+        }
+    }
+
+    /// E.SEC19c (M2): `normalize` drops zero-width and control characters, gluing a card word to its
+    /// number; the raw text is checked too, so the gluing cannot hide one.
+    #[test]
+    fn a_secret_glued_by_normalize_is_still_denied() {
+        let g = RealHarmGate::new();
+        for summary in ["Card details\u{200b}4111 1111 1111 1111", "Card details\r4111 1111 1111 1111", "card pin\u{200b}4821"] {
+            let i = ActionIntent {
+                kind: "note".into(),
+                target: "notes".into(),
+                summary: summary.into(),
+                payload: None,
+                capabilities: vec![Capability::WriteFs],
+                risk: RiskLevel::Low,
+                reversible: true,
+            };
+            match g.evaluate(&i) {
+                Decision::Deny { reason } => assert!(reason.contains("secret/credential"), "{summary:?}: {reason}"),
+                other => panic!("{summary:?} was not denied: {other:?}"),
+            }
         }
     }
 }

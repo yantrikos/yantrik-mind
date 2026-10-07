@@ -15662,3 +15662,63 @@ L3 is accepted and pinned by a test (`pin:abc1234`, `card v4471` pass), so any c
 - The window-bound test's first construction glued the filler's "a" to "pin", making "pina". It is rebuilt with spaces.
 
 **Full suite:** 2398 passed, 0 failed.
+
+## E.SEC19c — PREREG: the independent re-review of E.SEC19b (SAFE WITH CHANGES), before any of its code
+
+**The re-review:** a second fresh reviewer agent. It ran ~180 inputs through three versions side by side (the original, E.SEC19, E.SEC19b), fuzzed 400k inputs, and ran 12 more mutants.
+- **Every first-review finding:** fixed.
+- **H1 (my regression):** super-linear time. `follows` and `precedes` count characters between every (digit run, card word) pair. 48 KB of "card " then "1234 x " takes 13.7 s, and 226 KB takes 22.5 s; the original rule took under 1 ms. No size cap guards `gate_write`, egress `authorize` or the harm gate.
+- **M1:** other JSON escapes still hide a number: `\u000a`, `\f`, `\b`, `\u000b`, ` `. For `\u00XX` the run even starts inside the hex.
+- **M2:** the harm gate's `normalize` DELETES zero-width and control characters (except `\n`, `\t`), gluing `Card details​4111…` and `Card details\r4111…` into one token. E.SEC19's `is_embedded` then drops it there.
+- **L1:** `IBAN DE89-3704-0044-0532-0130-00` (hyphens) is missed.
+- **L2:** the IBAN shape refuses words such as `the iban parser moved to py39 runtime last week` and `iban de12 something about the form`.
+- **L3:** before-word false positives: `uploaded 2048 pins to the board`, `PR #5021: pin tokio`.
+- **L4:** twelve mutants no test kills.
+
+**What is built:**
+1. **H1:**
+   - The card words' ends and the PIN/CVV words' starts are kept sorted. Each digit run is checked only against the NEAREST word end before it, and the nearest PIN/CVV word start after it, by binary search. If the nearest one is out of the window, every farther one is too.
+   - A byte bound (4 bytes per character) is checked before characters are counted.
+   - A timing test: the 48 KB input in under 1 s in a debug build. E.SEC19b took 13.7 s; the bound is set at a level that cannot pass by luck.
+2. **M1:**
+   - `first_sensitive(text)` also scans a same-length view in which every JSON escape is blanked with spaces: `\n \t \r \b \f \" \ \/` (2 bytes) and `\uXXXX` (6 bytes).
+   - All of them are ASCII, so offsets and char boundaries are unchanged. The raw finding comes first; the view is scanned only when the raw one finds nothing.
+3. **M2:** the harm gate checks `contains_secret` on the raw text as well as the normalized one, which can only add denials.
+4. **L1 + L2:**
+   - An IBAN is accepted only when its ISO 7064 mod-97 checksum is 1, case-insensitive.
+   - A single space OR hyphen separates groups, and the IBAN may end at any group boundary between 15 and 34 alphanumerics.
+   - It is checked within the window after ANY card word (card, pin, iban…), not only `iban`, so `card DE89 3704 …` is caught too.
+5. **L3:** `pins` leaves the before-word set (a number before "pins" is a count), and a run right after `#` is never a before-word PIN.
+6. **L4:** tests for each of the reviewer's surviving mutants:
+   - a `\r` JSON case;
+   - a date with a good month and a bad day;
+   - `1234 is the cvc`;
+   - the L2 sentences;
+   - an IBAN inside a word (`xDE89…`, passes: the accepted L3);
+   - a 2-group dotted number;
+   - `ax4242`;
+   - an IBAN beyond the window;
+   - `card DE89 …` refused.
+
+**Kill criteria (each one fails the build):**
+- K1: any re-review input listed as missed by the new code is still missed: the M1 escape cases, M2 through the harm gate, `IBAN DE89-3704-…`.
+- K2: any L2 sentence, `uploaded 2048 pins to the board`, `PR #5021: pin tokio to 1.38`, or any earlier negative is refused.
+- K3: the timing test fails, or the reviewer's three timing inputs each take over 1 s in a debug build.
+- K4: on the real snapshot, card-context refusals rise above 43, or any memory the old rule passed is newly refused.
+- K5: a mutant of each new piece survives:
+  - the nearest-word search widened or narrowed;
+  - the byte pre-check dropped;
+  - the escape view dropped;
+  - each escape kind;
+  - the raw harm check;
+  - the checksum;
+  - the hyphen separator;
+  - `pins` restored;
+  - the `#` skip.
+- K6: the suite, Linux staging, or a third fresh independent review is not SAFE.
+
+**Not in scope, recorded as E.SEC20:** the pre-existing misses the re-review found:
+- snake_case and camelCase keys in egress JSON (`{card_number:…}`, `{pin_code:4821}`);
+- 3-digit CVVs;
+- `4111_1111…` and `4111/1111…`.
+All three versions missed them; they are not regressions.

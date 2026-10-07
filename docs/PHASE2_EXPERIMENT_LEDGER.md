@@ -15539,3 +15539,35 @@ E.GRANT2c waits for yantrik-os #667 round 2 (UNSAFE; its fixes rewrite the scree
 - The profiler split words on letters and digits only, but the detector's `at_token_start` / `token_at` count `_` and `-` as word characters. So `lock_pin` is not "pin" and `card-context` is not "card".
 - Re-measured with the real word rules (W=32 after the word, ISO dates excluded, IBAN-aware embedded check), the card-context refusals go from 614 to exactly 29.
 - Total refusals become 718 − 585 = 133; 585 memories are recovered.
+
+## E.SEC19 — RESULT: the card-context rule wants the number after the word, within 32 bytes, as itself; 614 → 29 on the real snapshot; 6 mutants killed
+
+**Built (mind-types safety.rs, the card-context branch only):** a run of 4+ digits is a card-context number only if all of these hold:
+- it starts within 32 bytes after a whole context word;
+- it is not an ISO date;
+- `is_embedded` is false for it, unless the letters before it are an IBAN's two-letter uppercase country code at the start of a token, with no letter after.
+The PAN, SSN, token, PEM and credential-phrase rules are unchanged.
+
+**On the real snapshot** (local copy, sha256 dfb5505e…, the real gate, rid and kind only), comparing each memory before and after:
+- old: 718 refused (614 card-context, 92 credential-phrase, 11 token, 1 PEM). A first quick count said 91 and 12; it did not reproduce, and 92/11 came out twice.
+- new: 146 refused (29 card-context, 104 credential-phrase, 11 token, 1 PEM, 1 national-id).
+- 572 memories recovered. 13 that the card rule had caught first are now caught by later rules (12 credential-phrase, 1 national-id), as they should be: `first_sensitive` returns the first finding in a fixed order.
+
+**K4: the card-context part held exactly (614 → 29). The total did not: "718 − 585 = 133" was mis-derived** — it ignored that a memory released by one rule can be caught by a later one. The actual total is 146.
+
+**K3 had three wrong expectations. The rule, as preregistered and measured, refuses all three, and each is now a test of that known cost:**
+- "pin the version to 0.23.0 in 2026": a year 26 bytes after "pin". A PIN can look like a year, so "pin 1987" stays refused too.
+- "the status card reads 192.168.4.35:8094": a port follows a colon, not a dot, so it is not "embedded".
+- "green card timeline ~2030".
+Each appeared among the 29 the profiler had already shown as still refused. I wrote K3 without checking against that list.
+
+**K3's hash case was ineffective as written.** `db94a1c2` put the hash BEFORE the word, and holds no 4-digit run. The first mutation run showed it: the `is_embedded`-dropped and exemption-widened mutants SURVIVED. It is replaced by two hashes after the word, inside the window: `e8903b08` (letters on both sides) and `db948211` (letters before only, lower case). Both mutants are now killed.
+
+**K1 and K2 held:**
+- every earlier positive still refused;
+- `my card ends in 4242`, the garage PIN, the Chase sentence (32 bytes), `cvv 1234`, `iban DE89 …` and `PIN 4821 unlocked` refused as card-context;
+- `charge 4111 …` still a PAN.
+
+**K5:** all six mutants killed: window dropped, both-sided, date exclusion dropped, `is_embedded` dropped, IBAN exemption dropped, exemption widened.
+
+**Full suite:** 2391 passed, 0 failed (2387 + 4).

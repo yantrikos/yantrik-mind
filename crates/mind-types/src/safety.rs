@@ -275,6 +275,30 @@ fn is_embedded(text: &str, start: usize, len: usize) -> bool {
     before || after || fractional || truncated
 }
 
+/// E.SEC19: how far after a card/PIN word its number may start, in bytes. "my debit card number,
+/// the one from Chase, is 4471 …" is 32.
+const CARD_VALUE_WINDOW: usize = 32;
+
+/// E.SEC19: `dddd-dd-dd`, a date -- never a card number or a PIN.
+fn is_iso_date(run: &str) -> bool {
+    let b = run.as_bytes();
+    b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+}
+
+/// E.SEC19: the run follows exactly two uppercase letters that start a token, and no letter
+/// follows it -- an IBAN's country code (`DE89 3704 …`), not a hash or an id.
+fn iban_country_code(text: &str, start: usize, len: usize) -> bool {
+    let b = text.as_bytes();
+    start >= 2
+        && b[start - 1].is_ascii_uppercase()
+        && b[start - 2].is_ascii_uppercase()
+        && (start == 2 || !b[start - 3].is_ascii_alphanumeric())
+        && !text[start + len..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+}
+
 fn luhn_ok(digits: &str) -> bool {
     let mut sum = 0u32;
     for (i, c) in digits.chars().rev().enumerate() {
@@ -401,9 +425,32 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
             false
         })
     };
-    if has_ctx(CARD_CONTEXT) {
+    // E.SEC19: the number must FOLLOW the context word, within CARD_VALUE_WINDOW bytes, and stand as
+    // itself. Any 4-digit run anywhere in a text that said "card" anywhere refused 614 of 8,060
+    // memories of this project ("approval card ... 2026-10-05", "pin the version ... 2026"). A date
+    // is never a card or a PIN; an IBAN's country code (`DE89 …`) is the one letter-led run kept.
+    let card_word_ends: Vec<usize> = CARD_CONTEXT
+        .iter()
+        .flat_map(|w| {
+            let mut ends = Vec::new();
+            let mut from = 0usize;
+            while let Some(rel) = lower[from..].find(w) {
+                let at = from + rel;
+                if at_token_start(&lower, at) && token_at(&lower, at) == *w {
+                    ends.push(at + w.len());
+                }
+                from = at + w.len();
+            }
+            ends
+        })
+        .collect();
+    if !card_word_ends.is_empty() {
         for (start, len, digits) in digit_runs(text) {
-            if digits.len() >= 4 {
+            if digits.len() >= 4
+                && card_word_ends.iter().any(|&end| start >= end && start - end <= CARD_VALUE_WINDOW)
+                && !is_iso_date(&text[start..start + len])
+                && !(is_embedded(text, start, len) && !iban_country_code(text, start, len))
+            {
                 return find(SensitiveKind::CardContextNumber, start, len);
             }
         }
@@ -1239,5 +1286,66 @@ mod sec1b {
         assert!(sensitive_findings("").is_empty());
         // Termination on a degenerate input, not just a clean one.
         let _ = sensitive_findings(&"sk-abc123 ".repeat(500));
+    }
+}
+
+/// E.SEC19 — a number is a card's only when it follows the card word, close by, as itself.
+#[cfg(test)]
+mod sec19 {
+    use super::*;
+
+    /// Card, PIN, CVV and IBAN numbers that must still be refused, each as a card-context number.
+    #[test]
+    fn a_number_that_follows_the_word_is_still_refused() {
+        for text in [
+            "my card ends in 4242",
+            "the PIN for the garage door is 4821",
+            "my debit card number, the one from Chase, is 4471 9302 1122 8890",
+            "cvv 1234",
+            "iban DE89 3704 0044 0532 0130 00",
+            "PIN 4821 unlocked",
+            "my card pin is 4471-9302-1122-8890",
+            "my card is 4471 9302 1122 8890",
+        ] {
+            let got = first_sensitive(text).unwrap_or_else(|| panic!("MISSED: {text:?}"));
+            assert_eq!(got.kind, SensitiveKind::CardContextNumber, "{text:?} -> {got:?}");
+        }
+    }
+
+    /// What this project writes beside the word "card" or "pin", every one refused before.
+    #[test]
+    fn a_date_a_version_an_address_a_hash_or_a_number_before_the_word_is_not_a_card() {
+        for text in [
+            "approval card shipped 2026-10-05",
+            "pin the engine version to 0.23.0 for the release we cut in 2026",
+            "a 4090 card",
+            "card bottom - 12",
+            // Hashes AFTER the word, inside the window: letters on both sides of the run, and letters
+            // before it only (lower case, so not an IBAN's country code).
+            "the card merged in e8903b08 today",
+            "the card merged as db948211 today",
+        ] {
+            assert_eq!(first_sensitive(text), None, "FALSE POSITIVE on {text:?}");
+        }
+    }
+
+    /// The known cost of the window: a 4-digit number within 32 bytes after "pin" is refused even when
+    /// it is a year, because a PIN can look like one ("pin 1987"). The prereg's K3 listed this exact
+    /// sentence as one to pass; that was the expectation wrong, not the rule.
+    #[test]
+    fn a_year_close_after_pin_is_still_refused() {
+        // And a port 16 bytes after "card": the colon is not a dot, so it is not "embedded"
+        // (the prereg's K3 also listed this one wrongly).
+        for text in ["pin the version to 0.23.0 in 2026", "pin 1987", "the status card reads 192.168.4.35:8094", "green card timeline ~2030"] {
+            let got = first_sensitive(text).unwrap_or_else(|| panic!("MISSED: {text:?}"));
+            assert_eq!(got.kind, SensitiveKind::CardContextNumber, "{text:?}");
+        }
+    }
+
+    /// A real card number stays caught anywhere, with or without the word (the PAN rule is unchanged).
+    #[test]
+    fn a_luhn_card_number_is_caught_without_the_word() {
+        let got = first_sensitive("charge 4111 1111 1111 1111 today, the card is fine").unwrap();
+        assert_eq!(got.kind, SensitiveKind::PaymentPan);
     }
 }

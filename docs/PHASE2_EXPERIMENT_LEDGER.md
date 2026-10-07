@@ -15816,3 +15816,33 @@ All three versions missed them; they are not regressions.
   - and the two L4 survivors.
 - **K5:** the suite or Linux staging fails.
 - **Then:** Pranab decides between a fourth review and shipping.
+
+## E.SEC19d — RESULT: a typo IBAN, nested escapes decoded in place, no joined runs, the test gaps; 9 mutants killed
+
+**Built** (mind-types safety.rs):
+- `iban_at` refuses a checksum-valid IBAN OR one with 12+ digits. It takes the longest valid boundary, checksum first, else the longest whose last group holds a digit.
+- `json_escapes_blanked` decodes in place:
+  - a run of backslashes plus its escape letter is one escape;
+  - the escape's last byte becomes the decoded character (`\n`, `\t`, `\r`; a newline for `\b`, `\f` and control or whitespace `\u`; the character itself for printable ASCII `\u`; `a` for a `\u` letter);
+  - `\` alone becomes one backslash.
+
+**Tests:** the deliberate `iban DE88 …` pass flipped to refused. mind-governance gained the AWS-key witness for the raw check.
+
+**Kill criteria:**
+- **K1 held:**
+  - L1's five typo or cut-off IBANs and Norway's 15-character IBAN are refused, with the span ending before a trailing word;
+  - L2's three double-encoded inputs are refused, and so is `\u0034\u0038\u0032\u0031` as a PIN;
+  - the AWS key is denied by the harm gate.
+- **K2 held:** L3's dates across `\n` and the `\t`/`\n` numeric table pass; every earlier negative still passes, including the four L2-review word sentences.
+- **K3 held:** on the real snapshot, card-context refusals are 42 and all refusals 159; 559 memories recovered; none newly refused.
+- **K4 held:** 9 mutants, all killed:
+  - checksum only;
+  - a digit floor of 6;
+  - the first boundary;
+  - a trailing word joining the span;
+  - E.SEC19c's backslash pairing;
+  - the decoded byte back to a space;
+  - the farthest pin word on the before side;
+  - a 3× byte bound;
+  - no raw harm check.
+- **Full suite:** 2410 passed, 0 failed.

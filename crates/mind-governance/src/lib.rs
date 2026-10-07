@@ -717,4 +717,24 @@ mod sec1b_boundary {
             }
         }
     }
+
+    /// E.SEC19d (L4): an upper-case-only token shape (an AWS access key) is invisible in the
+    /// lowercased text; the raw check is what sees it.
+    #[test]
+    fn an_upper_case_key_is_seen_in_the_raw_text() {
+        let g = RealHarmGate::new();
+        let i = ActionIntent {
+            kind: "note".into(),
+            target: "notes".into(),
+            summary: "aws key AKIAIOSFODNN7EXAMPLE".into(),
+            payload: None,
+            capabilities: vec![Capability::WriteFs],
+            risk: RiskLevel::Low,
+            reversible: true,
+        };
+        match g.evaluate(&i) {
+            Decision::Deny { reason } => assert!(reason.contains("secret/credential"), "{reason}"),
+            other => panic!("an AWS key was not denied: {other:?}"),
+        }
+    }
 }

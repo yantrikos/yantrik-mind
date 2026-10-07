@@ -232,10 +232,19 @@ const PHYSICAL_VALUE_MIN: usize = 4;
 
 /// Is this byte offset the start of a token (rather than the middle of a word)?
 fn at_token_start(text: &str, at: usize) -> bool {
-    text[..at]
-        .chars()
-        .next_back()
-        .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+    escaped_separator_before(text, at)
+        || text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+}
+
+/// E.SEC19b (the review's H1): does a JSON-style escape -- `\n`, `\t` or `\r`, two characters --
+/// end right before `at`? Canonical JSON writes a newline that way, so in `Card PIN:\n4821` the `n`
+/// stands against the number; it is a separator, not a letter of some word.
+fn escaped_separator_before(text: &str, at: usize) -> bool {
+    let b = text.as_bytes();
+    at >= 2 && b[at - 2] == b'\\' && matches!(b[at - 1], b'n' | b't' | b'r')
 }
 
 /// The maximal token beginning at `at`.
@@ -258,7 +267,8 @@ fn is_embedded(text: &str, start: usize, len: usize) -> bool {
     let mut trail = text[start + len..].chars();
     let (b1, b2) = (lead.next(), lead.next());
     let (a1, a2) = (trail.next(), trail.next());
-    let before = b1.is_some_and(|c| c.is_ascii_alphabetic());
+    // (E.SEC19b H1: the `n` of an escaped newline is not a letter of the run's token.)
+    let before = b1.is_some_and(|c| c.is_ascii_alphabetic()) && !escaped_separator_before(text, start);
     let after = a1.is_some_and(|c| c.is_ascii_alphabetic());
 
     // THE FRACTIONAL PART OF A DECIMAL is not a card. `0.5500005555555559` carries a 16-digit run
@@ -275,28 +285,87 @@ fn is_embedded(text: &str, start: usize, len: usize) -> bool {
     before || after || fractional || truncated
 }
 
-/// E.SEC19: how far after a card/PIN word its number may start, in bytes. "my debit card number,
-/// the one from Chase, is 4471 …" is 32.
-const CARD_VALUE_WINDOW: usize = 32;
+/// E.SEC19 / E.SEC19b (M3): how far after a card/PIN word its number may start, in characters (not
+/// bytes: non-ASCII text must not shrink it).
+const CARD_VALUE_WINDOW: usize = 48;
 
-/// E.SEC19: `dddd-dd-dd`, a date -- never a card number or a PIN.
+/// E.SEC19b (M1): how far before a PIN/CVV word its number may end, in characters -- "4821 is my
+/// pin", "Remember 4821, that's my ATM PIN."
+const PIN_BEFORE_WINDOW: usize = 24;
+
+/// E.SEC19: `dddd-dd-dd`, a real date (E.SEC19b: month 01-12, day 01-31) -- never a card or a PIN.
 fn is_iso_date(run: &str) -> bool {
     let b = run.as_bytes();
-    b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    if !(b.len() == 10 && b[4] == b'-' && b[7] == b'-' && b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())) {
+        return false;
+    }
+    let num = |i: usize| u32::from(b[i] - b'0') * 10 + u32::from(b[i + 1] - b'0');
+    (1..=12).contains(&num(5)) && (1..=31).contains(&num(8))
 }
 
-/// E.SEC19: the run follows exactly two uppercase letters that start a token, and no letter
-/// follows it -- an IBAN's country code (`DE89 3704 …`), not a hash or an id.
-fn iban_country_code(text: &str, start: usize, len: usize) -> bool {
+/// E.SEC19b (M2): an IBAN starting at `at`, in any case, spaces allowed: two letters, two digits,
+/// then letters, digits and single spaces, 15 to 34 alphanumerics in all. The span, if one is there.
+fn iban_at(text: &str, at: usize) -> Option<(usize, usize)> {
     let b = text.as_bytes();
-    start >= 2
-        && b[start - 1].is_ascii_uppercase()
-        && b[start - 2].is_ascii_uppercase()
-        && (start == 2 || !b[start - 3].is_ascii_alphanumeric())
-        && !text[start + len..].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+    if !(at + 4 <= b.len()
+        && b[at].is_ascii_alphabetic()
+        && b[at + 1].is_ascii_alphabetic()
+        && b[at + 2].is_ascii_digit()
+        && b[at + 3].is_ascii_digit()
+        && at_token_start(text, at))
+    {
+        return None;
+    }
+    let (mut i, mut alnum, mut end) = (at, 0usize, at);
+    while i < b.len() && alnum < 34 {
+        if b[i].is_ascii_alphanumeric() {
+            alnum += 1;
+            end = i + 1;
+        } else if !(b[i] == b' ' && i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric()) {
+            break;
+        }
+        i += 1;
+    }
+    (15..=34).contains(&alnum).then_some((at, end - at))
+}
+
+/// E.SEC19b (L1): `dddd.dddd.dddd(.dddd)` standing on its own -- a card number written with dots --
+/// as `(start, byte_len, digits)`, the shape `digit_runs` gives.
+fn dotted_groups(text: &str) -> Vec<(usize, usize, String)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= b.len() {
+        let four = |j: usize| j + 4 <= b.len() && b[j..j + 4].iter().all(u8::is_ascii_digit);
+        let standalone_start = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'.');
+        if four(i) && standalone_start {
+            let (mut j, mut groups) = (i + 4, 1usize);
+            while j < b.len() && b[j] == b'.' && four(j + 1) && groups < 5 {
+                j += 5;
+                groups += 1;
+            }
+            let standalone_end = j == b.len() || !(b[j].is_ascii_alphanumeric() || (b[j] == b'.' && j + 1 < b.len() && b[j + 1].is_ascii_digit()));
+            if (3..=4).contains(&groups) && standalone_end {
+                let digits: String = text[i..j].chars().filter(char::is_ascii_digit).collect();
+                out.push((i, j - i, digits));
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// E.SEC19b (L2): the letters right before `start` are only masking -- `x4242`, `XXXX4242` -- back
+/// to the start of a token.
+fn masked_lead(text: &str, start: usize) -> bool {
+    let b = text.as_bytes();
+    let mut i = start;
+    while i > 0 && matches!(b[i - 1], b'x' | b'X') {
+        i -= 1;
+    }
+    i < start && at_token_start(text, i)
 }
 
 fn luhn_ok(digits: &str) -> bool {
@@ -396,7 +465,8 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
     //    chance: the read-receipt audit on the box flagged 28 lines, and every one of them was a
     //    SHA-256 `chain` value with a card-shaped substring inside it. A real card is its own
     //    token, optionally grouped with spaces or hyphens — it is never buried in hex.
-    for (start, len, digits) in digit_runs(text) {
+    // (E.SEC19b L1: a card written with dots is one number too.)
+    for (start, len, digits) in digit_runs(text).into_iter().chain(dotted_groups(text)) {
         let n = digits.len();
         if !(13..=19).contains(&n)
             || !matches!(digits.as_bytes()[0], b'3'..=b'6')
@@ -429,29 +499,51 @@ pub fn first_sensitive(text: &str) -> Option<SensitiveFinding> {
     // itself. Any 4-digit run anywhere in a text that said "card" anywhere refused 614 of 8,060
     // memories of this project ("approval card ... 2026-10-05", "pin the version ... 2026"). A date
     // is never a card or a PIN; an IBAN's country code (`DE89 …`) is the one letter-led run kept.
-    let card_word_ends: Vec<usize> = CARD_CONTEXT
+    // E.SEC19b: and a PIN or CVV may come BEFORE its word ("4821 is my pin"); an IBAN is known by its
+    // shape after the word, in any case (the harm gate lowercases); escapes are separators.
+    let card_words: Vec<(usize, usize, &str)> = CARD_CONTEXT
         .iter()
         .flat_map(|w| {
-            let mut ends = Vec::new();
+            let mut found = Vec::new();
             let mut from = 0usize;
             while let Some(rel) = lower[from..].find(w) {
                 let at = from + rel;
                 if at_token_start(&lower, at) && token_at(&lower, at) == *w {
-                    ends.push(at + w.len());
+                    found.push((at, at + w.len(), *w));
                 }
                 from = at + w.len();
             }
-            ends
+            found
         })
         .collect();
-    if !card_word_ends.is_empty() {
-        for (start, len, digits) in digit_runs(text) {
-            if digits.len() >= 4
-                && card_word_ends.iter().any(|&end| start >= end && start - end <= CARD_VALUE_WINDOW)
-                && !is_iso_date(&text[start..start + len])
-                && !(is_embedded(text, start, len) && !iban_country_code(text, start, len))
-            {
+    if !card_words.is_empty() {
+        for (start, len, digits) in digit_runs(text).into_iter().chain(dotted_groups(text)) {
+            let n = digits.len();
+            let standalone = !is_embedded(text, start, len) || masked_lead(text, start);
+            if n < 4 || !standalone || is_iso_date(&text[start..start + len]) {
+                continue;
+            }
+            let follows = card_words
+                .iter()
+                .any(|&(_, end, _)| start >= end && text[end..start].chars().count() <= CARD_VALUE_WINDOW);
+            let precedes = n <= 8
+                && card_words.iter().any(|&(at, _, w)| {
+                    matches!(w, "pin" | "pins" | "cvv" | "cvc")
+                        && start + len <= at
+                        && text[start + len..at].chars().count() <= PIN_BEFORE_WINDOW
+                });
+            if follows || precedes {
                 return find(SensitiveKind::CardContextNumber, start, len);
+            }
+        }
+        for &(_, end, w) in &card_words {
+            if w != "iban" {
+                continue;
+            }
+            for (offset, _) in text[end..].char_indices().take(CARD_VALUE_WINDOW + 1) {
+                if let Some((at, len)) = iban_at(text, end + offset) {
+                    return find(SensitiveKind::CardContextNumber, at, len);
+                }
             }
         }
     }
@@ -1342,10 +1434,124 @@ mod sec19 {
         }
     }
 
-    /// A real card number stays caught anywhere, with or without the word (the PAN rule is unchanged).
+    /// A real card number is caught with no card word anywhere, and far before one (the PAN rule).
     #[test]
-    fn a_luhn_card_number_is_caught_without_the_word() {
-        let got = first_sensitive("charge 4111 1111 1111 1111 today, the card is fine").unwrap();
-        assert_eq!(got.kind, SensitiveKind::PaymentPan);
+    fn a_luhn_card_number_is_caught_wherever_it_stands() {
+        for text in ["charge 4111 1111 1111 1111 today", "4111 1111 1111 1111, and much later in this note the word card"] {
+            assert_eq!(first_sensitive(text).map(|f| f.kind), Some(SensitiveKind::PaymentPan), "{text:?}");
+        }
+    }
+}
+
+/// E.SEC19b -- the independent review of E.SEC19, as tests. `first_sensitive` also guards the outward
+/// tool-call check (canonical JSON), the harm gate (lowercased) and log redaction.
+#[cfg(test)]
+mod sec19b {
+    use super::*;
+
+    fn refused(text: &str) -> bool {
+        first_sensitive(text).is_some()
+    }
+
+    /// H1: a newline or tab written as a JSON escape is a separator, not a letter of the number's token.
+    #[test]
+    fn json_escapes_do_not_hide_a_number() {
+        for text in [
+            r#"{"text":"Card details\n4111 1111 1111 1111"}"#,
+            r#"{"body":"Card PIN:\n4821"}"#,
+            r#"{"body":"New PIN\t4821"}"#,
+            r#"{"text":"cvv\n1234"}"#,
+            r#"{"text":"iban\nDE89370400440532013000"}"#,
+            r#"{"body":"Note\npin 4821"}"#,
+        ] {
+            assert!(refused(text), "MISSED: {text}");
+            assert!(contains_secret(text), "the wrapper must agree: {text}");
+        }
+    }
+
+    /// M1: a PIN or CVV said before its word.
+    #[test]
+    fn a_pin_before_its_word_is_refused() {
+        for text in [
+            "4821 is my pin",
+            "Remember 4821, that's my ATM PIN.",
+            "1234 is the cvv on my amex",
+            "4821\n(that's the garage pin)",
+        ] {
+            assert_eq!(first_sensitive(text).map(|f| f.kind), Some(SensitiveKind::CardContextNumber), "{text:?}");
+        }
+        // A long number before "pin" is an order or an id, not a PIN (4 to 8 digits only).
+        assert!(!refused("1234567890 then pin"));
+        // Only for pin/cvv: a number before "card" is a model or a count.
+        assert!(!refused("a 4090 card"));
+        assert!(!refused("released 2028-09-30, the card is due"));
+    }
+
+    /// M2: IBANs in any case, with or without spaces, with letters in the account part.
+    #[test]
+    fn an_iban_is_known_by_its_shape() {
+        for text in [
+            "iban DE89 3704 0044 0532 0130 00",
+            "iban de89 3704 0044 0532 0130 00",
+            "iban de89370400440532013000",
+            "my iban is gb29nwbk60161331926819",
+            "iban GB29NWBK60161331926819",
+            "iban NL91ABNA0417164300",
+            "iban FR14 2004 1010 0505 0001 3M02 606",
+            "IBAN: DE89 3704 0044 0532 0130 00",
+        ] {
+            assert_eq!(first_sensitive(text).map(|f| f.kind), Some(SensitiveKind::CardContextNumber), "{text:?}");
+        }
+        assert!(!refused("the iban field is in the bank form"), "words after iban are not an IBAN");
+    }
+
+    /// M3: the window is 48 characters, counted in characters.
+    #[test]
+    fn the_window_is_forty_eight_characters() {
+        for text in [
+            "my debit card number, the one from Chase Bank, is 4471 9302 1122 8890",
+            "Mom's PIN for her Bank of America ATMs is 4821",
+            "My PIN is something I keep forgetting. It is 4821.",
+            "my pin \u{2014} the one for the caf\u{e9} \u{2014} is 4821",
+        ] {
+            assert!(refused(text), "MISSED: {text:?}");
+        }
+        // The bound itself: 48 characters between the word and the number is in, 49 is out.
+        let after = |n: usize| format!("pin{}4821", " ".repeat(n));
+        assert!(refused(&after(48)), "48 characters after the word");
+        assert!(!refused(&after(49)), "49 characters after the word");
+        // In characters, not bytes: 46 two-byte letters plus two spaces are 48 characters but 94 bytes.
+        assert!(refused(&format!("pin {} 4821", "\u{e9}".repeat(46))), "the window counted bytes");
+        // And before the word: 24 in, 25 out.
+        let before = |n: usize| format!("4821{}pin", " ".repeat(n));
+        assert!(refused(&before(24)), "24 characters before the pin word");
+        assert!(!refused(&before(25)), "25 characters before the pin word");
+    }
+
+    /// L1, L2: dotted card numbers and masked last fours.
+    #[test]
+    fn dotted_and_masked_numbers_are_refused() {
+        for text in ["card 4111.1111.1111.1111", "card 4471.9302.1122.8890", "card x4242", "card ending x4242", "card XXXX4242", "card xxxx4242"] {
+            assert!(refused(text), "MISSED: {text:?}");
+        }
+        assert_eq!(first_sensitive("send it to 4111.1111.1111.1111").map(|f| f.kind), Some(SensitiveKind::PaymentPan));
+        assert!(!refused("the card version 2.10.4.1"), "a version is not a dotted card");
+    }
+
+    /// Info: only a real date is excused; a card-shaped "date" with month 93 is not one.
+    #[test]
+    fn only_a_real_date_is_excused() {
+        assert!(refused("card 4471-93-02"));
+        assert!(refused("card expires 2028-13-45"));
+        assert!(!refused("approval card shipped 2026-10-05"));
+        assert!(!refused("the card is due 2028-09-30"));
+    }
+
+    /// L3, accepted: letters glued to the number. A real PIN is numeric; recorded so a change shows.
+    #[test]
+    fn letters_glued_to_the_number_are_the_accepted_cost() {
+        for text in ["pin:abc1234", "card v4471"] {
+            assert!(!refused(text), "{text:?}: L3 changed -- update the ledger");
+        }
     }
 }

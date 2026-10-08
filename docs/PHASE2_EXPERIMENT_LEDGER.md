@@ -16005,3 +16005,29 @@ All three versions missed them; they are not regressions.
   - `include: memories`;
   - the copy check, and its length moved from 8 to 30.
 - **K3:** on the Mac, after Pranab re-runs the setup, a forced memory review (the day's flag cleared in the state) yields proposals with no 8-word overlap with any memory in the snapshot.
+
+## E.SELF1b — RESULT: four layers keep the person's private memories out of proposals; 7 mutants killed
+
+**Built** (ym-propose.py):
+- recall asks for flat memories only (`include: memories`);
+- memories outside the technical domains, or touching a private topic, never reach the prompt;
+- the prompt limits scope to Yantrik OS and the Mind, forbids quoting a memory and forbids personal details;
+- a proposal sharing any 8-word run with a recalled memory is dropped;
+- `YM_PROPOSE_FORCE_REVIEW=1` allows a second memory review on the same day, for manual runs.
+
+**On the snapshot:** the memory the first run quoted is `people`-domain AND a private-topic hit, so both layers stop it. 5,766 of the 8,060 memories may reach a prompt.
+
+**K1 held:** 16 tests, on Windows and Linux. The test data had to be fixed once: my "seven-word" sentence in fact shared eight words. The overlaps were then measured: 2 for the copy, 0 for the kept one.
+
+**K2 held:** 7 mutants killed:
+- the domain allowlist;
+- the topic skip;
+- `include: memories`;
+- the copy check;
+- a copy length of 30;
+- the scope rule;
+- the forced review.
+
+**K3 pending:** Pranab re-runs the setup and a forced review.
+
+22 had already confirmed the leaked line never reached the puller (0 lines with that id, the lead's last run before it). Proposal pulling stays paused (STOP-PROPOSALS) until K3.

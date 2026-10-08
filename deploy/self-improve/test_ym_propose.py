@@ -37,12 +37,14 @@ class FakeGate:
 
 
 class FakeMemory:
-    def __init__(self):
+    def __init__(self, rows=None):
         self.queries = []
+        self.rows = rows if rows is not None else [{"text": "Pranab wants the composer to pick models from his providers.",
+                                                    "domain": "yantrik-os"}]
 
     def recall(self, query, k=6):
         self.queries.append(query)
-        return ["Pranab wants the composer to pick models from his providers."]
+        return list(self.rows)
 
 
 class Base(unittest.TestCase):
@@ -189,7 +191,9 @@ class EndToEnd(Base):
                         self.send_response(202)
                         self.end_headers()
                         return
-                    result = {"content": [{"type": "text", "text": json.dumps({"results": [{"kind": "memory", "text": "the Wi-Fi chip is a BCM4331"}]})}]}
+                    seen["recall_args"] = body.get("params", {}).get("arguments")
+                    rows = [{"kind": "memory", "text": "the Wi-Fi chip is a BCM4331", "domain": "infrastructure"}]
+                    result = {"content": [{"type": "text", "text": json.dumps({"results": rows})}]}
                     data = json.dumps({"jsonrpc": "2.0", "id": body.get("id"), "result": result}).encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
@@ -212,6 +216,7 @@ class EndToEnd(Base):
             srv.shutdown()
         self.assertEqual(seen["gate"], [("Bearer gk-test", "strata-x")])
         self.assertEqual([m for _, m in seen["mem"]], ["initialize", "notifications/initialized", "tools/call"])
+        self.assertEqual(seen["recall_args"]["include"], "memories", "beliefs carry no domain; they are not recalled")
         self.assertTrue(all(a == "Bearer mem-token-123" for a, _ in seen["mem"]))
         out = self.out()
         self.assertEqual(len(out), 1)
@@ -222,3 +227,50 @@ class EndToEnd(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Private(Base):
+    """E.SELF1b: the person's private memories never reach a prompt or a proposal."""
+
+    ROWS = [
+        {"text": "Pranab keeps a trading journal of his positions", "domain": "finance"},
+        {"text": "RELATIONSHIP WITH PRANAB: he pushes hard on my conclusions", "domain": "people"},
+        {"text": "his daughter starts school in August", "domain": "general"},
+        {"text": "the scanner card feeds the trading dashboard", "domain": "work"},
+        {"text": "the Notes app loses its scroll position when the window is resized on the Mac mini", "domain": "yantrik-os"},
+    ]
+
+    def test_private_domains_and_topics_never_reach_the_gate(self):
+        gate = FakeGate(["[]"])
+        yp.run(now=at(10), gate=gate, memory=FakeMemory(self.ROWS))
+        prompt = gate.calls[0][1]
+        for leak in ["trading journal", "RELATIONSHIP", "daughter", "scanner card"]:
+            self.assertNotIn(leak, prompt, leak)
+        self.assertIn("Notes app loses its scroll position", prompt)
+
+    def test_the_prompt_says_scope_and_no_quotes(self):
+        gate = FakeGate(["[]"])
+        yp.run(now=at(10), gate=gate, memory=FakeMemory(self.ROWS))
+        system = gate.calls[0][0]
+        self.assertIn("only for Yantrik OS or the Yantrik Mind", system)
+        self.assertIn("never quote a memory", system)
+
+    def test_a_proposal_copying_eight_words_is_dropped_seven_kept(self):
+        mem = [{"text": "the Notes app loses its scroll position when the window is resized on the Mac mini",
+                "domain": "yantrik-os"}]
+        # Eight in a row shared: "loses its scroll position when the window is".
+        eight = dict(GOOD, title="Copy", evidence="it loses its scroll position when the window is resized")
+        # Exactly seven words in a row shared ("loses its scroll position when the window"), then its own.
+        seven = dict(GOOD, title="Own words", evidence="it loses its scroll position when the window shrinks")
+        yp.run(now=at(10), gate=FakeGate([json.dumps([eight, seven])]), memory=FakeMemory(mem))
+        self.assertEqual([p["title"] for p in self.out()], ["Own words"])
+
+    def test_a_forced_review_runs_again_the_same_day(self):
+        yp.run(now=at(10), gate=FakeGate(["[]"]), memory=FakeMemory())
+        gate = FakeGate(["[]"])
+        yp.FORCE_REVIEW = True
+        try:
+            yp.run(now=at(11), gate=gate, memory=FakeMemory())
+        finally:
+            yp.FORCE_REVIEW = False
+        self.assertEqual(len(gate.calls), 1)

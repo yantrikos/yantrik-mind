@@ -15971,3 +15971,37 @@ All three versions missed them; they are not regressions.
 **The scout** (Pranab's ~/.hermes/scripts/yantrik-scout.py, as pranab): `SHARED_DIR` plus a five-line append of each non-duplicate finding to `/srv/yantrik/self-improve/findings.jsonl`, only when that folder exists. The home file is unchanged for the puller. A backup is beside it (`.before-shared`), and the diff is exactly those lines; CRLF line endings were kept.
 
 **Not done yet:** K3 (setup, the timer, a manual run on the Mac) and the end-to-end turn. That card expired unanswered (Pranab away); it is not retried until he is back.
+
+## E.SELF1b — PREREG: proposals must not carry the person's private memories (the first run quoted one)
+
+**What happened:** the first run (Pranab's setup, 2026-10-07 21:43, memory review) wrote 3 valid proposals.
+- One, `05f6c94d0d8a1c6d`, quoted a personal memory VERBATIM in its `evidence` ("RELATIONSHIP WITH PRANAB… he pushes hard on my conclusions…", in a trading context). Proposals flow from the puller to the lead, then into issues.
+- Another targeted Claude Code's CLAUDE.md, not Yantrik: the clone holds a coding assistant's memories.
+- 22 was asked to hold that line and pause pulling. The next run that could repeat this is 07:15 the next day; 23:17 is in quiet hours.
+
+**What is built, as layers:**
+1. **Recall only flat memories** (`include: memories`, so no beliefs, which carry no domain), and only these domains:
+   - work, architecture, infrastructure, skill, engineering, benchmarks, preference;
+   - yantrik-os, yantrik-mind;
+   - anything starting `yantrikdb`.
+   people, finance, trading, relationship, character, self, general and the rest never reach the prompt.
+2. **Skip any recalled memory that mentions a sensitive topic,** even in an allowed domain: relationship, trading or trade, stock, portfolio, salary, money, tax, LTCG, visa, green card, immigration, health, medical, family, wife, husband, kid or child, therapy, password, private.
+3. **Prompt rules:**
+   - propose only for Yantrik OS or the Yantrik Mind, never for other products such as Claude Code;
+   - write evidence and reasoning in your own words; never quote a memory;
+   - never include personal details about people, relationships, money, health or family.
+4. **Copy check:** a proposal is dropped if ANY 8-word run of its text (lower-cased, whitespace normalised) appears in any recalled memory.
+
+**Kill criteria (each one fails the build):**
+- **K1:** any of these tests fails:
+  - a people, finance or trading memory never reaches the gate's prompt;
+  - a work memory that mentions trading is skipped;
+  - a proposal copying 8 words of a recalled memory is dropped, and one sharing only 7 words is kept;
+  - the prompt holds the scope and no-quote rules;
+  - the 12 earlier tests still pass.
+- **K2:** a mutant of each layer survives:
+  - the domain allowlist;
+  - the topic skip;
+  - `include: memories`;
+  - the copy check, and its length moved from 8 to 30.
+- **K3:** on the Mac, after Pranab re-runs the setup, a forced memory review (the day's flag cleared in the state) yields proposals with no 8-word overlap with any memory in the snapshot.

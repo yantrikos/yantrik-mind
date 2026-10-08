@@ -15899,3 +15899,43 @@ All three versions missed them; they are not regressions.
 - 7,645 writes in one process life with no wedge; E.ENG1 holds on the real store.
 - 415 already in = the first run's 256 stored + the 159 the new gate still refuses, as predicted.
 - The Mind's memory holds 256 + 7,645 = 7,901 of the 8,060. That total is derived from the two runs' counts, not read from the store.
+
+## E.SELF1 — PREREG: the Mac Mind's proposal driver (Pranab, 2026-10-07: "now let's make the mind work")
+
+**The ask** (Pranab, through yantrik-os-22): the Mind sits between the Mac's scout (findings) and the GPT-6 lead (issues and specs). On a schedule, outside quiet hours, it reads new findings, reasons with its memory, and writes proposals as JSON lines: `title`, `kind` (bug | feature | improvement), `area`, `evidence`, `reasoning`, `proposed_change`, `confidence`. They go to a folder the puller reads as pranab.
+- Constraints: no network beyond the gate; no desktop actions; no approval cards; at most ~10 proposals a day.
+- The gate allows 8M tokens a day, shared with the scout; one request at a time; output clamped at 4096.
+
+**Pranab's choices, asked directly:** a small driver, not a new Mind feature; a one-time setup script he runs with sudo; the test turn through his desktop.
+- The Mind cannot do this as it stands: standing orders run only daily or weekly, a job cannot read a file, there is no JSON-lines sink and no token budget, and `YM_CTL=off` leaves no non-desktop turn.
+
+**What is built** (deploy/self-improve/):
+- **`ym-propose.py`** (stdlib Python), run by `yantrik-mind-propose.timer` every 2 h as the yantrik-mind account. The service unit has `ProtectHome=yes`, `ProtectSystem=strict`, `ReadWritePaths` limited to its two folders, and the egress proxy in its environment.
+- **Each run:**
+  - exits during quiet hours (22:00–07:00 local);
+  - reads up to 5 new findings from `/srv/yantrik/self-improve/findings.jsonl`, matched by the sha256 of each line;
+  - with no new finding, makes at most ONE memory review a day;
+  - recalls up to 6 memories per item through the Mind's memory server (127.0.0.1:7440, with the Mind's own token);
+  - asks the gate (the Mind's own provider settings) for proposals as a JSON array, the findings marked as untrusted data;
+  - validates every proposal: exact fields, `kind` in the set, confidence 0–1, length caps;
+  - drops duplicates (by title hash) and anything secret-shaped (token prefixes, private keys, `password=` and the like);
+  - appends the survivors (plus `id`, `created_at`, `source`, `model`) to `/srv/yantrik/self-improve/proposals/proposals-YYYY-MM-DD.jsonl`, mode 0644, in a folder that is 2770 pranab:yantrik-minds;
+  - stops for the day at 10 proposals or 400,000 gate tokens (counted from the gate's `usage`);
+  - on a 429 waits and retries at most 3 times.
+- **It has no tools.** A hostile finding can at worst produce bad text, which validation filters. Nothing it writes is executed.
+- **`setup-self-improve.sh`,** for Pranab to run once with sudo. It creates `/srv/yantrik/self-improve` and `proposals/` (2770 pranab:yantrik-minds) and the state folder `/var/lib/yantrik-mind/self-improve` (0700 yantrik-mind), installs the script and both units, and enables the timer. It prints each step.
+- **The scout** also appends each finding to `/srv/yantrik/self-improve/findings.jsonl` when that folder exists. Its home file is unchanged for the puller.
+- **v1 has no `yos` view of the machine.** The mind account cannot reach the person's desktop session from a timer, and the scout already reads the machine. This is said, not hidden.
+
+**Kill criteria (each one fails the build):**
+- **K1:** the unit tests fail. They cover:
+  - quiet hours at the bounds;
+  - schema validation for each field;
+  - duplicate drop;
+  - the secret filter;
+  - fenced or chatty model output still parsed;
+  - the daily caps stopping a run;
+  - a full run against a fake gate and a fake memory server that writes exactly the expected lines and state.
+- **K2:** a mutant of each of these survives: the quiet check, the cap, the duplicate drop, the secret filter, and validation of `kind`.
+- **K3:** on the Mac, after setup, a manual run makes no proposal from an empty findings file plus a memory review that answers unusably. Or the timer is not active, or the file is not readable by pranab.
+- **K4:** any proposal contains a secret-shaped string.

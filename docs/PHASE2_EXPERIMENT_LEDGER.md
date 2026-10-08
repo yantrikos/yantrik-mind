@@ -15846,3 +15846,27 @@ All three versions missed them; they are not regressions.
   - a 3× byte bound;
   - no raw harm check.
 - **Full suite:** 2410 passed, 0 failed.
+
+## E.ENG1 — PREREG: the Mind spawns its memory engine's background workers (the Mac mini import wedged at 256 writes)
+
+**What happened:** on 2026-10-07 the clone import into the Mac mini's Mind (72b579d) stored 256 memories. Every write after that returned `ingest queue full (256 pending ops, max=256); retry after 50ms`, for two hours, through a backoff loop.
+
+**Why:** yantrikdb 0.23.0 (engine/materializer.rs) documents this wedge ("CT 132", 2026-05-20).
+- Without `spawn_all_workers`, the materializers that drain the oplog and the COMPACTOR that seals the in-memory delta tier into the cold HNSW never run.
+- The delta tier then fills at `delta_max` (default 256), and every later `record` returns `Backpressure`. The error text points at the oplog, which is fine.
+- `MemoryHandle::spawn` (mind-memory lib.rs ~4790) calls `YantrikDB::new` and never spawns either. A grep finds no `spawn_all_workers`, `spawn_compactor` or `spawn_materializers` anywhere in the Mind.
+- Rejected writes change nothing (Backpressure is returned "before any visible mutation"), so the first 256 are durable.
+- **Every Mind on the 0.21+ pin carries this latent wedge after 256 memory writes in one process lifetime.** Production 172af33 included: its Cargo.toml pins =0.23.0. That is from git history only; .90 was not touched.
+
+**What is built:**
+- `MemoryHandle::spawn_for_device` holds the engine as `Arc<YantrikDB>` and calls `spawn_all_workers(&db, recommended_worker_count())`, keeping the guard for the memory thread's whole life. Engine drop also stops the workers, via the Weak upgrade.
+- The actor otherwise uses the engine exactly as before (`&*db`).
+- `yantrik-memory` (mind-memory-mcp) opens the same handle and so gets the same fix.
+
+**Kill criteria (each one fails the build):**
+- K1: a new mind-memory test writes 600 memories through the handle (more than twice `delta_max`) and any write fails. It is watched to FAIL first without the fix: the 257th write must report backpressure on the unfixed code.
+- K2: recall cannot find memory #500 after the writes.
+- K3: the full suite or Linux staging fails.
+- K4: the mutant "workers not spawned" survives.
+
+**Ships:** with E.SEC19d in the same Mac bundle (branch mind-mac-sec19), on Pranab's ship decision for the card rule plus his word on this change. The 520 and production Minds wait for his word.

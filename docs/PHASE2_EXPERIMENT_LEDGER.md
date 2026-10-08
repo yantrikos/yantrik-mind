@@ -15870,3 +15870,26 @@ All three versions missed them; they are not regressions.
 - K4: the mutant "workers not spawned" survives.
 
 **Ships:** with E.SEC19d in the same Mac bundle (branch mind-mac-sec19), on Pranab's ship decision for the card rule plus his word on this change. The 520 and production Minds wait for his word.
+
+## E.ENG1 — RESULT: the Mind spawns its memory engine's workers; 600 writes in one life all land
+
+**Built** (mind-memory `spawn_for_device`): the engine is held as `Arc<YantrikDB>`, and `spawn_all_workers(&db, recommended_worker_count())` runs for the memory thread's life. The rest of the actor is unchanged, through `Arc` deref.
+
+**Kill criteria:**
+- **K1 and K2 held:** `six_hundred_memories_in_one_life_all_land` writes 600 memories and recalls #500.
+  - Watched to FAIL on the unfixed code first: `write 257 of 600 failed: memory: ingest queue full (256 pending ops, max=256); retry after 50ms`. That is the Mac mini's error, at the same count.
+  - With the fix it passes in 2.7 s.
+- **K4 held:** "workers not spawned" is the unfixed code, which fails as above.
+- **K3:** the full suite found something the module run had not.
+
+**What the suite found:** `an_erase_clears_the_free_pages_a_sweep_cannot_see` failed once, and **4 of 40** when stress-run (8 parallel × 5), against **0 of 40** without the workers.
+- **Cause:** the test commits to the live file with RAW SQL from this process, on purpose, to leave free-page residue. That is the engine's Rule 9 ("use the engine API or a separate process for raw SQL").
+- A commit from outside the engine changes `PRAGMA data_version`. The engine then queues a `quick_check`, which the MATERIALIZER runs. Without workers it never ran.
+- A check taken mid-edit returned something other than "ok", and that latches the store against writes until reopen (engine `note_integrity`). A lock error cannot taint: `query_row`'s `?` returns before it is recorded.
+- **Production is not exposed:**
+  - the Mind links ONE SQLite (libsqlite3-sys 0.35 through rusqlite 0.37);
+  - its only in-process open of a live store is `snapshot_db_to`, which is READ_ONLY and never commits;
+  - the other raw opens are on pack files, not the live store.
+- **Fix, in the test only:** `planted_with(tag, raw_sql: true)` opens the engine first and sets `ForeignSqliteMode::Warn` (it still notices and counts, without refusing), then the handle opens the file. Stress: **0 of 80** (8 × 10, on a binary checked to be freshly built). An earlier "0 of 80" ran a stale binary after a failed build; it was discarded.
+
+**Full suite:** 2411 passed, 0 failed.

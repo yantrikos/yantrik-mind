@@ -4793,9 +4793,18 @@ impl MemoryHandle {
             .spawn(move || {
                 let gauge = thread_gauge;
                 let db = match YantrikDB::new(&path, dim) {
-                    Ok(d) => { let _ = ready_tx.send(Ok(())); d }
+                    Ok(d) => { let _ = ready_tx.send(Ok(())); std::sync::Arc::new(d) }
                     Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
                 };
+                // E.ENG1: the engine's background workers -- the materializers that drain the oplog
+                // and the compactor that seals the in-memory delta tier into the cold index. Without
+                // the compactor the delta tier fills at 256 writes and every later write is refused
+                // as "ingest queue full" for the rest of the process's life: the Mac mini's import
+                // wedged at write 257. Held for the thread's life; dropping the engine stops them.
+                let _workers = yantrikdb_core::engine::materializer::spawn_all_workers(
+                    &db,
+                    yantrikdb_core::engine::materializer::recommended_worker_count(),
+                );
                 // yantrikdb 0.12: records longer than the embedder's input window used to be
                 // embedded head-only — a long briefing was findable by its opening lines and
                 // invisible from everything after (silent retrieval loss). The backfill chunks
@@ -7100,6 +7109,28 @@ mod tests {
         let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
         let err = mem.remember_memory(memory_write(serde_json::json!("a string"))).await.unwrap_err();
         assert!(matches!(err, MindError::Invalid(_)), "{err:?}");
+    }
+
+    /// E.ENG1: more than twice the engine's delta tier (256) of writes in one life all land, and the
+    /// last of them is found. The Mac mini import wedged at write 257 ("ingest queue full") because
+    /// the engine's workers -- the compactor above all -- were never spawned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn six_hundred_memories_in_one_life_all_land() {
+        let mem = MemoryHandle::spawn(":memory:", 64).unwrap();
+        let mut rids = Vec::new();
+        for i in 0..600 {
+            let mut w = memory_write(serde_json::Value::Null);
+            w.text = format!("Ledger line {i}: crate {i} sits on rack {i} in the north shed");
+            match mem.remember_memory(w).await {
+                Ok(rid) => rids.push(rid),
+                Err(e) => panic!("write {} of 600 failed: {e}", i + 1),
+            }
+        }
+        let hits = mem
+            .recall_memories("Ledger line 500: crate 500 sits on rack 500 in the north shed", 5, None, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|h| h.rid == rids[500]), "memory #500 was not recalled");
     }
 
     /// What goes in with a memory comes back with it — the whole reason metadata is carried.
@@ -12689,7 +12720,20 @@ mod erase_tests {
     /// tables), a flat memory (memories, full-text index), a transcript line in lower case. Beside
     /// it, a near miss that must survive.
     async fn planted(tag: &str) -> (mind_types::scratch::Scratch, MemoryHandle) {
+        planted_with(tag, false).await
+    }
+
+    /// `raw_sql`: the test commits to the file with raw SQL from this process -- against the engine's
+    /// Rule 9, on purpose, to leave free-page residue no API would. Since E.ENG1 the materializer
+    /// runs the engine's integrity check after such a commit, and a check taken mid-edit can latch
+    /// the store against writes (4 of 40 stressed runs). So the engine's foreign-commit guard is set
+    /// to `warn` before the handle opens the file: it still notices and counts, it does not refuse.
+    async fn planted_with(tag: &str, raw_sql: bool) -> (mind_types::scratch::Scratch, MemoryHandle) {
         let s = mind_types::scratch::file(&format!("erase_{tag}"), "db");
+        if raw_sql {
+            let db = YantrikDB::new(&s.as_str(), 8).unwrap();
+            db.set_foreign_sqlite_mode(yantrikdb_core::ForeignSqliteMode::Warn).unwrap();
+        }
         let mem = MemoryHandle::spawn(&s.as_str(), 8).unwrap();
         for statement in [format!("The storage locker code is {SECRET}"), format!("The gym locker code is {NEAR}")] {
             mem.remember_as_belief(BeliefAssertion {
@@ -12775,7 +12819,7 @@ mod erase_tests {
     /// 364 such copies in a live file).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_erase_clears_the_free_pages_a_sweep_cannot_see() {
-        let (s, mem) = planted("freepages").await;
+        let (s, mem) = planted_with("freepages", true).await;
         let path = s.as_str().to_string();
         // A long memory holding the secret, deleted the way old rows go: its pages are freed, not wiped.
         let long = format!("{} {SECRET} {}", "filler ".repeat(1200), "tail ".repeat(1200));

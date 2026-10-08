@@ -1,0 +1,21 @@
+[Unit]
+Description=Yantrik Mind: turn the scout's findings into proposals for the developers (E.SELF1)
+After=yantrik-mind.service yantrik-mind-egress.service
+Requires=yantrik-mind-egress.service
+
+[Service]
+Type=oneshot
+User=yantrik-mind
+Group=yantrik-minds
+UMask=0022
+# The mind account reaches out only through its egress proxy; the memory server is on loopback.
+Environment=HTTPS_PROXY=http://127.0.0.1:7450 https_proxy=http://127.0.0.1:7450
+Environment=HTTP_PROXY=http://127.0.0.1:7450 http_proxy=http://127.0.0.1:7450
+Environment=NO_PROXY=127.0.0.1,localhost,::1 no_proxy=127.0.0.1,localhost,::1
+ExecStart=/usr/bin/python3 -I /usr/local/lib/yantrik-mind-propose/ym-propose.py
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/srv/yantrik/self-improve/proposals /var/lib/yantrik-mind/self-improve
+TimeoutStartSec=1800

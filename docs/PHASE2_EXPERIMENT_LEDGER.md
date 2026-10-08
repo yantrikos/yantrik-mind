@@ -15939,3 +15939,35 @@ All three versions missed them; they are not regressions.
 - **K2:** a mutant of each of these survives: the quiet check, the cap, the duplicate drop, the secret filter, and validation of `kind`.
 - **K3:** on the Mac, after setup, a manual run makes no proposal from an empty findings file plus a memory review that answers unusably. Or the timer is not active, or the file is not readable by pranab.
 - **K4:** any proposal contains a secret-shaped string.
+
+## E.SELF1 — RESULT (built and tested; setup and first run on the Mac pending Pranab's sudo)
+
+**Built:** deploy/self-improve/ holds `ym-propose.py`, its `yantrik-mind-propose.{service,timer}`, `setup-self-improve.sh` and `test_ym_propose.py`.
+
+**K1 held:** 12 tests, on Windows and on Linux staging (Python 3.13), with ResourceWarnings as errors. They cover:
+- quiet-hour bounds;
+- each field's validation;
+- secrets;
+- fenced and chatty output;
+- quiet runs doing nothing;
+- a finding proposed once, then the memory review, then nothing;
+- a repeated title dropped;
+- the daily cap, including a model returning more proposals than the day has room for;
+- the token budget;
+- invalid and secret proposals dropped;
+- a full run over real HTTP (a fake gate plus a fake MCP memory server): the gate is called with the Mind's own key and model, the memory with its own token, and exactly one line and the state are written.
+
+**K2 held:** 8 mutants killed:
+- the quiet check;
+- the daily cap;
+- the cap checked before a call;
+- the token budget;
+- the duplicate drop;
+- the secret filter;
+- `kind` validation;
+- a finding asked about again.
+"Daily cap" SURVIVED at first: no test's model returned more than the day's room. Killed by `test_a_model_that_returns_too_many_is_cut_at_the_cap`.
+
+**The scout** (Pranab's ~/.hermes/scripts/yantrik-scout.py, as pranab): `SHARED_DIR` plus a five-line append of each non-duplicate finding to `/srv/yantrik/self-improve/findings.jsonl`, only when that folder exists. The home file is unchanged for the puller. A backup is beside it (`.before-shared`), and the diff is exactly those lines; CRLF line endings were kept.
+
+**Not done yet:** K3 (setup, the timer, a manual run on the Mac) and the end-to-end turn. That card expired unanswered (Pranab away); it is not retried until he is back.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Every two hours in the day: the Yantrik Mind's proposals (E.SELF1)
+
+[Timer]
+# 07:15 to 21:15 every two hours; the driver also refuses to run from 22:00 to 07:00 itself.
+OnCalendar=*-*-* 07/2:15:00
+RandomizedDelaySec=300
+Persistent=false
+
+[Install]
+WantedBy=timers.target

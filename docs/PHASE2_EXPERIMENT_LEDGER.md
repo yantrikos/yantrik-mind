@@ -15893,3 +15893,9 @@ All three versions missed them; they are not regressions.
 - **Fix, in the test only:** `planted_with(tag, raw_sql: true)` opens the engine first and sets `ForeignSqliteMode::Warn` (it still notices and counts, without refusing), then the handle opens the file. Stress: **0 of 80** (8 × 10, on a binary checked to be freshly built). An earlier "0 of 80" ran a stale binary after a failed build; it was discarded.
 
 **Full suite:** 2411 passed, 0 failed.
+
+**E.ENG1 + E.SEC19d on the Mac mini (f606926), 2026-10-07:**
+- Pranab ran the re-import after the 559 rids the old card rule had refused were removed from the done file: `FINISHED: 8060 read, 7645 stored, 0 refused by the Mind, 0 failed, 415 already in, 1182s` (relayed by yantrik-os-22).
+- 7,645 writes in one process life with no wedge; E.ENG1 holds on the real store.
+- 415 already in = the first run's 256 stored + the 159 the new gate still refuses, as predicted.
+- The Mind's memory holds 256 + 7,645 = 7,901 of the 8,060. That total is derived from the two runs' counts, not read from the store.

@@ -274,3 +274,55 @@ class Private(Base):
         finally:
             yp.FORCE_REVIEW = False
         self.assertEqual(len(gate.calls), 1)
+
+
+class Repeats(Base):
+    """E.SELF1c: the field's 9 real titles, in the order the Mac wrote them (Oct 7-10)."""
+
+    REAL = [
+        "Implement Structured Memory Schema to Replace Flat CLAUDE.md",
+        "Add Deterministic Mode and Flake Detection to E2E Test Runner",
+        "Implement Relationship-Aware Context Weighting",
+        "Implement Deterministic E2E Test Harness for Yantrik OS",
+        "Automated Legacy Memory Cleanup Tool",
+        "Enhance E2E Test Determinism with Playwright Best Practices",
+        "Automated Cleanup of Legacy/Invalid Durable Beliefs",
+        "Implement deterministic Playwright test runner with auto-retry and trace capture",
+        "Add automated cleanup for legacy/durable memory entries",
+    ]
+
+    def test_the_real_titles_keep_exactly_the_distinct_ideas(self):
+        kept = []
+        for t in self.REAL:
+            if not yp.near_duplicate(t, kept):
+                kept.append(t)
+        self.assertEqual(kept, [self.REAL[0], self.REAL[1], self.REAL[2], self.REAL[4]])
+
+    def test_the_prompt_shows_earlier_titles_as_text(self):
+        self.finding("A")
+        yp.run(now=at(10), gate=FakeGate(["[" + json.dumps(GOOD) + "]"]), memory=FakeMemory())
+        self.finding("B")
+        gate = FakeGate(["[]"])
+        yp.run(now=at(11), gate=gate, memory=FakeMemory())
+        user = gate.calls[0][1]
+        self.assertIn("- " + GOOD["title"], user)
+        self.assertNotIn(yp.title_id(GOOD["title"]), user, "a hash is not a title the model can avoid")
+
+    def test_a_near_duplicate_is_dropped(self):
+        self.finding("A")
+        self.finding("B")
+        first = dict(GOOD, title="Automated Legacy Memory Cleanup Tool")
+        again = dict(GOOD, title="Add automated cleanup for legacy/durable memory entries")
+        yp.run(now=at(10), gate=FakeGate(["[" + json.dumps(first) + "]", "[" + json.dumps(again) + "]"]), memory=FakeMemory())
+        self.assertEqual([p["title"] for p in self.out()], [first["title"]])
+
+    def test_the_review_theme_changes_from_day_to_day(self):
+        mem = FakeMemory()
+        days = []
+        for d in (0, 1):
+            t = time.localtime(at(10) + d * 86400)
+            yp.STATE = os.path.join(self.d, f"state{d}.json")
+            yp.run(now=time.mktime(t), gate=FakeGate(["[]"]), memory=mem)
+        self.assertEqual(len(mem.queries), 2)
+        self.assertNotEqual(mem.queries[0], mem.queries[1])
+        self.assertTrue(all(q in yp.REVIEW_THEMES for q in mem.queries))

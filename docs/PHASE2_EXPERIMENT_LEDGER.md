@@ -16054,3 +16054,22 @@ All three versions missed them; they are not regressions.
 - K1: a test fails. Tests: the prompt shows earlier titles as text, never hashes; the theme changes from one day to the next; the 9 real titles, run through the filter in their real order, keep exactly the expected distinct set; the 16 earlier tests still pass.
 - K2: a mutant survives: the hash list restored; no rotation; the near-duplicate filter dropped; its threshold raised to 0.7.
 - K3: over the next 3 days on the Mac, a proposal's title stem-Jaccard with an earlier proposal's title is 0.20 or more.
+
+## E.SELF1c — RESULT: titles shown as text, a rotating review theme, near-duplicates dropped; 5 mutants killed
+
+**Built:**
+- The state keeps the last 60 titles as text, and the prompt lists the last 30 as "already proposed (do not repeat or rephrase)".
+- The memory review takes one of six themes by day of year, as its recall query and in its prompt.
+- A title whose stem Jaccard with a recent one is 0.20 or more is dropped.
+
+**K1 held:** 20 tests (Windows and Linux). The 9 real titles, in field order, keep exactly titles #0, #1, #2 and #4, the four distinct ideas.
+
+**K2 held:** 5 mutants killed:
+- the hash list restored;
+- no rotation;
+- no near-duplicate filter;
+- a threshold of 0.7;
+- titles not remembered.
+The hash-list mutant first missed its anchor through heredoc escaping, and was run from a file.
+
+**K3 pending:** the next three days' proposals on the Mac, once Pranab re-runs the setup.

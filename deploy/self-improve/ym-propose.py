@@ -79,6 +79,32 @@ def copies_memory(proposal, memories):
     return bool(shingles(" ".join(str(proposal[k]) for k in CAPS)) & seen)
 
 
+# E.SELF1c: the job repeated itself daily -- it was shown title HASHES as "already proposed", asked the
+# same recall every day, and dropped exact titles only. Now: titles as text, a rotating review theme,
+# and a near-duplicate drop measured on the field's 9 real titles (same idea 0.18-0.60, different
+# ideas at most 0.12, as Jaccard of 5-letter stems).
+REVIEW_THEMES = [
+    "what the person asked for that Yantrik OS or the Mind does not do yet",
+    "what frustrated the person about Yantrik OS or the Mind",
+    "what broke or failed on the machine",
+    "what was slow or wasteful",
+    "what was decided but not built yet",
+    "what was promised to the person and is still open",
+]
+STOPWORDS = set("the a an and or for of to in on with from into by add implement automated automate enhance improve "
+                "create build support new use using based tool tools".split())
+NEAR_DUPLICATE = 0.20
+
+
+def stems(title):
+    return {w[:5] for w in re.findall(r"[a-z0-9]+", title.lower()) if len(w) >= 3 and w not in STOPWORDS}
+
+
+def near_duplicate(title, earlier):
+    a = stems(title)
+    return any(len(a & b) / max(1, len(a | b)) >= NEAR_DUPLICATE for b in (stems(t) for t in earlier))
+
+
 def log(msg):
     print(f"[propose] {msg}", flush=True)
 
@@ -96,6 +122,7 @@ def load_state(path, today):
         st = {}
     st.setdefault("seen_findings", [])
     st.setdefault("titles", [])
+    st.setdefault("recent_titles", [])
     if st.get("day") != today:
         st.update(day=today, proposals=0, tokens=0, review_done=False)
     return st
@@ -104,6 +131,7 @@ def load_state(path, today):
 def save_state(path, st):
     st["seen_findings"] = st["seen_findings"][-2000:]
     st["titles"] = st["titles"][-2000:]
+    st["recent_titles"] = st["recent_titles"][-60:]
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(st, f)
@@ -283,9 +311,9 @@ def run(now=None, gate=None, memory=None):
     if FORCE_REVIEW:
         st["review_done"] = False
     if not items and not st["review_done"]:
-        items = [("memory-review", "No new findings. From your memories of what the person has asked for, been "
-                  "frustrated by or decided, propose the most valuable improvements to Yantrik OS or yourself that "
-                  "were not already proposed.", "what the person asked to improve, was frustrated by, or decided")]
+        theme = REVIEW_THEMES[now.tm_yday % len(REVIEW_THEMES)]
+        items = [("memory-review", f"No new findings. Today's review: {theme}. From your memories on that, propose "
+                  "the most valuable improvements to Yantrik OS or yourself that were not already proposed.", theme)]
     if not items:
         log("no new findings; today's memory review is done")
         save_state(STATE, st)
@@ -301,7 +329,8 @@ def run(now=None, gate=None, memory=None):
             break
         recalled = [m["text"] for m in memory.recall(query) if m.get("text") and usable_memory(m)]
         user = (prompt + "\n\nWhat you remember that may bear on it:\n" + "\n".join(f"- {m[:600]}" for m in recalled)
-                + "\n\nAlready proposed (do not repeat): " + json.dumps(st["titles"][-30:]))
+                + "\n\nAlready proposed (do not repeat or rephrase any of these):\n"
+                + "\n".join(f"- {t}" for t in st["recent_titles"][-30:]))
         text, tokens = gate.ask(SYSTEM.format(n=min(3, room)), user)
         st["tokens"] += tokens
         kept = 0
@@ -312,12 +341,16 @@ def run(now=None, gate=None, memory=None):
             tid = title_id(clean["title"])
             if tid in st["titles"] or st["proposals"] >= DAILY_PROPOSALS:
                 continue
+            if near_duplicate(clean["title"], st["recent_titles"]):
+                log(f"near-duplicate dropped: {clean['title'][:60]}")
+                continue
             record = dict(clean, id=tid, created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z", now), source=source,
                           model=getattr(gate, "model", "?"))
             with open(out_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             os.chmod(out_path, 0o644)
             st["titles"].append(tid)
+            st["recent_titles"].append(clean["title"])
             st["proposals"] += 1
             kept += 1
         if source == "memory-review":

@@ -16031,3 +16031,26 @@ All three versions missed them; they are not regressions.
 **K3 pending:** Pranab re-runs the setup and a forced review.
 
 22 had already confirmed the leaked line never reached the puller (0 lines with that id, the lead's last run before it). Proposal pulling stays paused (STOP-PROPOSALS) until K3.
+
+**E.SELF1b — K3 held in the field (2026-10-10):** the runs of Oct 8, 9 and 10 at 07:16–07:17 (memory review; the scout reported no finding) wrote 6 proposals. Checked against all 8,060 snapshot memories: 0 eight-word copies and 0 private-topic words in any of them. 22 resumed pulling.
+
+## E.SELF1c — PREREG: the proposal job repeats itself; show the model its own titles, vary the review, drop near-duplicates
+
+**What the field showed:** each day's review proposed the same two ideas again: deterministic E2E tests (4 times) and legacy memory cleanup (3 times).
+- Cause one, a bug: the prompt's "already proposed" list sent title HASHES (`st["titles"]`), so the model never saw what it had proposed.
+- Cause two: the review asked the same recall query every day, so it got the same memories.
+- Cause three: the duplicate drop matched exact titles only.
+
+**Measured on the 9 real titles** (Jaccard of 5-letter word stems after a small stopword list):
+- pairs of the same idea: 0.60, 0.43, 0.38, 0.33, 0.33, 0.30, 0.27, 0.25, 0.18;
+- pairs of different ideas: at most 0.12.
+
+**What is built:**
+1. The state keeps the last 60 titles as TEXT (`recent_titles`), and the prompt lists them as "already proposed".
+2. The memory review rotates through six themes by day of year: what the person asked for, what frustrated them, what broke or failed, what was slow, what was decided but not built, what was promised. The day's theme is the recall query, and it is named in the prompt.
+3. A proposal is dropped as a near-duplicate when its title's stem Jaccard with any recent title is at least 0.20. That would catch 7 of the 9 measured duplicate pairs and none of the distinct ones; it is a backstop, items 1 and 2 are the fix.
+
+**Kill criteria (each one fails the build):**
+- K1: a test fails. Tests: the prompt shows earlier titles as text, never hashes; the theme changes from one day to the next; the 9 real titles, run through the filter in their real order, keep exactly the expected distinct set; the 16 earlier tests still pass.
+- K2: a mutant survives: the hash list restored; no rotation; the near-duplicate filter dropped; its threshold raised to 0.7.
+- K3: over the next 3 days on the Mac, a proposal's title stem-Jaccard with an earlier proposal's title is 0.20 or more.

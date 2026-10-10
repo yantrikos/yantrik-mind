@@ -16092,3 +16092,18 @@ The hash-list mutant first missed its anchor through heredoc escaping, and was r
   - `set_server_env` for the token afterwards keeps the variable (the restart's config carries both).
 - K2: a mutant survives: the variable not added; added to every server.
 - K3: the suite or Linux staging fails.
+
+## E.HARN1 — RESULT: the Mind's desktop bridge starts with YANTRIK_YOS_MCP_NO_ATTACH=1
+
+**Built:**
+- `mind_tools::opt_out_of_auto_attach` adds `YANTRIK_YOS_MCP_NO_ATTACH=1` to the desktop server's config only, once, keeping an operator's own value.
+- mind-core's MCP boot calls it before `connect_all`, with `mind_conversation::DESKTOP_SERVER`, now `pub` and re-exported.
+
+**K1 held:**
+- `only_the_desktop_bridge_opts_out_of_auto_attach` (pure);
+- `the_opt_out_survives_the_token_restart`, on a real child: the first launch reports `1`, and so does the launch after `set_server_env` gives it a token.
+
+**K2 held:** both mutants killed (not added; added to every server).
+- The boot call site itself (mind-core) has no unit test: it sits in the boot function, and a string search would not prove it ran. It is verified the way the Mind's boot is, on staging and the first install.
+
+**Suite:** 2413 passed, 0 failed. Linux staging: mind-tools and mind-core green.

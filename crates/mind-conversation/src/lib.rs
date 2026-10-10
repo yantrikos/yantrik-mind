@@ -43,6 +43,8 @@ mod book;
 mod briefing;
 mod build;
 mod desktop;
+/// E.HARN1: the desktop's MCP server name, for the boot path that configures it.
+pub use desktop::DESKTOP_SERVER;
 mod calendar;
 mod capabilities;
 mod entrypoint;

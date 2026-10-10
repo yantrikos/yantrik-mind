@@ -19,7 +19,7 @@
 use mind_tools::McpTool;
 
 /// The MCP server name a Yantrik OS desktop is attached under (`/opt/yantrik/bin/yos-mcp`).
-pub(crate) const DESKTOP_SERVER: &str = "yantrik-os";
+pub const DESKTOP_SERVER: &str = "yantrik-os";
 
 /// The private calendar-EVENT tools, and every alias the dispatcher accepts for them.
 pub(crate) const SUPERSEDED_BY_DESKTOP: [&str; 6] = [

@@ -208,6 +208,22 @@ fn tool_outcome(r: &Value) -> anyhow::Result<String> {
 }
 
 /// `cfg` with `key=value` in its environment, or `None` when it already is.
+/// E.HARN1 (yantrik-os #720): the environment variable that tells the desktop's `yos-mcp` not to
+/// attach itself as a presence-only mind. The Mind's own bridge is its tools, not a mind.
+pub const YOS_MCP_NO_ATTACH: &str = "YANTRIK_YOS_MCP_NO_ATTACH";
+
+/// E.HARN1: give the desktop server's config `YANTRIK_YOS_MCP_NO_ATTACH=1` before it is first started,
+/// so the bridge the Mind starts at boot -- without a token until the first turn -- never auto-attaches.
+/// Only that server; a value the operator set is kept. Returns whether it added the variable.
+pub fn opt_out_of_auto_attach(configs: &mut [McpServerConfig], desktop: &str) -> bool {
+    let Some(cfg) = configs.iter_mut().find(|c| c.name == desktop) else { return false };
+    if cfg.env.iter().any(|(k, _)| k == YOS_MCP_NO_ATTACH) {
+        return false;
+    }
+    cfg.env.push((YOS_MCP_NO_ATTACH.to_string(), "1".to_string()));
+    true
+}
+
 fn with_env(cfg: &McpServerConfig, key: &str, value: &str) -> Option<McpServerConfig> {
     if cfg.env.iter().any(|(k, v)| k == key && v == value) {
         return None;
@@ -734,6 +750,43 @@ for line in sys.stdin:
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}) + "\n")
     sys.stdout.flush()
 "#;
+
+    /// E.HARN1: only the desktop server gets the opt-out, once, and an operator's own value is kept.
+    #[test]
+    fn only_the_desktop_bridge_opts_out_of_auto_attach() {
+        let cfg = |name: &str, env: Vec<(String, String)>| McpServerConfig { name: name.into(), command: "x".into(), args: vec![], env };
+        let mut configs = vec![cfg("yantrik-os", vec![]), cfg("github", vec![])];
+        assert!(opt_out_of_auto_attach(&mut configs, "yantrik-os"));
+        assert!(!opt_out_of_auto_attach(&mut configs, "yantrik-os"), "a second call adds nothing");
+        assert_eq!(configs[0].env, vec![(YOS_MCP_NO_ATTACH.to_string(), "1".to_string())]);
+        assert!(configs[1].env.is_empty(), "another server got the opt-out");
+        let mut own = vec![cfg("yantrik-os", vec![(YOS_MCP_NO_ATTACH.to_string(), "0".to_string())])];
+        assert!(!opt_out_of_auto_attach(&mut own, "yantrik-os"));
+        assert_eq!(own[0].env, vec![(YOS_MCP_NO_ATTACH.to_string(), "0".to_string())], "the operator's value was replaced");
+        assert!(!opt_out_of_auto_attach(&mut [], "yantrik-os"), "no desktop server, nothing to do");
+    }
+
+    /// E.HARN1, on a real child process: the bridge starts with the opt-out, and keeps it when the
+    /// token restarts it.
+    #[test]
+    fn the_opt_out_survives_the_token_restart() {
+        let script = std::env::temp_dir().join(format!("ym-mcp-noattach-{}.py", std::process::id()));
+        std::fs::write(&script, SERVER.replace("\"YANTRIK_AGENT_TOKEN\", \"none\"", "\"YANTRIK_YOS_MCP_NO_ATTACH\", \"unset\"")).unwrap();
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let mut configs = vec![McpServerConfig {
+            name: "desk".into(),
+            command: python.into(),
+            args: vec![script.to_string_lossy().into_owned()],
+            env: vec![],
+        }];
+        assert!(opt_out_of_auto_attach(&mut configs, "desk"));
+        let hub = McpHub::new();
+        hub.connect_all(&configs);
+        assert_eq!(hub.call_blocking("mcp.desk.whoami", &json!({})).unwrap(), "1", "the first launch lacked the opt-out");
+        assert!(hub.set_server_env("desk", "YANTRIK_AGENT_TOKEN", "tok-1").unwrap());
+        assert_eq!(hub.call_blocking("mcp.desk.whoami", &json!({})).unwrap(), "1", "the token restart dropped the opt-out");
+        let _ = std::fs::remove_file(&script);
+    }
 
     /// yantrik-os #411: the desktop server is restarted with the conversation's token, once per
     /// change -- measured on a real child process, not a fake.

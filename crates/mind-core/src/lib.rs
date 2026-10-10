@@ -715,7 +715,9 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         if let Ok(raw) = std::fs::read_to_string(&path) {
             match serde_json::from_str::<serde_json::Value>(&raw) {
                 Ok(v) => {
-                    let configs = mind_tools::McpServerConfig::from_json(&v);
+                    let mut configs = mind_tools::McpServerConfig::from_json(&v);
+                    // E.HARN1 (yantrik-os #720): the desktop bridge never attaches itself as a mind.
+                    mind_tools::opt_out_of_auto_attach(&mut configs, mind_conversation::DESKTOP_SERVER);
                     if !configs.is_empty() {
                         let n = configs.len();
                         let hub = Arc::new(mind_tools::McpHub::new());

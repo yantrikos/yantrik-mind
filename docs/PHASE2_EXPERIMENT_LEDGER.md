@@ -16073,3 +16073,22 @@ All three versions missed them; they are not regressions.
 The hash-list mutant first missed its anchor through heredoc escaping, and was run from a file.
 
 **K3 pending:** the next three days' proposals on the Mac, once Pranab re-runs the setup.
+
+## E.HARN1 — PREREG: the Mind's yos-mcp never auto-attaches (yantrik-os #720, self-attaching minds)
+
+**Why:** yantrik-os #720 (6ba177f4) lets a terminal mind attach itself.
+- `yos-mcp` will auto-attach as presence-only when it has no `YANTRIK_AGENT_TOKEN` and is not running as the mind uid.
+- The Mind starts its yos-mcp at boot with NO token, adding it on the first turn (`set_desktop_agent_token` → `set_server_env`). On a machine where the Mind still runs as the person (never `migrate-minds`), that tokenless bridge would auto-attach on every boot.
+- Agreed with yantrik-os-22, belt and braces: the host refuses a presence-only attach descended from an attached harness, and the Mind sets the OS's opt-out `YANTRIK_YOS_MCP_NO_ATTACH=1` on its yos-mcp from boot.
+
+**What is built:** mind-core's MCP boot adds `YANTRIK_YOS_MCP_NO_ATTACH=1` to the desktop server's (`yantrik-os`) env BEFORE `connect_all`, so the first launch already carries it, with no restart. Other servers are untouched, and a value the operator already set is kept.
+
+**Kill criteria (each one fails the build):**
+- K1: a test fails. Tests:
+  - the desktop server's config gets the variable, exactly once;
+  - a second call adds nothing;
+  - another server gets nothing;
+  - an operator's own value is kept;
+  - `set_server_env` for the token afterwards keeps the variable (the restart's config carries both).
+- K2: a mutant survives: the variable not added; added to every server.
+- K3: the suite or Linux staging fails.

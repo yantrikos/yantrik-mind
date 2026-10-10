@@ -16107,3 +16107,26 @@ The hash-list mutant first missed its anchor through heredoc escaping, and was r
 - The boot call site itself (mind-core) has no unit test: it sits in the boot function, and a string search would not prove it ran. It is verified the way the Mind's boot is, on staging and the first install.
 
 **Suite:** 2413 passed, 0 failed. Linux staging: mind-tools and mind-core green.
+
+## E.VOICE1 — PREREG: desktop voice turns (yantrik-os #734): stop when interrupted, answer in clean speech
+
+**Why:** #734 routes the desktop's voice (Super+Space, Whisper, streaming TTS, barge-in) to whichever mind the Lens is on. A spoken turn arrives with `origin {channel: "voice"}`; the OS speaks the reply and interrupts the turn when the person talks over it.
+- The Mind never reads `origin`.
+- It notices nothing until the turn ends. The desktop's signal (yantrik-os host.rs at 0a366af2, from 22) is that every `harness.chunk` on an interrupted turn, including the Mind's own empty 30 s heartbeat, answers `{"dropped": true}`. The Mind ignores the heartbeat's reply.
+- On the Mac (one Strata call at a time) the abandoned turn's remaining steps hold the model while the person's next spoken turn waits.
+
+**What is built** (mind-core harness.rs):
+1. The heartbeat reads its reply. On `dropped: true` the turn is abandoned: the thinking task is aborted (no further step or model call of that turn starts), nothing is delivered, and one line is logged.
+   - Honest limit: model calls are blocking (`ureq` inside `spawn_blocking`, holding the pool's permit), so the ONE call already in flight completes on its thread and its result is thrown away. Freeing it mid-call needs a cancellable client, which is out of scope.
+2. On a voice-origin turn the heartbeat beats every 2 s, so an interrupt is seen within about 2 s; other turns stay at 30 s.
+3. A voice-origin turn's answer is delivered through `mind_tools::speech::to_spoken`: markdown, lists and code fences become plain spoken sentences, and nothing is cut. The full turn still runs (tools included), since a spoken request on the desktop is often an action. `fast_reply` (no tools) is not used.
+- Not in scope: streaming the answer. The Mind still delivers it whole, so time to first sound is the whole answer; that is recorded as the next item.
+
+**Kill criteria (each one fails the build):**
+- K1: a test fails:
+  - a fake desktop answering `{"dropped": true}` to a heartbeat chunk makes the turn end without a `complete` and with its task aborted (a step after the first never runs);
+  - `{}` heartbeats change nothing;
+  - the beat is 2 s exactly when `origin.channel == "voice"`, else 30 s;
+  - a voice turn's delivered text is `to_spoken` of the answer (markdown gone), and a Lens turn's is unchanged.
+- K2: a mutant survives: `dropped` ignored; abort skipped; beat always 30 s; spoken delivery for every turn; spoken delivery for none.
+- K3: the suite or Linux staging fails.

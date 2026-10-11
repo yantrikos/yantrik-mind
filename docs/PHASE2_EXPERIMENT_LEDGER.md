@@ -16431,3 +16431,30 @@ The OS hands the Mind `POST /provider {source: "yantrik-gateway", provider: "yan
 - showing the gateway's own 403 body;
 - the chain-label gate for other chains (a separate finding, its reach unmeasured);
 - turn options (model, effort, attachments: #673), which the Mind still ignores.
+
+## E.VOICE3 — PREREG: a dropped turn is closed with `complete`, so the person's next turn is not held for 30 s
+
+**Why:** found in the Mind-impact review of yantrik-os #745 and confirmed in host.rs (bd410fcb).
+- When the desktop answers `{"dropped": true}`, the Mind abandons the turn and sends nothing more. This happens on an interrupted, stopped or unheard turn, on a heartbeat (E.VOICE1), a streamed sentence (E.VOICE2) or the answer itself (E.REPLY1).
+- The host keeps an abandoned turn in flight, holding its conversation, "until the harness closes it, or for this long if it never does": `STOP_GRACE` is 30 s (`holds_conversation`). `next_waiting` hands out no other turn in that conversation meanwhile.
+- So after a barge-in, the words the person just spoke wait up to 30 s before the Mind is given them.
+
+22 (11 Oct): `complete` is the intended close. `finish` takes the turn out of `in_flight` either way, replies `dropped`, and leaves an already-final run as it is. Unlike `fail`, `complete` keeps the desktop's "what it said while you were away" offer for a turn the person merely left.
+
+**What is built (mind-core harness.rs):** every place the Mind sees `dropped` on an open turn sends `harness.complete` for it once, its reply ignored, and logs the close. The places are:
+- the heartbeat;
+- a streamed segment;
+- the answer chunk in `deliver_after`.
+
+A dropped `complete` itself needs nothing more.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the portable deliver test: a dropped answer chunk is followed by exactly one `complete`;
+  - on Linux, the real `serve` against a fake desktop that answers `dropped` once the turn is interrupted, on both paths (a heartbeat drop with no sentence committed, and a drop of a streamed sentence). In each:
+    - exactly one `complete` is sent for the turn, after the drop;
+    - no text chunk is sent after the drop;
+    - nothing is recorded as said;
+    - the model request is closed (E.VOICE2).
+- K2, a mutant survives: the close removed at each of the three places, separately.
+- K3: the suite or Linux staging fails.

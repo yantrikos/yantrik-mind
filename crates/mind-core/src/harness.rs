@@ -103,6 +103,68 @@ fn delivered_text(turn: &serde_json::Value, said: &str) -> String {
     if is_voice(turn) { mind_tools::speech::to_spoken(said) } else { said.to_string() }
 }
 
+/// E.VOICE2: a piece of a streamed answer as the desktop gets it. Its leading whitespace is kept,
+/// so the pieces join with the spacing the answer had; a spoken turn's words are made speech.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn delivered_piece(turn: &serde_json::Value, piece: &str) -> String {
+    let words = piece.trim_start();
+    let lead = &piece[..piece.len() - words.len()];
+    if words.is_empty() {
+        return piece.to_string();
+    }
+    format!("{lead}{}", delivered_text(turn, words))
+}
+
+/// E.VOICE2: what the turn has already sent while it ran.
+#[derive(Default)]
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Streamed {
+    /// Anything at all, from any step.
+    any: bool,
+    /// What the latest step committed, as the Mind wrote it (before speech).
+    step: String,
+}
+
+/// E.VOICE2: what is left to send once the answer exists. Every streamed step committed only a
+/// prefix of what it wrote, so when the answer starts with the latest step's words only the rest
+/// goes; otherwise (a preamble before a tool call, an answer rewritten after the step) the whole
+/// answer follows after a blank line. Nothing a step sent is sent twice.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn remainder(streamed: &Streamed, answer: &str) -> String {
+    if !streamed.any {
+        return answer.to_string();
+    }
+    match answer.strip_prefix(streamed.step.as_str()) {
+        Some(rest) if !streamed.step.is_empty() => rest.to_string(),
+        _ => format!("\n\n{answer}"),
+    }
+}
+
+/// E.VOICE2: hand one streamed delta to the desktop. False when the desktop dropped the turn.
+#[cfg(unix)]
+async fn send_delta(
+    address: &str,
+    session: &str,
+    turn_id: u64,
+    turn: &serde_json::Value,
+    timeout: Duration,
+    streamed: &mut Streamed,
+    delta: mind_conversation::AnswerDelta,
+) -> bool {
+    let text = match delta {
+        mind_conversation::AnswerDelta::Step => {
+            streamed.step.clear();
+            return true;
+        }
+        mind_conversation::AnswerDelta::Text(t) => t,
+    };
+    let piece = delivered_piece(turn, &text);
+    let reply = call(address.to_string(), CHUNK, serde_json::json!({ "session": session, "turn_id": turn_id, "delta": piece }), timeout).await;
+    streamed.any = true;
+    streamed.step.push_str(&text);
+    !heartbeat_dropped(&reply)
+}
+
 /// How long to wait before looking for the desktop again.
 ///
 /// Hit in two ordinary situations: this mind started before the shell did, and the shell
@@ -556,6 +618,7 @@ async fn serve(
         // channel. Without it one bad turn would stop the mind polling, the desktop would drop it
         // after ninety seconds, and the picker would quietly lose an entry with nothing said
         // about why.
+        let mut streamed = Streamed::default();
         let answer = {
             let mem = mem.clone();
             let conv = conv.clone();
@@ -624,8 +687,12 @@ async fn serve(
             let (redact_tx, mut redact_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::erase_redact::Redact>();
             // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
             let chat = turn["conversation"].as_str().unwrap_or_default().to_string();
+            // E.VOICE2: the answer as it is written, and the flag that stops its model call.
+            let (answer_tx, mut answer_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::AnswerDelta>();
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_in = cancel.clone();
             let mut thinking = tokio::spawn(async move {
-                mind_conversation::TURN_CONVERSATION
+                mind_inference::with_cancel(cancel_in, mind_conversation::TURN_ANSWER.scope(answer_tx, mind_conversation::TURN_CONVERSATION
                     .scope(
                         chat,
                         mind_conversation::erase_redact::TURN_REDACT.scope(
@@ -642,7 +709,7 @@ async fn serve(
                                 ),
                             ),
                         ),
-                    )
+                    )))
                     .await
             });
             // A turn can outlast the desktop's 90-second presence window, and this loop does not
@@ -654,6 +721,14 @@ async fn serve(
             let done = loop {
                 tokio::select! {
                     done = &mut thinking => break Some(done),
+                    Some(delta) = answer_rx.recv() => {
+                        if !send_delta(address, session, turn_id, &turn, timeout, &mut streamed, delta).await {
+                            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                            thinking.abort();
+                            eprintln!("[harness] turn {turn_id}: the desktop dropped it mid-answer; abandoned");
+                            break None;
+                        }
+                    }
                     Some(ask) = ask_rx.recv() => {
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
                         let conversation = turn["conversation"].as_str().unwrap_or_default();
@@ -706,6 +781,8 @@ async fn serve(
                         // turn: no further step or model call starts. (A call already in flight is a
                         // blocking request; it finishes on its thread and its answer is thrown away.)
                         if heartbeat_dropped(&beat_reply) {
+                            // E.VOICE2: the model call in flight stops reading too.
+                            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                             thinking.abort();
                             eprintln!("[harness] turn {turn_id}: the desktop dropped it (interrupted, stopped or unheard); abandoned");
                             break None;
@@ -719,6 +796,8 @@ async fn serve(
                     }
                 }
             };
+            // E.VOICE2: deltas still queued when the turn finished are not sent; the remainder is
+            // computed from what WAS sent, so they arrive with the answer.
             // E.CARDS1: every card lands before the answer does (the sender went with the turn).
             let _ = forward.await;
             let _ = status_fwd.await;
@@ -734,7 +813,10 @@ async fn serve(
                 // and chopping it into pieces with sleeps between them would be an animation of
                 // streaming rather than streaming. The desktop shows its thinking state until
                 // this lands, which is the truth of what is happening.
-                deliver(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &delivered_text(&turn, &said)).await;
+                // E.VOICE2: only what the stream has not already sent.
+                let rest = remainder(&streamed, &said);
+                let rest = if streamed.any { delivered_piece(&turn, &rest) } else { delivered_text(&turn, &rest) };
+                deliver_after(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &rest, streamed.any).await;
             }
             Err(e) => {
                 // Said, not swallowed. A turn that simply never completed would leave the person
@@ -1358,8 +1440,24 @@ where
     C: Fn(&'static str, serde_json::Value) -> F,
     F: std::future::Future<Output = Result<serde_json::Value, String>>,
 {
+    deliver_after(call, session, turn_id, said, false).await
+}
+
+/// E.VOICE2: [`deliver`] after part of the answer was streamed: nothing left to say is not an
+/// empty turn, so only the end of the turn is sent.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn deliver_after<C, F>(call: C, session: &str, turn_id: u64, said: &str, streamed: bool) -> bool
+where
+    C: Fn(&'static str, serde_json::Value) -> F,
+    F: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
     let text = if said.trim().is_empty() { EMPTY_TURN } else { said };
-    match call(CHUNK, serde_json::json!({ "session": session, "turn_id": turn_id, "delta": text })).await {
+    let sent = if streamed && said.trim().is_empty() {
+        Ok(serde_json::json!({}))
+    } else {
+        call(CHUNK, serde_json::json!({ "session": session, "turn_id": turn_id, "delta": text })).await
+    };
+    match sent {
         Ok(reply) if dropped(&reply) => {
             eprintln!(
                 "[harness] turn {turn_id}: the desktop dropped the answer -- the chat it was for is gone \
@@ -1931,5 +2029,325 @@ mod voice_loop_tests {
         assert_eq!(desk.completes.load(Ordering::SeqCst), 0, "a dropped turn was completed");
         assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
         assert!(!said, "a dropped turn's answer was recorded as said: the turn ran on after the drop");
+    }
+}
+
+/// E.VOICE2: what is left to send once part of the answer was streamed.
+#[cfg(test)]
+mod stream_rest_tests {
+    use super::*;
+
+    fn streamed(step: &str) -> Streamed {
+        Streamed { any: true, step: step.to_string() }
+    }
+
+    #[test]
+    fn nothing_streamed_sends_the_answer_as_before() {
+        assert_eq!(remainder(&Streamed::default(), "Pasta tonight."), "Pasta tonight.");
+    }
+
+    #[test]
+    fn an_answer_that_continues_the_step_sends_only_the_rest() {
+        assert_eq!(remainder(&streamed("Pasta is quick."), "Pasta is quick. Rice works too."), " Rice works too.");
+        assert_eq!(remainder(&streamed("Pasta is quick."), "Pasta is quick."), "", "all of it was sent");
+    }
+
+    #[test]
+    fn an_answer_the_step_did_not_begin_follows_after_a_blank_line() {
+        // A preamble before a tool call, then the answer from a later step that streamed nothing.
+        assert_eq!(remainder(&streamed(""), "It is sunny."), "\n\nIt is sunny.");
+        // The step's words, then an answer rewritten after it.
+        assert_eq!(remainder(&streamed("Let me check."), "It is sunny."), "\n\nIt is sunny.");
+    }
+
+    #[test]
+    fn a_spoken_piece_keeps_its_leading_space_and_loses_its_markdown() {
+        let voice = serde_json::json!({ "origin": { "channel": "voice" } });
+        let lens = serde_json::json!({ "origin": { "channel": "lens" } });
+        assert_eq!(delivered_piece(&lens, " **Rice** works."), " **Rice** works.");
+        let spoken = delivered_piece(&voice, "\n- **Rice** works.");
+        assert!(spoken.starts_with('\n') && !spoken.contains("**") && spoken.contains("Rice works"), "{spoken:?}");
+        assert_eq!(delivered_piece(&voice, "  "), "  ");
+    }
+
+    #[tokio::test]
+    async fn after_a_stream_nothing_left_is_not_an_empty_turn() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Default::default();
+        let log = seen.clone();
+        let call = move |m: &'static str, p: serde_json::Value| {
+            log.lock().unwrap().push((m.to_string(), p));
+            async { Ok::<_, String>(serde_json::json!({})) }
+        };
+        assert!(deliver_after(call.clone(), "s", 7, "", true).await);
+        let methods: Vec<String> = seen.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(methods, vec![COMPLETE.to_string()], "only the end of the turn");
+        seen.lock().unwrap().clear();
+        assert!(deliver_after(call, "s", 7, "", false).await);
+        assert_eq!(seen.lock().unwrap()[0].1["delta"], EMPTY_TURN, "unstreamed, an empty answer still says so");
+    }
+}
+
+/// E.VOICE2 on the real loop: `serve` against a fake desktop and a fake model gate that streams
+/// server-sent events slowly, through the real yantrik-ml OpenAI client.
+#[cfg(all(test, unix))]
+mod stream_loop_tests {
+    use super::*;
+    use mind_inference::InferencePool;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Instant;
+    use yantrik_ml::LLMBackend;
+
+    /// A model endpoint: a streamed request gets `tokens`, one SSE line every `gap`; a plain one
+    /// gets them whole. It records when it last wrote and when a write first failed (the client
+    /// went away).
+    struct Gate {
+        tokens: Vec<String>,
+        gap: Duration,
+        streams: AtomicUsize,
+        last_write: Mutex<Option<Instant>>,
+        gone: Mutex<Option<Instant>>,
+    }
+
+    fn fake_gate(gate: Arc<Gate>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut len = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let l = line.trim_end().to_ascii_lowercase();
+                        if let Some(v) = l.strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                        if l.is_empty() {
+                            break;
+                        }
+                    }
+                    let mut body = vec![0u8; len];
+                    let _ = reader.read_exact(&mut body);
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                    if body["stream"] != true {
+                        let whole = gate.tokens.concat();
+                        let reply = serde_json::json!({ "choices": [{ "message": { "content": whole }, "finish_reason": "stop" }] }).to_string();
+                        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+                        return;
+                    }
+                    gate.streams.fetch_add(1, Ordering::SeqCst);
+                    if write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").is_err() {
+                        return;
+                    }
+                    let lines = gate
+                        .tokens
+                        .iter()
+                        .map(|t| serde_json::json!({ "choices": [{ "index": 0, "delta": { "content": t } }] }).to_string())
+                        .chain([serde_json::json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }).to_string(), "[DONE]".to_string()]);
+                    for data in lines {
+                        if write!(stream, "data: {data}\n\n").and_then(|_| stream.flush()).is_err() {
+                            gate.gone.lock().unwrap().get_or_insert(Instant::now());
+                            return;
+                        }
+                        *gate.last_write.lock().unwrap() = Some(Instant::now());
+                        std::thread::sleep(gate.gap);
+                    }
+                });
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[derive(Default)]
+    struct Desk {
+        handed: AtomicBool,
+        channel: Mutex<String>,
+        text: Mutex<String>,
+        /// Set `interrupt_after` the turn is handed: every chunk is then answered `dropped`.
+        interrupt_after: Mutex<Option<Duration>>,
+        interrupted: Mutex<Option<Instant>>,
+        pieces: Mutex<Vec<(Instant, String)>>,
+        completes: AtomicUsize,
+        fails: AtomicUsize,
+        stop: AtomicBool,
+    }
+
+    fn fake_desktop(path: &std::path::Path, desk: Arc<Desk>) {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let p = &req["params"];
+                let interrupted = desk.interrupted.lock().unwrap().is_some_and(|t| Instant::now() >= t);
+                let result = match req["method"].as_str().unwrap_or_default() {
+                    "harness.poll" if desk.stop.load(Ordering::SeqCst) => {
+                        let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": { "message": "session ended" } }));
+                        continue;
+                    }
+                    "harness.poll" if !desk.handed.swap(true, Ordering::SeqCst) => {
+                        if let Some(after) = *desk.interrupt_after.lock().unwrap() {
+                            *desk.interrupted.lock().unwrap() = Some(Instant::now() + after);
+                        }
+                        let channel = desk.channel.lock().unwrap().clone();
+                        let text = desk.text.lock().unwrap().clone();
+                        serde_json::json!({
+                            "turn_id": 7, "text": text, "conversation": "main",
+                            "origin": { "channel": channel, "remote": false, "trust": "local" }
+                        })
+                    }
+                    "harness.chunk" => {
+                        if let Some(d) = p["delta"].as_str().filter(|d| !d.is_empty()) {
+                            desk.pieces.lock().unwrap().push((Instant::now(), d.to_string()));
+                        }
+                        if interrupted { serde_json::json!({ "dropped": true }) } else { serde_json::json!({}) }
+                    }
+                    "harness.complete" => {
+                        desk.completes.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!({})
+                    }
+                    "harness.fail" => {
+                        desk.fails.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!({})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }));
+            }
+        });
+    }
+
+    /// One turn through `serve`; the desktop, the gate, and the assistant's words in the transcript.
+    async fn one_turn(tag: &str, channel: &str, interrupt_after: Option<Duration>, gate: Arc<Gate>, run_for: Duration) -> (Arc<Desk>, Vec<String>) {
+        let base = fake_gate(gate);
+        let backend = yantrik_ml::GenericOpenAIBackend::for_provider("openai", base, Some("k".into()), "fake-model");
+        let pool = InferencePool::new(Arc::new(backend) as Arc<dyn LLMBackend>, 1);
+        turn_on(tag, channel, "What should I cook tonight?", interrupt_after, pool, run_for).await
+    }
+
+    /// One turn through `serve` on `pool`. Runs for `run_for`, or until an undropped turn ends.
+    async fn turn_on(tag: &str, channel: &str, text: &str, interrupt_after: Option<Duration>, pool: InferencePool, run_for: Duration) -> (Arc<Desk>, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("ym-stream-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("harness.sock");
+        let desk = Arc::new(Desk::default());
+        *desk.channel.lock().unwrap() = channel.to_string();
+        *desk.interrupt_after.lock().unwrap() = interrupt_after;
+        *desk.text.lock().unwrap() = text.to_string();
+        fake_desktop(&path, desk.clone());
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let watch = mem.clone();
+        let conv = Arc::new(crate::engine(&mem, pool));
+        let addr = path.to_string_lossy().into_owned();
+        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-stream", Duration::from_secs(10)).await });
+        let started = Instant::now();
+        while started.elapsed() < run_for {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if interrupt_after.is_none() && desk.completes.load(Ordering::SeqCst) + desk.fails.load(Ordering::SeqCst) > 0 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                break;
+            }
+        }
+        desk.stop.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        use mind_types::MemoryFacade;
+        let said = watch
+            .recent_messages(20, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|(role, _)| role == "assistant")
+            .map(|(_, text)| text)
+            .collect();
+        (desk, said)
+    }
+
+    fn gate(tokens: &[&str], gap_ms: u64) -> Arc<Gate> {
+        Arc::new(Gate {
+            tokens: tokens.iter().map(|t| t.to_string()).collect(),
+            gap: Duration::from_millis(gap_ms),
+            streams: AtomicUsize::new(0),
+            last_write: Mutex::new(None),
+            gone: Mutex::new(None),
+        })
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        // A debug build's turn future overflows tokio's 2 MiB worker stacks (see E.VOICE1).
+        tokio::runtime::Builder::new_multi_thread().worker_threads(4).thread_stack_size(32 * 1024 * 1024).enable_all().build().unwrap()
+    }
+
+    #[test]
+    fn a_lens_answer_arrives_while_it_is_written_and_joins_into_what_was_said() {
+        runtime().block_on(async {
+            let tokens = ["Pasta ", "is ", "quick. ", "Rice ", "works ", "too. ", "Soup ", "is ", "warm."];
+            let g = gate(&tokens, 400);
+            let (desk, said) = one_turn("lens", "lens", None, g.clone(), Duration::from_secs(12)).await;
+            assert!(g.streams.load(Ordering::SeqCst) >= 1, "the step did not stream");
+            assert_eq!(desk.completes.load(Ordering::SeqCst), 1, "the turn was not completed");
+            let pieces = desk.pieces.lock().unwrap().clone();
+            assert!(pieces.len() >= 2, "the answer came in one piece: {pieces:?}");
+            let last_write = g.last_write.lock().unwrap().expect("the gate wrote");
+            assert!(pieces[0].0 < last_write, "the first words reached the desktop only after the model finished");
+            let joined: String = pieces.iter().map(|(_, p)| p.as_str()).collect();
+            assert_eq!(said, vec![tokens.concat()], "the transcript");
+            assert_eq!(joined, tokens.concat(), "the desktop's pieces joined are the answer, nothing twice");
+        });
+    }
+
+    #[test]
+    fn a_spoken_turn_interrupted_mid_stream_closes_the_model_request() {
+        runtime().block_on(async {
+            // No sentence ever ends, so nothing is committed: only the heartbeat can see the drop.
+            let tokens: Vec<&str> = std::iter::repeat("word ").take(60).collect();
+            let g = gate(&tokens, 500);
+            let (desk, said) = one_turn("voice", "voice", Some(Duration::from_millis(2500)), g.clone(), Duration::from_secs(14)).await;
+            assert!(g.streams.load(Ordering::SeqCst) >= 1, "the step did not stream");
+            let interrupted = desk.interrupted.lock().unwrap().expect("interrupted");
+            let gone = g.gone.lock().unwrap().expect("the model request was never closed: it read on after the drop");
+            assert!(gone >= interrupted, "closed before the interruption");
+            assert!(gone - interrupted < Duration::from_secs(3), "closed {:?} after the drop", gone - interrupted);
+            assert_eq!(desk.completes.load(Ordering::SeqCst), 0, "a dropped turn was completed");
+            assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
+            assert!(said.is_empty(), "a dropped turn's answer was recorded: {said:?}");
+        });
+    }
+
+    /// K3 preflight, by hand on a box with a real lane: the Mind's own private lane
+    /// (`YM_LOCAL_OLLAMA_URL`), which serves the agent loop, through the real `serve`.
+    /// `cargo test -p mind-core --lib -- --ignored preflight_real_lane --nocapture`
+    #[test]
+    #[ignore]
+    fn preflight_real_lane() {
+        runtime().block_on(async {
+            let (backend, label) = mind_inference::local_backend_from_env().expect("YM_LOCAL_OLLAMA_URL names the lane");
+            let pool = InferencePool::new(backend.clone(), 2).with_private_backend(backend, &label);
+            let t0 = Instant::now();
+            let (desk, said) = turn_on("preflight", "lens", "In three short sentences, what should I cook tonight?", None, pool, Duration::from_secs(300)).await;
+            let pieces = desk.pieces.lock().unwrap().clone();
+            for (at, p) in &pieces {
+                eprintln!("[preflight] +{:>6} ms  {p:?}", at.duration_since(t0).as_millis());
+            }
+            eprintln!("[preflight] lane {label}; {} piece(s); completes {}, fails {}", pieces.len(), desk.completes.load(Ordering::SeqCst), desk.fails.load(Ordering::SeqCst));
+            assert_eq!(desk.completes.load(Ordering::SeqCst), 1, "the turn did not complete");
+            let joined: String = pieces.iter().map(|(_, p)| p.as_str()).collect();
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert_eq!(joined, said[0], "the desktop's pieces joined are the answer");
+            assert!(pieces.len() >= 2, "the answer came in one piece");
+        });
     }
 }

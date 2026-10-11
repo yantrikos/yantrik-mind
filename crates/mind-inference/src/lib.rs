@@ -263,6 +263,41 @@ pub fn current_call_cap() -> Option<std::time::Duration> {
     CALL_CAP.try_with(|c| *c).ok()
 }
 
+tokio::task_local! {
+    /// E.VOICE2: set when the work every model call inside this task serves is over (a person
+    /// talked over a spoken answer). Carried onto the blocking thread by hand, like the cap.
+    static CANCEL: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+/// Run `f` with every model call inside it watching `flag`: no attempt starts once it is set, and
+/// a streamed request stops reading between lines (yantrik-ml `call_cancel`).
+/// (A plain function returning the task-local future, not an `async fn`: wrapped around a whole
+/// turn, an `async fn` layer trips rustc's higher-ranked `Send` check where the turn is spawned.)
+pub fn with_cancel<F: std::future::Future>(
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    f: F,
+) -> tokio::task::futures::TaskLocalFuture<std::sync::Arc<std::sync::atomic::AtomicBool>, F> {
+    CANCEL.scope(flag, f)
+}
+fn current_cancel() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+    CANCEL.try_with(|c| c.clone()).ok()
+}
+
+tokio::task_local! {
+    /// E.VOICE2: where a tool-capable call inside this task sends its words as the model writes them.
+    static STEP_TOKENS: tokio::sync::mpsc::UnboundedSender<String>;
+}
+/// Run `f` with its tool-capable model calls STREAMED: the same request, tools and accounting, read
+/// as a stream so its words reach `tx` while it is written, and a cancel can stop it mid-call.
+pub fn with_step_tokens<F: std::future::Future>(
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    f: F,
+) -> tokio::task::futures::TaskLocalFuture<tokio::sync::mpsc::UnboundedSender<String>, F> {
+    STEP_TOKENS.scope(tx, f)
+}
+fn current_step_tokens() -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+    STEP_TOKENS.try_with(|t| t.clone()).ok()
+}
+
 /// How one logical request ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallOutcome {
@@ -675,11 +710,15 @@ impl InferencePool {
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
         let call_cap = current_call_cap();
+        let cancel = current_cancel();
+        let step_tokens = current_step_tokens();
+        let streaming = step_tokens.is_some();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit; // released when the blocking work finishes
             // Installed for this job only; `None` also clears whatever an earlier job on this
             // pooled thread left behind.
             let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
+            let _cancel = yantrik_ml::call_cancel::install_cancel(cancel);
             // E.OBS1c: clear any stale note left on this pooled blocking thread, so the label we
             // read afterwards can only have been written by THIS call's chain traversal.
             let _ = take_serving_link();
@@ -704,10 +743,18 @@ impl InferencePool {
             loop {
                 // L4-0: a leaf backend's invocation IS the attempt, counted before the call so
                 // a panic inside it is still one attempt; a chain counts its links itself.
+                // E.VOICE2: the work is over; no attempt starts.
+                yantrik_ml::call_cancel::check()?;
                 if leaf {
                     note_attempt();
                 }
-                match backend.chat(&messages, &config, tools_ref) {
+                let reply = match &step_tokens {
+                    Some(tx) => backend.chat_streaming(&messages, &config, tools_ref, &mut |t| {
+                        let _ = tx.send(t.to_string());
+                    }),
+                    None => backend.chat(&messages, &config, tools_ref),
+                };
+                match reply {
                     Ok(r) => return Ok(r),
                     Err(e) => {
                         let detail = format!("{e:#}");
@@ -742,7 +789,7 @@ impl InferencePool {
                     outcome: CallOutcome::Failed,
                     attempts,
                     latency_ms,
-                    streaming: false,
+                    streaming,
                     opportunity,
                     tokens: None,
                 });
@@ -764,7 +811,7 @@ impl InferencePool {
                     outcome: CallOutcome::Served,
                     attempts,
                     latency_ms,
-                    streaming: false,
+                    streaming,
                     opportunity,
                     tokens: None,
                 });
@@ -785,7 +832,7 @@ impl InferencePool {
                     outcome: CallOutcome::Failed,
                     attempts,
                     latency_ms,
-                    streaming: false,
+                    streaming,
                     opportunity,
                     tokens: None,
                 });
@@ -926,9 +973,11 @@ impl InferencePool {
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
         let call_cap = current_call_cap();
+        let cancel = current_cancel();
         let joined = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _cap = yantrik_ml::call_timeout::install_call_cap(call_cap);
+            let _cancel = yantrik_ml::call_cancel::install_cancel(cancel);
             let _ = take_serving_link();
             install_attempts(attempts_in);
             if !is_chain_backend(backend.as_ref()) {
@@ -5482,5 +5531,99 @@ mod private_lane_configured_tests {
         let pool = InferencePool::new(Arc::new(Idle) as Arc<dyn LLMBackend>, 1)
             .with_provider("zz-uncleared-cloud:model");
         assert!(!pool.private_lane_configured());
+    }
+}
+
+/// E.VOICE2: the step-token and cancel task-locals reach the blocking thread and the backend.
+#[cfg(test)]
+mod voice2_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Records how it was called, and whether the cancel flag was visible on its own thread.
+    #[derive(Default)]
+    struct Probe {
+        plain: AtomicUsize,
+        streamed: AtomicUsize,
+        tools_seen: Mutex<Option<usize>>,
+        saw_flag: AtomicBool,
+    }
+
+    struct ProbeLLM(Arc<Probe>);
+
+    impl LLMBackend for ProbeLLM {
+        fn chat(&self, _: &[ChatMessage], _: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            self.0.plain.fetch_add(1, Ordering::SeqCst);
+            *self.0.tools_seen.lock().unwrap() = t.map(|t| t.len());
+            Ok(ScriptedLLM::new("whole").chat(&[], &GenerationConfig::default(), None)?)
+        }
+        fn chat_streaming(&self, _: &[ChatMessage], _: &GenerationConfig, t: Option<&[serde_json::Value]>, on: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.0.streamed.fetch_add(1, Ordering::SeqCst);
+            *self.0.tools_seen.lock().unwrap() = t.map(|t| t.len());
+            self.0.saw_flag.store(yantrik_ml::call_cancel::cancelled(), Ordering::SeqCst);
+            on("Pasta ");
+            on("tonight.");
+            Ok(ScriptedLLM::new("Pasta tonight.").chat(&[], &GenerationConfig::default(), None)?)
+        }
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "probe"
+        }
+    }
+
+    fn pool(p: &Arc<Probe>) -> InferencePool {
+        InferencePool::new(Arc::new(ProbeLLM(p.clone())) as Arc<dyn LLMBackend>, 1)
+    }
+
+    fn tools() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({ "type": "function", "function": { "name": "recall" } })]
+    }
+
+    #[tokio::test]
+    async fn with_step_tokens_a_tool_call_streams_with_its_tools_and_its_words_arrive() {
+        let p = Arc::new(Probe::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let r = with_step_tokens(tx, pool(&p).chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household, tools()))
+            .await
+            .unwrap();
+        assert_eq!((p.streamed.load(Ordering::SeqCst), p.plain.load(Ordering::SeqCst)), (1, 0));
+        assert_eq!(*p.tools_seen.lock().unwrap(), Some(1), "the tools went with the streamed call");
+        assert_eq!(r.text, "Pasta tonight.");
+        let mut got = String::new();
+        while let Ok(t) = rx.try_recv() {
+            got.push_str(&t);
+        }
+        assert_eq!(got, "Pasta tonight.");
+        // Without the task-local: today's plain call.
+        let q = Arc::new(Probe::default());
+        pool(&q).chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household, tools()).await.unwrap();
+        assert_eq!((q.streamed.load(Ordering::SeqCst), q.plain.load(Ordering::SeqCst)), (0, 1));
+    }
+
+    #[tokio::test]
+    async fn the_cancel_flag_reaches_the_blocking_thread_and_a_set_flag_starts_nothing() {
+        let p = Arc::new(Probe::default());
+        let flag = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Visible on the backend's thread: set it from inside, before the backend reads it.
+        let seen = flag.clone();
+        let r = with_cancel(flag.clone(), with_step_tokens(tx, async {
+            seen.store(true, Ordering::SeqCst);
+            pool(&p).chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household, tools()).await
+        }))
+        .await;
+        assert!(r.is_err(), "a set flag ends the call");
+        assert_eq!(p.streamed.load(Ordering::SeqCst) + p.plain.load(Ordering::SeqCst), 0, "no attempt started");
+        // Unset: the call runs and the backend sees the flag installed (and clear).
+        let q = Arc::new(Probe::default());
+        let flag = Arc::new(AtomicBool::new(false));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        with_cancel(flag.clone(), with_step_tokens(tx, pool(&q).chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Household, tools())))
+            .await
+            .unwrap();
+        assert!(!q.saw_flag.load(Ordering::SeqCst));
     }
 }

@@ -73,6 +73,9 @@ mod emotion;
 mod ex4_shadow;
 mod guards;
 mod redact;
+/// E.VOICE2: the answer streamed to the desktop while the model writes it.
+mod answer_stream;
+pub use answer_stream::{AnswerDelta, TURN_ANSWER};
 pub mod erase_redact;
 pub use ex4_shadow::LegacyOutcome;
 mod browse;
@@ -13689,10 +13692,21 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let call_cap = step_call_cap(
                 loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
             );
-            let resp = match mind_inference::with_call_cap(
-                call_cap,
-                self.inference
-                    .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+            // E.VOICE2: on the desktop the step streams; its words go out only when no check that
+            // discards or replaces a direct reply can fire on this step.
+            let forward = answer_stream::forward_allowed(
+                unsaved_doc,
+                !saved_files.is_empty(),
+                desktop::goal_path(user_text).is_some(),
+                unattempted_side_effect(user_text, &cost.calls).is_some(),
+            );
+            let resp = match answer_stream::streamed_step(
+                forward,
+                mind_inference::with_call_cap(
+                    call_cap,
+                    self.inference
+                        .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+                ),
             )
             .await
             {

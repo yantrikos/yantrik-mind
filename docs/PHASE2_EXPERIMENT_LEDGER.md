@@ -16239,3 +16239,77 @@ A spoken sentence cannot be taken back, and the Lens appends chunks. So the rule
   - the pool does not carry the flag to the blocking thread;
   - the pool ignores the step tokens.
 - K3: the suite (both repos) or Linux staging fails, or a preflight turn on staging against its real lane does not complete with its chunks equal to its answer.
+
+## E.VOICE2 — RESULT: the answer reaches the desktop sentence by sentence, and an interruption closes the model request within 3 s; 11 mutants killed
+
+**Built:**
+- **yantrik-ml (yantrik-companion).**
+  - New module `call_cancel`: a per-thread `Option<Arc<AtomicBool>>` with an install guard, plus `check()`. The check sits at the top of all seven stream read loops (OpenAI, Ollama, Anthropic, Gemini, and the three in the legacy `ApiLLM`). With no flag installed, nothing changes.
+  - The Ollama stream loop is factored into `parse_ollama_stream` and now keeps the `thinking` field, as `ollama_chat` already did. Staging's private lane is Ollama, so without this a streamed step lost the reasoning that the plain call returned.
+- **mind-inference.**
+  - `with_cancel` and `with_step_tokens` are task-locals, carried onto the blocking thread like the call cap.
+  - `chat_scoped_tools_attributed` refuses to start an attempt once the flag is set. With step tokens it calls `chat_streaming` with the same tools, and the row is marked `streaming`.
+  - The helpers return tokio's `TaskLocalFuture` rather than being `async fn`s. An `async fn` wrapped around a whole turn failed the Linux build with "implementation of `Send` is not general enough" where `serve` spawns the turn.
+- **mind-conversation.**
+  - `answer_stream.rs` holds `AnswerDelta` (Step / Text), the `TURN_ANSWER` task-local, `forward_allowed`, `AnswerCommitter` and `streamed_step`.
+  - The agent loop wraps each step's call. It forwards only when there is no unsaved document, no saved pages, no goal path in the request and no unattempted side effect.
+- **mind-core harness.rs.**
+  - Committed segments go out as `harness.chunk`. A voice turn's are spoken; `delivered_piece` keeps the leading whitespace.
+  - `remainder` sends only what the latest step did not already send. Otherwise it sends a blank line and then the whole answer.
+  - `deliver_after` sends only `complete` when nothing is left.
+  - A `dropped` reply to a segment chunk or a heartbeat sets the cancel flag, then aborts the turn.
+  - `YM_STREAM_ANSWER=off` restores the old path.
+
+**Deviation from the prereg:** I removed the planned end-of-turn drain of queued deltas, and with it its K2 mutant. `remainder` is computed from what WAS sent, so deltas left in the channel arrive with the answer. The drain added sends and no correctness.
+
+**K1 held.**
+- Committer (5 tests):
+  - the joined segments are a prefix of `redact_answer(text.trim())` across a corpus with credentials, markdown and odd whitespace, at seven chunk sizes;
+  - no key is ever streamed;
+  - each retracting precondition alone stops forwarding.
+- Harness: 5 portable tests (remainder, spoken pieces, nothing left is not an empty turn).
+- mind-inference: 2 tests (streamed with its tools; a set flag starts no attempt).
+- yantrik-ml: 4 tests:
+  - an endless stream stops within one line of the flag;
+  - an unset flag changes nothing;
+  - the Ollama stream keeps its thinking and its tool call;
+  - the flag guard restores the thread.
+- **Linux (staging .95), the real `serve` against a fake desktop and a fake SSE gate through the real `GenericOpenAIBackend`:**
+  - a Lens turn's first piece reaches the desktop before the gate has finished, the pieces join to exactly the transcript's answer, and nothing is sent twice;
+  - a spoken turn interrupted 2.5 s in, with no sentence ever ending (so only the heartbeat can see the drop): the gate sees its client go within 3 s; no complete, no fail, nothing recorded.
+  - With E.VOICE1's tests, 13 passed.
+
+**K2 held: 11 mutants killed.**
+- Windows (6):
+  - the committer never closes on `{`;
+  - the committer commits trailing whitespace;
+  - the gate ignores the unattempted side effect;
+  - the remainder is always the whole answer;
+  - the pool drops the cancel flag;
+  - the pool ignores step tokens.
+- Linux (3):
+  - segments not forwarded;
+  - the heartbeat drop leaves the flag unset;
+  - yantrik-ml's check removed from the OpenAI stream.
+- yantrik-ml (2):
+  - the check removed (the endless stream runs out instead of being cancelled);
+  - the Ollama thinking dropped again.
+
+**K3 held.**
+- Full suite (Windows): 2428 passed, 0 failed.
+- **Preflight against staging's real lane** (`preflight_real_lane`, `#[ignore]`, run by hand). Turn: "In three short sentences, what should I cook tonight?" through `serve` on `ollama-local:qwen3.8:27b-q4_K_M` (the private lane that serves the agent loop):
+  - a direct reply in one step;
+  - first piece at 12.1 s, second at 14.0 s, turn done in 15 s;
+  - 2 pieces, which join to exactly the transcript's answer;
+  - 1 complete, 0 fails.
+- Staging's checkouts were restored afterwards (yantrik-companion at 3203e2e, the test checkout at c266b44, `target/debug` removed); the service is active with one mind-core process.
+
+**Honest limits, as preregistered:**
+- a chain backend emits once (no live words, no mid-call cancel);
+- compose and `cited_answer` are not streamed;
+- a mid-stream retry can repeat committed words;
+- a streamed OpenAI-path step has no `thinking` (nor does the plain one there).
+
+Also seen: yantrik-ml's `parse_api_tool_calls` drops an Ollama tool call that has no `id`, on both paths. That is pre-existing and unchanged here; current Ollama sends one.
+
+**Ships with:** the yantrik-ml change must be present in the sibling `yantrik-companion` checkout for this branch to build.

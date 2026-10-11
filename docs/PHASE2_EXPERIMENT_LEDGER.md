@@ -16164,3 +16164,78 @@ The hash-list mutant first missed its anchor through heredoc escaping, and was r
 **The honest limit, as preregistered:** the model call already in flight when the drop is seen finishes on its blocking thread and holds its permit until then. Only later steps are stopped.
 
 **Next:** streaming the answer, for time to first sound.
+
+## E.VOICE2 — PREREG: the Mind streams its answer to the desktop, and a barge-in stops the model call mid-stream
+
+**Why:** E.VOICE1 left two gaps.
+- **Time to first sound is the whole answer.** #734's desktop speaks a reply stream sentence by sentence, but the Mind sends its answer in one chunk once the turn is finished.
+- **An interrupted turn's in-flight model call runs to the end.** It is a blocking `ureq` read holding the pool's permit, so on the Mac (one Strata slot) the person's next spoken turn waits behind an answer nobody will hear.
+
+Pranab, 10 Oct: "Yes, full streaming". That covers the Mind streaming its final answer and a cancel flag in yantrik-ml, kept minimal and backward compatible.
+
+**What scoping found (it shapes the build):** the Mind's answer is not final when the model stops writing. Several whole-answer checks can discard a direct reply (path B of `agent_loop_focused`) and ask again:
+- the unsaved-document nudge;
+- the missing-goal-file nudge;
+- the dead-link nudge;
+- the unattempted-side-effect and look-first nudges, which are what stop a spoken "Done, I set it" for a reminder that was never set.
+
+Other replacements:
+- a reply that looks like HTML is replaced by a page link;
+- a reply containing JSON is parsed as a tool call or an `answer`;
+- path A and C answers are rewritten by `cited_answer`.
+
+A spoken sentence cannot be taken back, and the Lens appends chunks. So the rule is: **nothing is sent that the delivered answer might not contain.**
+
+**What is built:**
+1. **yantrik-ml (yantrik-companion), new module `call_cancel`.**
+   - A thread-local `Option<Arc<AtomicBool>>` with an install guard, shaped like `call_timeout::install_call_cap`.
+   - `call_cancel::check()` runs at the top of every SSE `reader.lines()` loop in the crate. When the flag is set, the read ends with an error naming the cancel, and the response body is dropped so the server sees the disconnect.
+   - No flag installed (every caller today) means no behaviour change.
+2. **mind-inference, two task-locals, both carried onto the blocking thread by hand like the call cap.**
+   - `with_cancel(flag)`: the pool installs the flag around every model call and refuses to START an attempt once it is set.
+   - `with_step_tokens(tx)`: `chat_scoped_tools_attributed` uses `chat_streaming` with the SAME tools and sends each token to `tx`. Gating, retries, escalation and accounting are unchanged, and the row is marked `streaming`.
+3. **mind-conversation.** The harness scopes a task-local `TURN_ANSWER` (absent elsewhere, so the web, Telegram and console are unchanged).
+   - While it is set, every agent-loop step streams, so a cancel can stop it mid-call.
+   - Its words are forwarded only when the pre-step state rules out every retracting check: no unsaved document, no saved pages, no goal path in the request, no unattempted side effect. Otherwise the tokens are discarded.
+   - A pure `AnswerCommitter` turns tokens into committed segments:
+     - leading whitespace is skipped;
+     - a segment is committed only at a sentence end (`.`, `!`, `?` or `…` followed by whitespace) or at a newline;
+     - the whitespace is held to start the next segment;
+     - the step closes for good at the first `{` or `<` (the JSON and HTML paths);
+     - each segment passes `redact_answer`, which is token-wise and whitespace-delimited, so the redacted segments join into a prefix of the redacted answer;
+     - the unfinished last sentence is never committed: it arrives with the answer.
+   - Each step sends a `Step` marker first.
+4. **mind-core harness.rs.**
+   - Committed segments go to the desktop as `harness.chunk` while the turn runs. A voice turn's segments are spoken as `to_spoken`, keeping their leading whitespace.
+   - At the end, if the delivered answer starts with what the LAST streamed step committed, only the rest is sent. Otherwise (a preamble before a tool call, a JSON or `cited_answer` exit) the whole answer follows, after a blank line. Nothing is ever sent twice from the same step.
+   - With nothing streamed, delivery is exactly today's.
+   - A dropped reply to any chunk, heartbeat or segment sets the cancel flag and then aborts the turn.
+   - `YM_STREAM_ANSWER=off` restores the old path.
+
+**Honest limits (not in scope):**
+- a chain backend streams by calling `chat` and emitting once (no live words, no mid-call cancel);
+- the tool-less compose and `cited_answer` calls are not streamed (cancel only stops them starting);
+- a transient error retried mid-stream can repeat words already committed;
+- the streamed path gets no `thinking` field (the OpenAI and Anthropic stream parsers drop it).
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **committer:** sentence and newline commits; leading whitespace skipped; nothing after the first `{` or `<`; and for a corpus that includes a credential and markdown, the joined segments are a prefix of `redact_answer(text.trim())`;
+  - **gate:** each retracting precondition alone stops forwarding;
+  - **yantrik-ml:** `parse_openai_stream` over an endless reader stops within one line once the flag is set, and is byte-identical with no flag;
+  - **mind-inference:** with step tokens the backend's `chat_streaming` is called with the tools; with the flag set no attempt starts, and the flag is visible on the blocking thread;
+  - **Linux, the real `serve` against a fake desktop and a fake SSE gate:**
+    - a Lens turn's first content chunk reaches the desktop before the gate has finished, and the joined chunks equal the answer in the transcript;
+    - a spoken turn dropped at a 2 s heartbeat while the gate is mid-stream: the gate sees the disconnect within 3 s of the drop, and there is no complete.
+- K2, a mutant survives:
+  - the committer never closes on `{`;
+  - the committer commits trailing whitespace;
+  - the gate ignores the unattempted side effect;
+  - segments are not forwarded (final only);
+  - deltas left in the channel are not drained at the end;
+  - the remainder logic always sends the whole answer;
+  - the drop does not set the flag;
+  - yantrik-ml's check is removed;
+  - the pool does not carry the flag to the blocking thread;
+  - the pool ignores the step tokens.
+- K3: the suite (both repos) or Linux staging fails, or a preflight turn on staging against its real lane does not complete with its chunks equal to its answer.

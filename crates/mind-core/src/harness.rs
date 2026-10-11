@@ -72,6 +72,36 @@ const IDLE: Duration = Duration::from_millis(200);
 /// desktop's 90-second presence window.
 #[cfg_attr(not(unix), allow(dead_code))]
 const HEARTBEAT: Duration = Duration::from_secs(30);
+/// E.VOICE1 (yantrik-os #734): a spoken turn's heartbeat. The desktop answers `dropped` to a chunk on
+/// an interrupted turn, so this is how soon a barge-in stops the turn.
+#[cfg_attr(not(unix), allow(dead_code))]
+const VOICE_HEARTBEAT: Duration = Duration::from_secs(2);
+
+/// E.VOICE1: a turn the person spoke at the desktop (#734: `origin.channel == "voice"`).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn is_voice(turn: &serde_json::Value) -> bool {
+    turn["origin"]["channel"].as_str() == Some("voice")
+}
+
+/// E.VOICE1: how often the turn's heartbeat runs.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn heartbeat_for(turn: &serde_json::Value) -> Duration {
+    if is_voice(turn) { VOICE_HEARTBEAT } else { HEARTBEAT }
+}
+
+/// E.VOICE1: the desktop's answer to a chunk says the turn is interrupted, stopped, or that no one is
+/// listening (yantrik-os host.rs `chunk`: `{"dropped": true}`). Not an error; the turn is over.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn heartbeat_dropped(reply: &Result<serde_json::Value, String>) -> bool {
+    matches!(reply, Ok(v) if v["dropped"] == true)
+}
+
+/// E.VOICE1: what a turn delivers. A spoken turn gets its answer as speech -- markdown, lists and code
+/// fences turned into plain sentences, nothing cut; any other turn gets it as written.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn delivered_text(turn: &serde_json::Value, said: &str) -> String {
+    if is_voice(turn) { mind_tools::speech::to_spoken(said) } else { said.to_string() }
+}
 
 /// How long to wait before looking for the desktop again.
 ///
@@ -619,11 +649,11 @@ async fn serve(
             // poll while it thinks: "Write a note titled Shopping…" took 93 seconds and the
             // desktop reported "mind stopped responding" to a mind that was mid-answer. An empty
             // chunk every 30 seconds keeps the session present without adding text.
-            let mut beat = tokio::time::interval(HEARTBEAT);
+            let mut beat = tokio::time::interval(heartbeat_for(&turn));
             beat.tick().await; // the first tick is immediate
             let done = loop {
                 tokio::select! {
-                    done = &mut thinking => break done,
+                    done = &mut thinking => break Some(done),
                     Some(ask) = ask_rx.recv() => {
                         let send = |m: &'static str, p: serde_json::Value| call(address.to_string(), m, p, timeout);
                         let conversation = turn["conversation"].as_str().unwrap_or_default();
@@ -665,13 +695,21 @@ async fn serve(
                         if let Some(line) = stalled_line(turn_id, started.elapsed(), &watched) {
                             eprintln!("{line}");
                         }
-                        let _ = call(
+                        let beat_reply = call(
                             address.to_string(),
                             CHUNK,
                             serde_json::json!({ "session": session, "turn_id": turn_id, "delta": "" }),
                             timeout,
                         )
                         .await;
+                        // E.VOICE1: interrupted (a barge-in), stopped, or nobody listening -- stop the
+                        // turn: no further step or model call starts. (A call already in flight is a
+                        // blocking request; it finishes on its thread and its answer is thrown away.)
+                        if heartbeat_dropped(&beat_reply) {
+                            thinking.abort();
+                            eprintln!("[harness] turn {turn_id}: the desktop dropped it (interrupted, stopped or unheard); abandoned");
+                            break None;
+                        }
                         // E.STATUS1: a long model call sends nothing else; say it is still going.
                         let now = latest.lock().ok().and_then(|l| l.clone());
                         if let Some(text) = now {
@@ -688,13 +726,15 @@ async fn serve(
         };
 
         // ── Answer ──
+        // E.VOICE1: a dropped turn is over; the desktop wants nothing more on it.
+        let Some(answer) = answer else { continue };
         match answer {
             Ok(said) => {
                 // Sent whole, because it IS whole: `handle_line_as` returns a finished answer,
                 // and chopping it into pieces with sleeps between them would be an animation of
                 // streaming rather than streaming. The desktop shows its thinking state until
                 // this lands, which is the truth of what is happening.
-                deliver(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &said).await;
+                deliver(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &delivered_text(&turn, &said)).await;
             }
             Err(e) => {
                 // Said, not swallowed. A turn that simply never completed would leave the person
@@ -1709,5 +1749,187 @@ async fn think(mem: &MemoryHandle, conv: &Arc<ConversationEngine>, text: &str) -
             "(done — nothing to show)".to_string()
         }
         Outcome::Said(s) => s,
+    }
+}
+
+/// E.VOICE1 (yantrik-os #734): desktop voice turns stop when the desktop drops them, and are spoken.
+#[cfg(test)]
+mod voice_tests {
+    use super::*;
+
+    fn voice() -> serde_json::Value {
+        serde_json::json!({ "turn_id": 7, "text": "hi", "origin": { "channel": "voice", "remote": false } })
+    }
+
+    #[test]
+    fn a_voice_turn_beats_every_two_seconds_and_others_every_thirty() {
+        assert_eq!(heartbeat_for(&voice()), Duration::from_secs(2));
+        assert_eq!(heartbeat_for(&serde_json::json!({ "turn_id": 7, "origin": { "channel": "lens" } })), Duration::from_secs(30));
+        assert_eq!(heartbeat_for(&serde_json::json!({ "turn_id": 7 })), Duration::from_secs(30), "no origin is not voice");
+    }
+
+    #[test]
+    fn only_dropped_true_ends_a_turn() {
+        assert!(heartbeat_dropped(&Ok(serde_json::json!({ "dropped": true }))));
+        assert!(!heartbeat_dropped(&Ok(serde_json::json!({}))));
+        assert!(!heartbeat_dropped(&Ok(serde_json::json!({ "dropped": false }))));
+        assert!(!heartbeat_dropped(&Err("connect: refused".into())), "a failed call is not a drop");
+    }
+
+    #[test]
+    fn a_voice_turn_is_delivered_as_speech_and_a_lens_turn_as_written() {
+        let said = "Here is the plan:\n\n- **Monday**: the dentist\n- `Tuesday`: lunch";
+        let spoken = delivered_text(&voice(), said);
+        assert!(!spoken.contains("**") && !spoken.contains('`') && !spoken.contains("- "), "{spoken}");
+        assert!(spoken.contains("Monday") && spoken.contains("dentist") && spoken.contains("lunch"), "nothing is cut: {spoken}");
+        assert_eq!(delivered_text(&serde_json::json!({ "turn_id": 7, "origin": { "channel": "lens" } }), said), said);
+    }
+}
+
+/// E.VOICE1 on the real loop: a fake desktop hands `serve` one spoken turn and answers its heartbeat
+/// `dropped`. The model is slow and counts its calls.
+#[cfg(all(test, unix))]
+mod voice_loop_tests {
+    use super::*;
+    use mind_inference::{InferencePool, ScriptedLLM};
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use yantrik_ml::{ChatMessage, GenerationConfig, LLMBackend, LLMResponse};
+
+    struct Slow {
+        inner: ScriptedLLM,
+        calls: Arc<AtomicUsize>,
+        wait: Duration,
+    }
+
+    impl LLMBackend for Slow {
+        fn chat(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.wait);
+            self.inner.chat(m, c, t)
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, text: &str) -> anyhow::Result<usize> {
+            Ok(text.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "slow"
+        }
+        fn model_id(&self) -> &str {
+            "slow"
+        }
+    }
+
+    #[derive(Default)]
+    struct Desk {
+        handed: AtomicBool,
+        drop_beats: AtomicBool,
+        beats: AtomicUsize,
+        completes: AtomicUsize,
+        fails: AtomicUsize,
+        stop: AtomicBool,
+    }
+
+    /// The desktop's side of the wire: one turn, then empty polls; a heartbeat chunk answered
+    /// `dropped` when `drop_beats`; every complete and fail counted; a poll error once `stop`.
+    fn fake_desktop(path: &std::path::Path, desk: Arc<Desk>) {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let p = &req["params"];
+                let result = match req["method"].as_str().unwrap_or_default() {
+                    "harness.poll" if desk.stop.load(Ordering::SeqCst) => {
+                        let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": { "message": "session ended" } }));
+                        continue;
+                    }
+                    "harness.poll" if !desk.handed.swap(true, Ordering::SeqCst) => serde_json::json!({
+                        "turn_id": 7, "text": "What should I cook tonight?", "conversation": "main",
+                        "origin": { "channel": "voice", "remote": false, "trust": "local" }
+                    }),
+                    "harness.chunk" if p["delta"] == "" => {
+                        desk.beats.fetch_add(1, Ordering::SeqCst);
+                        if desk.drop_beats.load(Ordering::SeqCst) { serde_json::json!({ "dropped": true }) } else { serde_json::json!({}) }
+                    }
+                    "harness.complete" => {
+                        desk.completes.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!({})
+                    }
+                    "harness.fail" => {
+                        desk.fails.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!({})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }));
+            }
+        });
+    }
+
+    /// The model calls, the desktop's view, and whether the transcript holds the answer as said.
+    async fn one_spoken_turn(drop_beats: bool) -> (usize, Arc<Desk>, bool) {
+        let dir = std::env::temp_dir().join(format!("ym-voice-{}-{}", std::process::id(), drop_beats));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("harness.sock");
+        let desk = Arc::new(Desk { drop_beats: AtomicBool::new(drop_beats), ..Default::default() });
+        fake_desktop(&path, desk.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slow = Slow { inner: ScriptedLLM::new("Pasta, I think."), calls: calls.clone(), wait: Duration::from_millis(3000) };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let watch = mem.clone();
+        let conv = Arc::new(crate::engine(&mem, InferencePool::new(Arc::new(slow) as Arc<dyn LLMBackend>, 1)));
+        let addr = path.to_string_lossy().into_owned();
+        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-voice", Duration::from_secs(10)).await });
+        // Long enough for an uninterrupted turn to run several model calls.
+        tokio::time::sleep(Duration::from_secs(16)).await;
+        desk.stop.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        use mind_types::MemoryFacade;
+        let said = watch
+            .recent_messages(20, &mind_types::AccessContext::operator_audit())
+            .await
+            .unwrap()
+            .iter()
+            .any(|(role, text)| role == "assistant" && text.contains("Pasta"));
+        (calls.load(Ordering::SeqCst), desk, said)
+    }
+
+    /// (Its own runtime: a full turn's future in a DEBUG build overflows tokio's 2 MiB worker stacks
+    /// when `serve` spawns it; a release build is far smaller. 32 MiB here, for the test only.)
+    #[test]
+    fn a_dropped_spoken_turn_stops_and_is_never_completed() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .thread_stack_size(32 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(dropped_spoken_turn());
+    }
+
+    async fn dropped_spoken_turn() {
+        // The control: undropped, the spoken turn completes and its answer is in the transcript as
+        // said. (Its one model call takes 3 s, so the 2 s heartbeat fires while it runs.)
+        let (_, control, control_said) = one_spoken_turn(false).await;
+        assert_eq!(control.completes.load(Ordering::SeqCst), 1, "the control turn was not completed");
+        assert!(control_said, "the control turn's answer is not in the transcript; the drop test would show nothing");
+        // Dropped at the first 2-second heartbeat: the call in flight finishes on its thread, the
+        // turn is aborted after it -- nothing completed or failed, no further call, and the answer
+        // the person never heard is not recorded as said.
+        let (calls, desk, said) = one_spoken_turn(true).await;
+        assert!(desk.beats.load(Ordering::SeqCst) >= 1, "no heartbeat was sent");
+        assert_eq!(calls, 1, "a model call started after the desktop dropped the turn");
+        assert_eq!(desk.completes.load(Ordering::SeqCst), 0, "a dropped turn was completed");
+        assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
+        assert!(!said, "a dropped turn's answer was recorded as said: the turn ran on after the drop");
     }
 }

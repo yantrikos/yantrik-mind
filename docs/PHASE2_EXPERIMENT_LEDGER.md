@@ -16130,3 +16130,37 @@ The hash-list mutant first missed its anchor through heredoc escaping, and was r
   - a voice turn's delivered text is `to_spoken` of the answer (markdown gone), and a Lens turn's is unchanged.
 - K2: a mutant survives: `dropped` ignored; abort skipped; beat always 30 s; spoken delivery for every turn; spoken delivery for none.
 - K3: the suite or Linux staging fails.
+
+## E.VOICE1 — RESULT: a spoken turn stops when the desktop drops it, and is delivered as speech; 6 mutants killed on Linux
+
+**Built** (mind-core harness.rs):
+- `heartbeat_for` gives 2 s for `origin.channel == "voice"` and 30 s otherwise.
+- The heartbeat's chunk reply is read: `heartbeat_dropped` (only `{"dropped": true}`) aborts the turn's task, logs one line and skips delivery.
+- `delivered_text` sends a voice turn's answer through `mind_tools::speech::to_spoken`.
+- The new items carry `#[cfg_attr(not(unix), allow(dead_code))]`, like the loop they serve.
+
+**K1 held:**
+- 3 pure tests (Windows and Linux).
+- On Linux, `a_dropped_spoken_turn_stops_and_is_never_completed` drives the real `serve` against a fake desktop on a Unix socket, with a model that takes 3 s per call:
+  - control: the turn completes and its answer is in the transcript;
+  - dropped at the 2 s heartbeat: exactly 1 model call, no complete, no fail, and the answer is NOT in the transcript. What the person never heard is not recorded as said.
+
+**What the test itself had to fix:**
+- The first version asserted at least 2 model calls in the control, so that "abort skipped" would show as an extra call. The guard caught that this turn makes only one call. The observable difference is the transcript, which a finished turn writes and an aborted one never reaches.
+- A debug build of a full turn overflowed tokio's 2 MiB worker stack when `serve` spawned it ("tokio-rt-worker has overflowed its stack"). The test builds its own runtime with 32 MiB stacks. Production is a release build, with far smaller futures, and is unchanged.
+
+**K2 held:** 6 mutants killed on Linux:
+- `dropped` ignored;
+- `abort()` skipped;
+- `heartbeat_for` always 30 s;
+- the loop beating at a fixed 30 s;
+- spoken delivery for every turn;
+- spoken delivery for none.
+
+**K3:**
+- Full suite (Windows): 2416 passed, 0 failed.
+- Linux: the 4 voice tests and the build of the Unix-only loop.
+
+**The honest limit, as preregistered:** the model call already in flight when the drop is seen finishes on its blocking thread and holds its permit until then. Only later steps are stopped.
+
+**Next:** streaming the answer, for time to first sound.

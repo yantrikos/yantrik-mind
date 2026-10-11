@@ -16458,3 +16458,27 @@ A dropped `complete` itself needs nothing more.
     - the model request is closed (E.VOICE2).
 - K2, a mutant survives: the close removed at each of the three places, separately.
 - K3: the suite or Linux staging fails.
+
+## E.VOICE3 — RESULT: a dropped turn is closed with one `complete`; 2 mutants killed
+
+**Built (mind-core harness.rs):**
+- The loop's dropped exit (`let Some(answer) = answer else`) now sends `harness.complete` for the turn, ignores its reply, and logs "closed after the drop". This one place serves both the heartbeat drop (E.VOICE1) and the streamed-segment drop (E.VOICE2).
+- `deliver_after` sends `complete` after a dropped answer chunk (E.REPLY1's exit).
+
+**Deviation from the prereg:** the close sits in two places, not three. Both loop drops leave through the same `else` arm, so the mutant list is the two places.
+
+**Changed on purpose:** E.REPLY1's deliver test asserted "nothing more is sent into a chat that is gone" (`[CHUNK]`). It now asserts `[CHUNK, COMPLETE]`: no text after the drop, and one close. 22 confirmed `complete` is the host's intended close. `fail` would also suppress the desktop's "what it said while you were away" for a turn the person merely left.
+
+**K1 held:**
+- The portable `a_dropped_answer_is_closed_with_one_complete` test.
+- E.VOICE1's loop test is renamed `a_dropped_spoken_turn_stops_and_is_closed_once` and now expects exactly one `complete`.
+- On Linux, the stream-loop fake desktop answers `complete` with `dropped` once the turn is interrupted and records when the close came. Two tests drive it:
+  - the heartbeat drop (`a_spoken_turn_interrupted_mid_stream_closes_the_model_request`): exactly one close, after the interruption; no text, no fail, nothing recorded; the model request closed within 3 s;
+  - the new segment drop (`a_turn_dropped_mid_answer_is_closed_once_and_sends_nothing_more`): sentences streamed before the drop, at most the one in-flight piece at or after it, exactly one close after it, nothing recorded, the model request closed.
+- 19 passed on Linux (staging, restored afterwards).
+
+**K2 held: 2 mutants killed.**
+- The loop-exit close removed: 3 Linux tests fail.
+- The `deliver_after` close removed: 2 portable tests fail.
+
+**K3 held:** full suite (Windows) 2440 passed, 0 failed.

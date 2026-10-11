@@ -805,8 +805,14 @@ async fn serve(
         };
 
         // ── Answer ──
-        // E.VOICE1: a dropped turn is over; the desktop wants nothing more on it.
-        let Some(answer) = answer else { continue };
+        // E.VOICE1: a dropped turn is over; the desktop wants nothing more on it -- except to be
+        // told it is closed. E.VOICE3: until then the host keeps the turn in flight, holding its
+        // conversation for STOP_GRACE (30 s), and the words the person just spoke over it wait.
+        let Some(answer) = answer else {
+            let _ = call(address.to_string(), COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id }), timeout).await;
+            eprintln!("[harness] turn {turn_id}: closed after the drop");
+            continue;
+        };
         match answer {
             Ok(said) => {
                 // Sent whole, because it IS whole: `handle_line_as` returns a finished answer,
@@ -1463,6 +1469,8 @@ where
                 "[harness] turn {turn_id}: the desktop dropped the answer -- the chat it was for is gone \
                  (New chat, a mind switch, or the person stopped it)"
             );
+            // E.VOICE3: closed, so the host frees the conversation now rather than after 30 s.
+            let _ = call(COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id })).await;
             return false;
         }
         Ok(_) => {}
@@ -1526,7 +1534,9 @@ mod deliver_tests {
         // VM 561, turns 58-59: the chat was gone, and the host said so in an Ok.
         let (seen, call) = desktop(|_| Ok(serde_json::json!({ "dropped": true })));
         assert!(!deliver(&call, "s1", 59, "Here it is.").await);
-        assert_eq!(methods(&seen), vec![CHUNK], "nothing more is sent into a chat that is gone");
+        // E.VOICE3: no more text into a chat that is gone -- but the turn is closed, or the host
+        // holds its conversation for STOP_GRACE (30 s).
+        assert_eq!(methods(&seen), vec![CHUNK, COMPLETE], "no text after the drop, and one close");
 
         let (seen, call) = desktop(|_| Ok(serde_json::Value::Null));
         assert!(deliver(&call, "s1", 60, "  \n").await);
@@ -2004,7 +2014,7 @@ mod voice_loop_tests {
     /// (Its own runtime: a full turn's future in a DEBUG build overflows tokio's 2 MiB worker stacks
     /// when `serve` spawns it; a release build is far smaller. 32 MiB here, for the test only.)
     #[test]
-    fn a_dropped_spoken_turn_stops_and_is_never_completed() {
+    fn a_dropped_spoken_turn_stops_and_is_closed_once() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .thread_stack_size(32 * 1024 * 1024)
@@ -2026,7 +2036,8 @@ mod voice_loop_tests {
         let (calls, desk, said) = one_spoken_turn(true).await;
         assert!(desk.beats.load(Ordering::SeqCst) >= 1, "no heartbeat was sent");
         assert_eq!(calls, 1, "a model call started after the desktop dropped the turn");
-        assert_eq!(desk.completes.load(Ordering::SeqCst), 0, "a dropped turn was completed");
+        // E.VOICE3: closed once, so the desktop frees the conversation; the answer is not sent.
+        assert_eq!(desk.completes.load(Ordering::SeqCst), 1, "a dropped turn was not closed exactly once");
         assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
         assert!(!said, "a dropped turn's answer was recorded as said: the turn ran on after the drop");
     }
@@ -2036,6 +2047,20 @@ mod voice_loop_tests {
 #[cfg(test)]
 mod stream_rest_tests {
     use super::*;
+
+    /// E.VOICE3: an answer the desktop drops is followed by exactly one `complete`, the close.
+    #[tokio::test]
+    async fn a_dropped_answer_is_closed_with_one_complete() {
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<String>>> = Default::default();
+        let log = seen.clone();
+        let call = move |m: &'static str, _p: serde_json::Value| {
+            log.lock().unwrap().push(m.to_string());
+            async { Ok::<_, String>(serde_json::json!({ "dropped": true })) }
+        };
+        assert!(!deliver_after(call, "s", 7, "Pasta tonight.", false).await, "a dropped answer did not land");
+        assert_eq!(*seen.lock().unwrap(), vec![CHUNK.to_string(), COMPLETE.to_string()]);
+    }
 
     fn streamed(step: &str) -> Streamed {
         Streamed { any: true, step: step.to_string() }
@@ -2176,6 +2201,7 @@ mod stream_loop_tests {
         interrupted: Mutex<Option<Instant>>,
         pieces: Mutex<Vec<(Instant, String)>>,
         completes: AtomicUsize,
+        completed_at: Mutex<Option<Instant>>,
         fails: AtomicUsize,
         stop: AtomicBool,
     }
@@ -2216,7 +2242,8 @@ mod stream_loop_tests {
                     }
                     "harness.complete" => {
                         desk.completes.fetch_add(1, Ordering::SeqCst);
-                        serde_json::json!({})
+                        desk.completed_at.lock().unwrap().get_or_insert(Instant::now());
+                        if interrupted { serde_json::json!({ "dropped": true }) } else { serde_json::json!({}) }
                     }
                     "harness.fail" => {
                         desk.fails.fetch_add(1, Ordering::SeqCst);
@@ -2321,9 +2348,39 @@ mod stream_loop_tests {
             let gone = g.gone.lock().unwrap().expect("the model request was never closed: it read on after the drop");
             assert!(gone >= interrupted, "closed before the interruption");
             assert!(gone - interrupted < Duration::from_secs(3), "closed {:?} after the drop", gone - interrupted);
-            assert_eq!(desk.completes.load(Ordering::SeqCst), 0, "a dropped turn was completed");
-            assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
+            assert_closed_once_after(&desk, interrupted);
+            assert!(desk.pieces.lock().unwrap().is_empty(), "text was sent on a dropped turn");
             assert!(said.is_empty(), "a dropped turn's answer was recorded: {said:?}");
+        });
+    }
+
+    /// E.VOICE3: the turn was closed with exactly one `complete`, after the drop, and never failed.
+    fn assert_closed_once_after(desk: &Desk, interrupted: Instant) {
+        assert_eq!(desk.completes.load(Ordering::SeqCst), 1, "a dropped turn was not closed exactly once");
+        let closed = desk.completed_at.lock().unwrap().expect("closed");
+        assert!(closed >= interrupted, "closed before the drop: that was a delivery, not a close");
+        assert_eq!(desk.fails.load(Ordering::SeqCst), 0, "a dropped turn was failed");
+    }
+
+    /// E.VOICE3, the streamed path: the desktop drops the turn while its sentences arrive. The
+    /// segment chunk is what sees `dropped`; the turn is closed once and nothing more is sent.
+    #[test]
+    fn a_turn_dropped_mid_answer_is_closed_once_and_sends_nothing_more() {
+        runtime().block_on(async {
+            let mut tokens: Vec<&str> = Vec::new();
+            for _ in 0..30 {
+                tokens.extend(["One ", "more ", "line. "]);
+            }
+            let g = gate(&tokens, 150);
+            let (desk, said) = one_turn("midanswer", "voice", Some(Duration::from_millis(3000)), g.clone(), Duration::from_secs(16)).await;
+            let interrupted = desk.interrupted.lock().unwrap().expect("interrupted");
+            let pieces = desk.pieces.lock().unwrap().clone();
+            assert!(pieces.iter().any(|(at, _)| *at < interrupted), "no sentence was streamed before the drop: the test shows nothing");
+            let after: Vec<_> = pieces.iter().filter(|(at, _)| *at >= interrupted).collect();
+            assert!(after.len() <= 1, "text went on after the drop: {after:?}");
+            assert_closed_once_after(&desk, interrupted);
+            assert!(said.is_empty(), "a dropped turn's answer was recorded: {said:?}");
+            assert!(g.gone.lock().unwrap().is_some(), "the model request was never closed");
         });
     }
 

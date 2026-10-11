@@ -16313,3 +16313,62 @@ A spoken sentence cannot be taken back, and the Lens appends chunks. So the rule
 Also seen: yantrik-ml's `parse_api_tool_calls` drops an Ollama tool call that has no `id`, on both paths. That is pre-existing and unchanged here; current Ollama sends one.
 
 **Ships with:** the yantrik-ml change must be present in the sibling `yantrik-companion` checkout for this branch to build.
+
+## E.PROV2 — PREREG: the Mind takes "Use Yantrik models" from the OS gateway (yantrik-os #675 / #673)
+
+**Why:** #675 lets a person point any mind at the OS's local model gateway (127.0.0.1:7460, OpenAI-shaped). The model is the one picked in the ask bar, resolved per request by the gateway. Consent for private context is applied there per AI account (consent.rs):
+- an account is Off until the person agrees;
+- free tiers that train on prompts are never shared;
+- local and LAN accounts are shared;
+- Private mode stays local-only.
+
+The OS hands the Mind `POST /provider {source: "yantrik-gateway", provider: "yantrik-gateway", base_url, model: "picked", api_key, private_context: true}`, and reverts it with `{source, remove: true}`. Today's /provider refuses this (it takes only ollama, nanogpt, ollama-cloud and minimax), so "Use Yantrik models" fails for the Mind. Agreed with 22 on 11 Oct.
+
+**Two facts that shape the build:**
+1. **The gateway is not owned hardware.** It forwards to cloud accounts. If it were written as the Mind's local private lane (`YM_LOCAL_OLLAMA_URL`, meaning "owned hardware, fail closed, never escalates"), the Mind would count cloud-forwarded calls as served at home. So it is its own provider.
+2. **The private gate allows a chain when any one link is cleared.** `scope_allows` matches the cleared names as substrings of the WHOLE chain label. So "yantrik-gateway -> nanogpt" with only the gateway cleared would let a gateway failure carry private context on to nanogpt, which the person never cleared. The gateway therefore runs ALONE: no Mind-side cloud chain behind it. The gateway does its own account routing.
+   - This is a property of the gate for every chain. I have not checked whether any live configuration has such a chain; it is recorded here as a finding to check, not a measured leak.
+
+**What is built:**
+1. **/provider.** `provider: "yantrik-gateway"` is accepted only when `base_url` is http to a loopback IP (127.0.0.0/8 or ::1). It writes:
+   - `YM_GATEWAY_URL`;
+   - `YM_GATEWAY_KEY` (`api_key`, accepted as an alias of `key`, never echoed);
+   - `YM_PRIMARY_BRAIN=yantrik-gateway:<model>` (default `picked`);
+   - `yantrik-gateway` added to `YM_PRIVATE_PROVIDERS` when `private_context` is true, recorded as consent delegated to the gateway's per-account choice. It is removed when `private_context` is false.
+
+   Before the first take, the lines it changes (`YM_PRIMARY_BRAIN`, `YM_PRIVATE_PROVIDERS`) are kept in a 0600 sidecar beside the settings file. `{remove: true}` restores them exactly (a line that was absent is deleted), drops the `YM_GATEWAY_*` lines and deletes the sidecar. A second take refreshes the token and keeps the first sidecar.
+2. **mind-inference.**
+   - `backend_from_spec("yantrik-gateway[:model]")` builds an OpenAI-compatible backend from `YM_GATEWAY_URL` and `YM_GATEWAY_KEY`, and re-checks loopback at build time. A non-loopback URL builds nothing and says why.
+   - `default_chain_from_env` returns the gateway ALONE when it is the primary brain.
+   - A configured local lane (`YM_LOCAL_OLLAMA_URL`) is still attached by `main` as the dedicated private lane, so a person with a home model keeps private turns there, stricter than the delegation.
+3. **What the person is told.** A failed call to the gateway is said in its contract's terms rather than as a bare status:
+   - 401: access withdrawn; choose Use Yantrik models again in Settings → Harnesses;
+   - 403: private context is not shared with that account; set up a private lane or allow sharing in AI accounts;
+   - 404: no model is picked for this mind yet; pick one in the ask bar.
+
+   These sentences are written in the Mind's code. yantrik-ml turns an error status into an error with no body, so the gateway's own body does not reach the Mind.
+
+**Not in scope:**
+- Automatically dropping the provider on 401 (the sentence says what to do).
+- Showing the gateway's 403 body.
+- Fixing the chain-label gate for other chains (a separate entry once its reach is measured).
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a non-loopback, https or hostname `base_url` is refused, and the settings file is unchanged byte for byte;
+  - a take writes exactly the lines above, and the key is never in the reply;
+  - `private_context` true adds `yantrik-gateway` to `YM_PRIVATE_PROVIDERS`, and false removes it;
+  - take then remove restores the settings file byte for byte, for a file that had `YM_PRIMARY_BRAIN`/`YM_PRIVATE_PROVIDERS` and for one that had neither;
+  - a second take keeps the first backup;
+  - `default_chain_from_env` with the gateway primary and other cloud keys present builds the gateway alone;
+  - `backend_from_spec` refuses a non-loopback `YM_GATEWAY_URL`;
+  - a Private-scope call with no local lane is served by the gateway when cleared and refused when not;
+  - each of the 401, 403 and 404 sentences.
+  - On Linux: the real `/provider` route under the person's uid, against a fake gateway, takes the offer, and the Mind's next turn reaches the fake gateway with the bearer token and the model `picked`.
+- K2, a mutant survives:
+  - the loopback check removed;
+  - the chain built with cloud links behind the gateway;
+  - the private list not updated;
+  - the remove path not restoring;
+  - the backup overwritten on a second take.
+- K3: the suite or Linux staging fails.

@@ -19014,6 +19014,54 @@ mod unreachable_model_is_named {
         assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
         assert!(reply.contains("Connection refused"), "the cause is missing: {reply}");
     }
+
+    /// E.QUOTA1: Ollama Cloud's answer once the week's allowance is spent, as yantrik-ml now
+    /// reports it. `first_ok` lets the first call through as a tool call, so the turn reaches compose.
+    struct Spent {
+        calls: std::sync::atomic::AtomicUsize,
+        first_ok: bool,
+    }
+    impl LLMBackend for Spent {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, _t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.first_ok && n == 0 {
+                return ScriptedLLM::new(r#"{"tool": "recall", "args": {"query": "what time it is"}}"#).chat(&[], &GenerationConfig::default(), None);
+            }
+            Err(anyhow::anyhow!("http status: 429: You reached your Pro weekly limit. Max is $100/month for $300 of usage (ref: 144bb863)")
+                .context("OpenAI-compatible API request to https://ollama.com/v1/chat/completions failed"))
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "spent"
+        }
+    }
+
+    const WEEK_SPENT: &str = "Ollama Cloud has reached this week's limit for this account. It didn't say when it comes back.";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spent_allowance_is_said_plainly_at_the_first_step() {
+        let pool = InferencePool::new(Arc::new(Spent { calls: Default::default(), first_ok: false }) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud");
+        let t0 = std::time::Instant::now();
+        let reply = reply_from(pool).await;
+        assert_eq!(reply, WEEK_SPENT);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", t0.elapsed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spent_allowance_mid_turn_is_said_plainly_at_compose() {
+        // The private lane serves compose (an uncleared cloud is refused before any call), so the
+        // spent allowance is met where compose actually asks.
+        let spent: Arc<dyn LLMBackend> = Arc::new(Spent { calls: Default::default(), first_ok: true });
+        let pool = InferencePool::new(Arc::clone(&spent), 1).with_provider("ollama-cloud").with_private_backend(spent, "ollama-cloud");
+        let reply = reply_from(pool).await;
+        assert!(reply.starts_with(WEEK_SPENT), "{reply}");
+        assert!(!reply.contains("couldn't think") && !reply.contains('$') && !reply.contains("ref:"), "{reply}");
+    }
 }
 
 // ── E.ERASE1 Phase C: forgetting from chat ─────────────────────────────────────────────────────

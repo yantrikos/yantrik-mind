@@ -16525,3 +16525,45 @@ A dropped `complete` itself needs nothing more.
   - `person_sentence` not used at the first step;
   - `person_sentence` not used at compose.
 - K3: either suite or Linux staging fails.
+
+## E.QUOTA1 — RESULT: a spent allowance is said in 0.3 s, not waited on; 6 mutants killed
+
+**Built:**
+- **yantrik-ml, yantrik-companion#3** (7438513, stacked on #2).
+  - `GenericOpenAIBackend`'s two chat request paths use an agent with `http_status_as_error(false)`.
+  - A non-2xx answer becomes `http status: N[ (retry after X)][: <what the server said>]`. The words are `error.message`, `error` or `message`, else the text: one line, at most 300 characters, from at most 4 KiB.
+  - The request's context line is kept. The health probe is unchanged.
+- **mind-inference.**
+  - `used_up` (a 429 with allowance words), `provider_named` (from the request's address), `limit_sentence` (written here; the period read off the server's words, a Retry-After rendered in hours or minutes, else "It didn't say when it comes back.").
+  - `retry_wait` gives up at once on `used_up`.
+  - `Said` is a typed context, with `person_sentence`. `provider_said` replaces E.PROV2's `gateway_said`: the gateway's sentences (gateway route only) and the limit sentence (any route) both ride as `Said`.
+- **mind-conversation.** The first step's "(couldn't think just now: ...)" and the compose failure's code-written line show `person_sentence` when there is one. Compose still carries no provider words and still appends the actions done.
+
+**K1 held:**
+- yantrik-ml: 3 tests:
+  - the recorded 429 on both paths;
+  - Retry-After, and a 502 HTML page as one line of at most 300 characters;
+  - a 200 unchanged.
+- mind-inference: 5 tests:
+  - allowance against rate limit, including OpenAI's `insufficient_quota` and its RPM rate limit, and a bare 429;
+  - `retry_wait`;
+  - the exact sentences, quoting nothing (no `$`, `ref:` or billing link);
+  - `Said` for the gateway and for the limit only;
+  - a pool call to a local server answering the recorded 429 returns in under 2 s with the sentence.
+- mind-conversation: 2 tests: the first step says exactly the sentence; a turn that reaches compose (a tool call, then the 429, with compose on a private lane) starts with it and carries no provider words.
+- Linux (staging): mind-inference 12, mind-conversation 9 and mind-core 29 tests pass.
+- **Live K3** (`live_spent_allowance_is_said_at_once`, `#[ignore]`): staging's real Ollama Cloud key, whose account's Pro weekly limit is still spent, through the real pool. The answer was "Ollama Cloud has reached this week's limit for this account. It didn't say when it comes back." **in 289 ms**. Before this, the same call waited up to a minute, retried, on every model call of the turn.
+- Staging restored afterwards.
+
+**K2 held: 6 mutants killed.**
+- the body not read (yantrik-ml);
+- `used_up` always false;
+- `retry_wait` ignoring `used_up` (the pool test then waited the full 60 s, the reported behaviour);
+- the first step ignoring the sentence;
+- compose ignoring the sentence.
+
+**K3 held:** full suite (Windows) 2447 passed, 0 failed.
+
+**Seen, not changed:**
+- The ChainBackend fails over to its next link on any error, so a spent link costs one fast failure per turn rather than being skipped until it resets.
+- The Anthropic and Gemini clients still drop error bodies.

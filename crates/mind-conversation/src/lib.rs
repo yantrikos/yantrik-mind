@@ -13722,7 +13722,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 // E.MSG3: `{e:#}`, the whole chain -- `{e}` printed only the outer context, the same
                 // words for a refused connection, a timeout and a 410 (yantrik-os #166).
-                Err(e) => return Ok(format!("(couldn't think just now: {e:#})")),
+                // E.QUOTA1: a failure with a sentence for the person (a spent allowance, the
+                // gateway's contract) says that sentence alone; anything else as before.
+                Err(e) => {
+                    return Ok(mind_inference::person_sentence(&e)
+                        .unwrap_or_else(|| format!("(couldn't think just now: {e:#})")))
+                }
             };
             // Split the model's reasoning off the reply and STREAM IT. The reasoning is the most
             // interesting thing happening during a 30-second local-model turn and it used to be
@@ -14822,11 +14827,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // the honest-line handling below, since nothing needed protecting.
                 // E.CFG2: "unreachable" only when there is something to reach.
                 // E.ARENA1-F53: the sentence that is true of THIS lane, then what was already done.
-                let mut reply = compose_failure_reply(
-                    self.inference.has_private_lane(),
-                    self.inference.private_lane_configured(),
-                )
-                .to_string();
+                // E.QUOTA1: a sentence this code wrote for the failure (a spent allowance) is still a
+                // constant in what it may carry -- the provider's own words never reach it.
+                let mut reply = mind_inference::person_sentence(&e).unwrap_or_else(|| {
+                    compose_failure_reply(
+                        self.inference.has_private_lane(),
+                        self.inference.private_lane_configured(),
+                    )
+                    .to_string()
+                });
                 reply.push_str(&actions_done_line(&made));
                 let _ = self
                     .memory

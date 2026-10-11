@@ -836,7 +836,7 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
-                return Err(gateway_said(&provider_for_lane, e));
+                return Err(provider_said(&provider_for_lane, e));
             }
         };
         // E.OBS1c: "served by" is a POST-SUCCESS fact. A chain notes the link that answered; a
@@ -1047,7 +1047,7 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
-                return Err(gateway_said(&provider_for_lane, e));
+                return Err(provider_said(&provider_for_lane, e));
             }
         };
         // Same post-success rule as the plain path (E.OBS1c): a route is not a server.
@@ -2354,13 +2354,90 @@ pub fn gateway_sentence(detail: &str) -> Option<&'static str> {
     }
 }
 
-/// E.PROV2: `e` with the gateway's sentence in front, when `route` is the gateway.
-fn gateway_said(route: &str, e: anyhow::Error) -> anyhow::Error {
-    if !route.starts_with(GATEWAY_PROVIDER) {
-        return e;
+/// A failed call said to the person in words this code wrote (E.PROV2, E.QUOTA1). Typed, so the
+/// places that tell the person a call failed can show it alone -- never the provider's own text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Said(pub String);
+
+impl std::fmt::Display for Said {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
-    match gateway_sentence(&format!("{e:#}")) {
-        Some(s) => e.context(s),
+}
+
+/// The sentence for the person, when a failed call has one.
+pub fn person_sentence(e: &anyhow::Error) -> Option<String> {
+    e.downcast_ref::<Said>().map(|s| s.0.clone())
+}
+
+/// E.QUOTA1: a 429 that says an ALLOWANCE is spent -- the week's, the month's, a quota, the
+/// credits -- rather than "slow down". Ollama Cloud, 2026-10-11: "You reached your Pro weekly
+/// limit." Waiting a minute on that, call after call, is what the person watched as "thinking..."
+/// with no end. A rate limit ("Rate limit reached ... requests per min") is not this.
+pub fn used_up(detail: &str) -> bool {
+    const SPENT: [&str; 10] = [
+        "weekly limit", "monthly limit", "daily limit", "usage limit", "quota", "billing", "credits",
+        "credit balance", "spending limit", "plan limit",
+    ];
+    let d = detail.to_lowercase();
+    d.contains("http status: 429") && SPENT.iter().any(|w| d.contains(w))
+}
+
+/// E.QUOTA1: who the failed request went to, named the way a person knows it -- read off the address
+/// in the error, which every client puts there (`... request to https://ollama.com/v1/... failed`).
+fn provider_named(detail: &str) -> &'static str {
+    const BY_HOST: [(&str, &str); 7] = [
+        ("ollama.com", "Ollama Cloud"),
+        ("nano-gpt.com", "NanoGPT"),
+        ("minimax.io", "MiniMax"),
+        ("nvidia.com", "NVIDIA NIM"),
+        ("groq.com", "Groq"),
+        ("openrouter.ai", "OpenRouter"),
+        ("anthropic.com", "Anthropic"),
+    ];
+    BY_HOST.iter().find(|(host, _)| detail.contains(host)).map_or("The model provider", |(_, name)| name)
+}
+
+/// E.QUOTA1: the sentence for a spent allowance. Written here: the provider's own words are read for
+/// the period only, never shown (they carry prices, links and a reference id).
+pub fn limit_sentence(detail: &str) -> Option<String> {
+    if !used_up(detail) {
+        return None;
+    }
+    let d = detail.to_lowercase();
+    let which = if d.contains("weekly") {
+        "this week's limit"
+    } else if d.contains("monthly") {
+        "this month's limit"
+    } else if d.contains("daily") {
+        "today's limit"
+    } else {
+        "its usage limit"
+    };
+    let when = detail
+        .split("(retry after ")
+        .nth(1)
+        .and_then(|r| r.split(')').next())
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty() && r.len() <= 40)
+        .map(|r| match r.parse::<u64>() {
+            Ok(secs) if secs >= 3600 => format!("It says to try again in about {} hours.", (secs + 1800) / 3600),
+            Ok(secs) if secs >= 60 => format!("It says to try again in about {} minutes.", (secs + 30) / 60),
+            Ok(_) => "It says to try again in a minute.".to_string(),
+            Err(_) => format!("It says to try again after {r}."),
+        })
+        .unwrap_or_else(|| "It didn't say when it comes back.".to_string());
+    Some(format!("{} has reached {which} for this account. {when}", provider_named(detail)))
+}
+
+/// `e` with the person's sentence in front when there is one: the gateway's contract (E.PROV2,
+/// only when `route` is the gateway), or a spent allowance (E.QUOTA1, any provider).
+fn provider_said(route: &str, e: anyhow::Error) -> anyhow::Error {
+    let detail = format!("{e:#}");
+    let said = if route.starts_with(GATEWAY_PROVIDER) { gateway_sentence(&detail).map(str::to_string) } else { None }
+        .or_else(|| limit_sentence(&detail));
+    match said {
+        Some(s) => e.context(Said(s)),
         None => e,
     }
 }
@@ -2991,6 +3068,10 @@ pub fn brain_pool_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
 /// waits with growing gaps for up to a minute in total — the time a slot actually takes to free.
 pub(crate) fn retry_wait(detail: &str, attempt: u32, waited_ms: u64) -> Option<u64> {
     const BUSY_PATIENCE_MS: u64 = 60_000;
+    // E.QUOTA1: a spent allowance is not a full server; no wait frees it.
+    if used_up(detail) {
+        return None;
+    }
     if detail.contains("429") {
         if waited_ms >= BUSY_PATIENCE_MS {
             return None;
@@ -5763,9 +5844,9 @@ mod gateway_tests {
         assert!(gateway_sentence("http status: 403").unwrap().contains("AI accounts"));
         assert!(gateway_sentence("http status: 404").unwrap().contains("ask bar"));
         assert_eq!(gateway_sentence("http status: 500"), None);
-        let said = format!("{:#}", gateway_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 403")));
+        let said = format!("{:#}", provider_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 403")));
         assert!(said.starts_with("the account behind the picked model") && said.contains("403"), "{said}");
-        let other = format!("{:#}", gateway_said("nanogpt:deepseek", anyhow::anyhow!("http status: 403")));
+        let other = format!("{:#}", provider_said("nanogpt:deepseek", anyhow::anyhow!("http status: 403")));
         assert_eq!(other, "http status: 403", "another provider's 403 is not the gateway's");
     }
 
@@ -5797,5 +5878,111 @@ mod gateway_tests {
         }
         assert!(control.contains("minimax"), "the control did not see the cloud key: {control}");
         assert_eq!(label, "yantrik-gateway:picked", "a cloud link runs behind the gateway");
+    }
+}
+
+/// E.QUOTA1: a spent allowance is said at once, in words written here, and never waited on.
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+
+    /// The error text yantrik-ml makes of Ollama Cloud's answer on 2026-10-11 (E.QUOTA1's body).
+    const OLLAMA_WEEKLY: &str = "OpenAI-compatible API request to https://ollama.com/v1/chat/completions failed: http status: 429: You reached your Pro weekly limit. Max is $100/month for $300 of usage, with no 5-hour or weekly caps: https://ollama.com/settings/billing (ref: 144bb863-fdc4-4827-83f0-b72167486392)";
+
+    #[test]
+    fn a_spent_allowance_is_told_from_a_rate_limit() {
+        assert!(used_up(OLLAMA_WEEKLY));
+        assert!(used_up("request to https://api.openai.com/v1 failed: http status: 429: You exceeded your current quota, please check your plan and billing details."));
+        assert!(!used_up("http status: 429: Rate limit reached for gpt-4 in organization org-x on requests per min (RPM): Limit 500"), "a rate limit");
+        assert!(!used_up("Ollama API request failed: http status: 429"), "a bare 429: the busy gateway");
+        assert!(!used_up("http status: 403: your quota page is at ..."), "not a 429");
+    }
+
+    #[test]
+    fn a_spent_allowance_is_not_waited_on_and_a_busy_server_still_is() {
+        assert_eq!(retry_wait(OLLAMA_WEEKLY, 0, 0), None);
+        assert!(retry_wait("Ollama API request failed: http status: 429", 0, 0).is_some(), "the busy local gateway keeps its minute");
+    }
+
+    #[test]
+    fn the_sentence_names_the_provider_and_the_period_and_quotes_nothing() {
+        let s = limit_sentence(OLLAMA_WEEKLY).unwrap();
+        assert_eq!(s, "Ollama Cloud has reached this week's limit for this account. It didn't say when it comes back.");
+        assert!(!s.contains('$') && !s.contains("ref:") && !s.contains("billing"));
+        let later = limit_sentence("request to https://nano-gpt.com/api/v1 failed: http status: 429 (retry after 7200): monthly limit reached").unwrap();
+        assert_eq!(later, "NanoGPT has reached this month's limit for this account. It says to try again in about 2 hours.");
+        assert_eq!(limit_sentence("Ollama API request failed: http status: 429"), None);
+    }
+
+    #[test]
+    fn the_sentence_rides_as_a_typed_said_and_only_on_what_it_describes() {
+        let e = provider_said("ollama-cloud:deepseek-v4.1-flash", anyhow::anyhow!(OLLAMA_WEEKLY));
+        assert_eq!(person_sentence(&e).as_deref(), Some("Ollama Cloud has reached this week's limit for this account. It didn't say when it comes back."));
+        assert_eq!(person_sentence(&provider_said("ollama-cloud:x", anyhow::anyhow!("http status: 500"))), None);
+        let gw = provider_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 404"));
+        assert!(person_sentence(&gw).unwrap().contains("ask bar"), "the gateway's sentences are Said too");
+    }
+
+    /// Through the pool, against a server answering the recorded 429: the call gives up at once.
+    #[tokio::test]
+    async fn a_pool_call_to_a_spent_allowance_returns_at_once_with_the_sentence() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let mut sink = vec![0u8; len];
+                let _ = reader.read_exact(&mut sink);
+                let body = r#"{"error":{"message":"You reached your Pro weekly limit. Max is $100/month (ref: abc)","type":"api_error"}}"#;
+                let _ = write!(stream, "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        // Named for the provider so the sentence can say who: the address carries ollama.com in
+        // the real thing; here the pool's route label stands in, and the detail names the host.
+        let be = yantrik_ml::GenericOpenAIBackend::for_provider("openai", format!("http://127.0.0.1:{port}/v1"), Some("k".into()), "m");
+        let pool = InferencePool::new(Arc::new(be) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud:deepseek-v4.1-flash");
+        let t0 = std::time::Instant::now();
+        let e = pool
+            .chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Public, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2), "waited {:?} on a spent allowance", t0.elapsed());
+        let said = person_sentence(&e).expect("a sentence for the person");
+        assert!(said.ends_with("has reached this week's limit for this account. It didn't say when it comes back."), "{said}");
+        assert!(!said.contains('$') && !said.contains("ref"), "{said}");
+    }
+
+    /// K3 by hand, while an account's allowance is spent: the real provider through the real pool.
+    /// `YM_QUOTA_LIVE_SPEC=ollama-cloud:deepseek-v4.1-flash cargo test -p mind-inference --lib -- --ignored live_spent`
+    #[tokio::test]
+    #[ignore]
+    async fn live_spent_allowance_is_said_at_once() {
+        let spec = std::env::var("YM_QUOTA_LIVE_SPEC").expect("YM_QUOTA_LIVE_SPEC");
+        let be = backend_from_spec(&spec).expect("the provider's key is set");
+        let pool = InferencePool::new(be, 1).with_provider(&spec);
+        let t0 = std::time::Instant::now();
+        let e = pool
+            .chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Public, Vec::new())
+            .await
+            .unwrap_err();
+        let said = person_sentence(&e);
+        eprintln!("[live] {:?} after {:?}; sentence: {said:?}", format!("{e:#}").chars().take(160).collect::<String>(), t0.elapsed());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", t0.elapsed());
+        assert!(said.is_some_and(|s| s.contains("has reached")), "no sentence for the person");
     }
 }

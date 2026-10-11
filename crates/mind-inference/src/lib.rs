@@ -836,7 +836,7 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
-                return Err(e);
+                return Err(gateway_said(&provider_for_lane, e));
             }
         };
         // E.OBS1c: "served by" is a POST-SUCCESS fact. A chain notes the link that answered; a
@@ -1047,7 +1047,7 @@ impl InferencePool {
                     opportunity,
                     tokens: None,
                 });
-                return Err(e);
+                return Err(gateway_said(&provider_for_lane, e));
             }
         };
         // Same post-success rule as the plain path (E.OBS1c): a route is not a server.
@@ -2297,8 +2297,85 @@ impl LLMBackend for StrictOpenAiBackend {
     }
 }
 
+/// E.PROV2: the OS's local model gateway (yantrik-os #675), named in a spec as
+/// `yantrik-gateway[:model]`. Its address and the Mind's token come from the person's
+/// "Use Yantrik models" (`YM_GATEWAY_URL`, `YM_GATEWAY_KEY`, written by `POST /provider`).
+pub const GATEWAY_PROVIDER: &str = "yantrik-gateway";
+
+/// E.PROV2: plain http to a loopback IP (127.0.0.0/8 or ::1) -- the only address the Mind takes the
+/// gateway at. A hostname (even `localhost`), https, or credentials in the address are refused.
+pub fn is_loopback_http(url: &str) -> bool {
+    let Some(rest) = url.trim().strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((h, tail)) if tail.is_empty() || tail.starts_with(':') => h,
+            _ => return false,
+        },
+        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    };
+    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// E.PROV2: the gateway as a backend, from `get` (the process env in use). OpenAI-shaped, the
+/// Mind's token as the bearer; `model` defaults to `picked` (whatever the person picks in the ask
+/// bar, resolved by the gateway per request). The address is checked again here: a settings file
+/// edited by hand cannot point the "gateway" anywhere but this machine.
+pub fn gateway_backend_from(model: &str, get: &dyn Fn(&str) -> Option<String>) -> Result<Arc<dyn LLMBackend>, String> {
+    let url = get("YM_GATEWAY_URL").map(|u| u.trim().trim_end_matches('/').to_string()).unwrap_or_default();
+    if !is_loopback_http(&url) {
+        return Err("the Yantrik models gateway must be at a loopback address (http://127.0.0.1:...); not using it".into());
+    }
+    let key = get("YM_GATEWAY_KEY").map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        return Err("the Yantrik models gateway has no token for this Mind; not using it".into());
+    };
+    let model = if model.trim().is_empty() { "picked" } else { model.trim() };
+    Ok(Arc::new(yantrik_ml::GenericOpenAIBackend::for_provider("openai", url, Some(key), model)) as Arc<dyn LLMBackend>)
+}
+
+/// E.PROV2: a failed call to the gateway, said in the gateway's own contract (yantrik-os #675)
+/// rather than as a bare status. yantrik-ml turns an error status into an error without its body,
+/// so the gateway's own sentence never arrives; these are written here, from that contract.
+pub fn gateway_sentence(detail: &str) -> Option<&'static str> {
+    if detail.contains("status: 401") {
+        Some("Yantrik models access for this Mind was withdrawn -- choose Use Yantrik models again in Settings \u{2192} Harnesses")
+    } else if detail.contains("status: 403") {
+        Some("the account behind the picked model does not take private context -- set up a private lane, or allow sharing with it in Settings \u{2192} AI & Intelligence \u{2192} AI accounts")
+    } else if detail.contains("status: 404") {
+        Some("no model is picked for this mind yet -- pick one in the ask bar")
+    } else {
+        None
+    }
+}
+
+/// E.PROV2: `e` with the gateway's sentence in front, when `route` is the gateway.
+fn gateway_said(route: &str, e: anyhow::Error) -> anyhow::Error {
+    if !route.starts_with(GATEWAY_PROVIDER) {
+        return e;
+    }
+    match gateway_sentence(&format!("{e:#}")) {
+        Some(s) => e.context(s),
+        None => e,
+    }
+}
+
 pub fn backend_from_spec(spec: &str) -> Option<Arc<dyn LLMBackend>> {
     let (provider, model) = split_spec(spec);
+    if provider == GATEWAY_PROVIDER {
+        return match gateway_backend_from(model, &|name| std::env::var(name).ok()) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("[brain] {e}");
+                None
+            }
+        };
+    }
     let (base, key_env, default_model) = provider_catalog(provider)?;
     let key = configured_api_key(key_env)?;
     // Containment hook (E.CB2-N): `YM_PROVIDER_BASE_URL_<PROVIDER>` re-points one provider at a
@@ -2711,6 +2788,17 @@ fn same_model(a: &str, b: &str) -> bool {
 /// behavior (cloud primary, local emergency). `None` if neither a local endpoint nor a cloud key is
 /// set. Models via `YM_LOCAL_OLLAMA_MODEL` / `YM_MODEL` / `YM_OLLAMA_MODEL` / `YM_MINIMAX_MODEL`.
 pub fn default_chain_from_env() -> Option<(Arc<dyn LLMBackend>, String)> {
+    // E.PROV2: the person chose Yantrik models -- the gateway is the brain ALONE. The private gate
+    // clears a chain when ANY link's name is cleared (`scope_allows` matches the whole label), so
+    // a cloud link behind a cleared gateway would carry private context the person never cleared
+    // to that provider. The gateway routes between accounts itself, under their consent. A local
+    // lane, if any, is still the dedicated private lane (`main`).
+    if let Some(spec) = primary_brain_spec(|name| std::env::var(name).ok()).filter(|s| split_spec(s).0 == GATEWAY_PROVIDER) {
+        match backend_from_spec(&spec) {
+            Some(be) => return Some((be, spec)),
+            None => eprintln!("[brain] {spec} could not be built; using the rest of this Mind's settings"),
+        }
+    }
     let local = local_backend_from_env();
     let local_primary = local.is_some()
         && std::env::var("YM_LOCAL_ROLE")
@@ -5625,5 +5713,89 @@ mod voice2_tests {
             .await
             .unwrap();
         assert!(!q.saw_flag.load(Ordering::SeqCst));
+    }
+}
+
+/// E.PROV2: the OS gateway as this Mind's brain -- loopback only, alone, and said in its own terms.
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_http_to_a_loopback_ip_is_the_gateway() {
+        for ok in ["http://127.0.0.1:7460/v1", "http://127.0.0.1:7460", "http://127.8.9.10/v1", "http://[::1]:7460/v1", "  http://127.0.0.1:7460/v1/  "] {
+            assert!(is_loopback_http(ok), "{ok}");
+        }
+        for no in [
+            "https://127.0.0.1:7460/v1",
+            "http://localhost:7460/v1",
+            "http://192.168.4.35:7460/v1",
+            "http://127.0.0.1.evil.example/v1",
+            "http://user@127.0.0.1:7460/v1",
+            "http://evil.example@127.0.0.1/v1",
+            "http://[::1]evil/v1",
+            "127.0.0.1:7460",
+            "",
+        ] {
+            assert!(!is_loopback_http(no), "{no}");
+        }
+    }
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn the_gateway_is_built_only_at_a_loopback_address_and_with_a_token() {
+        let good = env(&[("YM_GATEWAY_URL", "http://127.0.0.1:7460/v1"), ("YM_GATEWAY_KEY", "ygw-0123456789")]);
+        let b = gateway_backend_from("", &good).expect("built");
+        assert_eq!(b.model_id(), "picked", "the ask bar's pick by default");
+        assert_eq!(gateway_backend_from("acct/model-x", &good).unwrap().model_id(), "acct/model-x");
+        let far = env(&[("YM_GATEWAY_URL", "http://203.0.113.9:7460/v1"), ("YM_GATEWAY_KEY", "ygw-0123456789")]);
+        assert!(gateway_backend_from("", &far).is_err(), "a hand-edited address off this machine");
+        let keyless = env(&[("YM_GATEWAY_URL", "http://127.0.0.1:7460/v1"), ("YM_GATEWAY_KEY", "  ")]);
+        assert!(gateway_backend_from("", &keyless).is_err());
+    }
+
+    #[test]
+    fn a_gateway_failure_is_said_in_its_own_terms_and_nothing_else_is_touched() {
+        assert!(gateway_sentence("request failed: http status: 401").unwrap().contains("withdrawn"));
+        assert!(gateway_sentence("http status: 403").unwrap().contains("AI accounts"));
+        assert!(gateway_sentence("http status: 404").unwrap().contains("ask bar"));
+        assert_eq!(gateway_sentence("http status: 500"), None);
+        let said = format!("{:#}", gateway_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 403")));
+        assert!(said.starts_with("the account behind the picked model") && said.contains("403"), "{said}");
+        let other = format!("{:#}", gateway_said("nanogpt:deepseek", anyhow::anyhow!("http status: 403")));
+        assert_eq!(other, "http status: 403", "another provider's 403 is not the gateway's");
+    }
+
+    #[test]
+    fn the_cleared_gateway_serves_private_context_and_an_uncleared_one_does_not() {
+        assert!(scope_allows(PrivacyScope::Private, "yantrik-gateway:picked", "", "yantrik-gateway"));
+        assert!(!scope_allows(PrivacyScope::Private, "yantrik-gateway:picked", "", "nanogpt"));
+    }
+
+    /// The gateway primary is the brain ALONE, even with a cloud key in the environment. Env names
+    /// no other test sets; restored after.
+    #[test]
+    fn with_the_gateway_primary_no_cloud_link_runs_behind_it() {
+        let names = ["YM_PRIMARY_BRAIN", "YM_GATEWAY_URL", "YM_GATEWAY_KEY", "MINIMAX_API_KEY"];
+        let saved: Vec<_> = names.iter().map(|n| (n, std::env::var_os(n))).collect();
+        std::env::set_var("MINIMAX_API_KEY", "mm-test-key-123456");
+        std::env::set_var("YM_GATEWAY_URL", "http://127.0.0.1:7460/v1");
+        std::env::set_var("YM_GATEWAY_KEY", "ygw-0123456789");
+        // The control: without the gateway, the cloud key IS a link of the brain.
+        std::env::remove_var("YM_PRIMARY_BRAIN");
+        let (_, control) = default_chain_from_env().expect("a brain");
+        std::env::set_var("YM_PRIMARY_BRAIN", "yantrik-gateway:picked");
+        let (_, label) = default_chain_from_env().expect("a brain");
+        for (n, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(n, v),
+                None => std::env::remove_var(n),
+            }
+        }
+        assert!(control.contains("minimax"), "the control did not see the cloud key: {control}");
+        assert_eq!(label, "yantrik-gateway:picked", "a cloud link runs behind the gateway");
     }
 }

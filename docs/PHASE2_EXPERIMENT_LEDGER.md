@@ -16372,3 +16372,62 @@ The OS hands the Mind `POST /provider {source: "yantrik-gateway", provider: "yan
   - the remove path not restoring;
   - the backup overwritten on a second take.
 - K3: the suite or Linux staging fails.
+
+## E.PROV2 — RESULT: the Mind takes "Use Yantrik models" from this machine's gateway, alone, and puts back what it replaced; 7 mutants killed
+
+**Built:**
+- **mind-inference.**
+  - `GATEWAY_PROVIDER` (`yantrik-gateway`).
+  - `is_loopback_http`: plain http to 127.0.0.0/8 or ::1. Hostnames (`localhost` included), https, and credentials in the address are refused.
+  - `gateway_backend_from(model, get)`: OpenAI-shaped, the token as the bearer, model defaulting to `picked`. It re-checks the address, so a hand-edited settings file cannot point the gateway off this machine.
+  - `backend_from_spec` takes `yantrik-gateway[:model]`.
+  - `default_chain_from_env` returns the gateway ALONE when it is `YM_PRIMARY_BRAIN`; a failed build is logged and the rest of the settings are used.
+  - `gateway_said`, used by the tool-call and streaming-sink failure arms, puts the contract sentence in front of a 401, 403 or 404 when, and only when, the route is the gateway.
+- **mind-core provider_set.rs.**
+  - `ProviderSet` gains `source` and `remove`; `api_key` is an alias of `key`; `provider` may be absent on the gateway's revert.
+  - `take_gateway` writes `YM_GATEWAY_URL`, `YM_GATEWAY_KEY`, `YM_PRIMARY_BRAIN=yantrik-gateway:<model>`, and the private list (the gateway in or out per `private_context`, as delegated consent). It never touches `YM_LOCAL_OLLAMA_URL`.
+  - The first take keeps `YM_PRIMARY_BRAIN` and whether a private-list line existed in a 0600 `<settings>.pre-gateway`.
+  - `put_back` drops the gateway lines, restores the brain line (or removes it), takes the gateway out of the private list (removing a line the gateway created), and deletes the backup. Other providers' consents made in between are left as they are.
+  - `remove` is refused for any provider but the gateway.
+
+**Deviations from the prereg:**
+1. **The put-back.** The prereg said it would restore the private-list line exactly. It now only removes the gateway from that list, so a consent the person changed for another provider while the gateway was in use is not clobbered. Byte-for-byte restore still holds when nothing else changed (tested).
+2. **The "next turn reaches the gateway" check.** It runs at the backend, not as a full engine turn. The real route takes the OS's exact body from the person's uid, then the brain built from the file it wrote calls a fake gateway, which sees `Authorization: Bearer <token>` and `"model":"picked"`. A full turn would need `YM_PRIVATE_PROVIDERS` set process-wide inside a test binary that other privacy tests share. The gate's half is covered separately: a cleared gateway passes `scope_allows` for Private and an uncleared one does not, and the gateway-alone brain is pinned by its own env test.
+
+**K1 held:**
+- mind-core: 6 tests:
+  - refusals leave the file and the backup untouched and never quote the token;
+  - the take's exact lines, and consent following the flag;
+  - byte-for-byte take then put back, for a file with a brain and private list and for one with neither;
+  - a second take keeps the first backup;
+  - a put-back without a take drops only the gateway;
+  - the route and the brain calling the fake gateway.
+- mind-inference: 5 tests:
+  - the loopback grammar (5 accepted, 9 refused);
+  - the backend built only at loopback and with a token;
+  - the 401, 403 and 404 sentences, and none for another provider;
+  - the private gate;
+  - with the gateway primary and a MiniMax key present, the brain is `yantrik-gateway:picked` alone, while the control (no gateway) includes minimax.
+- Linux (staging, with the yantrik-companion branch checked out for the build and restored after): 23 mind-core tests (the provider, stream and voice tests, including the unix-only owner-only file) and 7 mind-inference tests pass.
+
+**K2 held: 7 mutants killed.**
+- the route's loopback check removed;
+- a cloud chain built behind the gateway;
+- the private list not updated;
+- the put-back not restoring the brain;
+- the backup overwritten on a second take;
+- the backend's loopback re-check removed;
+- the gateway sentence applied to every route.
+
+**K3 held:** full suite (Windows) 2439 passed, 0 failed. Staging was restored afterwards (yantrik-companion at 3203e2e, test checkout clean, `target/debug` removed); the service is active with one mind-core process.
+
+**Depends on the OS side (yantrik-os #675):**
+- the offer carries `provider: "yantrik-gateway"` (22, 11 Oct);
+- the Mind must not be wired from the Install button without the card (asked of 22);
+- the Mind's egress set already includes 7460.
+
+**Not yet:**
+- dropping the provider automatically on 401;
+- showing the gateway's own 403 body;
+- the chain-label gate for other chains (a separate finding, its reach unmeasured);
+- turn options (model, effort, attachments: #673), which the Mind still ignores.

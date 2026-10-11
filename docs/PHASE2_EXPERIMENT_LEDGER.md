@@ -16482,3 +16482,46 @@ A dropped `complete` itself needs nothing more.
 - The `deliver_after` close removed: 2 portable tests fail.
 
 **K3 held:** full suite (Windows) 2440 passed, 0 failed.
+
+## E.QUOTA1 — PREREG: a provider's used-up allowance is said at once, never waited on
+
+**Why:** 22's 520 batch, 11 Oct.
+- The Mind's Mind-answers check could not pass, because Ollama Cloud's Pro weekly limit for this account ran out at 10:03 CT.
+- The Mind treats every 429 as "the server is full": `retry_wait` waits with growing gaps for a minute per call (E.ARENA1-F9's patience, meant for a busy local gateway). The journal shows "transient model-endpoint error -- backing off 1000ms ... 15000ms", and the person watches "thinking..." with no end.
+- The body says why. Observed from staging (same account, 22:13 UTC): `429 {"error":{"message":"You reached your Pro weekly limit. Max is $100/month ... (ref: ...)"}}`, with no Retry-After.
+- The Mind never sees that body. yantrik-ml lets ureq turn an error status into `http status: 429` and drops the body.
+
+**What is built:**
+1. **yantrik-ml (yantrik-companion), `GenericOpenAIBackend`** (the OpenAI and native Ollama request paths).
+   - A non-2xx answer becomes an error that still begins `http status: N` (every existing matcher keeps working), followed by ` (retry after X)` when the server sent Retry-After and `: <what the server said>`.
+   - What the server said is `error.message`, `error` or `message` from a JSON body, else the raw body: one line, at most 300 characters, read from at most 4 KiB.
+   - The health probe and every other caller are unchanged.
+   - Stacked on yantrik-companion#2.
+2. **mind-inference.**
+   - `used_up(detail)`: a 429 whose words say an allowance is spent (weekly, monthly or daily limit, usage limit, quota, billing, credits, spending limit). A rate limit ("rate limit", requests per minute) is not.
+   - `retry_wait` gives up at once on `used_up`; a plain 429 keeps its minute.
+   - `limit_sentence(detail)` is written by code: "<Provider> has reached this week's limit for this account." (or month's, today's, its usage limit), then "It says to try again after X." from Retry-After, or "It didn't say when it comes back.".
+     - The provider is named from the request's address (ollama.com is Ollama Cloud; also NanoGPT, MiniMax, NVIDIA NIM, Groq, OpenRouter, Anthropic), else "The model provider".
+     - The server's own words are read only for the period, never shown.
+   - The E.PROV2 gateway sentences and this one become one typed `Said` context, and `person_sentence(&e)` returns it.
+3. **mind-conversation.** The two places a failed model call reaches the person use `person_sentence` when there is one:
+   - the first step's "(couldn't think just now: ...)";
+   - the compose failure's code-written line, which still carries no content and still appends the actions done.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **yantrik-ml:** a local server answering 429 with the recorded Ollama body yields an error containing `http status: 429` and `Pro weekly limit`; a Retry-After header shows as `(retry after 120)`; a 500 HTML page becomes one line of at most 300 characters; a 2xx answer is unchanged.
+  - **mind-inference:**
+    - `used_up` is true for the recorded Ollama body and for OpenAI's `insufficient_quota` sentence;
+    - `used_up` is false for OpenAI's "Rate limit reached ... requests per min" and for a bare `http status: 429`;
+    - `retry_wait` gives `None` for a used-up 429 and still waits for a plain one;
+    - the sentence names Ollama Cloud and "this week's" for the recorded body, carries the Retry-After when given, and never quotes the body's words (no "$100", no "ref:");
+    - a pool call to a fake 429 endpoint returns in under 2 s, not a minute.
+  - **mind-conversation:** a turn whose model answers the recorded 429 says the sentence, without "couldn't think just now" and without the body.
+- K2, a mutant survives:
+  - `used_up` always false;
+  - `retry_wait` ignoring `used_up`;
+  - the body not read in yantrik-ml;
+  - `person_sentence` not used at the first step;
+  - `person_sentence` not used at compose.
+- K3: either suite or Linux staging fails.

@@ -16526,7 +16526,7 @@ A dropped `complete` itself needs nothing more.
   - `person_sentence` not used at compose.
 - K3: either suite or Linux staging fails.
 
-## E.QUOTA1 — RESULT: a spent allowance is said in 0.3 s, not waited on; 6 mutants killed
+## E.QUOTA1 — RESULT: a spent allowance is said in 0.3 s, not waited on; 5 mutants killed
 
 **Built:**
 - **yantrik-ml, yantrik-companion#3** (7438513, stacked on #2).
@@ -16555,7 +16555,7 @@ A dropped `complete` itself needs nothing more.
 - **Live K3** (`live_spent_allowance_is_said_at_once`, `#[ignore]`): staging's real Ollama Cloud key, whose account's Pro weekly limit is still spent, through the real pool. The answer was "Ollama Cloud has reached this week's limit for this account. It didn't say when it comes back." **in 289 ms**. Before this, the same call waited up to a minute, retried, on every model call of the turn.
 - Staging restored afterwards.
 
-**K2 held: 6 mutants killed.**
+**K2 held: 5 mutants killed.**
 - the body not read (yantrik-ml);
 - `used_up` always false;
 - `retry_wait` ignoring `used_up` (the pool test then waited the full 60 s, the reported behaviour);
@@ -16567,3 +16567,5 @@ A dropped `complete` itself needs nothing more.
 **Seen, not changed:**
 - The ChainBackend fails over to its next link on any error, so a spent link costs one fast failure per turn rather than being skipped until it resets.
 - The Anthropic and Gemini clients still drop error bodies.
+
+(Correction: 53a0b21's commit message says "6 mutants killed"; the run killed 5, the ones listed above.)

@@ -16742,3 +16742,26 @@ A dropped `complete` itself needs nothing more.
 - `classify` not exempting them (after the no-note case).
 
 **K3 held:** full suite (Windows) 2453 passed, 0 failed. The run builds against yantrik-companion main 77b108f (#2 and #3 merged).
+
+## E.PRIV1b — PREREG: withdrawing consent removes every entry that clears that cloud; the banner tells the truth
+
+**Why:** found by driving. 22 read 520's settings after the 6a6006c install (11 Oct): `YM_PRIVATE_PROVIDERS=ollama-cloud:deepseek-v4.1-flash`, a provider:model spec from an earlier consent, not a bare id.
+- E.PRIV1's `/consent` treats an entry as one of the clouds it manages only when it equals a bare id (`ollama-cloud`). So it would KEEP that entry as "not the shell's to set".
+- The private gate (`scope_allows`) matches entries as substrings of the route label. The kept entry would therefore go on clearing Ollama Cloud after the person switched sharing Off: consent withdrawn in AI accounts, not withdrawn in the Mind.
+- The same holds for the catalogue alias `ollama` (it names Ollama Cloud in `provider_catalog`, and as a substring it clears an `ollama-cloud` label).
+- Separately, the startup banner on a machine with no local lane still says "private turns escalate+audit". Since E.PRIV1 they are refused unless the provider is cleared.
+
+**What is built:**
+1. **`consented_list` (mind-core provider_set.rs).** An entry is one of the managed clouds when its provider part (before the first `:`) is a known cloud id, or is the alias `ollama`. Managed entries are all replaced by the snapshot's shared ids. Everything else (ollama-local, LAN names, yantrik-gateway) is kept as before.
+2. **mind-core main.rs, the no-local-lane banner.** It says that private turns go only to a provider the person has agreed to share with (`YM_PRIVATE_PROVIDERS`), else they are refused, and it names whether the current provider is cleared.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - with `YM_PRIVATE_PROVIDERS=ollama-local,ollama-cloud:deepseek-v4.1-flash,ollama,yantrik-gateway`, a snapshot with ollama-cloud `share: false` leaves `ollama-local,yantrik-gateway`;
+  - the same with `share: true` leaves `ollama-local,yantrik-gateway,ollama-cloud`;
+  - after the `share: false` snapshot, `scope_allows(Private, "ollama-cloud:deepseek-v4.1-flash", ...)` is false;
+  - the banner text no longer contains "escalate".
+- K2, a mutant survives: managed entries matched by the bare id only (E.PRIV1's rule).
+- K3: the suite fails.
+
+**Ships before the consent mirror:** the OS mirror (22) must not reach a machine before a Mind bundle carrying E.PRIV1b. With 6a6006c, a withdrawal would not reach a spec-style entry.

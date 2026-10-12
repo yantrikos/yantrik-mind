@@ -63,15 +63,20 @@ mkdir -p "$ROOT/bin" "$ROOT/systemd/user"
 cp "$RELEASE/mind-core" "$ROOT/bin/yantrik-mind"
 cp "$RELEASE/yantrik-memory" "$ROOT/bin/yantrik-memory"
 cp "$SCRIPT_DIR/yantrik-mind.service" "$SCRIPT_DIR/yantrik-memory.service" "$ROOT/systemd/user/"
-cat > "$ROOT/BUILD" <<EOF
-name=$NAME
-commit=$COMMIT
-built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-agent_token=1
-EOF
-# agent_token=1: this Mind hands each conversation's agent token to its desktop tools (E.TOKEN1,
-# bae1353). yantrik-os #434 refuses to put a Mind into an image without it: under the minds'
-# account (#411) a Mind without it has every desktop act refused.
+# E.CMD1b: each capability line (`agent_token=1`, `cmd_answer=1`, ...) is read from the binary's
+# own bytes -- `mind_core::CAPABILITIES` -- never written here: this script packages whatever sits
+# in target/release, which can be a build of another commit. agent_token: the Mind hands each
+# conversation's agent token to its desktop tools (E.TOKEN1; yantrik-os #434 requires it).
+# cmd_answer: it reads yantrik-os #566's command answers (E.CMD1). A binary without the marker
+# gets no lines, and the OS refuses it.
+# To its `;` (the binary has no terminator after a string), and sed reads every line rather than
+# `head` closing the pipe: under pipefail a SIGPIPE would fail a binary that has the marker.
+CAPS="$(grep -a -o 'ym-capabilities: [a-z_ ]*;' "$ROOT/bin/yantrik-mind" | sed -n '1{s/^ym-capabilities: //;s/;$//;p}')"
+{
+  printf 'name=%s\ncommit=%s\nbuilt=%s\n' "$NAME" "$COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for cap in $CAPS; do printf '%s=1\n' "$cap"; done
+} > "$ROOT/BUILD"
+[ -n "$CAPS" ] || echo "warning: $RELEASE/mind-core carries no ym-capabilities marker; the OS will refuse this bundle" >&2
 
 mkdir -p "$OUT"
 TARBALL="$OUT/$NAME.tar.zst"

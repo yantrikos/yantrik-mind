@@ -145,6 +145,11 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", mind_core::build_commit());
         return Ok(());
     }
+    // E.CMD1b: what this binary can do, the same marker package.sh and the OS read from its bytes.
+    if std::env::args().nth(1).as_deref() == Some("--capabilities") {
+        println!("{}", mind_core::CAPABILITIES);
+        return Ok(());
+    }
 
     // Wallet custody is an operator-only bootstrap path. Handle it before model, memory, web, or
     // channel startup so key material cannot accidentally enter a prompt, trace, or live memory.
@@ -159,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         return mind_core::setup::run();
     }
 
+    println!("{} (commit {})", mind_core::CAPABILITIES, mind_core::build_commit());
     let (backend, name) = build_backend();
     // HOW MANY MODEL CALLS MAY BE IN FLIGHT AT ONCE.
     //

@@ -23,12 +23,6 @@ pub mod telegram;
 pub mod wallet_setup;
 pub mod web;
 
-/// The full source commit this binary was compiled from, stamped by the deploy pipeline via
-/// `YM_BUILD_COMMIT` at build time. `option_env!` makes the env var part of this crate's compile
-/// fingerprint, so a changed SHA forces mind-core to recompile even when `git reset --hard` has
-/// dragged source mtimes backward — the invalidation the stale-binary incident proved cargo will
-/// not do on its own. A binary built outside the pipeline honestly answers "unstamped" rather
-/// than guessing; the deploy gate treats anything but an exact SHA match as a refusal.
 /// E.PRIV1b: the startup line for a Mind with no model on its own hardware. Since E.PRIV1 a
 /// private-grounded turn is never escalated: it goes to the cloud only when the person agreed to
 /// share with it (`YM_PRIVATE_PROVIDERS`), and is refused otherwise.
@@ -41,8 +35,49 @@ pub fn no_local_lane_banner(provider: &str, cleared: bool) -> String {
     format!("brain: no local endpoint (YM_LOCAL_OLLAMA_URL unset) \u{2014} cloud provider '{provider}'; {private}")
 }
 
+/// E.CMD1b: what this binary can do that a Yantrik OS install checks for, as ONE marker string in
+/// its bytes. `package.sh` writes each word as a `<word>=1` line in the bundle's BUILD only when the
+/// binary carries it, and the OS's ISO build and `install-mind` read the binary too: a line written
+/// by a script for whatever binary sat in target/release could claim what the binary cannot do.
+/// - `agent_token`: hands each conversation's agent token to its desktop tools (E.TOKEN1).
+/// - `cmd_answer`: reads a command's answer with the bridge's own first line (yantrik-os #566, E.CMD1).
+/// It ends at `;`: a Rust string has no terminator in the binary, so whatever bytes follow it would
+/// otherwise read as more words to a `grep -a -o`.
+pub const CAPABILITIES: &str = "ym-capabilities: agent_token cmd_answer;";
+
+/// The full source commit this binary was compiled from, stamped by the deploy pipeline via
+/// `YM_BUILD_COMMIT` at build time. `option_env!` makes the env var part of this crate's compile
+/// fingerprint, so a changed SHA forces mind-core to recompile even when `git reset --hard` has
+/// dragged source mtimes backward — the invalidation the stale-binary incident proved cargo will
+/// not do on its own. A binary built outside the pipeline honestly answers "unstamped" rather
+/// than guessing; the deploy gate treats anything but an exact SHA match as a refusal.
 pub fn build_commit() -> &'static str {
     option_env!("YM_BUILD_COMMIT").unwrap_or("unstamped")
+}
+
+#[cfg(test)]
+mod capability_tests {
+    #[test]
+    fn the_marker_names_each_capability_as_a_whole_word() {
+        let body = super::CAPABILITIES.strip_prefix("ym-capabilities: ").expect("the prefix the OS greps for");
+        let words: Vec<&str> = body.strip_suffix(';').expect("ends at ;").split(' ').collect();
+        for want in ["agent_token", "cmd_answer"] {
+            assert!(words.contains(&want), "{want} missing from {:?}", super::CAPABILITIES);
+        }
+        assert!(super::CAPABILITIES.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == ' ' || c == ':' || c == '-' || c == ';'), "package.sh greps [a-z_ ] up to the ;");
+    }
+
+    /// package.sh derives BUILD's capability lines from the packaged binary's bytes, and never
+    /// writes one itself.
+    #[test]
+    fn package_sh_reads_the_capabilities_from_the_binary() {
+        let sh = include_str!("../../../deploy/yantrik-os/package.sh");
+        assert!(sh.contains("grep -a -o 'ym-capabilities: [a-z_ ]*;'"), "package.sh must read the marker, to its `;`, from the binary");
+        assert!(!sh.contains("ym-capabilities: [a-z_ ]*;' \"$ROOT/bin/yantrik-mind\" | head"), "no head after grep: under pipefail a SIGPIPE fails a binary that has the marker");
+        for literal in ["agent_token=1", "cmd_answer=1"] {
+            assert!(!sh.lines().any(|l| l.trim() == literal), "package.sh writes {literal} itself");
+        }
+    }
 }
 
 #[cfg(test)]

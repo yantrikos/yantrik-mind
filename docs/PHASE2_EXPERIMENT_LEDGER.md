@@ -16569,3 +16569,53 @@ A dropped `complete` itself needs nothing more.
 - The Anthropic and Gemini clients still drop error bodies.
 
 (Correction: 53a0b21's commit message says "6 mutants killed"; the run killed 5, the ones listed above.)
+
+## E.PRIV1 — PREREG: no private-grounded turn goes to a cloud the person has not agreed to share with; one consent, mirrored from AI accounts
+
+**Why:** Pranab's decision, 11 Oct, relayed by 22. I will ask him to confirm it directly before it reaches any machine.
+- The Mind follows the OS's private-context rule. A private-grounded turn goes to a cloud provider only after the person has agreed to share with it. Consent comes from onboarding, the per-account Share choice in AI accounts, or the onboarding default, which is Off until they agree.
+- Without that, the turn is not sent anywhere. The Mind says plainly that it won't send personal context to that provider, and offers a private lane or sharing in AI accounts.
+- This replaces the audited escalation. 520's journal, 11 Oct: "[privacy] private-grounded turn ESCALATED to household lane ... this pool has NO private lane".
+- The source must be one consent the person sets once, not a Mind-only setting. On the gateway path it is already enforced there (consent.rs).
+
+**What is built:**
+1. **mind-inference.**
+   - `chat_grounded_tools` never escalates to the household lane: with no private lane, the private call's result is the answer, served or refused. `PRIVACY_ESCALATED` is no longer incremented; the counter stays in the report at 0.
+   - A Private-scope refusal at the gate carries a typed `Said` with the sentence, naming the providers in the pool's route (display names; a chain names each). The wording: "I won't send your personal context to Ollama Cloud -- you haven't agreed to share with it. To keep personal things on this computer, set up a private lane; or allow sharing with Ollama Cloud in Settings → AI & Intelligence → AI accounts."
+   - The refusal's old words stay underneath it for the journal.
+   - An in-process backend (the pool label `scripted`, the offline fallback and every test pool) is cleared for Private. It never leaves the process, so it is not a cloud.
+2. **mind-conversation.** `COMPOSE_NO_PRIVATE_LANE` says the same thing in the same terms; it no longer tells the person to edit an env file. The first step and compose already show a `Said` (E.QUOTA1).
+3. **mind-core.** `POST /consent` on the person's memory socket, from the person's uid only (as `/provider`).
+   - Body: `{"source": "yantrik-os", "accounts": [{"provider": <OS catalogue id>, "share": bool}, ...]}`. A full snapshot every time, `share` required per entry, unknown keys ignored.
+   - It sets the cloud entries of `YM_PRIVATE_PROVIDERS` to exactly the shared providers the Mind runs: nanogpt, ollama-cloud, minimax, groq, openrouter, anthropic, qwen, and nim (from the OS id `nvidia-nim`). Unknown ids are ignored.
+   - Every other entry is kept as it is (ollama-local, LAN names, yantrik-gateway).
+   - It replies `{saved, shared, restarting}` and restarts when supervised.
+   - The OS sends the RESOLVED choice: `share` is true only when consent.rs resolves every account of that provider to Share. Only the shell sends it, from its in-memory state, on the person's own act; never from a file a harness could write (#675 security finding 4).
+   - Until the first mirror, the current list stands.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a Private call on an uncleared cloud pool makes no backend call, nothing is escalated, and `person_sentence` is the sentence naming the provider;
+  - a chain names both providers;
+  - a cleared provider and an in-process pool are served;
+  - a private-grounded agent turn on an uncleared cloud pool answers with exactly the sentence and the backend is never called;
+  - `/consent`:
+    - the pinned body sets `ollama-cloud` in and leaves `nanogpt` out;
+    - `nvidia-nim` maps to `nim`;
+    - unknown ids are ignored;
+    - `ollama-local`, `yantrik-gateway` and LAN entries survive;
+    - a second snapshot with `share: false` takes a provider out;
+    - a missing `share` is refused and changes nothing;
+    - another uid is refused.
+  - The three escalation tests are rewritten to the new rule, deliberately, and say so:
+    - `chat_grounded_prefers_private_and_audits_escalation`;
+    - `a_private_grounded_escalation_is_two_intentional_rows_in_two_lanes`;
+    - the DMN private-lane test.
+- K2, a mutant survives:
+  - escalation restored;
+  - the refusal without `Said`;
+  - `scripted` not cleared (the suite must notice);
+  - `/consent` dropping non-cloud entries;
+  - `/consent` ignoring `share: false`;
+  - the uid check removed.
+- K3: the suite or Linux staging fails.

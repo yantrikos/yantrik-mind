@@ -16782,3 +16782,26 @@ A dropped `complete` itself needs nothing more.
 **K3 held:** full suite (Windows) 2456 passed, 0 failed.
 
 **Effect on machines today:** none until the OS consent mirror sends a snapshot. 520 keeps its `ollama-cloud:deepseek-v4.1-flash` entry (the person's earlier consent) until then. **The mirror must not reach a machine before a Mind bundle carrying this commit.**
+
+## E.CMD1b — PREREG: the Mind's capabilities are read from its binary, so an OS install can refuse a Mind that cannot read #566
+
+**Why:** yantrik-os #566 is on the OS's main, so its bridge now writes a command's answer in the new shape. A Mind older than E.CMD1 (6a6006c) put next to it silently loses F47's failed-command detection.
+- yantrik-os-dc proposes that the ISO build and `yantrik-update install-mind` refuse a Mind whose BUILD does not declare `cmd_answer=1`, the way they already require `agent_token=1`.
+- But `package.sh` writes BUILD lines itself, and it packages whatever binary sits in `target/release`, which can be from another commit. A line written by the script can therefore claim a capability the binary lacks, and `agent_token=1` has the same weakness today.
+
+**What is built:**
+1. **mind-core.** `CAPABILITIES`, one marker string compiled into the binary: `ym-capabilities: agent_token cmd_answer`.
+   - It is kept alive by a `--capabilities` flag (printed, then exit, before anything boots, like `--build-commit`).
+   - It is also printed on the startup log.
+2. **deploy/yantrik-os/package.sh.** BUILD's capability lines are derived from the binary's BYTES (`grep -a -o 'ym-capabilities: [a-z_ ]*'`), one `X=1` per word, never written by the script.
+   - A binary without the marker gets none, and the OS then refuses it.
+   - My staging bundle script does the same.
+3. **Doc fix.** `build_commit`'s doc comment, which E.PRIV1b's insert separated from its function, is put back on it.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `CAPABILITIES` starts with `ym-capabilities: ` and names `agent_token` and `cmd_answer` as whole words;
+  - `package.sh` derives the lines from the binary (it greps `ym-capabilities:` out of the packaged mind binary) and writes no literal `agent_token=1`/`cmd_answer=1`;
+  - a bundle built from this commit on staging has BUILD lines `agent_token=1` and `cmd_answer=1`, and its binary's bytes contain the marker.
+- K2, a mutant survives: `cmd_answer` dropped from `CAPABILITIES`.
+- K3: the suite fails.

@@ -16765,3 +16765,20 @@ A dropped `complete` itself needs nothing more.
 - K3: the suite fails.
 
 **Ships before the consent mirror:** the OS mirror (22) must not reach a machine before a Mind bundle carrying E.PRIV1b. With 6a6006c, a withdrawal would not reach a spec-style entry.
+
+## E.PRIV1b — RESULT: a consent withdrawal reaches provider:model and alias entries; the banner tells the truth; 1 mutant killed
+
+**Built:**
+- `consented_list`'s managed-cloud test reads an entry's provider part (before `:`). The alias `ollama` counts too.
+- `mind_core::no_local_lane_banner(provider, cleared)` replaces the "private turns escalate+audit" line. `main` passes `pool.private_lane_configured()`, so the line says whether this provider is cleared.
+
+**K1 held** (3 tests), with VM 520's real entry plus the alias (`ollama-local,ollama-cloud:deepseek-v4.1-flash,ollama,yantrik-gateway`):
+- **Withdrawal:** `share: false` leaves `ollama-local,yantrik-gateway`, and `scope_allows` no longer clears `ollama-cloud:deepseek-v4.1-flash`. The control (the old list) did clear it.
+- **Sharing:** `share: true` leaves `ollama-local,yantrik-gateway,ollama-cloud`.
+- **Banner:** it never says "escalat", in either state.
+
+**K2 held: 1 mutant killed.** E.PRIV1's bare-id rule: both list tests fail.
+
+**K3 held:** full suite (Windows) 2456 passed, 0 failed.
+
+**Effect on machines today:** none until the OS consent mirror sends a snapshot. 520 keeps its `ollama-cloud:deepseek-v4.1-flash` entry (the person's earlier consent) until then. **The mirror must not reach a machine before a Mind bundle carrying this commit.**

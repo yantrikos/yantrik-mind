@@ -29,6 +29,18 @@ pub mod web;
 /// dragged source mtimes backward — the invalidation the stale-binary incident proved cargo will
 /// not do on its own. A binary built outside the pipeline honestly answers "unstamped" rather
 /// than guessing; the deploy gate treats anything but an exact SHA match as a refusal.
+/// E.PRIV1b: the startup line for a Mind with no model on its own hardware. Since E.PRIV1 a
+/// private-grounded turn is never escalated: it goes to the cloud only when the person agreed to
+/// share with it (`YM_PRIVATE_PROVIDERS`), and is refused otherwise.
+pub fn no_local_lane_banner(provider: &str, cleared: bool) -> String {
+    let private = if cleared {
+        "private turns go to it: the person agreed to share with it (YM_PRIVATE_PROVIDERS)"
+    } else {
+        "private turns are refused until the person agrees to share with it (AI accounts) or sets up a private lane"
+    };
+    format!("brain: no local endpoint (YM_LOCAL_OLLAMA_URL unset) \u{2014} cloud provider '{provider}'; {private}")
+}
+
 pub fn build_commit() -> &'static str {
     option_env!("YM_BUILD_COMMIT").unwrap_or("unstamped")
 }

@@ -288,7 +288,14 @@ pub fn consented_list(existing: &str, consent: &ConsentSet) -> (String, Vec<Stri
         .lines()
         .find_map(|l| l.trim_start().strip_prefix("YM_PRIVATE_PROVIDERS="))
         .unwrap_or_default();
-    let is_cloud = |x: &str| CONSENT_CLOUDS.iter().any(|(_, mind)| *mind == x);
+    // E.PRIV1b: an entry is the shell's when its PROVIDER names a managed cloud -- a bare id, a
+    // provider:model spec from an earlier consent (VM 520: `ollama-cloud:deepseek-v4.1-flash`), or
+    // the catalogue alias `ollama`. The private gate matches entries as substrings of the route
+    // label, so any of them left behind would keep clearing a cloud the person stopped sharing with.
+    let is_cloud = |x: &str| {
+        let provider = x.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+        provider == "ollama" || CONSENT_CLOUDS.iter().any(|(_, mind)| *mind == provider)
+    };
     let mut items: Vec<String> = current
         .split(',')
         .map(|x| x.trim().to_string())
@@ -707,5 +714,49 @@ mod consent_tests {
         assert_eq!(status, StatusCode::FORBIDDEN, "no peer uid (not the person's socket)");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+/// E.PRIV1b: a withdrawal reaches every entry that clears that cloud.
+#[cfg(test)]
+mod consent_spec_tests {
+    use super::*;
+
+    fn snap(share: bool) -> ConsentSet {
+        serde_json::from_value(serde_json::json!({ "source": "yantrik-os", "accounts": [{ "provider": "ollama-cloud", "share": share }] })).unwrap()
+    }
+
+    /// VM 520's list (11 Oct) plus the catalogue alias: a provider:model spec and `ollama` are the
+    /// shell's too.
+    const BEFORE: &str = "YM_PRIVATE_PROVIDERS=ollama-local,ollama-cloud:deepseek-v4.1-flash,ollama,yantrik-gateway\n";
+
+    #[test]
+    fn a_withdrawal_removes_spec_and_alias_entries() {
+        let (list, shared) = consented_list(BEFORE, &snap(false));
+        assert_eq!(list, "ollama-local,yantrik-gateway");
+        assert!(shared.is_empty());
+        let household = mind_inference::DEFAULT_HOUSEHOLD;
+        assert!(
+            !mind_inference::scope_allows(mind_inference::PrivacyScope::Private, "ollama-cloud:deepseek-v4.1-flash", household, &list),
+            "the withdrawn cloud is still cleared: {list}"
+        );
+        assert!(mind_inference::scope_allows(mind_inference::PrivacyScope::Private, "ollama-cloud:deepseek-v4.1-flash", household, "ollama-cloud:deepseek-v4.1-flash"), "the control: the old list did clear it");
+    }
+
+    #[test]
+    fn a_share_replaces_them_with_the_bare_id() {
+        let (list, shared) = consented_list(BEFORE, &snap(true));
+        assert_eq!(list, "ollama-local,yantrik-gateway,ollama-cloud");
+        assert_eq!(shared, vec!["ollama-cloud".to_string()]);
+    }
+
+    #[test]
+    fn the_banner_never_says_escalate() {
+        for cleared in [true, false] {
+            let b = crate::no_local_lane_banner("ollama-cloud:deepseek-v4.1-flash", cleared);
+            assert!(!b.contains("escalat"), "{b}");
+            assert!(b.contains("ollama-cloud:deepseek-v4.1-flash"), "{b}");
+        }
+        assert!(crate::no_local_lane_banner("x", false).contains("refused"));
     }
 }

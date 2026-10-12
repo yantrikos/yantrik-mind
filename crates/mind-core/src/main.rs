@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
         pool = pool.with_private_backend(local_be, &local_label);
         println!("brain: LOCAL primary + private lane active ({local_label}) — private turns stay home, fail closed on outage");
     } else {
-        println!("brain: no local endpoint (YM_LOCAL_OLLAMA_URL unset) — cloud provider '{name}', private turns escalate+audit");
+        println!("{}", mind_core::no_local_lane_banner(&name, pool.private_lane_configured()));
     }
 
     let db = std::env::var("YM_DB").unwrap_or_else(|_| ":memory:".to_string());

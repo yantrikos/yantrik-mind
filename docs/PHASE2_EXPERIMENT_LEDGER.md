@@ -16805,3 +16805,22 @@ A dropped `complete` itself needs nothing more.
   - a bundle built from this commit on staging has BUILD lines `agent_token=1` and `cmd_answer=1`, and its binary's bytes contain the marker.
 - K2, a mutant survives: `cmd_answer` dropped from `CAPABILITIES`.
 - K3: the suite fails.
+
+## E.CMD1b — RESULT: capabilities read from the binary; a staging bundle declares exactly what its binary carries; 1 mutant killed
+
+**Built:**
+- `mind_core::CAPABILITIES = "ym-capabilities: agent_token cmd_answer;"`.
+  - **Deviation:** it ends at `;`. Found before shipping: a Rust string has no terminator in the binary, so a `grep -a -o '[a-z_ ]*'` would have read whatever lowercase bytes follow it as more capabilities.
+  - It is kept alive by `--capabilities` (print-and-exit, before boot) and printed on the startup line.
+- `package.sh` derives `<word>=1` lines from the packaged binary's bytes. It uses `sed`, not `head`, after the grep: the same SIGPIPE-under-pipefail trap my staging script hit on 11 Oct. It warns when the marker is absent.
+- `build_commit`'s doc comment is back on its function.
+
+**K1 held:**
+- `capability_tests`: the marker's words, the terminator, and `package.sh` reading the binary rather than writing literal lines.
+- **On staging:** a bundle of fc5aa7b built by the repo's own `package.sh` (sha256 f4784c51c41d659f7a11b274d3aafba0b20cda30f18ac0d80e068379247c5b64) has `agent_token=1` and `cmd_answer=1` in BUILD. Its packaged binary's bytes give `ym-capabilities: agent_token cmd_answer;`.
+
+**K2 held: 1 mutant killed.** `cmd_answer` dropped from `CAPABILITIES`.
+
+**K3 held:** full suite (Windows) 2458 passed, 0 failed.
+
+**Ordering:** the OS's capability check (yantrik-os-dc, `tasks/mind-capabilities.md`) lands only after a bundle carrying the marker (fc5aa7b or later) is on 520 and the Mac.

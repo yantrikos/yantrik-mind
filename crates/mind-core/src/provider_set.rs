@@ -244,7 +244,97 @@ struct Setter {
 pub fn router(person_uid: u32, env_path: PathBuf, supervised: bool) -> Router {
     Router::new()
         .route("/provider", post(set_provider))
+        .route("/consent", post(set_consent))
         .with_state(Setter { person_uid, env_path, supervised })
+}
+
+/// E.PRIV1: the person's AI-accounts Share choices, mirrored by the OS shell (yantrik-os, from its
+/// own in-memory state, on the person's act -- never from a file a harness could write). A full
+/// snapshot each time; `share` is the RESOLVED choice (consent.rs: every account of that provider
+/// resolves to Share).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConsentSet {
+    #[serde(default)]
+    pub source: Option<String>,
+    pub accounts: Vec<AccountConsent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountConsent {
+    pub provider: String,
+    /// Required: a snapshot that does not say is not consent.
+    pub share: bool,
+}
+
+/// E.PRIV1: the OS catalogue's provider ids as this Mind names them, for the clouds it runs. Any
+/// other entry of the private list (a local lane, a LAN name, the gateway) is not the shell's to
+/// set and is kept as it is.
+const CONSENT_CLOUDS: [(&str, &str); 9] = [
+    ("nanogpt", "nanogpt"),
+    ("ollama-cloud", "ollama-cloud"),
+    ("minimax", "minimax"),
+    ("groq", "groq"),
+    ("openrouter", "openrouter"),
+    ("anthropic", "anthropic"),
+    ("qwen", "qwen"),
+    ("nvidia-nim", "nim"),
+    ("nim", "nim"),
+];
+
+/// E.PRIV1: `YM_PRIVATE_PROVIDERS` after a snapshot: the non-cloud entries as they were, then the
+/// clouds the person shares, in the snapshot's order.
+pub fn consented_list(existing: &str, consent: &ConsentSet) -> (String, Vec<String>) {
+    let current = existing
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("YM_PRIVATE_PROVIDERS="))
+        .unwrap_or_default();
+    let is_cloud = |x: &str| CONSENT_CLOUDS.iter().any(|(_, mind)| *mind == x);
+    let mut items: Vec<String> = current
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty() && !is_cloud(x))
+        .collect();
+    let mut shared = Vec::new();
+    for a in &consent.accounts {
+        let id = a.provider.trim().to_ascii_lowercase();
+        let Some((_, mind)) = CONSENT_CLOUDS.iter().find(|(os, _)| *os == id) else {
+            continue;
+        };
+        if a.share && !shared.iter().any(|s: &String| s == mind) {
+            shared.push(mind.to_string());
+        }
+    }
+    items.extend(shared.iter().cloned());
+    (items.join(","), shared)
+}
+
+async fn set_consent(
+    State(s): State<Setter>,
+    ext: axum::http::Extensions,
+    Json(req): Json<ConsentSet>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let peer = ext.get::<ConnectInfo<PeerUid>>().and_then(|ConnectInfo(p)| p.0);
+    if peer != Some(s.person_uid) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "saved": false, "error": "only the person may set what this Mind may share" })),
+        );
+    }
+    let existing = std::fs::read_to_string(&s.env_path)
+        .unwrap_or_else(|_| "# Yantrik Mind's own settings. Yantrik OS never reads this file.\n".to_string());
+    let (list, shared) = consented_list(&existing, &req);
+    let body = crate::setup::upsert_env_line(&existing, "YM_PRIVATE_PROVIDERS", &list);
+    if let Err(e) = crate::setup::write_env_600(&s.env_path.display().to_string(), &body) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "saved": false, "error": format!("could not save: {e}") })));
+    }
+    eprintln!("[consent] the person's sharing, from {}: {}", req.source.as_deref().unwrap_or("the desktop"), if shared.is_empty() { "none".to_string() } else { shared.join(", ") });
+    if s.supervised {
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            std::process::exit(0);
+        });
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "saved": true, "shared": shared, "restarting": s.supervised })))
 }
 
 async fn set_provider(
@@ -546,5 +636,76 @@ mod gateway_tests {
         assert!(seen.contains("\"model\":\"picked\""), "{seen}");
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(backup_path(&p));
+    }
+}
+
+/// E.PRIV1: the person's AI-accounts sharing, mirrored into the Mind's private list.
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    /// 22's pinned body (11 Oct).
+    const PINNED: &str = r#"{"source":"yantrik-os","accounts":[{"provider":"ollama-cloud","share":true},{"provider":"nanogpt","share":false}]}"#;
+
+    fn tmp(name: &str, body: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("ym-consent-{}-{name}.env", std::process::id()));
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    async fn post(p: &Path, uid: Option<u32>, body: &str) -> (StatusCode, String) {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/consent")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(PeerUid(uid)));
+        let res = router(1000, p.to_path_buf(), false).oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn list(p: &Path) -> String {
+        std::fs::read_to_string(p).unwrap().lines().find_map(|l| l.strip_prefix("YM_PRIVATE_PROVIDERS=").map(str::to_string)).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn the_pinned_snapshot_shares_what_the_person_shares_and_keeps_the_rest() {
+        let p = tmp("pinned", "YM_DB=/x/mind.db\nYM_PRIVATE_PROVIDERS=ollama-local,nanogpt,yantrik-gateway,192.168.4.35\n");
+        let (status, body) = post(&p, Some(1000), PINNED).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains(r#""shared":["ollama-cloud"]"#), "{body}");
+        assert_eq!(list(&p), "ollama-local,yantrik-gateway,192.168.4.35,ollama-cloud", "nanogpt out, the rest kept");
+        assert!(std::fs::read_to_string(&p).unwrap().contains("YM_DB=/x/mind.db\n"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn ids_map_unknown_ones_are_ignored_and_a_later_snapshot_takes_one_out() {
+        let p = tmp("ids", "");
+        let snap = r#"{"source":"yantrik-os","accounts":[{"provider":"nvidia-nim","share":true},{"provider":"some-new-cloud","share":true},{"provider":"Groq","share":true}],"future":1}"#;
+        assert_eq!(post(&p, Some(1000), snap).await.0, StatusCode::OK);
+        assert_eq!(list(&p), "nim,groq");
+        let later = r#"{"source":"yantrik-os","accounts":[{"provider":"nvidia-nim","share":false},{"provider":"groq","share":true}]}"#;
+        assert_eq!(post(&p, Some(1000), later).await.0, StatusCode::OK);
+        assert_eq!(list(&p), "groq", "share:false takes it out");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_without_share_or_from_another_account_changes_nothing() {
+        let before = "YM_PRIVATE_PROVIDERS=nanogpt\n";
+        let p = tmp("refused", before);
+        let (status, _) = post(&p, Some(1000), r#"{"accounts":[{"provider":"ollama-cloud"}]}"#).await;
+        assert!(status.is_client_error(), "a snapshot that does not say is not consent: {status}");
+        let (status, _) = post(&p, Some(1001), PINNED).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = post(&p, None, PINNED).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "no peer uid (not the person's socket)");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+        let _ = std::fs::remove_file(&p);
     }
 }

@@ -63,8 +63,19 @@ impl LLMBackend for FlakyLLM {
 fn harness_with(
     backend: Arc<dyn LLMBackend>,
 ) -> (ConversationEngine, Arc<DecisionLog>, InferencePool) {
+    harness_on(InferencePool::new(backend, 1))
+}
+
+/// E.PRIV1: the harness on a CLOUD-labelled pool no one has agreed to share with (an unlabelled
+/// pool is in-process, and needs no consent).
+fn harness_cloud(
+    backend: Arc<dyn LLMBackend>,
+) -> (ConversationEngine, Arc<DecisionLog>, InferencePool) {
+    harness_on(InferencePool::new(backend, 1).with_provider("minimax"))
+}
+
+fn harness_on(pool: InferencePool) -> (ConversationEngine, Arc<DecisionLog>, InferencePool) {
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
-    let pool = InferencePool::new(backend, 1);
     let store = Arc::new(RecipeStore::open(":memory:").unwrap());
     let recipes =
         RecipeEngine::new(pool.clone(), Arc::new(NoTools), "JARVIS").with_store(store.clone());
@@ -106,7 +117,7 @@ fn user(text: &str) -> Vec<ChatMessage> {
 /// backend; the same through the streaming path; refused at the gate with zero attempts.
 #[tokio::test]
 async fn one_logical_request_writes_one_terminal_row_on_every_path() {
-    let (conv, log, _pool) = harness_with(Arc::new(ScriptedLLM::new("fine")));
+    let (conv, log, _pool) = harness_cloud(Arc::new(ScriptedLLM::new("fine")));
     conv.inference
         .chat_household_attributed(
             user("hello"),
@@ -125,7 +136,8 @@ async fn one_logical_request_writes_one_terminal_row_on_every_path() {
         )
         .await
         .unwrap();
-    // Private with no private lane configured: the gate refuses (nothing dispatched).
+    // Private on a cloud no one agreed to share with: the gate refuses (nothing dispatched).
+    // E.PRIV1: an unlabelled pool is in-process and needs no consent, so this one is a cloud.
     assert!(conv
         .inference
         .chat_scoped(
@@ -152,8 +164,8 @@ async fn one_logical_request_writes_one_terminal_row_on_every_path() {
             false
         )
     );
-    assert_eq!(served.served_by.as_deref(), Some("scripted"));
-    assert_eq!(served.route, "scripted");
+    assert_eq!(served.served_by.as_deref(), Some("minimax"));
+    assert_eq!(served.route, "minimax");
     let stream = &rows[1];
     assert_eq!(
         (
@@ -254,31 +266,26 @@ async fn attempts_count_backend_invocations_and_a_retry_that_serves_is_one_serve
     );
 }
 
-/// A private-grounded call with no private lane escalates: a refused PRIVATE row and a served
-/// HOUSEHOLD row — two logical requests in two lanes, intentional, never a duplicate.
+/// E.PRIV1 (Pranab, 11 Oct): a private-grounded call with no private lane and no cleared provider
+/// is ONE refused PRIVATE row and nothing more -- it no longer escalates to a served HOUSEHOLD row.
+/// (This test asserted that escalation before.)
 #[tokio::test]
-async fn a_private_grounded_escalation_is_two_intentional_rows_in_two_lanes() {
-    let (conv, log, _pool) = harness_with(Arc::new(ScriptedLLM::new("fine")));
-    conv.inference
+async fn a_private_grounded_refusal_is_one_row_and_never_escalates() {
+    let (conv, log, _pool) = harness_cloud(Arc::new(ScriptedLLM::new("fine")));
+    let e = conv
+        .inference
         .chat_grounded(user("family"), GenerationConfig::default())
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(mind_inference::person_sentence(&e).is_some(), "the person is told why: {e:#}");
     let rows = spend_rows(&log);
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 1);
     assert_eq!(
         (rows[0].lane, rows[0].outcome, rows[0].attempts),
         (
             mind_observability::InferenceLane::Private,
             InferenceOutcome::Refused,
             0
-        )
-    );
-    assert_eq!(
-        (rows[1].lane, rows[1].outcome, rows[1].attempts),
-        (
-            mind_observability::InferenceLane::Household,
-            InferenceOutcome::Served,
-            1
         )
     );
     assert_eq!(rows[0].callsite, "private-grounded");

@@ -16619,3 +16619,53 @@ A dropped `complete` itself needs nothing more.
   - `/consent` ignoring `share: false`;
   - the uid check removed.
 - K3: the suite or Linux staging fails.
+
+## E.PRIV1 — RESULT: private-grounded turns never escalate; the person is told why; consent is mirrored from AI accounts; 6 mutants killed
+
+**Built:**
+- **mind-inference.**
+  - `chat_grounded_tools` with no private lane returns the private call's own result. No household escalation, and `PRIVACY_ESCALATED` is never incremented (it is still reported, at 0).
+  - A Private-scope refusal at the gate carries `Said(no_consent_sentence(route))`, which names each provider of the route once, by display name.
+  - `in_process` (the `scripted` label) counts as cleared in the gate and in `lane_cleared`.
+  - `privacy_private_refused_count` is new: the structural "the private lane was attempted" signal the escalation counter used to be.
+  - **Found while building:** with a DEDICATED private lane, a failure built a fresh error from its text and dropped the typed sentence (E.QUOTA1's "limit reached" would have been lost there). A failure that carries a `Said` now passes through unchanged.
+- **mind-conversation.** `COMPOSE_NO_PRIVATE_LANE` says it in the same terms (AI accounts or a private lane), with no env file.
+- **mind-core.** `POST /consent` as preregistered.
+  - `consented_list` keeps non-cloud entries and appends the shared clouds in snapshot order.
+  - The cloud ids are nanogpt, ollama-cloud, minimax, groq, openrouter, anthropic and qwen, plus nvidia-nim and nim, which both map to nim. Ids are case-folded.
+
+**Changed on purpose** (each asserted the old fallback or the old wording):
+- `chat_grounded_prefers_private_and_audits_escalation` became `chat_grounded_never_escalates_and_says_why`: no backend call, nothing escalated, the refusal counted, the exact sentence.
+- `a_private_grounded_escalation_is_two_intentional_rows_in_two_lanes` became `a_private_grounded_refusal_is_one_row_and_never_escalates`, on a new `harness_cloud`.
+- The DMN private-lane test now watches the private-refusal counter and asserts nothing escalated.
+- `one_logical_request_writes_one_terminal_row_on_every_path` uses the cloud harness for its refused-private row.
+- `the_no_private_lane_refusal_is_content_free_and_names_the_setting` and `a_failed_compose_says_the_true_reason_and_what_was_done` now expect AI accounts and a private lane, not `YM_PRIVATE_PROVIDERS`.
+- `a_cloud_only_mind_says_what_is_missing_not_that_hardware_is_down` now expects exactly `no_consent_sentence("ollama-cloud")`. The turn stops at its first private call; it reached compose before, via the household lane.
+- `a_cloud_provider_that_refuses_is_named` and E.QUOTA1's first-step test clear their cloud as the dedicated private lane. An uncleared cloud is now refused before any call and never reaches its address.
+
+**K1 held:**
+- mind-inference: 3 new tests:
+  - never escalates and says why;
+  - a chain names each provider once;
+  - a cleared or in-process pool is served.
+- mind-core: 3 `/consent` tests:
+  - 22's pinned body;
+  - id mapping, unknown ids, a later snapshot with `share: false`;
+  - a missing `share`, another uid, and no peer uid all change nothing.
+- The private-grounded agent turn answers with exactly the sentence (the `a_cloud_only_mind...` test). That the backend is never called is asserted at the pool level (`chat_grounded_never_escalates_and_says_why`, calls 0), not in the turn test.
+- Linux (staging, restored afterwards): mind-inference 88, mind-conversation 1194 and mind-core 164 pass.
+
+**K2 held: 6 mutants killed.**
+- escalation restored;
+- the refusal without `Said`;
+- `scripted` not cleared (the mind-conversation suite fails broadly);
+- `/consent` dropping non-cloud entries;
+- `/consent` ignoring `share: false`;
+- the `/consent` uid check removed.
+
+**K3 held:** full suite (Windows) 2452 passed, 0 failed.
+
+**Before it reaches a machine:**
+- Pranab confirms the decision directly (it was relayed).
+- The OS mirror (22, a follow-up to #675) lands in the same batch.
+- A Mind with only an uncleared cloud and no private lane refuses every private-grounded turn until the mirror arrives. Likely: 520, and production .90 unless its settings clear a provider.

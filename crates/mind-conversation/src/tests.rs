@@ -172,18 +172,22 @@ async fn dmn_tick_uses_the_private_lane_not_a_silent_cloud_call() {
     .with_provider("minimax");
     let conv = ConversationEngine::new(Arc::new(mem), pool, "JARVIS");
 
-    let before = mind_inference::privacy_escalated_count();
+    // E.PRIV1: a private-carrying call on an uncleared cloud pool is REFUSED (never escalated), so
+    // the private-refusal counter is what proves the private lane was attempted.
+    let before = mind_inference::privacy_private_refused_count();
+    let escalated = mind_inference::privacy_escalated_count();
     // Phase rotates rehearse(0) → reconcile(1) → associate(2). Rehearse makes no model call at all,
     // so drive all three and assert the LLM-using phases went through the private lane.
     for _ in 0..3 {
         let _ = conv.dmn_tick().await;
     }
-    let after = mind_inference::privacy_escalated_count();
+    let after = mind_inference::privacy_private_refused_count();
     assert!(
         after > before,
         "DMN made a model call carrying private beliefs without attempting the private lane \
-         (escalation counter unmoved: {before} -> {after}) — this is the silent cloud leak"
+         (private refusals unmoved: {before} -> {after}) — this is the silent cloud leak"
     );
+    assert_eq!(mind_inference::privacy_escalated_count(), escalated, "E.PRIV1: nothing escalates");
 }
 
 #[tokio::test]
@@ -7756,8 +7760,10 @@ fn the_no_private_lane_refusal_is_content_free_and_names_the_setting() {
         );
     }
     assert!(!refusal.contains("unreachable"), "nothing is unreachable; nothing was configured");
-    assert!(refusal.contains("YM_PRIVATE_PROVIDERS"), "it names the setting that clears a model");
-    assert!(refusal.contains("answer without your private context"), "and the public way forward");
+    // E.PRIV1: the person's own consent (AI accounts) or a private lane -- never an env file.
+    assert!(refusal.contains("AI accounts") && refusal.contains("private lane"), "it names where the person agrees");
+    assert!(!refusal.contains("YM_PRIVATE_PROVIDERS"), "not a setting only an operator can find");
+    assert!(refusal.contains("answer without your personal context"), "and the public way forward");
 }
 
 /// E.CFG2, the other half: a mind WITH a private lane that fails at compose still says its own
@@ -7879,7 +7885,10 @@ async fn a_cloud_only_mind_says_what_is_missing_not_that_hardware_is_down() {
         .agent_loop_for_eval("what time is it?", &TurnIdentity::primary())
         .await
         .unwrap_or_else(|e| format!("ERR {e}"));
-    assert_eq!(reply, super::COMPOSE_NO_PRIVATE_LANE, "the truthful refusal, exactly");
+    // E.PRIV1 (Pranab, 11 Oct): nothing escalates, so the turn stops at its first private call with
+    // the sentence naming the provider and the way to agree (it reached compose before, via the
+    // household lane).
+    assert_eq!(reply, mind_inference::no_consent_sentence("ollama-cloud"), "the truthful refusal, exactly");
 }
 
 /// E.LOOP3 — the typed direct route must be a GRAMMAR, not a "looks simple" gate.
@@ -19008,7 +19017,10 @@ mod unreachable_model_is_named {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_cloud_provider_that_refuses_is_named() {
-        let pool = InferencePool::new(Arc::new(Refused) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud");
+        // E.PRIV1: a cleared cloud (here, as the dedicated private lane) -- an uncleared one is
+        // refused before any call and never reaches its address.
+        let be: Arc<dyn LLMBackend> = Arc::new(Refused);
+        let pool = InferencePool::new(Arc::clone(&be), 1).with_provider("ollama-cloud").with_private_backend(be, "ollama-cloud");
         let reply = reply_from(pool).await;
         assert!(reply.contains("couldn't think just now"), "{reply}");
         assert!(reply.contains("127.0.0.1:7461"), "the address is missing: {reply}");
@@ -19045,7 +19057,8 @@ mod unreachable_model_is_named {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_spent_allowance_is_said_plainly_at_the_first_step() {
-        let pool = InferencePool::new(Arc::new(Spent { calls: Default::default(), first_ok: false }) as Arc<dyn LLMBackend>, 1).with_provider("ollama-cloud");
+        let spent: Arc<dyn LLMBackend> = Arc::new(Spent { calls: Default::default(), first_ok: false });
+        let pool = InferencePool::new(Arc::clone(&spent), 1).with_provider("ollama-cloud").with_private_backend(spent, "ollama-cloud");
         let t0 = std::time::Instant::now();
         let reply = reply_from(pool).await;
         assert_eq!(reply, WEEK_SPENT);
@@ -19293,7 +19306,7 @@ fn a_failed_compose_says_the_true_reason_and_what_was_done() {
     let none = crate::compose_failure_reply(false, false);
     assert!(local.contains("my own hardware is unreachable"), "{local}");
     assert!(cloud.contains("did not answer") && !cloud.contains("hardware"), "{cloud}");
-    assert!(none.contains("YM_PRIVATE_PROVIDERS"), "{none}");
+    assert!(none.contains("AI accounts"), "E.PRIV1: {none}");
     let made = vec![
         (serde_json::json!({"app": "shell", "action": "files_new_folder", "args": {"name": "~/longtask/recipes"}}), "Done".to_string()),
         (serde_json::json!({"app": "editor", "action": "new", "args": {"text": "<!DOCTYPE html>secret body"}}), "Done".to_string()),

@@ -4565,12 +4565,13 @@ pub(crate) fn actions_done_line(made: &[(serde_json::Value, String)]) -> String 
 /// lane exists and has failed, and false for an owner who followed first run's advice to add a
 /// cloud key: nothing is unreachable, nothing was configured. Chosen by configuration state only,
 /// and a constant for the same reason as the other: it carries nothing it declined to compose.
+// E.PRIV1 (Pranab, 11 Oct): the same rule and the same terms as the rest of the OS -- the person
+// agrees to share in AI accounts, or keeps personal things on this computer with a private lane.
 const COMPOSE_NO_PRIVATE_LANE: &str =
-    "I can't put this answer together \u{2014} it draws on your private context, and the only \
-model I have is a cloud one that hasn't been cleared to see it. To clear it, add its name to \
-YM_PRIVATE_PROVIDERS in my settings file (~/.config/yantrik-mind.env) and restart me, or send me the \
-address of a model on your own hardware. Or tell me to answer without your private context and I'll \
-work from what's public.";
+    "I won't put this answer together \u{2014} it draws on your personal context, and the only \
+model I have is a cloud one you haven't agreed to share with. To keep personal things on this \
+computer, set up a private lane; or allow sharing with it in Settings \u{2192} AI & Intelligence \u{2192} \
+AI accounts. Or tell me to answer without your personal context and I'll work from what's public.";
 
 /// Why compose is ALWAYS private (E.SEC16), stated as an invariant rather than a judgement.
 ///

@@ -168,6 +168,68 @@ pub fn privacy_escalated_count() -> u64 {
     PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// E.PRIV1: how many Private-scope requests the gate has refused. Since a private-grounded turn no
+/// longer escalates, this is what moves when a path carrying private context ATTEMPTED the private
+/// lane on a pool with no cleared provider -- the structural proof `privacy_escalated_count` was.
+pub fn privacy_private_refused_count() -> u64 {
+    PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// E.PRIV1: an in-process backend (the pool label `scripted`: the offline fallback, and every pool
+/// a test builds without naming a provider). Private context given to it never leaves the process,
+/// so it is not a cloud and needs no consent.
+fn in_process(provider: &str) -> bool {
+    provider == "scripted"
+}
+
+/// E.PRIV1: a provider id as a person knows it.
+fn provider_display(id: &str) -> String {
+    match id {
+        "nanogpt" => "NanoGPT",
+        "ollama-cloud" | "ollama" => "Ollama Cloud",
+        "minimax" => "MiniMax",
+        "nim" | "nvidia-nim" => "NVIDIA NIM",
+        "groq" => "Groq",
+        "openrouter" => "OpenRouter",
+        "anthropic" => "Anthropic",
+        "claude-cli" => "Claude",
+        "qwen" | "qwencloud" => "Qwen Cloud",
+        other => return other.to_string(),
+    }
+    .to_string()
+}
+
+/// E.PRIV1 (Pranab, 11 Oct): what the person is told when a private-grounded request would go to a
+/// cloud they have not agreed to share with. Names every provider in the route (`chain[a -> b]`,
+/// `a -> b`, or one spec), once each.
+pub fn no_consent_sentence(route: &str) -> String {
+    let inner = route.trim().strip_prefix("chain[").and_then(|r| r.strip_suffix(']')).unwrap_or(route.trim());
+    let mut names: Vec<String> = Vec::new();
+    for spec in inner.split("->") {
+        let id = split_spec(spec.trim()).0;
+        if id.is_empty() {
+            continue;
+        }
+        let name = provider_display(id);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let count = names.len();
+    let who = match count {
+        0 => "this cloud model".to_string(),
+        1 => names[0].clone(),
+        _ => {
+            let last = names.pop().unwrap_or_default();
+            format!("{} and {last}", names.join(", "))
+        }
+    };
+    let it = if count > 1 { "them" } else { "it" };
+    format!(
+        "I won't send your personal context to {who} \u{2014} you haven't agreed to share with {it}. To keep personal things on this computer, set up a private lane; or allow sharing with {who} in Settings \u{2192} AI & Intelligence \u{2192} AI accounts."
+    )
+}
+
 /// E.OBS1: the process-wide lane observer — installed once by the conversation engine, fired
 /// POST-SUCCESS from the pool wrapper with the scope and the label of the link that ACTUALLY
 /// ANSWERED (not the pre-dispatch route). Content never rides this hook. One emit site means a UI
@@ -890,7 +952,8 @@ impl InferencePool {
             (PrivacyScope::Private, Some((be, lbl))) => (be.clone(), lbl.clone(), true),
             _ => (self.backend.clone(), self.provider.clone(), false),
         };
-        if !sanctioned && !scope_allows(scope, &label, &household, &private) {
+        let in_process_private = matches!(scope, PrivacyScope::Private) && in_process(&label);
+        if !sanctioned && !in_process_private && !scope_allows(scope, &label, &household, &private) {
             PRIVACY_REFUSED[scope_idx(scope)].fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[privacy] REFUSED {} -> provider '{}' not in the {} allowlist",
@@ -898,11 +961,17 @@ impl InferencePool {
                 label,
                 scope.as_str()
             );
-            anyhow::bail!(
+            let refused = anyhow::anyhow!(
                 "privacy: {}-scope request refused — provider '{}' is not allowlisted for this lane; use deterministic rendering (scaffold/fill) instead",
                 scope.as_str(),
                 label
             );
+            // E.PRIV1: the person is told why, in the terms of their own consent.
+            return Err(if matches!(scope, PrivacyScope::Private) {
+                refused.context(Said(no_consent_sentence(&label)))
+            } else {
+                refused
+            });
         }
         // Household is the ambiguous lane: Private is expected and Public is an explicit
         // declaration, but a Household count alone cannot distinguish an allowlisted public-facts
@@ -1104,6 +1173,13 @@ impl InferencePool {
                 if self.private.is_some() {
                     PRIVACY_REFUSED[scope_idx(PrivacyScope::Private)]
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // E.PRIV1/E.QUOTA1: a failure that already carries the person's sentence (a
+                    // spent allowance, the gateway's contract) keeps it -- the error built below
+                    // from its text would drop the typed sentence.
+                    if person_sentence(&e).is_some() {
+                        eprintln!("[privacy] private lane FAILED — failing CLOSED: {e:#}");
+                        return Err(e);
+                    }
                     // `{e:#}`, not `{e}`: this is an anyhow chain, and the OUTERMOST link is the
                     // generic context string ("Ollama API request failed") while the CAUSE — the
                     // transport error, the HTTP status, the TLS complaint — sits underneath it.
@@ -1126,33 +1202,17 @@ impl InferencePool {
                         failure_line(&why, &detail)
                     ));
                 }
-                // No local private lane configured (the documented interim gap): escalate to the
-                // household lane so the turn still works, but COUNT + log it — the gap is visible and
-                // auto-closes the moment YM_LOCAL_OLLAMA_URL / YM_PRIVATE_PROVIDERS names a local lane.
-                PRIVACY_ESCALATED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // E.PRIV1 (Pranab, 11 Oct): NO ESCALATION. Private context goes to a cloud only after
+                // the person agreed to share with it; without a private lane, the private call's
+                // answer is the answer -- a refusal carries the sentence that says why, and a
+                // cleared provider's failure is its own (the same provider; no second lane to try).
+                let _ = (messages, config, tools);
                 eprintln!(
-                    // Say which condition actually failed. This line used to name YM_LOCAL_OLLAMA_URL
-                    // unconditionally — including when that variable WAS set and the real gap was an
-                    // empty YM_PRIVATE_PROVIDERS, or a role pool that never inherited a lane. A
-                    // colleague spent hours on it and wrote the refusal up as a policy decision;
-                    // a component that misreports why it failed sends everyone downstream to the
-                    // wrong place.
-                    "[privacy] private-grounded turn ESCALATED to household lane (provider '{}') — this pool has NO private lane. Local URL set: {}. Allowlist (YM_PRIVATE_PROVIDERS): {}. If both look right, this is a ROLE pool (YM_ROLE_*) that did not inherit the default's lane.",
+                    "[privacy] private-grounded request NOT sent elsewhere (provider '{}', no private lane): {}",
                     self.provider,
-                    if mind_net::person_var("YM_LOCAL_OLLAMA_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) { "yes" } else { "NO" },
-                    match std::env::var("YM_PRIVATE_PROVIDERS") {
-                        Ok(v) if !v.trim().is_empty() => v,
-                        _ => "EMPTY".to_string(),
-                    }
+                    person_sentence(&e).unwrap_or_else(|| format!("{e:#}"))
                 );
-                self.chat_scoped_tools_attributed(
-                    messages,
-                    config,
-                    PrivacyScope::Household,
-                    tools,
-                    "private-grounded escalation",
-                )
-                .await
+                Err(e)
             }
         }
     }
@@ -1666,7 +1726,7 @@ pub fn link_is_gone(detail: &str) -> bool {
 /// E.CFG2's rule without the environment: a dedicated private lane, or the provider cleared for the
 /// private scope by the owner's allowlist.
 fn lane_cleared(dedicated: bool, provider: &str, household: &str, private: &str) -> bool {
-    dedicated || scope_allows(PrivacyScope::Private, provider, household, private)
+    dedicated || in_process(provider) || scope_allows(PrivacyScope::Private, provider, household, private)
 }
 
 impl ChainBackend {
@@ -4119,29 +4179,60 @@ mod privacy_tests {
         ));
     }
 
+    /// E.PRIV1 (Pranab, 11 Oct): a private-grounded request on a pool with no private lane and no
+    /// cleared provider is NOT sent anywhere -- not to its cloud, not to the household lane. The
+    /// person is told why. (This test asserted the opposite before: the audited escalation.)
     #[tokio::test]
-    async fn chat_grounded_prefers_private_and_audits_escalation() {
-        // a cloud-only pool with NO private provider configured → private-grounded turn escalates,
-        // still returns a reply (never breaks the turn), and the escalation is counted honestly.
-        let pool = InferencePool::new(
-            std::sync::Arc::new(ScriptedLLM::new("answer")) as std::sync::Arc<dyn LLMBackend>,
-            1,
-        )
-        .with_provider("minimax");
-        let before = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
-        let out = pool
-            .chat_grounded(
-                vec![ChatMessage::user("private family context")],
-                GenerationConfig::default(),
-            )
-            .await;
-        assert!(out.is_ok(), "chat_grounded must never break the turn");
-        let after = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
+    async fn chat_grounded_never_escalates_and_says_why() {
+        struct Never(Arc<std::sync::atomic::AtomicUsize>);
+        impl LLMBackend for Never {
+            fn chat(&self, _: &[ChatMessage], _: &GenerationConfig, _: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ScriptedLLM::new("leaked").chat(&[], &GenerationConfig::default(), None)
+            }
+            fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+                self.chat(m, c, t)
+            }
+            fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+                Ok(t.len() / 4)
+            }
+            fn backend_name(&self) -> &str {
+                "never"
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pool = InferencePool::new(Arc::new(Never(calls.clone())) as Arc<dyn LLMBackend>, 1).with_provider("minimax");
+        let escalated = PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed);
+        let refused = privacy_private_refused_count();
+        let e = pool
+            .chat_grounded(vec![ChatMessage::user("private family context")], GenerationConfig::default())
+            .await
+            .unwrap_err();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "private context reached the backend");
+        assert_eq!(PRIVACY_ESCALATED.load(std::sync::atomic::Ordering::Relaxed), escalated, "escalated");
+        assert!(privacy_private_refused_count() > refused, "the refusal was not counted");
         assert_eq!(
-            after,
-            before + 1,
-            "the cloud escalation of a private-grounded turn must be counted"
+            person_sentence(&e).as_deref(),
+            Some("I won't send your personal context to MiniMax \u{2014} you haven't agreed to share with it. To keep personal things on this computer, set up a private lane; or allow sharing with MiniMax in Settings \u{2192} AI & Intelligence \u{2192} AI accounts.")
         );
+    }
+
+    #[test]
+    fn the_sentence_names_every_provider_of_a_chain_once() {
+        let s = no_consent_sentence("chain[nanogpt:deepseek -> ollama-cloud:x -> nanogpt:y]");
+        assert!(s.starts_with("I won't send your personal context to NanoGPT and Ollama Cloud \u{2014} you haven't agreed to share with them."), "{s}");
+        assert!(no_consent_sentence("ollama-cloud:deepseek-v4.1-flash -> minimax").contains("Ollama Cloud and MiniMax"));
+    }
+
+    /// A cleared provider and an in-process backend are served as before.
+    #[tokio::test]
+    async fn a_cleared_or_in_process_pool_is_served() {
+        let scripted = InferencePool::new(Arc::new(ScriptedLLM::new("fine")) as Arc<dyn LLMBackend>, 1);
+        let r = scripted.chat_grounded(vec![ChatMessage::user("private")], GenerationConfig::default()).await;
+        assert_eq!(r.expect("an in-process pool needs no consent").text, "fine");
+        assert!(scripted.private_lane_configured(), "in-process counts as cleared");
+        assert!(lane_cleared(false, "nanogpt:x", DEFAULT_HOUSEHOLD, "nanogpt"));
+        assert!(!lane_cleared(false, "nanogpt:x", DEFAULT_HOUSEHOLD, ""));
     }
 
     #[tokio::test]

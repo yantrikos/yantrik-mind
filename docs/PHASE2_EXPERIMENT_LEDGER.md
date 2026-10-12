@@ -16712,3 +16712,33 @@ A dropped `complete` itself needs nothing more.
   - `nothing_was_run` not exempting shaped answers;
   - `classify` not exempting them.
 - K3: the suite fails.
+
+## E.CMD1 — RESULT: the Mind reads #566's command answers for their exit code; a program's words cannot read as a refusal; 3 mutants killed
+
+**Built:**
+- `desktop::shaped_command` takes off the "Done — " and recognises the bridge's finished or running line.
+- `command_first` returns a shaped answer as it is.
+- `nothing_was_run` is false for a shaped answer.
+- `Outcome::classify` scores a shaped answer Ok.
+- The old (92fecdf) answer shape is read exactly as before (its test unchanged and passing).
+
+**The fixture is real:** `fixtures/desktop/act_command_answer_869de6ea.json` comes from running yantrik-os #566's own `command_answer` and `failure_answer` at 869de6ea. It has eight cases: the seven preregistered plus `finished_0_failed_word_no_note`.
+
+**Deviation that the mutants forced:**
+- The first run of the `classify` mutant SURVIVED. Every fixture carried a grant note long enough to push the answer past `classify`'s 240-character status cut-off, so the exemption was never needed.
+- A real answer with no grant note is 188 characters. With "14 passed, 0 failed" in its output it was scored Failed.
+- That case, generated from `command_answer(..., "")`, was added, and the mutant is now killed.
+
+**K1 held:** `the_566_command_answers_are_read_for_their_exit_code`. For each case as the Mind sees it:
+- `command_first` drops "Done — ";
+- `command_exit` gives 127, 0, 0, 0, 0 or 137, and None for running and refused;
+- `nothing_was_run` is false for every run, the forged one included, and true for the bridge's refusal;
+- `classify` is Ok for every shaped answer;
+- F47 records 127 and 137, a later 0 for the same command replaces its failure, and "running" records nothing.
+
+**K2 held: 3 mutants killed:**
+- the "Done — " strip removed;
+- `nothing_was_run` not exempting shaped answers;
+- `classify` not exempting them (after the no-note case).
+
+**K3 held:** full suite (Windows) 2453 passed, 0 failed. The run builds against yantrik-companion main 77b108f (#2 and #3 merged).

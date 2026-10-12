@@ -127,6 +127,12 @@ impl Outcome {
         if trimmed.is_empty() {
             return Outcome::Empty;
         }
+        // E.CMD1: a command's answer (yantrik-os #566) -- the bridge's line, then the program's own
+        // output fenced. A short one used to be read for words like "failed" ("14 passed, 0 failed");
+        // its exit code is the command's own answer, and F47 reports a non-zero one.
+        if crate::desktop::shaped_command(trimmed).is_some() {
+            return Outcome::Ok;
+        }
         // CONTENT, not a status line: the words below are only meaningful when the observation is
         // reporting on itself. Past this length a match is almost certainly the subject matter.
         // Parenthetical replies stay status-shaped at any length — that is the mind's own convention

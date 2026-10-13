@@ -3798,8 +3798,9 @@ mod privacy_tests {
         // built by local_backend_from_env with the "ollama" preset and must never come through
         // backend_from_spec, or the fix would silently undo the 10s → 0.9s measurement.
         // include_str! resolves next to this file, so the guard works from any working directory.
-        const SRC: &str = include_str!("lib.rs");
-        let local = SRC
+        // A Windows checkout (core.autocrlf) has CRLF line ends; the cut below looks for "\n}\n".
+        let src = include_str!("lib.rs").replace("\r\n", "\n");
+        let local = src
             .split("fn local_backend_from(")
             .nth(1)
             .expect("local_backend_from exists");

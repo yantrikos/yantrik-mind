@@ -17117,3 +17117,21 @@ All three hand private context to a provider the person did not agree to. No liv
 **K3 held:** full suite (Windows, built against companion `mind/effort`) 2478 passed, 0 failed.
 
 **Ships:** on branch `mind/opt2`, merged into os-shared-memory only after yantrik-companion#5 merges. os-shared-memory builds against companion main, which has no `effort` field yet.
+
+**Review (yantrik-os-dc, companion#5 at e1c1a36):** approved, with one guard. `GenericOpenAIBackend` is shared, and plain OpenAI (like some compatible servers) answers an unknown body field with a 400. So the Mind's "gateway only" rule has to live in the backend too, or the next caller that sets effort on another route breaks every one of its turns. A nit: the gateway silently ignores a word it does not know, so a typo should be caught here.
+
+**Guard (d524f53, merged as companion main 965532e):**
+- `effort` is written only when the backend's base URL, minus a trailing `/`, is exactly `http://127.0.0.1:7460/v1`, the same exact match E.SOCK2 uses;
+- the word is lowercased and must be one of `easy|medium|high|xhigh`;
+- anything else is dropped with a debug line, and the field's doc says so.
+- Tests: four non-gateway URLs never see it (OpenAI, port 7461, `/v1/x`, `localhost:7460`). Three wrong words are dropped and the four words pass. `High` arrives as `high`.
+- 4 more mutants killed:
+  - URL guard removed;
+  - URL matched by `:7460` substring;
+  - word check removed;
+  - no lowercasing.
+- yantrik-ml lib 89 passed.
+
+**A Windows-only test fragility, found while merging (not from E.OPT2):** `the_local_lane_is_not_wrapped_and_keeps_its_measured_behaviour` cuts `local_backend_from` at the first `"\n}\n"`. This checkout has `core.autocrlf=true`, so a file git rewrites (here, by the branch switch) has CRLF line ends. The cut then runs to the end of the file, picks up the test module's `StrictOpenAiBackend`, and fails. The test now normalises line ends before cutting. The guard still holds: a `// StrictOpenAiBackend` line inserted into the local lane fails it.
+
+**K3 held:** full suite (Windows, os-shared-memory with E.OPT2, against companion main 965532e) 2478 passed, 0 failed.

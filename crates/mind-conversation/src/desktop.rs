@@ -3952,4 +3952,16 @@ mod sys1_tests {
             assert!(c.contains(field), "{field} was trimmed away: {c}");
         }
     }
+
+    /// The real one: VM 541's shell, as the Mind's own yos-mcp returned it (OS 2306c982, captured by
+    /// yantrik-os-dc from the live process, 13 Oct). The readings sit at characters 1,347 to 5,633.
+    #[test]
+    fn the_541_shell_keeps_its_readings() {
+        const SHELL: &str = include_str!("../fixtures/desktop/shell_describe_541_f486eb5b.txt");
+        let c = condense_description(SHELL).expect("condensed");
+        assert!(c.contains("(state trimmed)"), "the head did not cut");
+        for field in ["\"cpu_percent\": 7", "\"disk\": \"21.6 GB / 29.8 GB\"", "\"disk_percent\": 72", "\"memory\": \"1.6 GB / 5.8 GB\"", "\"memory_percent\": 27"] {
+            assert!(c.contains(field), "{field} was trimmed away");
+        }
+    }
 }

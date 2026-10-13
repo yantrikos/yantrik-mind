@@ -16892,3 +16892,5 @@ A dropped `complete` itself needs nothing more.
 **K3:** full suite (Windows) 2461 passed, 0 failed. The Linux run is recorded below with the bundle.
 
 **Ships:** the minimum Mind for yantrik-os #783 is the commit that carries this.
+
+**E.SOCK2 K3, Linux (staging, 715f276 against companion 77b108f):** mind-core 37 passed (provider_set, capability, stream, voice) and mind-net 14 passed. Bundle `yantrik-mind-715f276-linux-amd64.tar.zst` (sha256 586f024a3003411a1dea7be70f5d8bc87484ba45d5f874b093cbcc4fd8ed1609): BUILD `agent_token=1` and `cmd_answer=1`, with the marker in the binary. Not installed anywhere yet.

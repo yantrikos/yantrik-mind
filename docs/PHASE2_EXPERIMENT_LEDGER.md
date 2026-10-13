@@ -17308,3 +17308,5 @@ That's a Mind defect independent of the model. A model that sends `notes.new_not
 **K3 (Windows):** full suite 2490 passed, 0 failed.
 
 **E.ARGS1 K3, Linux (staging, 76d6c7b):** mind-conversation 1214 passed. K3 held. Not in any bundle yet.
+
+**Bundle `yantrik-mind-e41c3b0-linux-amd64.tar.zst`** (sha256 e60ead01a1b9ca9b64cb306e0165e4c70fd584cab5d1c3d64a7205a27d3893cc), built on staging against companion 965532e. It carries everything in 714b134 plus E.ARGS1. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet. (714b134 went onto 520 at 04:31 CT on Pranab's OK; installed and checked by yantrik-os-dc.)

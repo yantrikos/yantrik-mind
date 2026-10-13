@@ -17015,3 +17015,5 @@ Integration: inside `with_attachments` the scripted model's prompt holds the fil
 - a per-turn `model` (the gateway applies the pick for a Mind on the gateway);
 - attachments as web-search sources;
 - the bounded-loop and member paths.
+
+**E.OPT1 K3, Linux (staging, 52ba4bd against companion 77b108f):** mind-conversation attach 12 passed; mind-core attachments, stream and voice 16 passed.

@@ -17801,3 +17801,20 @@ E.SLASH1 answers a bare "/new" by code, before any model call. But `mind_core::h
 **K3 (Windows):** full suite 2512 passed, 0 failed.
 
 **E.EGRESS7 + E.SLASH2 K3, Linux (staging, fc67860):** mind-core 177 passed, mind-conversation 1231 passed. K3 held for both.
+
+## E.SYS1 — PREREG: the shell's disk, memory and CPU readings survive condensing
+
+**Why:** VM 541, "How full is my disk and what is using the most memory?" (e41c3b0 and 1ca45b0). On 1ca45b0 the turn read `os_describe {"app":"shell"}` at step 2 and still answered "I don't have a disk-fullness number or a top-memory process — those checks didn't actually run." yantrik-os-dc read the same description on 541: `"disk": "11.5 GB / 29.8 GB"`, `"disk_percent": 38`, `"memory": "1.3 GB / 5.8 GB"`, `"memory_percent": 21` and `"cpu_percent": 37`, all top-level keys of the state. `condense_description` keeps the state's first 900 characters (`DESKTOP_STATE_HEAD`) plus the `ALWAYS_KEPT` fields. With four windows open, the shell's state runs past 900 characters before these keys, and none of them is kept. So the model never saw them, and its answer was honest about what it had. There is no per-process field, so "what is using the most memory" still needs System Monitor.
+
+**What is built (desktop.rs):** `disk`, `disk_percent`, `memory`, `memory_percent` and `cpu_percent` join `ALWAYS_KEPT`. They are small, one line each.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails: a shell description whose state has a 1,500-character `windows` list before `disk`, `memory` and `cpu_percent` is condensed with all five readings kept whole, and the `(state trimmed)` mark present.
+- K2, a mutant survives: the five keys removed from `ALWAYS_KEPT`.
+- K3: both suites pass.
+
+## E.SYS1 — RESULT (synthetic fixture): the shell's readings survive condensing; 1 mutant killed
+
+**K1 held:** a description with a 30-window list before the readings is cut, and all five come back whole. **K2:** the keys removed fails it. **K3 (Windows):** full suite 2513 passed, 0 failed.
+
+**Open:** the test's description is one I wrote. yantrik-os-dc is capturing 541's real `os_describe shell` result, and a test against it is added before this ships in a bundle.

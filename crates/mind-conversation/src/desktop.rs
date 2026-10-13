@@ -2375,7 +2375,12 @@ const CONDENSED_MARK: &str = "\nACTIONS:";
 // E.ERASE2: `approvals_off_for_test` too -- whether a question may be put in front of the person.
 // E.EGRESS3d (N3): `path` and `modified` too -- which file the described text is, and whether it
 // is still as on disk.
-const ALWAYS_KEPT: [&str; 6] = ["clock", "mind_mode", "content", "approvals_off_for_test", "path", "modified"];
+// E.SYS1 (VM 541): the shell's readings -- past the head with a few windows open, so "how full is my
+// disk" was answered "I don't have a disk-fullness number" with the number one describe away.
+const ALWAYS_KEPT: [&str; 11] = [
+    "clock", "mind_mode", "content", "approvals_off_for_test", "path", "modified",
+    "disk", "disk_percent", "memory", "memory_percent", "cpu_percent",
+];
 
 /// One TOP-LEVEL field of a description's state, whole and on one line: `  "key": value`. The
 /// value is taken to its matching bracket when it is an object or a list (however it was
@@ -3926,5 +3931,25 @@ mod loop9_tests {
         let opened = vec![(open.clone(), "Done \u{2014} Notes \u{2014} \"Weekend packing list\" open".to_string())];
         assert_eq!(item_made_again(ACT, &open, &opened), None, "a non-create action with the same title");
         assert_eq!(item_made_again(ACT, &note("Weekend packing list", "x"), &[]), None, "nothing made yet");
+    }
+}
+
+/// E.SYS1: the shell's disk, memory and CPU readings are kept whole past a long state head.
+#[cfg(test)]
+mod sys1_tests {
+    use super::*;
+
+    #[test]
+    fn the_shells_readings_survive_condensing() {
+        let windows: Vec<String> = (0..30).map(|i| format!("{{\"app\": \"app{i}\", \"title\": \"a window with a long title {i}\"}}")).collect();
+        let obs = format!(
+            "Yantrik \u{2014} desktop screen, 30 windows open\n{{\n  \"screen\": \"desktop\",\n  \"windows\": [{}],\n  \"cpu_percent\": 37,\n  \"disk\": \"11.5 GB / 29.8 GB\",\n  \"disk_percent\": 38,\n  \"memory\": \"1.3 GB / 5.8 GB\",\n  \"memory_percent\": 21\n}}\n  act: open_app {{app}}\n",
+            windows.join(", ")
+        );
+        let c = condense_description(&obs).expect("condensed");
+        assert!(c.contains("(state trimmed)"), "the head did not cut: {c}");
+        for field in ["\"disk\": \"11.5 GB / 29.8 GB\"", "\"disk_percent\": 38", "\"memory\": \"1.3 GB / 5.8 GB\"", "\"memory_percent\": 21", "\"cpu_percent\": 37"] {
+            assert!(c.contains(field), "{field} was trimmed away: {c}");
+        }
     }
 }

@@ -17017,3 +17017,37 @@ Integration: inside `with_attachments` the scripted model's prompt holds the fil
 - the bounded-loop and member paths.
 
 **E.OPT1 K3, Linux (staging, 52ba4bd against companion 77b108f):** mind-conversation attach 12 passed; mind-core attachments, stream and voice 16 passed.
+
+## E.PRIV2 — PREREG: the private gate clears a provider by name, link by link, never by substring
+
+**Why:** E.PROV2 recorded that the Private gate matches cleared entries as SUBSTRINGS of the whole route label. Checking that finding found it wider than the chain case.
+1. **Chains.** `chain[ollama-cloud:x -> nanogpt:y]` or `ollama-cloud:x -> nanogpt:y` is cleared when ANY link's name is in the list. A Private call to the chain then fails over to a link the person never cleared.
+2. **Names inside names.** An entry `nim` (NVIDIA NIM, which `/consent` writes for `nvidia-nim`) clears `minimax:MiniMax-M2.7`, because "mi**nim**ax" contains it.
+3. **Model names.** An entry `qwen` (Qwen Cloud) clears `ollama-cloud:qwen3.8-…`, because the MODEL name contains it.
+
+All three hand private context to a provider the person did not agree to. No live machine is exposed today: .90 and staging have dedicated private lanes (the gate is not consulted), and the Mac and 520 each run one provider whose entry is exact. It is latent, and E.PRIV1's consent mirror would start writing `nim` and `qwen`.
+
+**What is built (mind-inference `scope_allows`, Private only; Household and Public unchanged):**
+- The label is split into links: `chain[a -> b]`, `a -> b`, and `brain-pool/x[a,b]`.
+- EVERY link must be cleared.
+- A link `provider[:model]` is cleared by an entry when:
+  - the entry has no model part and equals the link's provider; or
+  - the entry has a model part and equals the whole link.
+- Matching is case-folded and trimmed.
+- One alias is kept: an entry `ollama` clears provider `ollama-cloud` (the catalogue names Ollama Cloud both ways). It does not clear `ollama-local`.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a chain with one cleared link is refused, and with both cleared it is allowed (both label forms);
+  - `minimax:MiniMax-M2.7` with `nim` is refused, and with `minimax` allowed;
+  - `ollama-cloud:qwen3.8` with `qwen` is refused;
+  - `ollama-cloud:deepseek-v4.1-flash` with exactly that entry is allowed, and `ollama-cloud:other` with it refused;
+  - `ollama-local:qwen` with `ollama-local` is allowed;
+  - `ollama-cloud:x` with `ollama` is allowed, and `ollama-local:x` with `ollama` refused;
+  - `yantrik-gateway:picked` with `yantrik-gateway` is allowed;
+  - Household keeps its old behaviour (a chain label with `chain` in the household list passes).
+- K2, a mutant survives:
+  - any-link instead of every-link;
+  - substring matching restored;
+  - the model-part rule dropped (an entry with a model clears any model of that provider).
+- K3: the suite fails. Existing tests that encoded substring clearing are changed on purpose and listed in the result.

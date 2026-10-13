@@ -31,6 +31,11 @@ pub fn with_attachments<F: std::future::Future>(section: Option<String>, fut: F)
     TURN_ATTACHMENTS.scope(section.unwrap_or_default(), fut)
 }
 
+/// E.OPT1b: does this turn carry files the person attached? A keyword guess yields to it.
+pub(crate) fn turn_has_attachments() -> bool {
+    TURN_ATTACHMENTS.try_with(|s| !s.is_empty()).unwrap_or(false)
+}
+
 /// The step prompt's section for this turn's attachments, or nothing.
 pub(crate) fn attachments_section() -> String {
     TURN_ATTACHMENTS
@@ -205,6 +210,13 @@ mod tests {
         for (name, n) in sizes {
             assert!(n < base + 1024, "{name}: {n} bytes around a {base}-byte future");
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_has_attachments_only_inside_a_filled_scope() {
+        assert!(!turn_has_attachments());
+        assert!(!with_attachments(None, async { turn_has_attachments() }).await);
+        assert!(with_attachments(Some("x".into()), async { turn_has_attachments() }).await);
     }
 
     #[test]

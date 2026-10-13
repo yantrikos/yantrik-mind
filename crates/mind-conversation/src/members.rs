@@ -438,15 +438,18 @@ impl super::ConversationEngine {
         // work for members, DELIVERED TO THEIR OWN CHAT, with "me"/"us" resolving around them.
         // (Analysis about people — gift/tastes/closet studies — stays on the primary's path.)
         let member_chat = self.chat_of_member(&id.owner).await;
-        if let Some(req) = creative_request(user_text) {
+        // E.OPT1b: a turn carrying an attached file is about that file, not a photo guess.
+        let attached = crate::attachments::turn_has_attachments();
+        if let Some(req) = creative_request(user_text).filter(|_| !attached) {
             return self.photo_create_for(&req, member_chat, Some(&name)).await;
         }
         if photo_followup(user_text)
+            && !attached
             && (self.photo_session_active() || photo_followup_strong(user_text))
         {
             return self.photo_followup_turn(user_text, member_chat).await;
         }
-        if let Some(q) = photo_request(user_text) {
+        if let Some(q) = photo_request(user_text).filter(|_| !attached) {
             return self
                 .photo_find_and_send_for(&q, member_chat, Some(&name))
                 .await;

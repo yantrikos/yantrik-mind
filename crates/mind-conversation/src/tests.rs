@@ -17233,6 +17233,45 @@ mod desktop_consent_and_stall_wiring {
         assert!(compose.iter().all(|(_, e)| e.is_none()), "compose was sent an effort (streamed: {streamed}): {calls:?}");
     }
 
+    /// E.OPT1b: one chat turn, optionally with files attached; the reply and the model's prompts.
+    async fn picture_turn(attached: Option<String>) -> (String, Vec<String>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps: vec![], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let reply = crate::with_attachments(attached, conv.handle_turn_as_counted("What is in this picture?", TurnIdentity::primary()))
+            .await
+            .unwrap_or_else(|e| format!("ERR {e}"));
+        let prompts = seen.lock().unwrap().clone();
+        (reply, prompts)
+    }
+
+    /// E.OPT1b (VM 541): a PNG attached to "What is in this picture?" reaches the model with the
+    /// attachment's own account of it; the photo follow-up does not take the turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_attached_picture_is_not_taken_by_the_photo_guess() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let png = [0x89u8, b'P', b'N', b'G', 0, 1, 2, 3];
+        let sha: String = sha2::Sha256::digest(png).iter().map(|b| format!("{b:02x}")).collect();
+        let options = serde_json::json!({"attachments": [{
+            "name": "picture.png", "mime": "image/png", "size": png.len(), "sha256": sha,
+            "content_b64": base64::engine::general_purpose::STANDARD.encode(png),
+        }]});
+        let section = crate::render_attachments(&options);
+        let (reply, prompts) = picture_turn(section).await;
+        assert!(!reply.contains("working set"), "the photo guess took the turn: {reply}");
+        assert!(
+            prompts.iter().any(|p| p.contains("picture.png (image/png, 8 bytes): attached, but this Mind cannot read this kind of file yet.")),
+            "the model never saw the attachment's account"
+        );
+        // Without a file, the same words still go to the photo follow-up.
+        let (plain, _) = picture_turn(None).await;
+        assert!(plain.contains("working set"), "the photo follow-up regressed: {plain}");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

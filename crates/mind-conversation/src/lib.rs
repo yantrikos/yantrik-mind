@@ -15849,7 +15849,10 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // are NOT gated — a bare "yes" answering a pending confirmation names no tool and must
         // still reach handle_action.
         stage("news");
-        let names_tool = self.names_a_held_tool(user_text);
+        // E.OPT1b (VM 541): a file the person attached to this message names what they want more
+        // plainly than any word -- "What is in this picture?" with a PNG attached was taken by the
+        // photo follow-up, which answered about "photos from earlier" before the model saw the file.
+        let names_tool = self.names_a_held_tool(user_text) || attachments::turn_has_attachments();
         if let Some(topic) = self.interest_in_recent_news(user_text).filter(|_| !names_tool) {
             let brief = self.news_brief(&topic).await;
             let _ = self
@@ -15879,6 +15882,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // Follow-ups about photos just shown ("the third one", "is she smiling?") resolve against
         // the session working set — checked BEFORE fresh retrieval so the thread isn't lost.
         if photo_followup(user_text)
+            && !names_tool
             && (self.photo_session_active() || photo_followup_strong(user_text))
         {
             let reply = self.photo_followup_turn(user_text, None).await;
@@ -15910,7 +15914,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         // confirmation" — the small model sometimes confabulates a search instead of running one, so
         // route the intent straight to full-mailbox search and let the LLM summarize the real hits.
         stage("mail check");
-        if let Some(mq) = mail_lookup_intent(user_text).filter(|_| !self.names_a_held_tool(user_text)) {
+        if let Some(mq) = mail_lookup_intent(user_text).filter(|_| !names_tool) {
             // ARCH-3A: this deterministic fast-path bypasses run_agent_tool_as, so it must broker its
             // own egress — otherwise a "search my mail for <credential>" would reach IMAP unmediated.
             if let Some(broker) = &self.egress {

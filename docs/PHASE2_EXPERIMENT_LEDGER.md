@@ -17529,3 +17529,51 @@ Most of each call is the model's thinking preamble. yantrik-os #791 (f60bd59 + 7
 The first compose mutant survived the first version of the loop test, which composed only on the plain branch. The test now runs both branches.
 
 **K3 (Windows):** full suite 2501 passed, 0 failed. Its effect on 541 needs yantrik-os #791 (d3ec5c26, with dc's guard and refinement) on that machine. The before numbers are recorded above (dc, e41c3b0): note 288 s with calls of 42.8 and 96.5 (the latter failed); search+calendar 15 calls, 4.9–113.6 s; disk 37.1 and 67.8 s plus the card's wait.
+
+**E.PACE1b K3, Linux (staging, c9a8f92):** mind-inference 98 passed, mind-conversation 1221 passed. K3 held. Not in any bundle yet.
+
+## E.OPT1b — PREREG: a turn that carries an attached file is not taken by a keyword guess
+
+**Why:** VM 541 on e41c3b0 (yantrik-os-dc, 13 Oct, through the real ask-bar picker):
+- **(a) Text: PASS.** trip-notes.txt, "What is the hotel confirmation number…" was answered from the file in 31 s.
+- **(b) PNG: FAIL.** picture.png with "What is in this picture?" was answered in 4 s: "I don't have any photos in view right now — the ones from earlier have left my working set. Ask me to find them again…". The journal shows E.OPT1 rendered the attachment (97 chars). But `photo_followup` ("picture") answered before the model ever saw it, invented "photos from earlier", and never said the Mind can't read a PNG yet.
+
+The chat path's rule is already that every keyword guess "must lose to a request that names the thing it wants" (`names_tool`). A file the person attached to this message names it, and plainer than any word. Two guesses also lack that gate today: `photo_followup`, and the mail lookup, which recomputes it.
+
+**What is built (mind-conversation):**
+- `attachments::turn_has_attachments()`: this turn's attachments scope holds something.
+- **The chat path:** the guesses below the gate yield when the turn names a held tool or carries an attachment. That covers news interest, creative, photo follow-up, photo retrieval, mail lookup, researchops, draft and skills.
+- **The member path:** creative, photo follow-up and photo retrieval yield the same way.
+- The stateful interceptors above the gate (confirmations, erase, knock replies) are untouched, as that comment requires.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - with a PNG attached (rendered by `render_attachments`), "What is in this picture?" reaches the model. The model's prompt carries the attachment's "cannot read this kind of file yet" line, and the reply is the scripted model's, not the photo working-set sentence;
+  - without an attachment, the same words with a photo session active still take the photo follow-up (no regression);
+  - `turn_has_attachments` is false outside a scope and inside an empty one.
+- K2, a mutant survives:
+  - the attachment term dropped from the gate;
+  - the photo follow-up left ungated;
+  - `turn_has_attachments` always false.
+- K3: both suites pass.
+
+## E.OPT1b — RESULT: a turn carrying an attached file is not taken by a keyword guess; 3 mutants killed
+
+**Built:**
+- `attachments::turn_has_attachments()`;
+- **chat path:** the `names_tool` gate is now "names a held tool, or carries an attachment". The photo follow-up and the mail lookup now go through it too; the mail lookup had recomputed it without the attachment;
+- **member path:** creative, photo follow-up and photo retrieval yield to an attachment.
+
+**K1 held:**
+- a PNG attached to "What is in this picture?" reaches the model, whose prompt carries "picture.png (image/png, 8 bytes): attached, but this Mind cannot read this kind of file yet.", and the reply is not the working-set sentence;
+- the same words with no file still get the photo follow-up;
+- `turn_has_attachments` is false outside a scope and in an empty one, true in a filled one.
+
+**K2 held: 3 mutants killed:**
+- attachment term dropped;
+- photo follow-up ungated;
+- `turn_has_attachments` always false.
+
+**K3 (Windows):** full suite 2503 passed, 0 failed.
+
+**Note:** what the model says about the PNG is now its own, from the attachment line, the sentence yantrik-os-dc proposed ("I can't read pictures yet…"). It is not a fixed reply, so the 541 rerun should check its wording.

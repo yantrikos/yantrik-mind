@@ -16824,3 +16824,39 @@ A dropped `complete` itself needs nothing more.
 **K3 held:** full suite (Windows) 2458 passed, 0 failed.
 
 **Ordering:** the OS's capability check (yantrik-os-dc, `tasks/mind-capabilities.md`) lands only after a bundle carrying the marker (fc5aa7b or later) is on 520 and the Mac.
+
+## E.SOCK2 — PREREG: the person's memory socket can change only what the person already chose; /consent off it
+
+**Why:** found while reviewing yantrik-os #783, which switches the socket on. `/provider` (E.PROV1) and `/consent` (E.PRIV1) authenticate by peer uid ONLY.
+- Harnesses run as the person and run model-written code, so once the socket is served any of them could:
+  - POST `/provider {"provider":"ollama","base_url":"<any LAN host>"}`, which makes that host the Mind's PRIVATE LANE;
+  - or forge the person's consent with `/consent`.
+
+  Keeping the Mind's settings under its own account (#411) is what this would undo.
+- No machine serves the socket yet, so nothing is exposed.
+- yantrik-os-dc showed that no credential can tell the shell from a harness while both run as the person and the door is in a directory the person can write (E.DOOR3's fixed door can't be had by ownership; the shell binds it).
+- So the socket's power is narrowed instead (dc's option (b)). Consent waits for a person-presence path (option (c), Pranab's call).
+
+**What is built (mind-core provider_set.rs):**
+1. **The socket router's `/provider`** accepts only:
+   - a gateway offer whose `base_url` is exactly `http://127.0.0.1:7460/v1` (trailing `/` tolerated), with model `picked` or an explicit `<account>/<model>`;
+   - the gateway's `remove: true`.
+
+   Every other provider, key or address is refused with a sentence naming where it is set instead (the Mind's own first-run chat). `apply` itself is unchanged, so a future authenticated path keeps the full surface.
+2. **`/consent` is not on the socket router.** `set_consent` and `consented_list` stay, unused by the router, for the path (c) brings.
+3. **Gateway token check, if the gateway offers `GET /v1/whoami`** (asked of yantrik-os-dc): the offered token must answer `{"harness":"mind"}`, else the offer is refused and the file is not changed. If the gateway answers 404 (no whoami yet), the offer is still taken and this is logged. That residual (a harness could hand the Mind its own token; the Mind's calls then run under that harness's grant and pick, and no content reaches the harness) is accepted until the gateway answers whoami.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails, on the socket router as served (a peer uid equal to the person):
+  - an `ollama` offer with a LAN base_url, a `nanogpt` key, a gateway offer at `http://127.0.0.2:7460/v1`, and one at `http://127.0.0.1:7461/v1` are each refused, and the settings file is unchanged byte for byte;
+  - `POST /consent` answers 404 or 405 and changes nothing;
+  - the exact gateway offer is taken, and its `remove` reverts;
+  - with a fake gateway whose whoami says `{"harness":"hermes"}` the offer is refused and nothing changes; with `{"harness":"mind"}` it is taken; with 404 it is taken.
+- K2, a mutant survives:
+  - the gateway-only filter removed;
+  - `/consent` routed again;
+  - the exact-URL check loosened to any loopback;
+  - the whoami harness check removed.
+- K3: the suite or Linux staging fails.
+
+**Ships:** the bundle with E.SOCK2 is the minimum Mind for yantrik-os #783 (needs-mind.txt "783 <commit>").

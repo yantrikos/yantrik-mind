@@ -17693,3 +17693,5 @@ The `\n\n` is the harness's `remainder()`. When the final answer does not contin
 ## E.OUT2 — RESULT: an egress broker refusal is Denied; 1 mutant killed
 
 **K1 held:** the broker's three refusal texts classify as Denied, and "(connection refused)" is still not Denied (the existing priority test). **K2:** removing the marker fails `priority_order_decides_when_a_message_matches_two_arms`. **K3 (Windows):** full suite 2507 passed, 0 failed.
+
+**E.OUT2 K3, Linux (staging, c0f8036):** mind-conversation 1227 passed. K3 held.

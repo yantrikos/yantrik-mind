@@ -16975,3 +16975,43 @@ A dropped `complete` itself needs nothing more.
   - the section left out of the prompt;
   - the harness not passing the options.
 - K3: the suite or Linux staging fails.
+
+## E.OPT1 — RESULT: an attached file reaches the model as fenced content, checked against its sha256; everything else is said; 5 mutants killed
+
+**Built:**
+- **mind-conversation `attachments.rs`.**
+  - `render_attachments` decodes `content_b64`, refuses a sha256 mismatch, and shows text fenced (a "--- " line inside gets a "| " prefix). It caps a file at 24,000 characters and a turn at 48,000, saying so when it cuts.
+  - It says "cannot read this kind of file yet" for a binary type: image, audio, video, font, PDF, zip, office, octet-stream, tar or gzip, or bytes that are not UTF-8 or contain NUL. It says "too large…" when content is absent.
+  - `with_attachments` and `attachments_section` add a task-local section to the agent step prompt, just before "User:".
+- **mind-core harness.rs.** `turn_attachments(turn)` renders `options`; `take_turn` gains `attached` and runs the turn inside `with_attachments`.
+- **Dependencies.** `base64 = "0.22"` in mind-conversation (already in the tree through mind-tools); base64 and sha2 as mind-core dev-dependencies. Cargo.lock adds only those dependency edges.
+
+**Deviations the mutants forced:**
+- **binary content shown** first SURVIVED. The PNG fixture's bytes were not UTF-8, so they were refused before the type check. An ASCII PDF case now isolates the check.
+- **harness does not pass options** first SURVIVED. The source check's needle appeared in its own assertion line and matched itself. The needle is now built in two halves.
+
+**K1 held** (12 mind-conversation tests and 1 mind-core test). The attachment cases:
+- text fenced;
+- a checksum mismatch not read;
+- a PNG and a large file said, not shown;
+- an ASCII PDF not shown;
+- the fence escaped;
+- the caps;
+- none gives None.
+
+Integration: inside `with_attachments` the scripted model's prompt holds the file (a canary) and the transcript does not, and the control turn's prompt has no section. The harness renders `turn["options"]` and passes it.
+
+**K2 held: 5 mutants killed:**
+- the sha check removed;
+- binary shown (after the PDF case);
+- the fence not escaped;
+- the section left out of the prompt;
+- the harness not passing options (after the needle fix).
+
+**K3:** full suite (Windows) 2471 passed, 0 failed. Linux below.
+
+**Said, not built:**
+- `effort`;
+- a per-turn `model` (the gateway applies the pick for a Mind on the gateway);
+- attachments as web-search sources;
+- the bounded-loop and member paths.

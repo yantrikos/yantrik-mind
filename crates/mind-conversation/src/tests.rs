@@ -20811,3 +20811,41 @@ async fn the_round_two_screen_holds_the_minds_own_words() {
         assert_eq!(own(q, &named, &always).await.as_deref(), Some(q), "{q:?} did not leave under an always grant");
     }
 }
+
+/// E.OPT1: a file the person attached reaches the model's prompt for this turn, and never the
+/// transcript.
+#[cfg(test)]
+mod attached_files_reach_the_model {
+    use super::*;
+    use base64::Engine as _;
+    use sha2::Digest as _;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_attached_text_is_in_the_prompt_and_not_in_the_transcript() {
+        let content = b"Quarterly budget: rent 1200, groceries 450, ZQ-ATTACH-CANARY.";
+        let sha: String = sha2::Sha256::digest(content).iter().map(|b| format!("{b:02x}")).collect();
+        let options = serde_json::json!({ "attachments": [{
+            "name": "budget.txt", "path": "/home/asha/budget.txt", "mime": "text/plain", "size": content.len(),
+            "sha256": sha, "handed_over_by": "person", "via": "lens", "at": "2026-10-12T20:00:00Z",
+            "content_b64": base64::engine::general_purpose::STANDARD.encode(content)
+        }] });
+        let llm = Arc::new(ScriptedLLM::new("Rent is the biggest line."));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let conv = ConversationEngine::new(memarc.clone(), InferencePool::new(llm.clone() as Arc<dyn LLMBackend>, 1), "YM");
+        let section = crate::render_attachments(&options);
+        let reply = crate::with_attachments(section, conv.agent_loop_for_eval("what's the biggest line in this?", &TurnIdentity::primary()))
+            .await
+            .unwrap();
+        assert_eq!(reply, "Rent is the biggest line.");
+        let seen = llm.last_user_prompt();
+        assert!(seen.contains("ZQ-ATTACH-CANARY") && seen.contains("budget.txt"), "the model never saw the file");
+        let transcript = memarc.recent_messages(10, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        assert!(transcript.iter().all(|(_, t)| !t.contains("ZQ-ATTACH-CANARY")), "the file went into the transcript: {transcript:?}");
+        // The control: without the scope, the prompt carries no file.
+        let llm2 = Arc::new(ScriptedLLM::new("ok"));
+        let conv2 = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()), InferencePool::new(llm2.clone() as Arc<dyn LLMBackend>, 1), "YM");
+        conv2.agent_loop_for_eval("hello", &TurnIdentity::primary()).await.unwrap();
+        assert!(!llm2.last_user_prompt().contains("attached these files"));
+    }
+}

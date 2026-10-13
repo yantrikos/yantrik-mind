@@ -2191,6 +2191,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "icu_normalizer",
@@ -2226,6 +2227,7 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
  "hex",
@@ -2245,6 +2247,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha2",
  "sha3",
  "tokio",
  "tower",

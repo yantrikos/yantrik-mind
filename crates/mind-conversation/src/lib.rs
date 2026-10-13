@@ -76,6 +76,9 @@ mod redact;
 /// E.VOICE2: the answer streamed to the desktop while the model writes it.
 mod answer_stream;
 pub use answer_stream::{AnswerDelta, TURN_ANSWER};
+/// E.OPT1: files the person attaches in the desktop's ask bar.
+mod attachments;
+pub use attachments::{render_attachments, with_attachments};
 pub mod erase_redact;
 pub use ex4_shadow::LegacyOutcome;
 mod browse;
@@ -13632,6 +13635,8 @@ Open reminders you're carrying for them:",
             };
             // E.ARENA1-F28: what the person said to another mind before switching here.
             let handover = handover_section();
+            // E.OPT1: the files the person attached to this message, as content.
+            let attached = attachments::attachments_section();
             let place = format!(
                 "{}{}{}",
                 machine_place_line(),
@@ -13639,7 +13644,7 @@ Open reminders you're carrying for them:",
                 desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
-                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\nUser: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![

@@ -44,4 +44,7 @@ hex = "0.4"
 zeroize = "1"
 
 [dev-dependencies]
+# E.OPT1: the harness test builds an attachment as the desktop does.
+base64 = "0.22"
+sha2 = "0.10"
 tower = { version = "0.5", features = ["util"] }

@@ -634,6 +634,8 @@ async fn serve(
                 }
             }
             let from_context = turn["context"].as_str().and_then(handover_from_context);
+            // E.OPT1: the files the person attached to this message (yantrik-os #673).
+            let attached = turn_attachments(&turn);
             // E.HOME1: the person's home as the desktop reports it (#411: not this process's $HOME).
             let home = turn["context"].as_str().and_then(machine_home);
             if from_context.is_some() {
@@ -704,7 +706,7 @@ async fn serve(
                                     mind_conversation::TURN_STATUS.scope(
                                         status_tx,
                                         mind_conversation::TURN_CALLS
-                                            .scope(cards, mind_conversation::TURN_GRANT.scope(grant_tx, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context)))),
+                                            .scope(cards, mind_conversation::TURN_GRANT.scope(grant_tx, mind_conversation::with_person_home(home, take_turn(&mem, &conv, &text, from_context, attached)))),
                                     ),
                                 ),
                             ),
@@ -1633,6 +1635,25 @@ mod attach_tests {
         payload.get(field).and_then(serde_json::Value::as_bool).unwrap_or(false)
     }
 
+    /// E.OPT1: a turn's `options.attachments` are what the model is given.
+    #[test]
+    fn a_turns_attachments_are_rendered_for_the_model() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let content = b"hello from a file";
+        let sha: String = sha2::Sha256::digest(content).iter().map(|b| format!("{b:02x}")).collect();
+        let turn = serde_json::json!({ "turn_id": 9, "text": "read this", "options": { "attachments": [{
+            "name": "a.txt", "path": "/home/asha/a.txt", "mime": "text/plain", "size": content.len(), "sha256": sha,
+            "handed_over_by": "person", "via": "lens", "at": "2026-10-12T20:00:00Z",
+            "content_b64": base64::engine::general_purpose::STANDARD.encode(content) }] } });
+        assert!(super::turn_attachments(&turn).unwrap().contains("hello from a file"));
+        assert_eq!(super::turn_attachments(&serde_json::json!({ "turn_id": 9, "text": "hi" })), None);
+        let src = include_str!("harness.rs");
+        // Built in two halves so this line cannot match itself.
+        let call = ["take_turn(&mem, &conv, &text, from_context, ", "attached)"].concat();
+        assert!(src.contains(&call), "serve must pass the turn's attachments");
+    }
+
     /// E.SOCK2b: the desktop learns from a field, not a sentence, that this Mind has no model yet.
     #[test]
     fn the_attach_says_whether_the_mind_needs_a_model() {
@@ -1679,7 +1700,7 @@ mod handover_tests {
         let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
         let conv = Arc::new(crate::engine(&mem, pool));
         mem.profile_set("pending_onboard", "interest:hobbies").await.unwrap();
-        let reply = take_turn(&mem, &conv, TURN, None).await;
+        let reply = take_turn(&mem, &conv, TURN, None, None).await;
         assert!(!reply.contains("noted"), "the hand-over was filed as a hobby: {reply}");
         let filed = mem.profile_get("interest_hobbies").await.unwrap();
         assert!(filed.is_none(), "an interest was stored: {filed:?}");
@@ -1693,7 +1714,7 @@ mod handover_tests {
         let pool = InferencePool::new(Arc::new(ScriptedLLM::new("{}")) as Arc<dyn LLMBackend>, 1);
         let conv = Arc::new(crate::engine(&mem, pool));
         mem.profile_set("pending_onboard", "interest:hobbies").await.unwrap();
-        let reply = take_turn(&mem, &conv, "I love hiking and playing chess on weekends.", None).await;
+        let reply = take_turn(&mem, &conv, "I love hiking and playing chess on weekends.", None, None).await;
         assert_eq!(reply, "Love that — noted.");
         let pending = mem.profile_get("pending_onboard").await.unwrap().unwrap_or_default();
         assert!(pending.is_empty(), "a question was left pending: {pending}");
@@ -1723,7 +1744,7 @@ mod handover_tests {
         let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
         let conv = Arc::new(crate::engine(&mem, pool));
         mem.profile_set("pending_onboard", "interest:hobbies").await.unwrap();
-        let reply = take_turn(&mem, &conv, &message, block).await;
+        let reply = take_turn(&mem, &conv, &message, block, None).await;
         assert!(!reply.contains("noted"), "{reply}");
         assert!(mem.profile_get("interest_hobbies").await.unwrap().is_none());
     }
@@ -1821,6 +1842,7 @@ async fn take_turn(
     conv: &Arc<ConversationEngine>,
     text: &str,
     from_context: Option<String>,
+    attached: Option<String>,
 ) -> String {
     // yantrik-os #394 puts it in the context and leaves `text` the person's own; an OS without it
     // prefixes the text, and that is split here.
@@ -1831,7 +1853,16 @@ async fn take_turn(
     if let Some(b) = &handover {
         eprintln!("[harness] a hand-over from another mind ({} chars) kept as context", b.chars().count());
     }
-    mind_conversation::with_handover(handover, think(mem, conv, &message)).await
+    if let Some(a) = &attached {
+        eprintln!("[harness] the person attached files to this message ({} chars rendered for the model)", a.chars().count());
+    }
+    mind_conversation::with_attachments(attached, mind_conversation::with_handover(handover, think(mem, conv, &message))).await
+}
+
+/// E.OPT1: a turn's attached files as the model will see them, from `options.attachments`.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn turn_attachments(turn: &serde_json::Value) -> Option<String> {
+    mind_conversation::render_attachments(&turn["options"])
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]

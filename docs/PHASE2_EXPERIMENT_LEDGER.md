@@ -17839,3 +17839,5 @@ The compose instruction says "work log" three times ("based on this work log", "
 **K1 held:** a turn that composed after a tool and a failed step carries `COMPOSE_PLAIN_WORDS` in its compose prompt. That proves presence only. **K3 (Windows):** full suite 2514 passed, 0 failed. **K2, the 541 rerun, is still to come.**
 
 **E.SYS1, the real fixture:** yantrik-os-dc captured VM 541's `os_describe {"app":"shell"}` result as the Mind's own yos-mcp returned it (OS 2306c982), by tracing the live process rather than reusing its token: 42,731 characters, scanned clean of credentials and personal names. The readings sit at characters 1,347–5,633, all past the 900-character head. It is `fixtures/desktop/shell_describe_541_f486eb5b.txt`. Against it, all five readings survive condensing, and with the keys removed from `ALWAYS_KEPT` the test fails.
+
+**E.SYS1 + E.VOICE5 K3, Linux (staging, e50a781):** mind-core 177, mind-conversation 1234, mind-inference 98 passed. K3 held.

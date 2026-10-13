@@ -17577,3 +17577,5 @@ The chat path's rule is already that every keyword guess "must lose to a request
 **K3 (Windows):** full suite 2503 passed, 0 failed.
 
 **Note:** what the model says about the PNG is now its own, from the attachment line, the sentence yantrik-os-dc proposed ("I can't read pictures yet…"). It is not a fixed reply, so the 541 rerun should check its wording.
+
+**E.OPT1b K3, Linux (staging, 8ff91e2):** mind-conversation 1223 passed. K3 held.

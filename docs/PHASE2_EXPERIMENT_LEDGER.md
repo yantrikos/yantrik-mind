@@ -17672,3 +17672,24 @@ The `\n\n` is the harness's `remainder()`. When the final answer does not contin
 **K3 (Windows):** full suite 2507 passed, 0 failed.
 
 **E.VOICE4 K3, Linux (staging, ef4b397):** mind-conversation 1227 passed. K3 held. Not in any bundle yet.
+
+## E.OUT2 — PREREG: an egress broker refusal is scored as refused, never as ok
+
+**Why:** the 1ca45b0 rerun on VM 541. Step 8's `new_note` was refused by the egress broker: "(refused: the arguments to `mcp.yantrik-os.os_act` look like they contain a credential/secret — I won't send that outward)". The Agents record showed it "— ok": the Mind reported its own refused call as done.
+
+`tool_outcome::classify`'s Denied markers carry gate words ("refused by", "blocked by", "safe outbound request", …). The broker's `refusal_text` forms all begin "(refused: " and contain none of them. The marker cannot be a bare "refused", because "(connection refused)" is a network failure.
+
+**What is built:** "(refused:" joins the Denied markers. It's the broker's own prefix for all three of its refusals, and no network error is written that way.
+
+**Not in this change:** why the detector fired. The `card-context-number` kind matched "cards" (a packing-list item) and the "4471" of the booking code "AX-4471" two list lines later, inside E.SEC19's window. The detector is shared by several boundaries and was tuned against thousands of real memories, so its change is raised separately rather than made here.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - classify("mcp.yantrik-os.os_act", each of the broker's three refusal texts) is Denied;
+  - "(connection refused)" is still not Denied.
+- K2, a mutant survives: the marker removed.
+- K3: both suites pass.
+
+## E.OUT2 — RESULT: an egress broker refusal is Denied; 1 mutant killed
+
+**K1 held:** the broker's three refusal texts classify as Denied, and "(connection refused)" is still not Denied (the existing priority test). **K2:** removing the marker fails `priority_order_decides_when_a_message_matches_two_arms`. **K3 (Windows):** full suite 2507 passed, 0 failed.

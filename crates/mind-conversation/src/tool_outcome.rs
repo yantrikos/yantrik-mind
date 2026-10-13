@@ -191,6 +191,9 @@ impl Outcome {
             "can't do that —",
             "safe outbound request",
             "not executed",
+            // E.OUT2 (VM 541): the egress broker's own refusals all begin so ("(refused: the
+            // arguments to … look like they contain a credential"); one was shown to the person as ok.
+            "(refused:",
         ]) {
             return Outcome::Denied;
         }
@@ -549,6 +552,14 @@ mod tests {
 
     #[test]
     fn priority_order_decides_when_a_message_matches_two_arms() {
+        // E.OUT2: the egress broker's three refusals are refusals.
+        for s in [
+            "(refused: the arguments to `mcp.yantrik-os.os_act` look like they contain a credential/secret \u{2014} I won't send that outward)",
+            "(refused: `x` isn't a registered egress tool \u{2014} it can't send data outward until it's added to the egress registry)",
+            "(refused: egress policy denied `x`: other)",
+        ] {
+            assert_eq!(Outcome::classify("mcp.yantrik-os.os_act", s), Outcome::Denied, "{s}");
+        }
         // "refused" appears in both a gate refusal and a connection error, and the first version of
         // the Denied arm matched the bare word — so "(connection refused)" was classified as the
         // safety gate working rather than as a dead host. This test caught it.

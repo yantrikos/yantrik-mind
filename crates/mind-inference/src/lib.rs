@@ -382,6 +382,24 @@ fn current_cancel() -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
 }
 
 tokio::task_local! {
+    /// E.OPT2: how hard the person asked the model to think this turn (yantrik-os #673), empty for
+    /// no choice. Given to a call only when its route is the OS's gateway, which maps it per provider.
+    static EFFORT: String;
+}
+/// Run `f` with this turn's effort (`easy`, `medium`, `high`, `xhigh`, or empty).
+pub fn with_effort<F: std::future::Future>(effort: String, f: F) -> tokio::task::futures::TaskLocalFuture<String, F> {
+    EFFORT.scope(effort, f)
+}
+/// The effort for a call whose route is `route`: only toward the gateway; any other provider may
+/// refuse a field it does not know.
+fn effort_for(route: &str) -> Option<String> {
+    if !route.starts_with(GATEWAY_PROVIDER) {
+        return None;
+    }
+    EFFORT.try_with(|e| e.trim().to_string()).ok().filter(|e| !e.is_empty())
+}
+
+tokio::task_local! {
     /// E.VOICE2: where a tool-capable call inside this task sends its words as the model writes them.
     static STEP_TOKENS: tokio::sync::mpsc::UnboundedSender<String>;
 }
@@ -804,6 +822,9 @@ impl InferencePool {
             .expect("semaphore never closed");
         let scope_for_lane = scope;
         let provider_for_lane = selected_label;
+        // E.OPT2: the ask bar's effort, toward the gateway only.
+        let mut config = config;
+        config.effort = effort_for(&provider_for_lane);
         // L4-0: the attempt counter outlives the blocking thread — a panic there still yields
         // a Failed row with the attempts made.
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -1076,6 +1097,9 @@ impl InferencePool {
             .expect("semaphore never closed");
         let scope_for_lane = scope;
         let provider_for_lane = selected_label;
+        // E.OPT2: the ask bar's effort, toward the gateway only.
+        let mut config = config;
+        config.effort = effort_for(&provider_for_lane);
         let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempts_in = attempts.clone();
         let call_cap = current_call_cap();
@@ -6160,5 +6184,41 @@ mod private_gate_tests {
     fn the_household_lane_is_unchanged() {
         assert!(scope_allows(PrivacyScope::Household, "chain[a -> b]", DEFAULT_HOUSEHOLD, ""));
         assert!(scope_allows(PrivacyScope::Household, "minimax:MiniMax-M2.7", DEFAULT_HOUSEHOLD, ""));
+    }
+}
+
+/// E.OPT2: the ask bar's effort reaches a call only when its route is the gateway.
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    struct SeesEffort(Arc<std::sync::Mutex<Vec<Option<String>>>>);
+    impl LLMBackend for SeesEffort {
+        fn chat(&self, _: &[ChatMessage], c: &GenerationConfig, _: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            self.0.lock().unwrap().push(c.effort.clone());
+            ScriptedLLM::new("ok").chat(&[], &GenerationConfig::default(), None)
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "sees-effort"
+        }
+    }
+
+    #[tokio::test]
+    async fn effort_goes_to_the_gateway_only() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let call = |label: &'static str| {
+            let pool = InferencePool::new(Arc::new(SeesEffort(seen.clone())) as Arc<dyn LLMBackend>, 1).with_provider(label);
+            async move { pool.chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Public, Vec::new()).await.unwrap() }
+        };
+        with_effort("high".into(), call("yantrik-gateway:picked")).await;
+        with_effort("high".into(), call("nanogpt:deepseek")).await;
+        call("yantrik-gateway:picked").await;
+        assert_eq!(*seen.lock().unwrap(), vec![Some("high".to_string()), None, None]);
     }
 }

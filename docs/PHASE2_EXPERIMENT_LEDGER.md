@@ -17096,3 +17096,24 @@ All three hand private context to a provider the person did not agree to. No liv
   - the body writing `effort` when None;
   - the harness not passing it.
 - K3: both suites pass.
+
+## E.OPT2 — RESULT: the ask bar's effort reaches the gateway and nothing else; 3 mutants killed
+
+**Built:**
+- **yantrik-companion#5** (mind/effort): `GenerationConfig.effort`, written to the OpenAI body only when set.
+- **mind-inference:** `with_effort` (returns tokio's `TaskLocalFuture`, as E.VOICE2's helpers do), and `effort_for(route)`, which is Some only for `yantrik-gateway…`. Both call paths set `config.effort` from it.
+- **mind-core:** `turn_effort` takes one of `easy|medium|high|xhigh` from `options.effort`, else empty. `serve` wraps the turn in `with_effort`.
+
+**K1 held:**
+- yantrik-ml: absent by default, present when set.
+- mind-inference: gateway inside the scope → `Some("high")`; nanogpt inside → None; gateway outside → None.
+- harness: the four words pass, "turbo" and absent give nothing, and the source check (needle in two halves) passes.
+
+**K2 held: 3 mutants killed:**
+- yantrik-ml always writes the field;
+- every route is given the effort;
+- the harness passes an empty effort.
+
+**K3 held:** full suite (Windows, built against companion `mind/effort`) 2478 passed, 0 failed.
+
+**Ships:** on branch `mind/opt2`, merged into os-shared-memory only after yantrik-companion#5 merges. os-shared-memory builds against companion main, which has no `effort` field yet.

@@ -636,6 +636,8 @@ async fn serve(
             let from_context = turn["context"].as_str().and_then(handover_from_context);
             // E.OPT1: the files the person attached to this message (yantrik-os #673).
             let attached = turn_attachments(&turn);
+            // E.OPT2: how hard the person asked the model to think.
+            let effort = turn_effort(&turn);
             // E.HOME1: the person's home as the desktop reports it (#411: not this process's $HOME).
             let home = turn["context"].as_str().and_then(machine_home);
             if from_context.is_some() {
@@ -694,7 +696,7 @@ async fn serve(
             let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cancel_in = cancel.clone();
             let mut thinking = tokio::spawn(async move {
-                mind_inference::with_cancel(cancel_in, mind_conversation::TURN_ANSWER.scope(answer_tx, mind_conversation::TURN_CONVERSATION
+                mind_inference::with_effort(effort, mind_inference::with_cancel(cancel_in, mind_conversation::TURN_ANSWER.scope(answer_tx, mind_conversation::TURN_CONVERSATION
                     .scope(
                         chat,
                         mind_conversation::erase_redact::TURN_REDACT.scope(
@@ -711,7 +713,7 @@ async fn serve(
                                 ),
                             ),
                         ),
-                    )))
+                    ))))
                     .await
             });
             // A turn can outlast the desktop's 90-second presence window, and this loop does not
@@ -1635,6 +1637,19 @@ mod attach_tests {
         payload.get(field).and_then(serde_json::Value::as_bool).unwrap_or(false)
     }
 
+    /// E.OPT2: only the ask bar's four words pass, and serve runs the turn inside them.
+    #[test]
+    fn a_turns_effort_is_one_of_four_words_and_is_passed() {
+        let t = |e: serde_json::Value| serde_json::json!({ "turn_id": 1, "text": "x", "options": { "effort": e } });
+        assert_eq!(super::turn_effort(&t(serde_json::json!("xhigh"))), "xhigh");
+        assert_eq!(super::turn_effort(&t(serde_json::json!(" easy "))), "easy");
+        assert_eq!(super::turn_effort(&t(serde_json::json!("turbo"))), "");
+        assert_eq!(super::turn_effort(&serde_json::json!({ "turn_id": 1, "text": "x" })), "");
+        let src = include_str!("harness.rs");
+        let call = ["mind_inference::with_effort(", "effort, mind_inference::with_cancel("].concat();
+        assert!(src.contains(&call), "serve must run the turn inside its effort");
+    }
+
     /// E.OPT1: a turn's `options.attachments` are what the model is given.
     #[test]
     fn a_turns_attachments_are_rendered_for_the_model() {
@@ -1857,6 +1872,15 @@ async fn take_turn(
         eprintln!("[harness] the person attached files to this message ({} chars rendered for the model)", a.chars().count());
     }
     mind_conversation::with_attachments(attached, mind_conversation::with_handover(handover, think(mem, conv, &message))).await
+}
+
+/// E.OPT2: the effort the person picked for this turn, if it is one of the ask bar's four words.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn turn_effort(turn: &serde_json::Value) -> String {
+    match turn["options"]["effort"].as_str().map(str::trim) {
+        Some(e @ ("easy" | "medium" | "high" | "xhigh")) => e.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// E.OPT1: a turn's attached files as the model will see them, from `options.attachments`.

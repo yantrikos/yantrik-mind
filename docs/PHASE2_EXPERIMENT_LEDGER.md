@@ -17736,3 +17736,5 @@ The agent loop's broker check skips such a call. Every other `mcp.*` call, and e
 - the loop not consulting it.
 
 **K3 (Windows):** full suite 2509 passed, 0 failed.
+
+**E.LOCAL1 K3, Linux (staging, 338f172):** mind-conversation 1229 passed. K3 held.

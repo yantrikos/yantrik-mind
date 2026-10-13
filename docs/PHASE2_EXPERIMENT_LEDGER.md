@@ -17841,3 +17841,5 @@ The compose instruction says "work log" three times ("based on this work log", "
 **E.SYS1, the real fixture:** yantrik-os-dc captured VM 541's `os_describe {"app":"shell"}` result as the Mind's own yos-mcp returned it (OS 2306c982), by tracing the live process rather than reusing its token: 42,731 characters, scanned clean of credentials and personal names. The readings sit at characters 1,347–5,633, all past the 900-character head. It is `fixtures/desktop/shell_describe_541_f486eb5b.txt`. Against it, all five readings survive condensing, and with the keys removed from `ALWAYS_KEPT` the test fails.
 
 **E.SYS1 + E.VOICE5 K3, Linux (staging, e50a781):** mind-core 177, mind-conversation 1234, mind-inference 98 passed. K3 held.
+
+**Bundle `yantrik-mind-aa02af4-linux-amd64.tar.zst`** (sha256 87396674d3b6017b8fee0b839df56c88196d2b50a8851c1678a8be2a76e82fa0), built on staging against companion 965532e. It carries 1ca45b0 plus E.LOOP9, E.VOICE4, E.OUT2, E.LOCAL1, E.EGRESS7, E.SLASH2, E.SYS1 and E.VOICE5. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.

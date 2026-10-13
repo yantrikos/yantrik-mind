@@ -17579,3 +17579,5 @@ The chat path's rule is already that every keyword guess "must lose to a request
 **Note:** what the model says about the PNG is now its own, from the attachment line, the sentence yantrik-os-dc proposed ("I can't read pictures yet…"). It is not a fixed reply, so the 541 rerun should check its wording.
 
 **E.OPT1b K3, Linux (staging, 8ff91e2):** mind-conversation 1223 passed. K3 held.
+
+**Bundle `yantrik-mind-1ca45b0-linux-amd64.tar.zst`** (sha256 d76010258cccf9dbb9ac29ad526234872ec7282b76aa0411490627d2b066523a), built on staging against companion 965532e. It carries e41c3b0 plus E.PACE1a, E.MEM1, E.NAME2, E.PACE1b and E.OPT1b. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.

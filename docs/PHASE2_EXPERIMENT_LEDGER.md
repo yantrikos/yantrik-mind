@@ -17581,3 +17581,55 @@ The chat path's rule is already that every keyword guess "must lose to a request
 **E.OPT1b K3, Linux (staging, 8ff91e2):** mind-conversation 1223 passed. K3 held.
 
 **Bundle `yantrik-mind-1ca45b0-linux-amd64.tar.zst`** (sha256 d76010258cccf9dbb9ac29ad526234872ec7282b76aa0411490627d2b066523a), built on staging against companion 965532e. It carries e41c3b0 plus E.PACE1a, E.MEM1, E.NAME2, E.PACE1b and E.OPT1b. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.
+
+## E.LOOP9 — PREREG: an item made once this turn is not made again, and a refused fetch is a wasted step
+
+**Why:** the 1ca45b0 rerun on VM 541 (yantrik-os-dc, 13 Oct). The OS was test/541-791, so E.PACE1b's "easy" turned thinking off on tool steps. Tool steps fell to 2–4 s and calendar, search and disk stayed right, but:
+
+- **(c) Six notes.** "Create a note … Weekend packing list" made `new_note` succeed at steps 3–7 (note count 4→8). Every result said `"Weekend packing list" open (… saved) … accepted: True, settled: True`, and each call carried freshly worded text. F26 (`same_change_again`) only matches when the inner args are equal or one contains the other, so a rewording passes. Then step 9 sent `notes.trash {}`, a trash with no target, apparently to clean up; it raised a card that nobody answered. This is the cost of thinking-off that E.PACE1b said would be measured: without its preamble, the model did not see that the note already existed.
+- **(d) Eleven refused fetches.** `web_fetch` alternated between an address no search had listed and one already fetched. Each was refused by the egress planner ("picked no listed address — refused"), and nothing stopped it until the model answered at step 17. The loop's `EgressUnsafe` branch writes the refusal to the work log and `continue`s before the barren-step accounting, so a refused call never counted as wasted.
+
+**What is built:**
+1. **`desktop::item_made_again(tool, args, made)`.** Some(note) when this `os_act` creates something and its title is one made this turn:
+   - a create action is one whose action name starts `new`, `add` or `create`;
+   - the title is the `title`, `name`, `subject` or `summary` arg, trimmed and compared case-insensitively;
+   - "made this turn" means the same app and action, with a run recorded in `made`.
+
+   The note says the item already exists, quotes the result, and says to change that one rather than make another. It sits beside F26 in the not-sent chain. Two different titles are two items and both go.
+2. **The loop:** an `EgressUnsafe` refusal counts as a barren step, and the turn composes once `MAX_BARREN_STEPS` consecutive ones are reached, as the `Unavailable` branch already does.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **item_made_again:**
+    - `notes.new_note {title:"Weekend packing list", text:A}` after one with text B ran gives Some;
+    - title "weekend packing list " matches too;
+    - title "Groceries" gives None;
+    - `notes.trash` gives None (not a create);
+    - an earlier call that was refused (not in `made`) gives None.
+  - **Loop, notes:** three `new_note` steps titled the same with different text reach the desktop as one call, and the model is told the note exists.
+  - **Loop, fetches:** `web_fetch` calls refused by the egress guard stop the loop after two, and the turn composes.
+- K2, a mutant survives:
+  - the title compare made case-sensitive and exact (the trailing-space case);
+  - the create check removed (`trash` blocked);
+  - `item_made_again` dropped from the chain;
+  - the egress branch not counting barren.
+- K3: both suites pass.
+
+## E.LOOP9 — RESULT: an item made once is not made again, and a refused fetch is a wasted step; 4 mutants killed
+
+**Built:**
+- `desktop::item_made_again`, in the not-sent chain after F26, checked against the whole turn's `made`;
+- the loop's `EgressUnsafe` branch counts a barren step and composes at `MAX_BARREN_STEPS`.
+
+**K1 held:**
+- **Unit:** same title with new text gives Some (quoting the result). Trailing space and case match. Another title, a `trash`, nothing made yet, and an `open` of the same title twice all give None.
+- **Loop, notes:** three same-title notes with new wording reach the desktop as one, and the model is told.
+- **Loop, fetches:** two fetches the planner refused ("no address from the person's words or a web result"), then the turn composes. A third is never tried.
+
+**K2 held: 4 mutants killed.** Two survived the first tests and were killed after these test fixes:
+- **Create check removed:** the `trash` case could not catch it, since the actions differ anyway. A same-title `open` repeated now does.
+- **Egress branch not counting:** the first fetch test's engine had no web client and no egress broker, so the fetch was "web not configured" and never reached the guard. The test now gives the engine both, and the journal shows the egress refusal.
+
+The other two: title compare made exact, and `item_made_again` dropped from the chain.
+
+**K3 (Windows):** full suite 2506 passed, 0 failed.

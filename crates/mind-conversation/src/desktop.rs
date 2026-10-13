@@ -1783,6 +1783,41 @@ fn inner_args(args: &serde_json::Value) -> serde_json::Map<String, serde_json::V
     }
 }
 
+/// E.LOOP9 (VM 541, 1ca45b0): an item this `os_act` would create, when one with its title was made
+/// this turn. With thinking off the model made "Weekend packing list" six times, each with freshly
+/// worded text, so F26's field comparison never matched. A create is an action named `new…`,
+/// `add…` or `create…`; the title is `title`, `name`, `subject` or `summary`, compared trimmed and
+/// case-insensitively. Two different titles are two items.
+pub(crate) fn item_made_again(
+    tool: &str,
+    args: &serde_json::Value,
+    made: &[(serde_json::Value, String)],
+) -> Option<String> {
+    let (app, action) = act_target(tool, args)?;
+    if !["new", "add", "create"].iter().any(|p| action.starts_with(p)) {
+        return None;
+    }
+    let title_of = |a: &serde_json::Value| -> Option<String> {
+        let inner = inner_args(a);
+        ["title", "name", "subject", "summary"]
+            .iter()
+            .find_map(|k| inner.get(*k).and_then(|v| v.as_str()))
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+    };
+    let title = title_of(args)?;
+    made.iter().find_map(|(prev, head)| {
+        let (p_app, p_action) = act_target(ACT, prev)?;
+        (p_app == app && p_action == action && title_of(prev).as_deref() == Some(title.as_str())).then(|| {
+            format!(
+                "({app}.{action} already made this item this turn: {}. It exists -- do not make another. \
+                 If something in it should change, change that one; otherwise answer.)",
+                head.trim()
+            )
+        })
+    })
+}
+
 /// E.ARENA1-F26: the same change as one that already RAN this turn, re-sent with a field added or
 /// dropped -- which the exact repeat guard cannot see. R2 and R3, T3: `add_event {date, duration_min,
 /// time, title}` succeeded ("added": ..., "on": "2026-09-30 15:00"), and the model sent it again
@@ -3831,5 +3866,31 @@ mod args1_normalize_tests {
             crate::normalize_tool_args(serde_json::json!({"q": [{"type": "text", "text": "Ber"}, "gen"]})),
             serde_json::json!({"q": "Bergen"})
         );
+    }
+}
+
+/// E.LOOP9: an item made once this turn is not made again under new wording.
+#[cfg(test)]
+mod loop9_tests {
+    use super::*;
+
+    fn note(title: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": title, "text": text}})
+    }
+
+    #[test]
+    fn the_same_title_is_the_same_item_and_a_new_title_is_not() {
+        let made = vec![(note("Weekend packing list", "Clothes\n- socks"), "Done \u{2014} Notes \u{2014} \"Weekend packing list\" open (2 lines, saved)".to_string())];
+        let again = item_made_again(ACT, &note("Weekend packing list", "Essentials\n- ID"), &made).expect("made again");
+        assert!(again.contains("already made this item") && again.contains("Weekend packing list\" open"), "{again}");
+        assert!(item_made_again(ACT, &note("weekend packing list ", "x"), &made).is_some(), "case and spacing");
+        assert_eq!(item_made_again(ACT, &note("Groceries", "eggs"), &made), None);
+        let trash = serde_json::json!({"app": "notes", "action": "trash", "args": {"title": "Weekend packing list"}});
+        assert_eq!(item_made_again(ACT, &trash, &made), None, "not a create");
+        // Opening the same note twice is not making it twice.
+        let open = serde_json::json!({"app": "notes", "action": "open", "args": {"title": "Weekend packing list"}});
+        let opened = vec![(open.clone(), "Done \u{2014} Notes \u{2014} \"Weekend packing list\" open".to_string())];
+        assert_eq!(item_made_again(ACT, &open, &opened), None, "a non-create action with the same title");
+        assert_eq!(item_made_again(ACT, &note("Weekend packing list", "x"), &[]), None, "nothing made yet");
     }
 }

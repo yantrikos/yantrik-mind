@@ -17272,6 +17272,50 @@ mod desktop_consent_and_stall_wiring {
         assert!(plain.contains("working set"), "the photo follow-up regressed: {plain}");
     }
 
+    /// E.LOOP9 (VM 541, 1ca45b0): one note made, then the same title twice more with new wording --
+    /// one call reaches the desktop, and the model is told the note exists.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_note_made_once_is_not_made_again_in_new_words() {
+        let note = |text: &str| Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Weekend packing list", "text": text}}));
+        let r = run(
+            vec![note("Clothes\n- socks"), note("Essentials\n- ID\n- Charger"), note("Packing\n- toothbrush")],
+            vec!["Notes is open."],
+            vec!["Done \u{2014} Notes \u{2014} \"Weekend packing list\" open (2 lines, saved) accepted: True, settled: True"],
+        )
+        .await;
+        assert_eq!(acts_reached(&r).len(), 1, "the note was made again: {:?}", r.reached);
+        assert!(r.prompts.iter().any(|p| p.contains("already made this item")), "the model was not told");
+    }
+
+    /// E.LOOP9 (VM 541): fetches the egress guard refuses -- addresses no search listed -- are wasted
+    /// steps; two in a row end the loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_fetches_stop_the_loop() {
+        let fetch = |u: &str| Step::Call("web_fetch", serde_json::json!({"url": u}));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![
+                fetch("https://askweather.ai/dallas-tx/weather-this-weekend"),
+                fetch("https://weather.example/dallas"),
+                fetch("https://askweather.ai/dallas-tx/weather-this-weekend"),
+                fetch("https://weather.example/dallas"),
+            ],
+            seen: seen.clone(),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM")
+            .with_web(Arc::new(mind_tools::ScriptedFetcher::new("a page")))
+            .with_egress(Arc::new(mind_governance::egress::EgressBroker::open(std::env::temp_dir(), false)));
+        let _ = conv.agent_loop_for_eval("What's the weather in Dallas this weekend?", &TurnIdentity::primary()).await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(prompts.iter().any(|p| p.contains("[1] web_fetch ->")), "the second fetch was not refused and logged: {:?}", prompts.last());
+        assert!(!prompts.iter().any(|p| p.contains("[2] web_fetch ->")), "a third refused fetch was tried");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

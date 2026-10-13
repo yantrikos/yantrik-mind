@@ -14288,6 +14288,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     msg,
                 } => {
                     scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
+                    // E.LOOP9 (VM 541): a refused call learned nothing; eleven refused fetches ran
+                    // unstopped because this branch skipped the count.
+                    barren += 1;
+                    if barren >= MAX_BARREN_STEPS {
+                        eprintln!("[agent] step {step}: egress refused {barren} calls in a row \u{2014} composing from the work log");
+                        break;
+                    }
                     continue;
                 }
             };
@@ -14486,6 +14493,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }) {
                 // E.ARENA1-F26: a change already made, re-sent with a field more or less.
                 eprintln!("[agent] step {step}: {tool} is a change already made this turn \u{2014} not sent");
+                Some(note)
+            } else if let Some(note) = desktop::item_made_again(&tool, &args, &made) {
+                // E.LOOP9: the same item made again under new wording.
+                eprintln!("[agent] step {step}: {tool} would make an item already made this turn \u{2014} not sent");
                 Some(note)
             } else {
                 // E.ARENA1-F15: an app acted on without a describe this turn has its grades read

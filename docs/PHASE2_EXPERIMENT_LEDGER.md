@@ -17799,3 +17799,5 @@ E.SLASH1 answers a bare "/new" by code, before any model call. But `mind_core::h
 **K2 held:** handing the ":" rewrite again fails the test.
 
 **K3 (Windows):** full suite 2512 passed, 0 failed.
+
+**E.EGRESS7 + E.SLASH2 K3, Linux (staging, fc67860):** mind-core 177 passed, mind-conversation 1231 passed. K3 held for both.

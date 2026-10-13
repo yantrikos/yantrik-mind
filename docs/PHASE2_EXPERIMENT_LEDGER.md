@@ -17367,3 +17367,5 @@ Both are asked of yantrik-os-dc.
 **The other two parts, from yantrik-os-dc (13 Oct):**
 - **(b) effort, on hold.** The gateway drops effort for 541's model: `reasoning_for` gives `Reasoning::None` for an OpenAI-compatible host unless the model is gpt-oss. The AIG box looks like a llama.cpp server, where `chat_template_kwargs: {"enable_thinking": false}` may work for Qwen3. dc will measure that when AIG (192.168.4.203, down now) is back. Nothing is built until then.
 - **(c) the wall.** The desktop sets no deadline on a Mind turn. It keeps the turn while the harness process lives, shows "working on … N s in", and announces a late answer. So raising the 180 s wall is safe from the desktop's side. The number is to be chosen from 541's timed turns once AIG is back.
+
+**E.PACE1a K3, Linux (staging, bf3450e):** mind-inference 97 passed, mind-conversation 1215 passed. K3 held. Not in any bundle yet. e41c3b0 went onto 520 (13:07) and 541 on Pranab's OK; the 541 tests (attachments, note, search) wait on the AIG box.

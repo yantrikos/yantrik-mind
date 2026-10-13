@@ -17466,3 +17466,66 @@ All three were written. The barren-step guard counted the second as "returned no
 **What makes it live:** yantrik-os-dc's half, every desktop rename also writing GECOS. Until then a settings.yaml-only rename is invisible to the Mind, as it was.
 
 **E.NAME2 K3, Linux (staging, 9d56723):** mind-core 176 passed, mind-conversation 1220 passed. K3 held. Not in any bundle yet.
+
+## E.PACE1b — PREREG: the Mind's own tool steps go at effort "easy" unless the person picked one
+
+**Why:** VM 541 on e41c3b0 (yantrik-os-dc, 13 Oct, LAN Qwen 27B thinking behind the gateway):
+- a note in 2 steps took 288 s;
+- disk/memory took 282 s;
+- a search took 147 s in 3 steps;
+- single calls of 92 and 113 s appear in the decision log.
+
+Most of each call is the model's thinking preamble. yantrik-os #791 (f60bd59 + 79e50ca0) gives the gateway a switch that works on that server. Effort "easy" becomes `chat_template_kwargs.enable_thinking=false`, measured at 0.8 s with no reasoning against 2.2 s by default. A server that refuses the field gets one retry without it and is remembered. Today the Mind sends effort only when the person picks one in the ask bar (E.OPT2), so its own tool-choosing steps always think.
+
+**What is built:**
+- **mind-inference:** a second task-local, `with_step_effort(word, fut)` (a `TaskLocalFuture`, E.STACK1). `effort_for(route)`:
+  - is still None for any route that isn't the gateway;
+  - otherwise gives the person's effort when it is set;
+  - else the step's;
+  - else None.
+- **mind-conversation:** the agent loop's tool step (`chat_grounded_tools`) runs inside `with_step_effort("easy")`. Compose (the answer written from the work log) is not wrapped and keeps the model's default.
+
+**Known cost, to be measured, not assumed:** a step that answers directly, choosing no tool, writes the reply at easy too. On 541 that is a non-thinking Qwen 27B answer. The 541 rerun records answer quality for the same five asks next to the times.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **effort_for:**
+    - person "high" with step "easy" gives "high";
+    - person empty with step "easy" gives "easy";
+    - neither set gives None;
+    - step "easy" on `nanogpt:x` gives None.
+  - **The pool:** a call on `yantrik-gateway:picked` inside `with_step_effort("easy")` reaches the backend with `config.effort == Some("easy")`. Inside `with_effort("high", with_step_effort("easy", …))` it reaches it with "high".
+  - **The loop:** a tool step's config carries "easy", and compose's call carries no effort (a pool labelled `yantrik-gateway:picked`, scripted).
+- K2, a mutant survives:
+  - the step effort winning over the person's;
+  - the step effort sent to a non-gateway route;
+  - the loop not wrapping the step;
+  - compose wrapped too.
+- K3: both suites pass. The 541 rerun (asks c, d, e1, e2) is recorded against the e41c3b0 numbers before this goes anywhere but 541.
+
+## E.PACE1b — RESULT (code): the Mind's own tool steps go at "easy" unless the person picked one; 5 mutants killed
+
+**Built:**
+- `STEP_EFFORT` and `with_step_effort` (mind-inference);
+- `effort_for` uses the person's effort first, then the step's, and only for the gateway;
+- the agent step runs inside `with_step_effort("easy")`;
+- compose (`chat_streamed_to_progress`, both branches) is not wrapped.
+
+**K1 held:**
+- **effort_for:**
+  - step alone → easy;
+  - person "high" over step → high;
+  - person empty (the harness's no-pick) with step → easy;
+  - step on `nanogpt:x` → None.
+- **The loop** (a pool labelled `yantrik-gateway:picked`): every tool step carries "easy" and every compose call carries none. This holds both plain and inside a progress channel (the desktop's streamed compose).
+
+**K2 held: 5 mutants killed:**
+- step over the person;
+- step effort to any route;
+- the loop not wrapping the step;
+- compose wrapped (streamed);
+- compose wrapped (plain).
+
+The first compose mutant survived the first version of the loop test, which composed only on the plain branch. The test now runs both branches.
+
+**K3 (Windows):** full suite 2501 passed, 0 failed. Its effect on 541 needs yantrik-os #791 (d3ec5c26, with dc's guard and refinement) on that machine. The before numbers are recorded above (dc, e41c3b0): note 288 s with calls of 42.8 and 96.5 (the latter failed); search+calendar 15 calls, 4.9–113.6 s; disk 37.1 and 67.8 s plus the card's wait.

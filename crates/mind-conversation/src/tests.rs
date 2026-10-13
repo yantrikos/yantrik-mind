@@ -17177,6 +17177,62 @@ mod desktop_consent_and_stall_wiring {
         assert!(whole.contains("extension of Fresh Tester"), "{whole:.120}");
     }
 
+    /// E.PACE1b: the script, recording each call's effort and whether it offered tools.
+    struct EffortSeen {
+        inner: Script,
+        calls: Arc<StdMutex<Vec<(bool, Option<String>)>>>,
+    }
+    impl LLMBackend for EffortSeen {
+        fn chat(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.calls.lock().unwrap().push((t.is_some_and(|t| !t.is_empty()), c.effort.clone()));
+            self.inner.chat(m, c, t)
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "effort-seen"
+        }
+    }
+
+    /// E.PACE1b (VM 541): on the gateway, the Mind's own tool steps go at "easy" when the person
+    /// picked no effort; compose, written from the work log, is sent none -- plain, and streamed to a
+    /// progress channel as the desktop's turns are.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tool_steps_go_at_easy_and_compose_does_not() {
+        effort_run(false).await;
+        effort_run(true).await;
+    }
+
+    async fn effort_run(streamed: bool) {
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let inner = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Call("remember", serde_json::json!({"text": "Priya likes green tea"})), Step::Fail],
+            seen: Arc::new(StdMutex::new(Vec::new())),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let model: Arc<dyn LLMBackend> = Arc::new(EffortSeen { inner, calls: calls.clone() });
+        let pool = InferencePool::new(Arc::clone(&model), 1)
+            .with_provider("yantrik-gateway:picked")
+            .with_private_backend(model, "yantrik-gateway:picked");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let who = TurnIdentity::primary();
+        let turn = mind_inference::with_effort(String::new(), conv.agent_loop_for_eval("Remember that Priya likes green tea", &who));
+        let (ptx, _prx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let reply = if streamed { crate::TURN_PROGRESS.scope(ptx, turn).await } else { turn.await }.unwrap_or_default();
+        let calls = calls.lock().unwrap().clone();
+        let steps: Vec<_> = calls.iter().filter(|(tools, _)| *tools).collect();
+        let compose: Vec<_> = calls.iter().filter(|(tools, _)| !*tools).collect();
+        assert!(!steps.is_empty() && steps.iter().all(|(_, e)| e.as_deref() == Some("easy")), "{calls:?}");
+        assert!(!compose.is_empty(), "no compose call was made (streamed: {streamed}): {calls:?} / {reply}");
+        assert!(compose.iter().all(|(_, e)| e.is_none()), "compose was sent an effort (streamed: {streamed}): {calls:?}");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

@@ -398,7 +398,19 @@ fn effort_for(route: &str) -> Option<String> {
     if !route.starts_with(GATEWAY_PROVIDER) {
         return None;
     }
-    EFFORT.try_with(|e| e.trim().to_string()).ok().filter(|e| !e.is_empty())
+    let set = |e: &String| Some(e.trim().to_string()).filter(|e| !e.is_empty());
+    // E.PACE1b: the person's pick wins; the step's own default is used only when they made none.
+    EFFORT.try_with(set).ok().flatten().or_else(|| STEP_EFFORT.try_with(set).ok().flatten())
+}
+
+tokio::task_local! {
+    /// E.PACE1b: the effort a step of the Mind's own asks for when the person picked none -- its
+    /// tool-choosing steps go at "easy", which on a self-hosted Qwen turns thinking off.
+    static STEP_EFFORT: String;
+}
+/// Run `f` with this step's own effort (`easy`, …). The person's (`with_effort`) still wins.
+pub fn with_step_effort<F: std::future::Future>(effort: String, f: F) -> tokio::task::futures::TaskLocalFuture<String, F> {
+    STEP_EFFORT.scope(effort, f)
 }
 
 tokio::task_local! {
@@ -6244,6 +6256,24 @@ mod effort_tests {
         with_effort("high".into(), call("nanogpt:deepseek")).await;
         call("yantrik-gateway:picked").await;
         assert_eq!(*seen.lock().unwrap(), vec![Some("high".to_string()), None, None]);
+    }
+
+    /// E.PACE1b: a step's own effort is used only when the person picked none, and only toward the
+    /// gateway. The harness scopes an empty effort when the person picked none.
+    #[tokio::test]
+    async fn the_persons_effort_wins_and_the_steps_reaches_only_the_gateway() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let call = |label: &'static str| {
+            let pool = InferencePool::new(Arc::new(SeesEffort(seen.clone())) as Arc<dyn LLMBackend>, 1).with_provider(label);
+            async move { pool.chat_scoped_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), PrivacyScope::Public, Vec::new()).await.unwrap() }
+        };
+        let gw = "yantrik-gateway:picked";
+        with_step_effort("easy".into(), call(gw)).await;
+        with_effort("high".into(), with_step_effort("easy".into(), call(gw))).await;
+        with_effort(String::new(), with_step_effort("easy".into(), call(gw))).await;
+        with_step_effort("easy".into(), call("nanogpt:x")).await;
+        let want = |e: Option<&str>| e.map(str::to_string);
+        assert_eq!(*seen.lock().unwrap(), vec![want(Some("easy")), want(Some("high")), want(Some("easy")), None]);
     }
 }
 

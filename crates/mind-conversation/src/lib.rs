@@ -13822,10 +13822,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             );
             let resp = match answer_stream::streamed_step(
                 forward,
-                mind_inference::with_call_cap(
-                    call_cap,
-                    self.inference
-                        .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+                // E.PACE1b: the Mind's own tool step goes at "easy" unless the person picked an effort.
+                mind_inference::with_step_effort(
+                    "easy".to_string(),
+                    mind_inference::with_call_cap(
+                        call_cap,
+                        self.inference
+                            .chat_grounded_tools(messages, cfg.clone(), schemas.clone()),
+                    ),
                 ),
             )
             .await

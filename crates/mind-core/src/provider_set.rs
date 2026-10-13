@@ -238,14 +238,77 @@ struct Setter {
     person_uid: u32,
     env_path: PathBuf,
     supervised: bool,
+    /// E.SOCK2: the one gateway address the socket accepts.
+    gateway: String,
 }
 
+/// E.SOCK2: this machine's model gateway (yantrik-os #675), the only provider the person's socket
+/// may set.
+pub const GATEWAY_URL: &str = "http://127.0.0.1:7460/v1";
+
 /// The route, for the person's socket only.
+///
+/// E.SOCK2: what the socket may change is only what the person already chose. Every process of the
+/// person can reach it -- harnesses running model-written code included -- and nothing on it can
+/// tell the desktop from them (yantrik-os-dc, 12 Oct: the shell binds the door, so any directory it
+/// can bind in, a harness can too). So `/provider` takes the gateway at its fixed address and
+/// nothing else (never a key, an address or the private lane), and `/consent` is not here: a forged
+/// snapshot would be a forged consent. Both wait for a path that knows the person is there.
 pub fn router(person_uid: u32, env_path: PathBuf, supervised: bool) -> Router {
+    router_at(person_uid, env_path, supervised, GATEWAY_URL)
+}
+
+/// [`router`] with the gateway at `gateway` -- tests run a fake one on a free port.
+pub fn router_at(person_uid: u32, env_path: PathBuf, supervised: bool, gateway: &str) -> Router {
     Router::new()
         .route("/provider", post(set_provider))
+        .with_state(Setter { person_uid, env_path, supervised, gateway: gateway.trim().trim_end_matches('/').to_string() })
+}
+
+/// E.PRIV1's `/consent`, kept for a path that can tell the person from their programs (yantrik-os-dc's
+/// option (c), person presence). NOT served on the socket (E.SOCK2).
+pub fn consent_router(person_uid: u32, env_path: PathBuf, supervised: bool) -> Router {
+    Router::new()
         .route("/consent", post(set_consent))
-        .with_state(Setter { person_uid, env_path, supervised })
+        .with_state(Setter { person_uid, env_path, supervised, gateway: GATEWAY_URL.to_string() })
+}
+
+/// E.SOCK2: what the socket may set. A gateway offer at exactly `gateway`, or the gateway's revert.
+fn socket_allows(req: &ProviderSet, gateway: &str) -> Result<(), String> {
+    let provider = req.provider.trim();
+    let from_gateway = provider == GATEWAY || (provider.is_empty() && req.source.as_deref() == Some(GATEWAY));
+    if !from_gateway {
+        return Err("from the desktop this Mind takes only Yantrik models; other models, keys and a model on your own hardware are set in its own first-run chat".into());
+    }
+    if req.remove {
+        return Ok(());
+    }
+    let url = req.base_url.as_deref().unwrap_or_default().trim().trim_end_matches('/');
+    if url != gateway {
+        return Err(format!("Yantrik models are taken only from this machine's gateway at {gateway}"));
+    }
+    Ok(())
+}
+
+/// E.SOCK2: which harness the gateway issued `token` to -- `Ok(None)` when the gateway has no
+/// `/whoami` (404), so the token cannot be checked yet. Without this a person's process could hand
+/// the Mind its OWN gateway token, and the Mind's calls would run under that harness's grant.
+fn gateway_harness(gateway: &str, token: &str) -> Result<Option<String>, String> {
+    // Through mind-net, like every request the Mind makes: it decides the route (loopback goes direct).
+    let url = format!("{gateway}/whoami");
+    let agent = mind_net::route(mind_net::builder().timeout(std::time::Duration::from_secs(3)), &url);
+    match agent.get(&url).set("Authorization", &format!("Bearer {token}")).call() {
+        Ok(resp) => {
+            let v: serde_json::Value = resp.into_json().map_err(|e| format!("the gateway's whoami answer could not be read: {e}"))?;
+            match v["harness"].as_str() {
+                Some(h) if !h.trim().is_empty() => Ok(Some(h.trim().to_string())),
+                _ => Err("the gateway's whoami answer names no harness".into()),
+            }
+        }
+        Err(ureq::Error::Status(404, _)) => Ok(None),
+        Err(ureq::Error::Status(code, _)) => Err(format!("the gateway did not vouch for this token (status {code})")),
+        Err(e) => Err(format!("the gateway could not be asked about this token: {e}")),
+    }
 }
 
 /// E.PRIV1: the person's AI-accounts Share choices, mirrored by the OS shell (yantrik-os, from its
@@ -356,6 +419,25 @@ async fn set_provider(
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "saved": false, "error": "only the person may set this Mind's model" })),
         );
+    }
+    // E.SOCK2: only what the person already chose, and only a token the gateway issued to this Mind.
+    if let Err(e) = socket_allows(&req, &s.gateway) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "saved": false, "error": e })));
+    }
+    if !req.remove {
+        let (gateway, token) = (s.gateway.clone(), req.key.clone().unwrap_or_default());
+        let whose = tokio::task::spawn_blocking(move || gateway_harness(&gateway, &token)).await.unwrap_or_else(|e| Err(e.to_string()));
+        match whose {
+            Ok(Some(h)) if h == "mind" => {}
+            Ok(Some(h)) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "saved": false, "error": format!("that gateway token was issued to {h}, not to this Mind") })),
+                )
+            }
+            Ok(None) => eprintln!("[provider] the gateway has no whoami: the offered token's owner is not checked"),
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "saved": false, "error": e }))),
+        }
     }
     match apply(&s.env_path, &req) {
         Ok(saved) => {
@@ -470,10 +552,12 @@ mod tests {
         let (status, body) = call(Some(1001)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "", "another account's request changed the file");
+        // E.SOCK2: even from the person's uid the socket sets no cloud key -- any of their
+        // processes could have sent it.
         let (status, body) = call(Some(1000)).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(!body.contains("mm-secret"), "the reply carried the key: {body}");
-        assert!(std::fs::read_to_string(&p).unwrap().contains("MINIMAX_API_KEY=mm-secret-key-1234\n"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "", "a cloud key reached the file through the socket");
         let _ = std::fs::remove_file(&p);
     }
 }
@@ -589,25 +673,34 @@ mod gateway_tests {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let log = seen.clone();
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let (mut head, mut len) = (String::new(), 0usize);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    len = v.trim().parse().unwrap();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let (mut head, mut len) = (String::new(), 0usize);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    head.push_str(&line);
                 }
-                if line.trim().is_empty() {
-                    break;
-                }
-                head.push_str(&line);
+                // E.SOCK2: the gateway vouches that the token is this Mind's.
+                let reply = if head.starts_with("GET /v1/whoami") {
+                    r#"{"harness":"mind"}"#.to_string()
+                } else {
+                    let mut body = vec![0u8; len];
+                    reader.read_exact(&mut body).unwrap();
+                    *log.lock().unwrap() = format!("{head}\n{}", String::from_utf8_lossy(&body));
+                    r#"{"choices":[{"message":{"content":"from the gateway"},"finish_reason":"stop"}]}"#.to_string()
+                };
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
             }
-            let mut body = vec![0u8; len];
-            reader.read_exact(&mut body).unwrap();
-            *log.lock().unwrap() = format!("{head}\n{}", String::from_utf8_lossy(&body));
-            let reply = r#"{"choices":[{"message":{"content":"from the gateway"},"finish_reason":"stop"}]}"#;
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
         });
         let p = tmp("route", "YM_DB=/x/mind.db\n");
         let body = serde_json::json!({
@@ -622,7 +715,7 @@ mod gateway_tests {
             .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         req.extensions_mut().insert(ConnectInfo(PeerUid(Some(1000))));
-        let res = router(1000, p.clone(), false).oneshot(req).await.unwrap();
+        let res = router_at(1000, p.clone(), false, &format!("http://127.0.0.1:{port}/v1")).oneshot(req).await.unwrap();
         let status = res.status();
         let reply = String::from_utf8_lossy(&axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap()).into_owned();
         assert_eq!(status, StatusCode::OK, "{reply}");
@@ -669,7 +762,8 @@ mod consent_tests {
             .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         req.extensions_mut().insert(ConnectInfo(PeerUid(uid)));
-        let res = router(1000, p.to_path_buf(), false).oneshot(req).await.unwrap();
+        // E.SOCK2: /consent is not on the socket; its handler is tested where it is kept.
+        let res = consent_router(1000, p.to_path_buf(), false).oneshot(req).await.unwrap();
         let status = res.status();
         let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
         (status, String::from_utf8_lossy(&bytes).into_owned())
@@ -758,5 +852,119 @@ mod consent_spec_tests {
             assert!(b.contains("ollama-cloud:deepseek-v4.1-flash"), "{b}");
         }
         assert!(crate::no_local_lane_banner("x", false).contains("refused"));
+    }
+}
+
+/// E.SOCK2: the person's socket can change only what the person already chose.
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use tower::ServiceExt;
+
+    /// A gateway that answers only `GET /v1/whoami`: `Some(h)` → `{"harness": h}`, `None` → 404.
+    fn fake_gateway(harness: Option<&'static str>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                }
+                let (status, body) = match harness {
+                    Some(h) => ("200 OK", format!(r#"{{"harness":"{h}"}}"#)),
+                    None => ("404 Not Found", "{}".to_string()),
+                };
+                let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    }
+
+    fn tmp(name: &str, body: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("ym-sock2-{}-{name}.env", std::process::id()));
+        std::fs::write(&p, body).unwrap();
+        let _ = std::fs::remove_file(backup_path(&p));
+        p
+    }
+
+    async fn post(gateway: &str, p: &Path, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(PeerUid(Some(1000))));
+        let res = router_at(1000, p.to_path_buf(), false, gateway).oneshot(req).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn offer(base_url: &str) -> serde_json::Value {
+        serde_json::json!({ "source": "yantrik-gateway", "provider": "yantrik-gateway", "base_url": base_url, "model": "picked",
+                            "api_key": "ygw-socket-token-0123456789", "private_context": true })
+    }
+
+    const BEFORE: &str = "YM_DB=/x/mind.db\nYM_PRIMARY_BRAIN=nanogpt:deepseek\nYM_PRIVATE_PROVIDERS=ollama-local\n";
+
+    #[tokio::test]
+    async fn the_socket_refuses_a_private_lane_a_key_and_any_other_gateway_address() {
+        let gw = fake_gateway(Some("mind"));
+        let port: u16 = gw.trim_start_matches("http://127.0.0.1:").trim_end_matches("/v1").parse().unwrap();
+        let p = tmp("refuse", BEFORE);
+        for body in [
+            serde_json::json!({ "provider": "ollama", "base_url": "http://192.168.4.66:11434", "model": "qwen3.5:9b" }),
+            serde_json::json!({ "provider": "nanogpt", "key": "sk-abcdef1234567890" }),
+            // At the gateway's own address but not the gateway: only the gateway-only rule refuses
+            // this, and without it the gateway address would become the private lane.
+            serde_json::json!({ "provider": "ollama", "base_url": gw.clone(), "model": "qwen3.5:9b" }),
+            offer(&format!("http://127.0.0.2:{port}/v1")),
+            offer(&format!("http://127.0.0.1:{}/v1", port + 1)),
+        ] {
+            let (status, reply) = post(&gw, &p, "/provider", body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body} -> {reply}");
+            assert!(!reply.contains("sk-abcdef") && !reply.contains("ygw-socket"), "{reply}");
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE, "a refused offer changed the file");
+        let (status, _) = post(&gw, &p, "/consent", serde_json::json!({ "source": "yantrik-os", "accounts": [{ "provider": "nanogpt", "share": true }] })).await;
+        assert!(status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED, "/consent is on the socket: {status}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE, "a consent reached the file through the socket");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn the_gateway_at_its_own_address_is_taken_and_put_back() {
+        let gw = fake_gateway(Some("mind"));
+        let p = tmp("take", BEFORE);
+        let (status, reply) = post(&gw, &p, "/provider", offer(&format!("{gw}/"))).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert!(std::fs::read_to_string(&p).unwrap().contains("YM_PRIMARY_BRAIN=yantrik-gateway:picked\n"));
+        let (status, reply) = post(&gw, &p, "/provider", serde_json::json!({ "source": "yantrik-gateway", "remove": true })).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[tokio::test]
+    async fn a_token_the_gateway_issued_to_another_harness_is_refused() {
+        let p = tmp("whoami", BEFORE);
+        let hermes = fake_gateway(Some("hermes"));
+        let (status, reply) = post(&hermes, &p, "/provider", offer(&hermes)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
+        assert!(reply.contains("hermes"), "{reply}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE);
+        // A gateway with no whoami yet: taken, unverified (logged).
+        let older = fake_gateway(None);
+        let (status, reply) = post(&older, &p, "/provider", offer(&older)).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(backup_path(&p));
     }
 }

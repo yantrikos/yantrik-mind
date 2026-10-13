@@ -16860,3 +16860,35 @@ A dropped `complete` itself needs nothing more.
 - K3: the suite or Linux staging fails.
 
 **Ships:** the bundle with E.SOCK2 is the minimum Mind for yantrik-os #783 (needs-mind.txt "783 <commit>").
+
+## E.SOCK2 — RESULT: the socket sets only the gateway at its own address, with a token the gateway issued to this Mind; /consent is off it; 4 mutants killed
+
+**Built (mind-core provider_set.rs):**
+- `router` serves `/provider` only, through `router_at(…, GATEWAY_URL)`.
+- `socket_allows` takes a gateway offer whose `base_url` is exactly `http://127.0.0.1:7460/v1`, or the gateway's `remove`. Anything else is refused with a sentence naming the Mind's first-run chat.
+- `gateway_harness` asks the gateway's `GET /v1/whoami` (yantrik-os #783 a4fa5a2b) through `mind_net` and refuses a token issued to any harness but `mind`. A 404 (a gateway without whoami) is taken and logged.
+- `consent_router` keeps `/consent` for a future person-presence path; it is not served.
+
+**Found by the checks, not by me:**
+1. **The mutants.** The gateway-only-filter mutant SURVIVED the first run. Every refused body also failed the exact-address check, so the filter was never tested alone. The case only it catches is `{"provider":"ollama","base_url":<the gateway's own address>}`, which without it would make the gateway the private lane. It was added; the mutant is now killed.
+2. **The suite.** It failed on `mind-net`'s `nothing_reaches_the_network_around_this_crate`, because my first `whoami` call built a bare `ureq` agent. It now uses `mind_net::builder()` and `route()`.
+
+**Changed on purpose:**
+- E.PROV1's `only_the_person_sets_it_and_the_key_is_never_echoed` now expects the person's cloud-key POST to be REFUSED on the socket.
+- E.PRIV1's three consent tests reach `/consent` through `consent_router`.
+- E.PROV2's route test uses `router_at`, with a fake gateway that also answers whoami.
+
+**K1 held:** 3 new tests:
+- socket refusals: the private lane, a key, the gateway address claimed by `ollama`, a wrong host, a wrong port, and `/consent` not found, all leaving the file unchanged;
+- the gateway taken and put back;
+- whoami `hermes` refused, and 404 taken.
+
+**K2 held: 4 mutants killed:**
+- the filter removed (after the added case);
+- `/consent` routed again;
+- the exact URL loosened to any loopback;
+- the whoami check removed.
+
+**K3:** full suite (Windows) 2461 passed, 0 failed. The Linux run is recorded below with the bundle.
+
+**Ships:** the minimum Mind for yantrik-os #783 is the commit that carries this.

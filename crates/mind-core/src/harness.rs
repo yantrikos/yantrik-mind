@@ -529,7 +529,7 @@ async fn run(mem: MemoryHandle, conv: Arc<ConversationEngine>, detail: String) {
         let attached = call(
             address.clone(),
             ATTACH,
-            attach_payload(&detail),
+            attach_payload(&detail, NEEDS_SETUP.load(std::sync::atomic::Ordering::Relaxed)),
             timeout,
         )
         .await;
@@ -1581,13 +1581,18 @@ fn machine_timezone(context: &str) -> Option<String> {
 /// `false`, and every Yantrik OS machine's mind picker advertised this mind as unable to act or
 /// remember while Hermes, OpenClaw, Pi and DeepSeek, which send them top-level, showed as fully
 /// capable. Found on the live nightly (VM 520, 2026-09-22): `"id": "mind", "tools": false`.
-pub(crate) fn attach_payload(detail: &str) -> serde_json::Value {
+pub(crate) fn attach_payload(detail: &str, needs_model: bool) -> serde_json::Value {
     serde_json::json!({
         "id": ID,
         "name": NAME,
         "detail": detail,
         "tools": true,
         "memory": true,
+        // E.SOCK2b: this Mind booted with no model. The desktop's first run points it at the
+        // gateway's picked model, as it does every mind, and leaves a Mind with its own provider
+        // alone -- without reading the detail sentence. After a first run the Mind restarts and
+        // re-attaches with false. An OS that does not know the field ignores it.
+        "needs_model": needs_model,
         // E.ARENA1-F28 / yantrik-os #394: the hand-over comes in `context.handover`, and `text` is
         // the person's words alone. An OS without #394 ignores the field (Attach does not deny
         // unknown fields) and keeps prefixing, which `split_handover` still handles.
@@ -1628,9 +1633,19 @@ mod attach_tests {
         payload.get(field).and_then(serde_json::Value::as_bool).unwrap_or(false)
     }
 
+    /// E.SOCK2b: the desktop learns from a field, not a sentence, that this Mind has no model yet.
+    #[test]
+    fn the_attach_says_whether_the_mind_needs_a_model() {
+        assert_eq!(super::attach_payload("t", true)["needs_model"], serde_json::json!(true));
+        assert_eq!(super::attach_payload("t", false)["needs_model"], serde_json::json!(false));
+        let src = include_str!("harness.rs");
+        let site = src.split("ATTACH,").nth(1).expect("the attach call").split(".await").next().unwrap();
+        assert!(site.contains("NEEDS_SETUP.load"), "the attach must send what this boot announced: {site}");
+    }
+
     #[test]
     fn the_os_reads_this_mind_as_able_to_act_and_remember() {
-        let payload = super::attach_payload("test");
+        let payload = super::attach_payload("test", false);
         assert_eq!(payload["id"], "mind");
         assert!(payload["name"].is_string(), "the OS requires a name");
         assert!(as_the_os_reads(&payload, "tools"), "the OS would show this mind as unable to act");
@@ -1695,7 +1710,7 @@ mod handover_tests {
         assert_eq!(handover_from_context(r#"{"machine":{"timezone":"UTC"}}"#), None);
         assert_eq!(handover_from_context(r#"{"handover":{"text":"  "}}"#), None);
         assert_eq!(handover_from_context("not json"), None);
-        assert_eq!(super::attach_payload("t")["handover_context"], serde_json::json!(true), "the Mind opts in");
+        assert_eq!(super::attach_payload("t", false)["handover_context"], serde_json::json!(true), "the Mind opts in");
     }
 
     /// With #394 the text is the person's own, and a hand-over from the context must not be taken as

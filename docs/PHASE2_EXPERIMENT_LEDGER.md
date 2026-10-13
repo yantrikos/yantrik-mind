@@ -16916,3 +16916,19 @@ A dropped `complete` itself needs nothing more.
   - the 404 accepted again;
   - `needs_model` hard-coded to false.
 - K3: the suite fails.
+
+## E.SOCK2b — RESULT: no vouch, no offer; `needs_model` on attach; 2 mutants killed
+
+**Built:**
+- `set_provider` refuses a whoami 404 ("the desktop is older than this Mind: its gateway cannot say whose token this is").
+- `attach_payload(detail, needs_model)` sends `needs_model`, and the attach call passes `NEEDS_SETUP`.
+
+**K1 held:**
+- The whoami test now expects 404 → refused with the file unchanged, and `mind` → taken.
+- `the_attach_says_whether_the_mind_needs_a_model` checks both values, and that the attach site sends `NEEDS_SETUP.load(...)`.
+
+**K2 held: 2 mutants killed.**
+- 404 accepted again.
+- `needs_model` forced false. The first two attempts at this mutant did not compile inside `json!`, so they killed nothing; the third, `(false && needs_model)`, compiled and was killed.
+
+**K3 held:** full suite (Windows) 2462 passed, 0 failed.

@@ -435,7 +435,14 @@ async fn set_provider(
                     Json(serde_json::json!({ "saved": false, "error": format!("that gateway token was issued to {h}, not to this Mind") })),
                 )
             }
-            Ok(None) => eprintln!("[provider] the gateway has no whoami: the offered token's owner is not checked"),
+            // E.SOCK2b: the socket exists only beside a gateway that has whoami (yantrik-os #783);
+            // a 404 means something else answers on its port.
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "saved": false, "error": "the desktop is older than this Mind: its gateway cannot say whose token this is" })),
+                )
+            }
             Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "saved": false, "error": e }))),
         }
     }
@@ -960,9 +967,14 @@ mod socket_tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
         assert!(reply.contains("hermes"), "{reply}");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE);
-        // A gateway with no whoami yet: taken, unverified (logged).
+        // E.SOCK2b: a gateway with no whoami is not this OS's gateway; refused, nothing changes.
         let older = fake_gateway(None);
         let (status, reply) = post(&older, &p, "/provider", offer(&older)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{reply}");
+        assert!(reply.contains("older than this Mind"), "{reply}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), BEFORE);
+        let mind = fake_gateway(Some("mind"));
+        let (status, reply) = post(&mind, &p, "/provider", offer(&mind)).await;
         assert_eq!(status, StatusCode::OK, "{reply}");
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(backup_path(&p));

@@ -17174,3 +17174,49 @@ The cause is that three helpers wrap every desktop turn as `async fn`s that take
 - `person_home` without the empty filter (1). It survived the first version of the blank-home test, which asserted on a prompt sentence that `home_sentence` already filters. The case that changes behaviour is the $HOME fallback outside the minds' account, and the test now asserts that.
 
 **K3 (Windows):** full suite 2481 passed, 0 failed. The Linux result follows.
+
+**E.STACK1 K3, Linux (staging, 3bc710e against companion 965532e, default stack, debug info off for disk):** mind-core 175 passed (the overflowing handover test included), mind-conversation 1206 passed, mind-inference 94 passed. The yantrik-ml effort tests, 3 of them, also passed there. K3 held.
+
+## E.HH1 — PREREG: a route cleared for private context is cleared for household context too (web search on a gateway-wired Mind)
+
+**Why:** yantrik-os-dc, living on the fresh-install VM 541 (Mind 065c76f on the gateway, wired by Use Yantrik models): every `search` failed four times with `[egress] clean planner for search did not answer: privacy: household-scope request refused — provider 'yantrik-gateway:picked' is not allowlisted for this lane`. The person was told "every web lookup I tried failed this turn".
+
+The household gate (`scope_allows`, Household) consults only `YM_HOUSEHOLD_PROVIDERS` (default `minimax,nanogpt,ollama-cloud,claude-cli,scripted,chain`). The OS's wiring adds `yantrik-gateway` to `YM_PRIVATE_PROVIDERS` only, after the person agreed to share personal context with the account behind it. So the same Mind sends PRIVATE context to the gateway and refuses HOUSEHOLD context to it. The scopes are ordered: Public < Household < Private. A provider trusted with the stricter one is trusted with the looser one; the gate did not encode that.
+
+**What is built (mind-inference):** `scope_allows` for Household is `in household list || private_cleared(provider, private list)`. Nothing else changes:
+- Private still never falls back to the household list;
+- the household substring match is unchanged;
+- `yantrik-gateway` is NOT added to the household default. A gateway the person has not cleared for personal context stays refused for household context, which keeps the OS's consent rule the one place that decides.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - with `private = "ollama-cloud:deepseek-v4.1-flash,yantrik-gateway"` and the default household list, Household allows `yantrik-gateway:picked`;
+  - with the private list empty, Household refuses `yantrik-gateway:picked`;
+  - Private still refuses `minimax` with the default household list (no reverse fallback);
+  - a household-scope `chat_scoped` on a pool labelled `yantrik-gateway:picked` succeeds when the env's private list carries `yantrik-gateway`;
+  - every existing `lanes_route_correctly` / `private_gate_tests` case is unchanged.
+- K2, a mutant survives:
+  - the private term dropped (the 541 case is refused again);
+  - the household term dropped (a `minimax` household call is refused);
+  - the fallback made symmetric (Private also accepts the household list).
+- K3: both suites pass.
+
+## E.HH1 — RESULT: household admits what private admits; 3 mutants killed
+
+**Built:** `scope_allows` Household = `in_list(household) || private_cleared(provider, private)`.
+
+**K1 held:**
+- the 541 case: the gateway, with the wired private list, is allowed for household;
+- with no private list it is refused;
+- Private still refuses `minimax`, so there is no reverse fallback;
+- `random-cloud` is still refused;
+- every existing lane and private-gate test is unchanged.
+
+**One deviation from the prereg:** the pool-level case (a household `chat_scoped` with the env's private list carrying `yantrik-gateway`) is not a test. No test in mind-inference sets env vars and there is no env lock, so one would race the others. `gate_scope` passes both env lists straight to `scope_allows` (read at the call site), so the unit cases cover the decision.
+
+**K2 held: 3 mutants killed:**
+- private term dropped, caught by the new test;
+- household term dropped, caught by two existing privacy tests;
+- symmetric fallback, caught by `lanes_route_correctly` and one other.
+
+**K3 (Windows):** full suite 2482 passed, 0 failed.

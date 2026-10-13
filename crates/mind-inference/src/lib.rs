@@ -94,7 +94,9 @@ pub fn scope_allows(
     };
     match scope {
         PrivacyScope::Public => true,
-        PrivacyScope::Household => in_list(household_csv),
+        // E.HH1: the scopes are ordered, so a provider cleared for private context is cleared for
+        // household context too (a gateway the person agreed to share with could not search).
+        PrivacyScope::Household => in_list(household_csv) || private_cleared(provider, private_csv),
         // The private lane never falls back to the household list — owned hardware or refusal.
         // E.PRIV2: and it clears a provider by name, every link of a chain, never by substring.
         PrivacyScope::Private => private_cleared(provider, private_csv),
@@ -6185,6 +6187,17 @@ mod private_gate_tests {
     fn the_household_lane_is_unchanged() {
         assert!(scope_allows(PrivacyScope::Household, "chain[a -> b]", DEFAULT_HOUSEHOLD, ""));
         assert!(scope_allows(PrivacyScope::Household, "minimax:MiniMax-M2.7", DEFAULT_HOUSEHOLD, ""));
+    }
+
+    /// E.HH1, VM 541: a Mind wired to the gateway could send it private context but not a web search's
+    /// household-scope planner. What is cleared for private is cleared for household; never the reverse.
+    #[test]
+    fn what_is_cleared_for_private_is_cleared_for_household() {
+        let wired = "ollama-cloud:deepseek-v4.1-flash,yantrik-gateway";
+        assert!(scope_allows(PrivacyScope::Household, "yantrik-gateway:picked", DEFAULT_HOUSEHOLD, wired));
+        assert!(!scope_allows(PrivacyScope::Household, "yantrik-gateway:picked", DEFAULT_HOUSEHOLD, ""), "a gateway nobody cleared stays refused");
+        assert!(!scope_allows(PrivacyScope::Private, "minimax:MiniMax-M2.7", DEFAULT_HOUSEHOLD, wired), "private never falls back to the household list");
+        assert!(!scope_allows(PrivacyScope::Household, "random-cloud:x", DEFAULT_HOUSEHOLD, wired));
     }
 }
 

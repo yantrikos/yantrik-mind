@@ -1726,6 +1726,21 @@ mod handover_tests {
         assert!(filed.is_none(), "an interest was stored: {filed:?}");
     }
 
+    /// E.SLASH2 (VM 541): the desktop's "+ new conversation" sends a turn whose text is "/new". Code
+    /// answers it -- no model call -- and a console command typed with "/" is still the console's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_desktops_new_chat_is_answered_by_code() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("MODEL ANSWERED")) as Arc<dyn LLMBackend>, 1);
+        let conv = Arc::new(crate::engine(&mem, pool));
+        let new = take_turn(&mem, &conv, "/new", None, None).await;
+        assert!(new.starts_with("New conversation: this chat starts clean."), "{new}");
+        let odd = take_turn(&mem, &conv, "/frobnicate", None, None).await;
+        assert!(odd.contains("looks like a command"), "{odd}");
+        let help = take_turn(&mem, &conv, "/help", None, None).await;
+        assert!(!help.contains("MODEL ANSWERED") && !help.contains("looks like a command"), "{help}");
+    }
+
     /// E.ASK1: an answer to a get-to-know-you question is acknowledged, and nothing more is asked or
     /// left pending -- the next question waits for idle time.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

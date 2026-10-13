@@ -461,6 +461,10 @@ pub async fn handle_line_as(
     }
     // plain chat turn — attributed to the speaker (group-chat read-isolation)
     // `turn`, not `handle_turn_as`: one seam decides which loop runs, for every channel.
+    // E.SLASH2 (VM 541): a "/command" no console command claimed goes on as it was sent. Its ":"
+    // rewrite reached the model as a message -- the desktop's New chat ("/new") became a 158 s turn
+    // that remembered ":new" three times -- while the engine answers "/new" itself, by code.
+    let t = if raw.starts_with('/') { raw } else { t };
     match conv.turn(t, identity).await {
         Ok(r) => Outcome::Said(r),
         Err(e) => Outcome::Said(format!("(error: {e})")),

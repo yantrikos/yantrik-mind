@@ -17768,3 +17768,34 @@ The agent loop's broker check skips such a call. Every other `mcp.*` call, and e
 - the arm not using it.
 
 **K3 (Windows):** full suite 2511 passed, 0 failed.
+
+**E.EGRESS7 K3, Linux:** taken with the next change's run.
+
+## E.SLASH2 — PREREG: the desktop's "/new" reaches the engine as "/new", so code answers it
+
+**Why:** VM 541 (1ca45b0). "+ new conversation" sends a harness turn whose text is "/new" (yantrik-os wire/chat.rs on_lens_new_chat; the desktop drains and discards the reply). On 541 it became a 158 s model turn: route=agentic, a recall of "who is Fresh Tester…", and "Fresh Tester started a fresh session (\":new\")" remembered three times.
+
+E.SLASH1 answers a bare "/new" by code, before any model call. But `mind_core::handle_line_as`, which every desktop turn goes through, first rewrites a Telegram-style "/command" into the console's ":command". "/new" becomes ":new", which is no console command, so ":new" falls through to `conv.turn`. There `slash_reply` (which knows only the "/" form) does not fire, and the model gets ":new" as a message. Reproduced in a test: `take_turn("/new")` returns the scripted model's answer.
+
+**What is built (mind-core):** a "/" line that no console command claimed reaches `conv.turn` as the person sent it ("/new"), not as its ":" rewrite. E.SLASH1 then answers it, restarts the window, and makes no model call. Console commands typed with "/" (`/help`, `/workers`, …) are unchanged.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `take_turn("/new")` returns E.SLASH1's reply ("New conversation: this chat starts clean…") and the model is never called;
+  - `take_turn("/help")` still returns the console help;
+  - "/frobnicate" gets E.SLASH1's "looks like a command" sentence, not a model answer.
+- K2, a mutant survives: the engine handed the ":" rewrite again.
+- K3: both suites pass.
+
+## E.SLASH2 — RESULT: "/new" from the desktop is answered by code; 1 mutant killed
+
+**Built:** `handle_line_as` passes a "/" line that no console command claimed on as sent.
+
+**K1 held:**
+- `take_turn("/new")` gives "New conversation: this chat starts clean…", where before this change it gave the scripted model's answer (reproduced first);
+- "/frobnicate" gets the "looks like a command" sentence;
+- "/help" is still the console's.
+
+**K2 held:** handing the ":" rewrite again fails the test.
+
+**K3 (Windows):** full suite 2512 passed, 0 failed.

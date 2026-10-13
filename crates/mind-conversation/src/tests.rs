@@ -17016,7 +17016,8 @@ mod desktop_consent_and_stall_wiring {
         assert!(!r.prompts.iter().any(|p| p.contains("that action already ran")), "a refused act was called 'already ran'");
         assert_eq!(acts_reached(&r).len(), 1, "the identical refused call reached the desktop again: {:?}", r.reached);
         // E.ARENA1-F44: resent again after the fix was shown -- the turn ends, and says what happened.
-        assert!(r.reply.contains("nothing was created") && r.reply.contains("takes named parameters"), "{}", r.reply);
+        // E.ARGS1: in the person's words -- the refusal's text stays in the journal.
+        assert_eq!(r.reply, "I couldn't do that: the Notes app refused my request, and nothing was created. Want me to try again?");
     }
 
     /// E.ARENA1-F44 (VM 561, f2ba31e): yos-mcp's refusal ends with a ready-to-copy call; the note
@@ -17040,9 +17041,65 @@ mod desktop_consent_and_stall_wiring {
             r.prompts.iter().any(|p| p.contains("(Send exactly this next, with each <placeholder> filled in: {\"app\":\"notes\",\"action\":\"new_note\"")),
             "the note did not lead with the copyable call"
         );
-        assert!(r.reply.starts_with("I couldn't do that: the desktop refused `notes.new_note`, and nothing was created."), "{}", r.reply);
+        assert!(r.reply.starts_with("I couldn't do that: the Notes app refused my request, and nothing was created."), "{}", r.reply);
+        assert!(!r.reply.contains('`') && !r.reply.contains("named parameters"), "{}", r.reply);
         assert_eq!(acts_reached(&r).len(), 1, "{:?}", r.reached);
         assert_eq!(r.prompts.iter().filter(|p| p.contains("Send exactly this next")).count(), 1, "the fix was shown more than once before stopping");
+    }
+
+    /// E.ARGS1 (VM 541, 13 Oct): the refusal hands over the whole call with the value placed and
+    /// `<title>` left. The loop sends it itself -- two calls reach the desktop, the second the
+    /// corrected one, and the model is never asked to retype a note it already wrote.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refusal_that_hands_over_the_call_is_applied_by_the_loop() {
+        let note = "Weekend packing list \u{2014} two nights away\n\nEssentials\n- ID / wallet / card\n- Phone + charger";
+        let offered = format!(
+            "{{\"app\": \"notes\", \"action\": \"new_note\", \"args\": {{\"title\": \"<title>\", \"text\": {}}}}}",
+            serde_json::to_string(note).unwrap()
+        );
+        let refused = format!("REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Nothing was run. Send this, with each <placeholder> filled in: {offered}");
+        let bare = serde_json::json!({"app": "notes", "action": "new_note", "args": note});
+        let r = run(
+            vec![Step::Call("mcp.yantrik-os.os_act", bare)],
+            vec!["Notes is open."],
+            vec![refused.as_str(), "Done \u{2014} notes.new_note: accepted, settled. Notes \u{2014} 1 note: Weekend packing list \u{2014} two nights away"],
+        )
+        .await;
+        let acts = acts_reached(&r);
+        assert_eq!(acts.len(), 2, "{:?}", r.reached);
+        assert_eq!(
+            acts[1],
+            serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Weekend packing list \u{2014} two nights away", "text": note}})
+        );
+        assert!(r.prompts.iter().any(|p| p.contains("the call it offered was sent")), "the work log does not say the fix was sent");
+        assert!(!r.reply.contains("REFUSED") && !r.reply.contains('{'), "the person was shown the refusal: {}", r.reply);
+    }
+
+    /// E.ARGS1: the offered call is sent once per refused call. When it is refused too and the model
+    /// sends the bare value again later, the loop does not send the fix a second time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_offered_call_is_sent_once() {
+        let note = "Groceries for the week\n- eggs\n- rice";
+        let offered = format!(
+            "{{\"app\": \"notes\", \"action\": \"new_note\", \"args\": {{\"title\": \"<title>\", \"text\": {}}}}}",
+            serde_json::to_string(note).unwrap()
+        );
+        let refused = format!("REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Nothing was run. Send this, with each <placeholder> filled in: {offered}");
+        let other = "REFUSED \u{2014} nothing was run. refused: the Notes store is read-only right now.";
+        let bare = serde_json::json!({"app": "notes", "action": "new_note", "args": note});
+        let r = run(
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", bare.clone()),
+                Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "notes"})),
+                Step::Call("mcp.yantrik-os.os_act", bare),
+            ],
+            vec!["Notes is open."],
+            vec![refused.as_str(), other, refused.as_str()],
+        )
+        .await;
+        let acts = acts_reached(&r);
+        assert_eq!(acts.len(), 3, "the fix was sent more than once: {:?}", r.reached);
+        assert!(acts[1]["args"].is_object() && acts[2]["args"].is_string(), "{acts:?}");
     }
 
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.

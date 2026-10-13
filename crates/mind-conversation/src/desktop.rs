@@ -1006,15 +1006,96 @@ pub(crate) fn copyable_call(refusal: &str) -> Option<String> {
     (end > start).then(|| refusal[start..=end].to_string())
 }
 
+/// E.ARGS1: a placeholder the loop can fill itself from a bare value -- a title, from its first line.
+fn fillable_placeholder(p: &str) -> bool {
+    matches!(p, "<title>" | "<name>" | "<subject>")
+}
+
+/// E.ARGS1: a bare value's first non-empty line, as a title: trimmed, a leading `#` dropped, at most
+/// 80 characters.
+fn title_from(bare: &str) -> Option<String> {
+    let line = bare.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let t: String = line.trim_start_matches('#').trim().chars().take(80).collect();
+    (!t.is_empty()).then_some(t)
+}
+
+/// E.ARGS1 (VM 541, 13 Oct): the corrected call a refusal hands over for a bare-value `os_act`, ready
+/// to send -- or None when the loop cannot be sure of it. yos-mcp's `bare_value_refusal` offers the
+/// whole call with the value already placed and `<title>` left; the model was asked to retype it,
+/// resent the bare call instead, and the note was never made.
+///
+/// Some only when the refused call's `args` was a bare string, the offer names the same app and
+/// action, and every placeholder left is one filled here. The bridge stops echoing a value after
+/// about 800 characters, so a string field the bare value starts with (a trailing `…` or `...`
+/// ignored) is taken as the cut echo and replaced by the whole value. An offer that does not parse
+/// is rebuilt from the Mind's own copy: the parameters the refusal names, the value under the one
+/// the refusal shows it in.
+pub(crate) fn applied_fix(args: &serde_json::Value, refusal: &str) -> Option<serde_json::Value> {
+    let bare = args.get("args")?.as_str()?;
+    let (app, action) = act_target(ACT, args)?;
+    let offered = copyable_call(refusal)?;
+    let mut call = match serde_json::from_str::<serde_json::Value>(&offered) {
+        Ok(c) => c,
+        Err(_) => rebuilt_call(&app, &action, bare, refusal)?,
+    };
+    if act_target(ACT, &call)? != (app, action) {
+        return None;
+    }
+    let fields = call.get_mut("args")?.as_object_mut()?;
+    for value in fields.values_mut() {
+        let Some(s) = value.as_str() else { continue };
+        let echo = s.trim_end_matches('…').trim_end_matches("...");
+        if s.starts_with('<') && s.ends_with('>') {
+            if !fillable_placeholder(s) {
+                return None;
+            }
+            *value = serde_json::Value::String(title_from(bare)?);
+        } else if s != bare && echo.chars().count() >= 16 && bare.starts_with(echo) {
+            *value = serde_json::Value::String(bare.to_string());
+        }
+    }
+    fields.values().any(|v| v.as_str() == Some(bare)).then_some(call)
+}
+
+/// E.ARGS1: an offer cut too short to parse, rebuilt from the refusal's own words: "takes named
+/// parameters: title, text", with the bare value under the parameter the offer shows it in.
+fn rebuilt_call(app: &str, action: &str, bare: &str, refusal: &str) -> Option<serde_json::Value> {
+    let named = refusal.split_once("takes named parameters:")?.1;
+    let named = named.split(['.', '\n']).next()?;
+    let params: Vec<&str> = named.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+    let escaped = serde_json::to_string(bare).ok()?;
+    let start: String = escaped.trim_start_matches('"').chars().take(16).collect();
+    let holder = params.iter().find(|p| {
+        [format!("\"{p}\": \"{start}"), format!("\"{p}\":\"{start}")].iter().any(|n| refusal.contains(n.as_str()))
+    })?;
+    let mut fields = serde_json::Map::new();
+    for p in &params {
+        let v = if p == holder { bare.to_string() } else { format!("<{p}>") };
+        fields.insert((*p).to_string(), serde_json::Value::String(v));
+    }
+    Some(serde_json::json!({"app": app, "action": action, "args": fields}))
+}
+
+/// E.ARGS1: the work log's line for a refused bare value whose offered call the loop sent itself.
+pub(crate) fn fix_applied(out: &str) -> String {
+    format!("(the desktop refused the bare value; the call it offered was sent, with the title from the first line:) {out}")
+}
+
 /// E.ARENA1-F44: what the person is told when the model resent a refused call after being shown
 /// the fix. The turn ends here: more nudges were wasted steps, and a composed answer could claim
-/// the thing was made.
+/// the thing was made. E.ARGS1 (VM 541): in the person's words -- the refusal's text and the call's
+/// name are for the journal, never the reply.
 pub(crate) fn refusal_stop_reply(args: &serde_json::Value, refusal: &str) -> String {
-    let what = act_target(ACT, args).map_or_else(|| "that".to_string(), |(app, action)| format!("`{app}.{action}`"));
-    format!(
-        "I couldn't do that: the desktop refused {what}, and nothing was created. What it said: {} I was shown how to fix the call and sent it unchanged again, so I stopped rather than keep repeating it.",
-        refusal_reason(refusal, 300)
-    )
+    eprintln!("[agent] the refusal the person is not shown: {}", refusal_reason(refusal, 300));
+    let who = act_target(ACT, args).map_or_else(|| "the desktop".to_string(), |(app, _)| format!("the {} app", app_display(&app)));
+    format!("I couldn't do that: {who} refused my request, and nothing was created. Want me to try again?")
+}
+
+/// An app id as a person would name it: `notes` -> `Notes`, `text-editor` -> `Text editor`.
+fn app_display(app: &str) -> String {
+    let words = app.replace(['-', '_'], " ");
+    let mut c = words.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().collect::<String>() + c.as_str())
 }
 
 pub(crate) fn repeated_action_note(
@@ -3664,3 +3745,91 @@ mod tests {
 
 
 
+
+/// E.ARGS1: the call a refusal hands over, applied by the loop instead of retyped by the model.
+#[cfg(test)]
+mod args1_tests {
+    use super::*;
+
+    const NOTE: &str = "Weekend packing list \u{2014} two nights away\n\nEssentials\n- ID / wallet / card\n- Phone + charger\n- Medications";
+
+    fn bare(value: &str) -> serde_json::Value {
+        serde_json::json!({"app": "notes", "action": "new_note", "args": value})
+    }
+
+    /// yos-mcp's `bare_value_refusal`, in the shape VM 541 met it (yantrik-os-dc, 13 Oct).
+    fn refusal(offer: &str) -> String {
+        format!("REFUSED \u{2014} nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Nothing was run. Send this, with each <placeholder> filled in: {offer}")
+    }
+
+    fn offer(text: &str) -> String {
+        format!("{{\"app\": \"notes\", \"action\": \"new_note\", \"args\": {{\"title\": \"<title>\", \"text\": {}}}}}", serde_json::to_string(text).unwrap())
+    }
+
+    #[test]
+    fn the_541_refusal_gives_the_call_with_the_title_from_the_first_line() {
+        let fixed = applied_fix(&bare(NOTE), &refusal(&offer(NOTE))).expect("applied");
+        assert_eq!(
+            fixed,
+            serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Weekend packing list \u{2014} two nights away", "text": NOTE}})
+        );
+    }
+
+    #[test]
+    fn a_cut_echo_is_replaced_by_the_whole_value() {
+        let long = format!("Reading list\n{}", "a line of the note\n".repeat(70));
+        assert!(long.chars().count() > 1_200);
+        let cut: String = long.chars().take(800).collect::<String>() + "\u{2026}";
+        let fixed = applied_fix(&bare(&long), &refusal(&offer(&cut))).expect("applied");
+        assert_eq!(fixed["args"]["text"], serde_json::json!(long));
+        assert_eq!(fixed["args"]["title"], serde_json::json!("Reading list"));
+    }
+
+    #[test]
+    fn an_offer_that_does_not_parse_is_rebuilt_from_the_minds_own_copy() {
+        let broken = offer(NOTE).replace("}}", "}");
+        assert!(serde_json::from_str::<serde_json::Value>(&broken).is_err());
+        let fixed = applied_fix(&bare(NOTE), &refusal(&broken)).expect("rebuilt");
+        assert_eq!(fixed["args"]["text"], serde_json::json!(NOTE));
+        assert_eq!(fixed["args"]["title"], serde_json::json!("Weekend packing list \u{2014} two nights away"));
+    }
+
+    #[test]
+    fn what_the_loop_cannot_be_sure_of_is_left_to_the_model() {
+        // The older form leaves the value's own placeholder: which field takes it is not said.
+        let old = "{\"app\":\"notes\",\"action\":\"new_note\",\"args\":{\"title\":\"<title>\",\"text\":\"<text>\"}}";
+        assert_eq!(applied_fix(&bare(NOTE), &refusal(old)), None);
+        // An offer for another app or action.
+        assert_eq!(applied_fix(&bare(NOTE), &refusal(&offer(NOTE).replace("\"notes\"", "\"editor\""))), None);
+        assert_eq!(applied_fix(&bare(NOTE), &refusal(&offer(NOTE).replace("new_note", "append"))), None);
+        // Args that were already an object.
+        let object = serde_json::json!({"app": "notes", "action": "new_note", "args": {"text": NOTE}});
+        assert_eq!(applied_fix(&object, &refusal(&offer(NOTE))), None);
+        // A refusal with no call to copy.
+        assert_eq!(applied_fix(&bare(NOTE), "REFUSED \u{2014} nothing was run. refused: no such action"), None);
+    }
+
+    #[test]
+    fn the_stop_reply_is_in_the_persons_words() {
+        let reply = refusal_stop_reply(&bare(NOTE), &refusal(&offer(NOTE)));
+        assert_eq!(reply, "I couldn't do that: the Notes app refused my request, and nothing was created. Want me to try again?");
+    }
+}
+
+/// E.ARGS1: an action's parameters are not a content block, whatever they are named.
+#[cfg(test)]
+mod args1_normalize_tests {
+    #[test]
+    fn a_title_and_text_object_is_kept_and_a_content_block_still_unwraps() {
+        let call = serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "T", "text": "B"}});
+        assert_eq!(crate::normalize_tool_args(call.clone()), call);
+        assert_eq!(
+            crate::normalize_tool_args(serde_json::json!({"q": {"type": "text", "text": "Bergen"}})),
+            serde_json::json!({"q": "Bergen"})
+        );
+        assert_eq!(
+            crate::normalize_tool_args(serde_json::json!({"q": [{"type": "text", "text": "Ber"}, "gen"]})),
+            serde_json::json!({"q": "Bergen"})
+        );
+    }
+}

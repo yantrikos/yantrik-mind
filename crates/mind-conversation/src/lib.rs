@@ -1884,11 +1884,19 @@ pub(crate) fn media_url(url: &str, query: &str) -> String {
 pub(crate) fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
 
+    /// A content block: {"type":"text","content":"Bergen, Norway"} (also "text" as the key; live ones
+    /// carry a "name" too) -- one that says it is text, or holds nothing but its text. E.ARGS1:
+    /// `{"title": "…", "text": "…"}` is a tool's parameters, not a block, and unwrapping it sent
+    /// `notes.new_note` to the desktop as a bare value it refused.
+    fn content_block(o: &serde_json::Map<String, Value>) -> bool {
+        (o.contains_key("content") || o.contains_key("text"))
+            && (o.get("type").and_then(Value::as_str) == Some("text") || o.keys().all(|k| matches!(k.as_str(), "text" | "content")))
+    }
+
     /// One argument VALUE, unwrapped to the scalar a tool can consume.
     fn scalar(v: &Value) -> Value {
         match v {
-            // A content block: {"type":"text","content":"Bergen, Norway"} (also "text" as the key).
-            Value::Object(o) if o.contains_key("content") || o.contains_key("text") => {
+            Value::Object(o) if content_block(o) => {
                 let inner = o
                     .get("content")
                     .or_else(|| o.get("text"))
@@ -1908,7 +1916,7 @@ pub(crate) fn normalize_tool_args(v: serde_json::Value) -> serde_json::Value {
                 for item in items {
                     let text = match item {
                         Value::String(s) => Some(s.clone()),
-                        Value::Object(o) if o.contains_key("content") || o.contains_key("text") => {
+                        Value::Object(o) if content_block(o) => {
                             match scalar(
                                 o.get("content")
                                     .or_else(|| o.get("text"))
@@ -13523,6 +13531,8 @@ Open reminders you're carrying for them:",
         let mut last_call = String::new();
         // E.ARENA1-F43: the desktop's refusal of the last call, when it refused it.
         let mut last_refusal: Option<String> = None;
+        // E.ARGS1: the refused calls whose offered fix was already sent, so it is sent once.
+        let mut fixes_applied: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F44: refused calls the model has already been shown the fix for.
         let mut refusal_told: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -14467,6 +14477,20 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
             } else {
                 obs
+            };
+            // E.ARGS1 (VM 541): a bare value refused with the whole call offered -- send that call,
+            // once, instead of asking the model to retype it (on 541 it resent the bare one twice).
+            let obs = match (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs))
+                .then(|| desktop::applied_fix(&args, &obs))
+                .flatten()
+                .filter(|_| fixes_applied.insert(call_sig.clone()))
+            {
+                Some(fixed) => {
+                    eprintln!("[agent] step {step}: a bare value was refused with its call offered \u{2014} sent that call");
+                    let out = self.run_agent_tool_as(&tool, &fixed, id).await;
+                    desktop::fix_applied(&out)
+                }
+                None => obs,
             };
             // E.ARENA1-F23: accepted but not finished -- the first line is the state from before.
             // Look again at the same app after a moment, and hand the model what is there now.

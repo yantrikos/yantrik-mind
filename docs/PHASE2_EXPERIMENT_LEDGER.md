@@ -17224,3 +17224,85 @@ The household gate (`scope_allows`, Household) consults only `YM_HOUSEHOLD_PROVI
 **E.HH1 K3, Linux (staging, 714b134):** mind-inference 95 passed, mind-core 175 passed. K3 held.
 
 **Bundle `yantrik-mind-714b134-linux-amd64.tar.zst`** (sha256 1270cb3782170675710537efcab30789cb9a2e687caf700768d68e6451cb765d), built on staging against companion 965532e. It carries E.OPT1, E.PRIV2, E.OPT2, E.STACK1 and E.HH1. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet: it waits on Pranab's OK.
+
+## E.ARGS1 — PREREG: the loop applies the call a refusal hands it, and the person never reads the refusal
+
+**Why:** yantrik-os-dc on the fresh-install VM 541 (Mind 065c76f, gateway → LAN Qwen 27B, 13 Oct). Asked to "create a note in the Notes app called Weekend packing list…", the model sent `os_act {"app":"notes","action":"new_note","args":"Weekend packing list — two nights away\n\nEssentials\n…"}`, a bare string.
+
+yos-mcp refused it with the complete correct call, the value already placed: `REFUSED — nothing was run. refused: args arrived as a bare value, but notes.new_note takes named parameters: title, text. Nothing was run. Send this, with each <placeholder> filled in: {"app": "notes", "action": "new_note", "args": {"title": "<title>", "text": "Weekend packing list — …"}}`. The model resent the bare call twice, F44 stopped, and the person was shown the refusal JSON plus "I was shown how to fix the call and sent it unchanged again…". That's three model calls, about 60 s each on a thinking 27B, for a call the Mind already had.
+
+**What is built:**
+1. **`desktop::applied_fix(args, refusal)`** returns the corrected call, or None. It is Some only when all of these hold:
+   - the refused call's `args` was a bare string;
+   - the refusal offers a call (`copyable_call`) for the same app and action;
+   - every placeholder left in it can be filled.
+
+   `<title>` is filled from the bare value's first non-empty line: trimmed, a leading `#` dropped, at most 80 characters. Any other `<…>` placeholder leaves it None, so the older two-placeholder form still goes to F43/F44.
+
+   The bridge stops echoing a value after about 800 chars, so a long note may arrive cut. A string field the bare value starts with (any trailing `…`/`...` ignored) is replaced by the full value. When the offered call does not parse, the call is rebuilt from the Mind's own copy: the parameters named in "takes named parameters: a, b", with the bare value in the parameter the refusal shows it under (`"p": "` followed by the start of the value) and `<title>`-style names filled as above. If that cannot be done, the result is None.
+2. **The loop** (beside F11's `host_redirect`): when an `os_act` comes back refused and `applied_fix` gives a call, that call is sent once (never again for the same refused call). The work log shows "(the desktop refused the bare value; the call it offered was sent, with the title from the note's first line:) <result>". A result that ran clears the refusal, so F43/F44 see a success.
+3. **F44's stop reply in the person's words:** "I couldn't do that: the {app} app refused my request, and nothing was created. Want me to try again?" The refusal's text and the internals go to the journal only.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **applied_fix:**
+    - the 541 refusal verbatim gives `{"app":"notes","action":"new_note","args":{"title":"Weekend packing list — two nights away","text":<the full bare value>}}`;
+    - a cut echo (value of 1,200 chars, echo cut at 800 with `…`) gives the full value;
+    - an unparseable offer gives the rebuilt call;
+    - a `<text>` placeholder left gives None;
+    - a different app or action in the offer gives None;
+    - args already an object gives None.
+  - **The loop:** the 541 sequence (bare call, then the refusal, then the corrected call accepted) reaches the desktop as two calls, the second the corrected one. The reply does not contain "REFUSED" or "{". No third call is made.
+  - **F44 stop:** the existing F43/F44 tests, with the old `<text>` form, still stop after one fix shown. Their reply is now the person's sentence, with no "takes named parameters" and no backticks.
+- K2, a mutant survives:
+  - the placeholder check removed (a `<text>` call applied);
+  - the same-app/action check removed;
+  - the cut-echo replacement removed;
+  - the loop applies the fix every time (no once-guard);
+  - the stop reply carries the refusal reason again.
+- K3: both suites pass.
+
+**E.ARGS1 addendum (found while writing K1's loop test, before any result):** the corrected call reached the scripted desktop as the bare string again. `normalize_tool_args`'s `scalar()` unwraps any object holding a `text` or `content` key as a content block (`{"type":"text","text":"…"}`). So `os_act {"args": {"title": "…", "text": "…"}}` is collapsed into the bare text before dispatch, and the desktop refuses it as a bare value.
+
+That's a Mind defect independent of the model. A model that sends `notes.new_note` correctly is refused for a bare value it never sent; the journal shows "args normalised … -> …". On 541 the raw line already showed a string, so the model did err there too. Any action taking `text` plus another parameter is affected.
+
+**Added to what is built:** an object is a content block only when every key is `type`, `text` or `content`. Both places `scalar()` unwraps one (a value, and an item of a list) use that one test. `{"text": "hello"}` alone still unwraps, as today.
+
+**Added to K1:** `normalize_tool_args({"app":"notes","action":"new_note","args":{"title":"T","text":"B"}})` is unchanged. `{"q": {"type":"text","text":"Bergen"}}` still becomes `{"q": "Bergen"}`. The existing normalisation tests pass.
+
+**Added to K2:** the key test removed, so the object form collapses again.
+
+## E.ARGS1 — RESULT: the loop sends the call a refusal hands it, a title+text object is no longer collapsed, and the person reads one sentence; 6 mutants killed
+
+**Built:**
+- `desktop::applied_fix` (with `rebuilt_call`, `title_from`, and the placeholders `<title>`, `<name>`, `<subject>`);
+- the loop's send-once, beside F11, keyed by the refused call's signature;
+- `fix_applied` for the work log;
+- `refusal_stop_reply` in the person's words, with the reason written to the journal only;
+- `normalize_tool_args`'s `content_block` test.
+
+**K1 held:**
+- `applied_fix` on the 541 refusal verbatim gives the exact call, titled "Weekend packing list — two nights away".
+- A 1,200+-character note echoed cut at 800 with `…` gets the whole value back.
+- An unparseable offer is rebuilt.
+- None is returned for:
+  - the `<text>` form;
+  - a different app or action;
+  - object args;
+  - a refusal with no call to copy.
+- The loop: two calls reach the desktop, the second exactly the corrected call. The work log says the offered call was sent, and the reply has no "REFUSED" or "{".
+- **Send once:** with the fix itself refused and the bare value resent later, three calls reach the desktop, not four.
+- **F43/F44:** still stop after one fix is shown, and the reply is now "I couldn't do that: the Notes app refused my request, and nothing was created. Want me to try again?".
+- **Normalisation:** a title+text object is kept, and a content block (a value or a list item) still unwraps.
+
+**K2 held: 6 mutants killed:**
+- placeholder check removed (F44's test: the `<text>` call was applied);
+- same app/action check removed;
+- cut-echo replacement removed;
+- no once-guard;
+- stop reply carrying the reason;
+- content-block key test removed (two tests, including the loop's).
+
+**The content-block rule, revised before K3:** the first full run failed `tool_arguments_are_unwrapped_to_what_the_tool_can_use`. Live content blocks from qwen3.8 also carry `name` (`{"content":"Bergen, Norway","name":"place","type":"text"}`), so a key whitelist of `type|text|content` left them wrapped. The rule is now: the object has `text` or `content`, and it either says `"type": "text"` or holds nothing but `text`/`content`. `{"title","text"}` is still kept; the live block and `{"text": "…"}` still unwrap. The mutant that removes the shape test is killed by the normalisation test and the loop test.
+
+**K3 (Windows):** full suite 2490 passed, 0 failed.

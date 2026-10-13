@@ -17370,6 +17370,19 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(after_tool, "", "words were streamed after a tool ran");
     }
 
+    /// E.VOICE5: compose is told the person never saw the work log. (Presence only -- whether the
+    /// model follows it is measured on VM 541.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compose_is_told_to_speak_plainly() {
+        let r = run(
+            vec![Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "editor"})), Step::Fail],
+            vec![EDITOR],
+            vec!["UNUSED"],
+        )
+        .await;
+        assert!(r.prompts.iter().any(|p| p.contains(crate::COMPOSE_PLAIN_WORDS)), "compose was not told");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

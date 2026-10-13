@@ -17818,3 +17818,22 @@ E.SLASH1 answers a bare "/new" by code, before any model call. But `mind_core::h
 **K1 held:** a description with a 30-window list before the readings is cut, and all five come back whole. **K2:** the keys removed fails it. **K3 (Windows):** full suite 2513 passed, 0 failed.
 
 **Open:** the test's description is one I wrote. yantrik-os-dc is capturing 541's real `os_describe shell` result, and a test against it is added before this ships in a bundle.
+
+## E.VOICE5 — PREREG: compose speaks to the person, not about its own work log
+
+**Why:** VM 541. Two composed replies described the Mind's internals to the person:
+- e41c3b0, disk turn: "The log only shows that a shell action was refused after an approval timeout…";
+- 1ca45b0, disk turn: "those checks didn't actually run. The log shows the action was refused, then a later attempt failed…".
+
+The compose instruction says "work log" three times ("based on this work log", "the work log's list formatting", "the work log shows a tool ACTUALLY performed") and never says that the person has not seen it. The model answers in its terms.
+
+**What is built (lib.rs, compose):** one more sentence in the compose instruction. The work log is the Mind's own notes and the person has never seen it. So never mention a log, steps, tools or tool names, refusals or approval cards by those names; say in plain words what was done and what was not, and why if it matters. The example given is the one 541 needed: "I needed your OK to run a command, and didn't get it in time — want me to try again?".
+
+**Kill criteria:**
+- K1, a test fails: the compose prompt of a turn that ran a tool carries the sentence. This proves only that the text is there.
+- K2: the 541 rerun of the disk ask, and of any turn that ends after a refusal. If the reply still speaks of "the log", "a shell action", "approval timeout" or a tool name, E.VOICE5 failed, whatever K1 says.
+- K3: both suites pass.
+
+## E.VOICE5 — RESULT (code): compose is told the person never saw its work log
+
+**K1 held:** a turn that composed after a tool and a failed step carries `COMPOSE_PLAIN_WORDS` in its compose prompt. That proves presence only. **K3 (Windows):** full suite 2514 passed, 0 failed. **K2, the 541 rerun, is still to come.**

@@ -17135,3 +17135,42 @@ All three hand private context to a provider the person did not agree to. No liv
 **A Windows-only test fragility, found while merging (not from E.OPT2):** `the_local_lane_is_not_wrapped_and_keeps_its_measured_behaviour` cuts `local_backend_from` at the first `"\n}\n"`. This checkout has `core.autocrlf=true`, so a file git rewrites (here, by the branch switch) has CRLF line ends. The cut then runs to the end of the file, picks up the test module's `StrictOpenAiBackend`, and fails. The test now normalises line ends before cutting. The guard still holds: a `// StrictOpenAiBackend` line inserted into the local lane fails it.
 
 **K3 held:** full suite (Windows, os-shared-memory with E.OPT2, against companion main 965532e) 2478 passed, 0 failed.
+
+## E.STACK1 — PREREG: a desktop turn's wrappers stop doubling its future (a Linux stack overflow from E.OPT1)
+
+**Why:** the Linux run for E.OPT2 (staging, 7ead39f, debug build) aborted mind-core's tests with `fatal runtime error: stack overflow` in `harness::handover_tests::a_handover_from_the_context_is_not_an_answer_either`.
+- Running that one test: it passes at 065c76f and overflows at 5fa9d39 and at 7ead39f, so it arrived with E.OPT1 (52ba4bd).
+- With `RUST_MIN_STACK=16777216` all 175 mind-core tests pass.
+
+The cause is that three helpers wrap every desktop turn as `async fn`s that take the turn's future by value: `with_person_home`, `with_handover` and E.OPT1's `with_attachments`. Each one's state machine holds the inner future as an argument and again inside the scope it awaits. The turn future is already large, and E.OPT1's third layer pushed it past a test thread's 2 MiB. E.VOICE2's helpers (`with_cancel`, `with_step_tokens`) already avoid this by returning tokio's `TaskLocalFuture`. A release build's futures are smaller, but the same growth sits on a tokio worker's stack in production, so the margin is real either way.
+
+**What is built (mind-conversation):** each of the three helpers returns `tokio::task::futures::TaskLocalFuture<String, F>` and always scopes, using an empty string for "none". Their readers treat an empty value as none:
+- `handover_section`;
+- `attachments_section`;
+- `person_home` (so E.HOME2's "the minds' account never falls back to $HOME" keeps its meaning).
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **Size:** for a 64 KiB future, each wrapper's future is smaller than 64 KiB + 1 KiB (an `async fn` wrapper is about twice that).
+  - **No value is none:** with `None` (and with a blank home), `handover_section`, `attachments_section` and `person_home` behave exactly as outside any scope. Covered by the existing E.HOME1/E.HOME2, E.ARENA1-F28 and E.OPT1 tests, plus one per reader for the empty scope.
+  - **The overflow itself:** the handover test passes on Linux at the default stack.
+- K2, a mutant survives:
+  - any one helper turned back into an `async fn`;
+  - a reader that treats the empty value as present.
+- K3: both suites pass, and mind-core's full lib suite passes on Linux at the default stack.
+
+## E.STACK1 — RESULT (Windows): the three turn wrappers return TaskLocalFuture; 6 mutants killed
+
+**Built:** `with_person_home`, `with_handover` and `with_attachments` return `tokio::task::futures::TaskLocalFuture<String, F>` and always scope, using an empty string for none. `handover_section` and `attachments_section` give nothing for an empty scope. `person_home` filters an empty told home, so outside the minds' account it still falls back to this process's $HOME.
+
+**K1 held:**
+- **Size:** each wrapper around a 65,536-byte future is under that + 1 KiB.
+- **Empty scope:** an empty scope gives no hand-over and no attachments; a filled one shows them.
+- **Blank home:** a blank told home (`"   "`) outside the minds' account still tells the model this process's home. The existing E.HOME1/E.HOME2, E.ARENA1-F28 and E.OPT1 tests pass unchanged.
+
+**K2 held: 6 mutants killed:**
+- each helper turned back into an `async fn` (3), caught by the size test;
+- the hand-over and attachments readers treating empty as present (2), caught by the empty-scope test;
+- `person_home` without the empty filter (1). It survived the first version of the blank-home test, which asserted on a prompt sentence that `home_sentence` already filters. The case that changes behaviour is the $HOME fallback outside the minds' account, and the test now asserts that.
+
+**K3 (Windows):** full suite 2481 passed, 0 failed. The Linux result follows.

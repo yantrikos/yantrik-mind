@@ -17672,6 +17672,25 @@ mod desktop_consent_and_stall_wiring {
         assert!(!visible.reply.contains("Nothing is at"), "the filesystem was used under the minds' account: {}", visible.reply);
     }
 
+    /// E.STACK1: `with_person_home` always scopes now, an empty home for none. A blank home from the
+    /// desktop is no home: outside the minds' account the Mind still falls back to its own $HOME,
+    /// exactly as when the desktop says nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blank_told_home_is_no_home() {
+        let own = fresh_home("stack1own");
+        let wrote = || vec![Step::Call("mcp.yantrik-os.os_act", act("editor", "new", "hello"))];
+        let saved = || vec!["Done \u{2014} Text Editor \u{2014} x.txt, 1 line, saved"];
+        let ask = "Create a text file at ~/x.txt containing hello";
+        let blank = crate::with_person_home(
+            Some("   ".into()),
+            run_as(ask, Some(own.to_string_lossy().into_owned()), false, wrote(), vec![SHELL], saved()),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&own);
+        let fallback = format!("home folder on this computer is {}", own.to_string_lossy());
+        assert!(blank.prompts.iter().any(|p| p.contains(&fallback)), "a blank told home hid this process's own: {:?}", blank.prompts.first());
+    }
+
     /// E.HOME3 through the loop, on the desktop's real `files_stat` answers (520, df42338): under the
     /// minds' account the desktop is asked; only its "not there" is missing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -17464,3 +17464,5 @@ All three were written. The barren-step guard counted the second as "returned no
 **K3 (Windows):** full suite 2499 passed, 0 failed.
 
 **What makes it live:** yantrik-os-dc's half, every desktop rename also writing GECOS. Until then a settings.yaml-only rename is invisible to the Mind, as it was.
+
+**E.NAME2 K3, Linux (staging, 9d56723):** mind-core 176 passed, mind-conversation 1220 passed. K3 held. Not in any bundle yet.

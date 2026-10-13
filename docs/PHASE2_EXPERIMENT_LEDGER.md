@@ -17670,3 +17670,5 @@ The `\n\n` is the harness's `remainder()`. When the final answer does not contin
 - the loop passing `false`.
 
 **K3 (Windows):** full suite 2507 passed, 0 failed.
+
+**E.VOICE4 K3, Linux (staging, ef4b397):** mind-conversation 1227 passed. K3 held. Not in any bundle yet.

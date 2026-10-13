@@ -30,8 +30,13 @@ fn switched_off() -> bool {
 
 /// Whether a step's words may be forwarded: none of the checks that discard or replace a direct
 /// reply can fire on it. Each input is what that check reads, known before the step runs.
-pub(crate) fn forward_allowed(unsaved_doc: bool, saved_any: bool, goal_asked: bool, unattempted: bool) -> bool {
-    !unsaved_doc && !saved_any && !goal_asked && !unattempted
+///
+/// E.VOICE4 (VM 541): and nothing once a tool has run (`logged`). From then on the answer is
+/// re-grounded against the work log -- in the loop, and by compose's cited answer -- and either can
+/// replace what a step wrote; the desktop cannot take streamed words back, so the person read two
+/// answers, the streamed one and its replacement.
+pub(crate) fn forward_allowed(unsaved_doc: bool, saved_any: bool, goal_asked: bool, unattempted: bool, logged: bool) -> bool {
+    !unsaved_doc && !saved_any && !goal_asked && !unattempted && !logged
 }
 
 /// Tokens in, committed segments out.
@@ -167,10 +172,11 @@ mod tests {
 
     #[test]
     fn each_retracting_check_alone_stops_forwarding() {
-        assert!(forward_allowed(false, false, false, false));
-        assert!(!forward_allowed(true, false, false, false), "an unsaved document");
-        assert!(!forward_allowed(false, true, false, false), "saved pages (dead-link nudge)");
-        assert!(!forward_allowed(false, false, true, false), "a goal path in the request");
-        assert!(!forward_allowed(false, false, false, true), "an unattempted side effect");
+        assert!(forward_allowed(false, false, false, false, false));
+        assert!(!forward_allowed(true, false, false, false, false), "an unsaved document");
+        assert!(!forward_allowed(false, true, false, false, false), "saved pages (dead-link nudge)");
+        assert!(!forward_allowed(false, false, true, false, false), "a goal path in the request");
+        assert!(!forward_allowed(false, false, false, true, false), "an unattempted side effect");
+        assert!(!forward_allowed(false, false, false, false, true), "E.VOICE4: a tool has run");
     }
 }

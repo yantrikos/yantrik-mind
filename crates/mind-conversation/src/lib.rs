@@ -13819,6 +13819,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 !saved_files.is_empty(),
                 desktop::goal_path(user_text).is_some(),
                 unattempted_side_effect(user_text, &cost.calls).is_some(),
+                !scratch.trim().is_empty(),
             );
             let resp = match answer_stream::streamed_step(
                 forward,

@@ -17316,6 +17316,60 @@ mod desktop_consent_and_stall_wiring {
         assert!(!prompts.iter().any(|p| p.contains("[2] web_fetch ->")), "a third refused fetch was tried");
     }
 
+    /// E.VOICE4: the script, streaming each reply's text to the step's token sink as a model would.
+    struct Streams(Script);
+    impl LLMBackend for Streams {
+        fn chat(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.0.chat(m, c, t)
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, on: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let r = self.0.chat(m, c, t)?;
+            for w in r.text.split_inclusive(' ') {
+                on(w);
+            }
+            Ok(r)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "streams"
+        }
+    }
+
+    /// E.VOICE4: the words a turn streamed to the desktop.
+    async fn streamed_words(steps: Vec<Step>) -> String {
+        let script = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(Streams(script));
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::AnswerDelta>();
+        let who = TurnIdentity::primary();
+        let _ = crate::TURN_ANSWER.scope(tx, conv.agent_loop_for_eval("What is on my list?", &who)).await;
+        let mut words = String::new();
+        while let Ok(d) = rx.try_recv() {
+            if let crate::AnswerDelta::Text(t) = d {
+                words.push_str(&t);
+            }
+        }
+        words
+    }
+
+    /// E.VOICE4 (VM 541): once a tool has run, a step's words may still be replaced, so none are
+    /// streamed; a turn answered at its first step still streams.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_streams_once_a_tool_has_run() {
+        let direct = streamed_words(vec![Step::Say("Your list has three things on it. Milk is first.")]).await;
+        assert!(direct.contains("Your list has three things on it."), "a direct answer no longer streams: {direct:?}");
+        let after_tool = streamed_words(vec![
+            Step::Call("remember", serde_json::json!({"text": "the list has milk"})),
+            Step::Say("Your list has three things on it. Milk is first."),
+        ])
+        .await;
+        assert_eq!(after_tool, "", "words were streamed after a tool ran");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

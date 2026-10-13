@@ -17633,3 +17633,40 @@ The chat path's rule is already that every keyword guess "must lose to a request
 The other two: title compare made exact, and `item_made_again` dropped from the chain.
 
 **K3 (Windows):** full suite 2506 passed, 0 failed.
+
+**E.LOOP9 K3, Linux (staging, 42d1224):** mind-conversation 1226 passed. K3 held.
+
+## E.VOICE4 — PREREG: no words are streamed once a tool has run, because the answer can still be rewritten
+
+**Why:** the 1ca45b0 rerun on VM 541 (yantrik-os-dc, 13 Oct):
+- **Calendar:** two answers, "Tomorrow (Wednesday, Oct 14) is clear … **Dentist appointment, Thu Oct 15, 3:00 PM**.\n\nTomorrow is 2026-10-14. There are no calendar events on 2026-10-14." The gateway's call log shows compose (27.1 s), then one more call (22.7 s, 575 tokens out) before "turn done".
+- **Search:** three answers glued together.
+
+The `\n\n` is the harness's `remainder()`. When the final answer does not continue what was streamed, it sends the whole answer again after a blank line ("an answer rewritten after the step"). The desktop's protocol has no way to take streamed words back: `harness.chunk` appends, and `harness.complete` carries no text. E.VOICE2's rule is "nothing is sent that the delivered answer might not contain". `forward_allowed` checks four rewriting conditions known before a step, but once a tool has run the answer is re-grounded against the work log: the in-loop ThinkCited→Validate, and compose's `cited_answer`. Either can replace what a step wrote. So after the first tool call, a step's words cannot be known to survive.
+
+**What is built (mind-conversation):** `forward_allowed` gains a fifth input, whether the work log has anything in it. A step's words are forwarded only while it is empty, that is, a turn's first model step before any tool ran. After that the answer arrives whole, as it did before E.VOICE2. A turn answered directly without tools still streams.
+
+**Later, not here:** streaming tool turns again needs the desktop to accept a replacement (for example `harness.complete {text}` meaning "this is the answer"), raised with yantrik-os-dc.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `forward_allowed(.., logged=true)` is false; all-false is true;
+  - **loop, on a streaming surface:** a turn whose first step calls a tool and whose second step answers sends no Text delta. A turn whose first step answers directly sends its sentences.
+- K2, a mutant survives:
+  - the logged input ignored;
+  - the loop passing `false` for it.
+- K3: both suites pass.
+
+## E.VOICE4 — RESULT: nothing is streamed once a tool has run; 2 mutants killed
+
+**Built:** `forward_allowed(.., logged)`; the loop passes whether the work log has anything in it.
+
+**K1 held:**
+- the unit test covers each of the five inputs alone;
+- **loop on a streaming surface** (a backend that streams its scripted text to the step's token sink): a first-step direct answer streams its sentences, and a turn that ran `remember` before answering streams nothing.
+
+**K2 held: 2 mutants killed:**
+- the logged input ignored;
+- the loop passing `false`.
+
+**K3 (Windows):** full suite 2507 passed, 0 failed.

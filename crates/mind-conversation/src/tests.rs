@@ -17215,9 +17215,10 @@ mod desktop_consent_and_stall_wiring {
         assert!(r.prompts.iter().any(|p| p.contains("their no covers it")));
     }
 
-    /// F9, Reading C's T6: the step's model call is capped by the turn's remaining time — about
-    /// half of the 135 s the loop has — not the client's 300 s; and a model that stops answering
-    /// mid-turn ends in a composed answer from the work log, not an error line.
+    /// F9, Reading C's T6: the step's model call is capped by the turn's remaining time, not the
+    /// client's 300 s; and a model that stops answering mid-turn ends in a composed answer from the
+    /// work log, not an error line. E.PACE1a: this pool is one route with no fallback, so the cap is
+    /// the whole 135 s the loop has, not half of it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_step_call_is_capped_and_a_mid_turn_failure_composes() {
         let r = run(
@@ -17230,7 +17231,7 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         let first = *r.timeouts.first().expect("the model was called");
-        assert!((60..=67).contains(&first), "step 0 waited up to {first} s");
+        assert!((130..=135).contains(&first), "step 0 waited up to {first} s");
         assert!(r.reply.contains(COMPOSED), "the work log was thrown away: {}", r.reply);
         assert!(!r.reply.contains("couldn't think just now"), "{}", r.reply);
     }

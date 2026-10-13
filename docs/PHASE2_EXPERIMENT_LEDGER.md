@@ -17310,3 +17310,60 @@ That's a Mind defect independent of the model. A model that sends `notes.new_not
 **E.ARGS1 K3, Linux (staging, 76d6c7b):** mind-conversation 1214 passed. K3 held. Not in any bundle yet.
 
 **Bundle `yantrik-mind-e41c3b0-linux-amd64.tar.zst`** (sha256 e60ead01a1b9ca9b64cb306e0165e4c70fd584cab5d1c3d64a7205a27d3893cc), built on staging against companion 965532e. It carries everything in 714b134 plus E.ARGS1. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet. (714b134 went onto 520 at 04:31 CT on Pranab's OK; installed and checked by yantrik-os-dc.)
+
+## E.PACE1a — PREREG: a step on a route with no fallback may use the loop's whole remaining time
+
+**Why:** yantrik-os-dc's decision log from VM 541 (13 Oct, Mind 065c76f, single route `yantrik-gateway:picked` → LAN Qwen 27B, thinking).
+- Failed inference calls end at exactly 60.0 s (bursts ii and vi: 60.0, 60.0, 60.0, 59.8), which is `step_call_cap`'s floor.
+- Served single calls of 92.4 s and 113.1 s occur.
+- The disk/memory turn lost its third call to `reading SSE line: timeout: global` and answered "paste df -h".
+
+`step_call_cap` gives one step max(half the loop's remaining time, 60 s) (E.ARENA1-F9). The other half is "room for the fallback, or one more try". A route with one link has no fallback, and a failed step past the first breaks to compose rather than retrying. So on a single-route Mind the second half is never used, and a slow call is cut while time remains.
+
+**What is built:**
+- **mind-inference:** `InferencePool::grounded_has_fallback()`. The private-grounded step's route is the dedicated private lane when there is one, else the pool's provider. This returns true when that route names more than one link (`route_links`: `chain[a -> b]`, `a -> b`, `brain-pool/x[a,b]`).
+- **mind-conversation:** `step_call_cap(loop_left_ms, fallback)`. With a fallback the rule is unchanged: half, never under 60 s. Without one, the step gets the whole remaining loop time, never under 60 s.
+- The agent step passes `self.inference.grounded_has_fallback()`.
+- The stray doc line above `step_call_cap` moves back to `machine_place_line`.
+
+**Not in this change:**
+- (b) the Mind's own tool steps at effort "easy" waits on how the gateway maps effort for 541's provider;
+- (c) the 180 s turn wall waits on whether the desktop keeps waiting past it.
+
+Both are asked of yantrik-os-dc.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `step_call_cap(135_000, true)` = 67.5 s; `(135_000, false)` = 135 s; `(30_000, false)` = 60 s; `(30_000, true)` = 60 s;
+  - `grounded_has_fallback` is false for `yantrik-gateway:picked` and true for `chain[nanogpt -> minimax]`. With a dedicated private lane labelled `ollama-local:qwen`, it is false even when the provider is a chain.
+- K2, a mutant survives:
+  - the fallback flag ignored (always half);
+  - the flag inverted;
+  - `grounded_has_fallback` reading the provider when a private lane exists.
+- K3: both suites pass.
+
+## E.PACE1a — RESULT: a step on a single route may use the whole remaining loop; 3 mutants killed
+
+**Built:**
+- `InferencePool::grounded_has_fallback()`: the private lane when there is one, else the provider, and true when the route names more than one link;
+- `step_call_cap(loop_left_ms, fallback)`: half with a fallback, all of it without, never under 60 s;
+- the agent step passes it;
+- the stray doc line is back on `machine_place_line`.
+
+**K1 held:**
+- caps: 135 s left → 67.5 s / 135 s; 30 s left → 60 s / 60 s;
+- single route: false; chain and brain-pool: true;
+- a private lane over a chain provider: false.
+
+**One existing test changed on purpose:** `a_step_call_is_capped_and_a_mid_turn_failure_composes` asserted step 0's cap was 60–67 s, half the loop. Its scripted pool is one route, so the cap is now the whole loop, and it asserts 130–135 s. Its other half (a mid-turn failure composes from the work log) is unchanged.
+
+**K2 held: 3 mutants killed:**
+- flag ignored;
+- flag inverted;
+- the provider read despite a private lane.
+
+**K3 (Windows):** full suite 2493 passed, 0 failed.
+
+**The other two parts, from yantrik-os-dc (13 Oct):**
+- **(b) effort, on hold.** The gateway drops effort for 541's model: `reasoning_for` gives `Reasoning::None` for an OpenAI-compatible host unless the model is gpt-oss. The AIG box looks like a llama.cpp server, where `chat_template_kwargs: {"enable_thinking": false}` may work for Qwen3. dc will measure that when AIG (192.168.4.203, down now) is back. Nothing is built until then.
+- **(c) the wall.** The desktop sets no deadline on a Mind turn. It keeps the turn while the harness process lives, shows "working on … N s in", and announces a late answer. So raising the 180 s wall is safe from the desktop's side. The number is to be chosen from 541's timed turns once AIG is back.

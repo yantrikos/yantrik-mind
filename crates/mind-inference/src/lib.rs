@@ -715,6 +715,16 @@ impl InferencePool {
         &self.provider
     }
 
+    /// E.PACE1a: does the route a private-grounded step goes to have a link to fall back to? That
+    /// route is the dedicated private lane when there is one, else this pool's provider.
+    pub fn grounded_has_fallback(&self) -> bool {
+        let label = match &self.private {
+            Some((_, lane)) => lane.as_ref(),
+            None => self.provider.as_ref(),
+        };
+        route_links(label).len() > 1
+    }
+
     /// Unscoped chat = HOUSEHOLD lane (today's behavior, now explicit, audited, and revocable via
     /// YM_HOUSEHOLD_PROVIDERS). New code should call `chat_scoped` and say what it's carrying.
     pub async fn chat(
@@ -6234,5 +6244,28 @@ mod effort_tests {
         with_effort("high".into(), call("nanogpt:deepseek")).await;
         call("yantrik-gateway:picked").await;
         assert_eq!(*seen.lock().unwrap(), vec![Some("high".to_string()), None, None]);
+    }
+}
+
+/// E.PACE1a: the step cap's question -- can a private-grounded step's route fall back?
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    fn pool(label: &str) -> InferencePool {
+        InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1).with_provider(label)
+    }
+
+    #[test]
+    fn a_single_route_has_no_fallback_and_a_chain_does() {
+        assert!(!pool("yantrik-gateway:picked").grounded_has_fallback());
+        assert!(pool("chain[nanogpt -> minimax]").grounded_has_fallback());
+        assert!(pool("brain-pool/x[a,b]").grounded_has_fallback());
+    }
+
+    #[test]
+    fn the_private_lane_is_the_grounded_route_when_there_is_one() {
+        let p = pool("chain[nanogpt -> minimax]").with_private_backend(Arc::new(ScriptedLLM::new("ok")), "ollama-local:qwen");
+        assert!(!p.grounded_has_fallback(), "the chain is not where a grounded step goes");
     }
 }

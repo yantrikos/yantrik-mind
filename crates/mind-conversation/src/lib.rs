@@ -4883,13 +4883,16 @@ pub fn set_machine_place(place: Option<String>) {
     }
 }
 
-/// The sentence the agent prompt carries about where the computer is, or nothing.
 /// E.ARENA1-F9: the most one step's model call may wait — half of what the loop has left, never
 /// under a minute. Half leaves room for the fallback, or one more try, when a request hangs; the
 /// minute keeps a slow local lane's ordinary call from being cut. It scales with the budget, so a
 /// long delegated turn still allows long calls.
-fn step_call_cap(loop_left_ms: u64) -> std::time::Duration {
-    std::time::Duration::from_millis((loop_left_ms / 2).max(60_000))
+///
+/// E.PACE1a (VM 541): a route with no fallback gets all of it. A failed step past the first breaks
+/// to compose, so the other half was never spent -- and a thinking 27B's 92 s call was cut at 60 s.
+fn step_call_cap(loop_left_ms: u64, fallback: bool) -> std::time::Duration {
+    let share = if fallback { loop_left_ms / 2 } else { loop_left_ms };
+    std::time::Duration::from_millis(share.max(60_000))
 }
 
 /// A twin hint is given once per exact call; this is the key it is remembered by.
@@ -4897,6 +4900,20 @@ fn call_sig_for_twin(tool: &str, args: &serde_json::Value) -> String {
     format!("{tool}|{args}")
 }
 
+#[cfg(test)]
+mod pace1a_tests {
+    /// E.PACE1a: half the loop's time with a fallback, all of it without; never under a minute.
+    #[test]
+    fn a_route_with_no_fallback_gets_the_whole_remaining_loop() {
+        let s = |left, fallback| super::step_call_cap(left, fallback).as_millis();
+        assert_eq!(s(135_000, true), 67_500);
+        assert_eq!(s(135_000, false), 135_000);
+        assert_eq!(s(30_000, false), 60_000);
+        assert_eq!(s(30_000, true), 60_000);
+    }
+}
+
+/// The sentence the agent prompt carries about where the computer is, or nothing.
 fn machine_place_line() -> String {
     match MACHINE_PLACE.read().ok().and_then(|p| p.clone()) {
         Some(place) => machine_place_sentence(&place),
@@ -13709,6 +13726,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // turn, and the fallback after it answered in one second.
             let call_cap = step_call_cap(
                 loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
+                self.inference.grounded_has_fallback(),
             );
             // E.VOICE2: on the desktop the step streams; its words go out only when no check that
             // discards or replaces a direct reply can fire on this step.

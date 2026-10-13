@@ -17220,3 +17220,7 @@ The household gate (`scope_allows`, Household) consults only `YM_HOUSEHOLD_PROVI
 - symmetric fallback, caught by `lanes_route_correctly` and one other.
 
 **K3 (Windows):** full suite 2482 passed, 0 failed.
+
+**E.HH1 K3, Linux (staging, 714b134):** mind-inference 95 passed, mind-core 175 passed. K3 held.
+
+**Bundle `yantrik-mind-714b134-linux-amd64.tar.zst`** (sha256 1270cb3782170675710537efcab30789cb9a2e687caf700768d68e6451cb765d), built on staging against companion 965532e. It carries E.OPT1, E.PRIV2, E.OPT2, E.STACK1 and E.HH1. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet: it waits on Pranab's OK.

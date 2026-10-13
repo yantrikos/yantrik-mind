@@ -17102,6 +17102,47 @@ mod desktop_consent_and_stall_wiring {
         assert!(acts[1]["args"].is_object() && acts[2]["args"].is_string(), "{acts:?}");
     }
 
+    /// E.MEM1: the loop with a memory the test can read back -- the remembered beliefs matching
+    /// `probe`, and the prompts the model saw.
+    async fn remember_run(steps: Vec<Step>, probe: &str) -> (usize, Vec<String>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps, seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem.clone());
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let conv = ConversationEngine::new(memarc, pool, "YM");
+        let _ = conv.agent_loop_for_eval("Remember my sister's birthday, and Ravi's", &TurnIdentity::primary()).await;
+        let found = mem.beliefs_matching(probe, &mind_types::AccessContext::operator_audit()).await.unwrap_or_default();
+        let prompts = seen.lock().unwrap().clone();
+        (found.len(), prompts)
+    }
+
+    /// E.MEM1 (VM 541, turn 5): one fact in three phrasings is one belief, and the model is told so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_rephrased_fact_is_remembered_once() {
+        let say = |t: &str| Step::Call("remember", serde_json::json!({"text": t}));
+        let (n, prompts) = remember_run(
+            vec![
+                say("Sister Priya's birthday is on 4 November."),
+                say("User's sister Priya has a birthday on 4 November."),
+                say("User's sister Priya has her birthday on 4 November."),
+            ],
+            "Priya",
+        )
+        .await;
+        assert_eq!(n, 1, "the rephrasings were saved as beliefs too");
+        assert!(prompts.iter().any(|p| p.contains("already remembered this turn")), "the model was not told");
+    }
+
+    /// E.MEM1: two different facts in one turn are both kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_facts_in_one_turn_are_both_remembered() {
+        let say = |t: &str| Step::Call("remember", serde_json::json!({"text": t}));
+        let (priya, _) = remember_run(vec![say("Priya's birthday is on 4 November."), say("Ravi's birthday is on 9 March.")], "birthday").await;
+        assert_eq!(priya, 2);
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

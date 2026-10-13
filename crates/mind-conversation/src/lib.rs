@@ -4900,6 +4900,50 @@ fn call_sig_for_twin(tool: &str, args: &serde_json::Value) -> String {
     format!("{tool}|{args}")
 }
 
+/// E.MEM1 (VM 541): the statement remembered earlier this turn that `statement` restates, if any --
+/// content words overlapping by Jaccard >= 0.6. "Sister Priya's birthday is on 4 November" and
+/// "User's sister Priya has her birthday on 4 November" are one fact; the model wrote it three times.
+pub(crate) fn already_remembered<'a>(statement: &str, earlier: &'a [String]) -> Option<&'a str> {
+    const FUNCTION: &[&str] = &[
+        "a", "an", "the", "is", "are", "was", "on", "in", "at", "of", "to", "has", "have", "had", "her", "his",
+        "their", "its", "my", "s", "user", "users", "that", "and",
+    ];
+    let words = |t: &str| -> std::collections::BTreeSet<String> {
+        t.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty() && !FUNCTION.contains(w))
+            .map(str::to_string)
+            .collect()
+    };
+    let now = words(statement);
+    if now.is_empty() {
+        return None;
+    }
+    earlier.iter().map(String::as_str).find(|e| {
+        let then = words(e);
+        let common = now.intersection(&then).count() as f64;
+        let all = now.union(&then).count() as f64;
+        all > 0.0 && common / all >= 0.6
+    })
+}
+
+#[cfg(test)]
+mod mem1_tests {
+    use super::already_remembered;
+
+    #[test]
+    fn a_rephrased_fact_restates_the_first_and_a_new_one_does_not() {
+        let first = vec!["Sister Priya's birthday is on 4 November (user: Fresh Tester).".to_string()];
+        assert!(already_remembered("User's sister Priya has a birthday on 4 November.", &first).is_some());
+        assert!(already_remembered("User's sister Priya has her birthday on 4 November.", &first).is_some());
+        let priya = vec!["Priya's birthday is on 4 November".to_string()];
+        assert_eq!(already_remembered("Ravi's birthday is on 9 March", &priya), None);
+        let tea = vec!["Remember I like tea".to_string()];
+        assert_eq!(already_remembered("Remember I don't like coffee", &tea), None);
+        assert_eq!(already_remembered("anything", &[]), None);
+    }
+}
+
 #[cfg(test)]
 mod pace1a_tests {
     /// E.PACE1a: half the loop's time with a fallback, all of it without; never under a minute.
@@ -13550,6 +13594,8 @@ Open reminders you're carrying for them:",
         let mut last_refusal: Option<String> = None;
         // E.ARGS1: the refused calls whose offered fix was already sent, so it is sent once.
         let mut fixes_applied: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.MEM1: what `remember` saved this turn, so a rephrasing is not saved again.
+        let mut remembered_this_turn: Vec<String> = Vec::new();
         // E.ARENA1-F44: refused calls the model has already been shown the fix for.
         let mut refusal_told: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -14372,7 +14418,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // F8, a sensitive action whose host family is unread gets that one read; F7, a
             // sensitive action with a standard twin is pointed at it once. Sent again, it goes
             // through to the person.
-            let not_sent = if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
+            let restated = (tool == "remember")
+                .then(|| tool_catalog::read_arg(&tool, &args, "text"))
+                .and_then(|t| already_remembered(&t, &remembered_this_turn).map(str::to_string));
+            let not_sent = if let Some(first) = restated {
+                // E.MEM1 (VM 541): one fact, three phrasings, three beliefs.
+                eprintln!("[agent] step {step}: remember restates a fact saved this turn \u{2014} not saved again");
+                Some(format!("(already remembered this turn: \"{first}\" \u{2014} not saved again)"))
+            } else if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
                 Some(note)
             } else if desktop::another_new_while_unsaved(&tool, &args, unsaved_doc) {
                 // E.ARENA1-F20: a document still needs saving; another new tab is not the step.
@@ -14466,6 +14519,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 Some(note) => note,
                 None => self.run_agent_tool_as(&tool, &args, id).await,
             };
+            if sent && tool == "remember" && obs.trim() == "(remembered)" {
+                remembered_this_turn.push(tool_catalog::read_arg(&tool, &args, "text"));
+            }
             if !sent {
                 // Nothing reached the desktop, so nothing was done: the same call sent next must
                 // not be refused as a repeat. F7 promised "send this call again and it will go to

@@ -17369,3 +17369,48 @@ Both are asked of yantrik-os-dc.
 - **(c) the wall.** The desktop sets no deadline on a Mind turn. It keeps the turn while the harness process lives, shows "working on … N s in", and announces a late answer. So raising the 180 s wall is safe from the desktop's side. The number is to be chosen from 541's timed turns once AIG is back.
 
 **E.PACE1a K3, Linux (staging, bf3450e):** mind-inference 97 passed, mind-conversation 1215 passed. K3 held. Not in any bundle yet. e41c3b0 went onto 520 (13:07) and 541 on Pranab's OK; the 541 tests (attachments, note, search) wait on the AIG box.
+
+## E.MEM1 — PREREG: one fact is remembered once per turn, however the model rephrases it
+
+**Why:** VM 541 (yantrik-os-dc, 13 Oct, turn 5). Asked to remember Priya's birthday, the model called `remember` three times:
+1. "Sister Priya's birthday is on 4 November (user: Fresh Tester).";
+2. "User's sister Priya has a birthday on 4 November.";
+3. "User's sister Priya has her birthday on 4 November."
+
+All three were written. The barren-step guard counted the second as "returned nothing new", because `remember` always answers "(remembered)", but it guards the loop, not the store. So three near-identical beliefs entered memory. The reply's "A remember action was recorded as remembered." is the model's own wording; no Mind string says it.
+
+**What is built (mind-conversation):**
+- `already_remembered(statement, earlier) -> Option<&str>`: the earlier statement this one restates, when their content words overlap by Jaccard ≥ 0.6. Content words are lowercased alphanumeric tokens, with a short list of function words and "user"/"user's" dropped.
+- **The loop:** a `remember` whose `text` (read through the alias table, as the tool reads it) restates one already saved this turn is not sent. The step reads `(already remembered this turn: "<first>" — not saved again)`.
+- A `remember` that answered "(remembered)" adds its statement to the turn's list.
+- Distinct facts in one turn are each saved.
+
+**Not in this change:** "(user: Fresh Tester)" is the model's text; the Mind formats no such label. The stale name is memory holding the person's old display name (settings.yaml `user_name` changed and nothing tells the Mind). That's a separate question, raised with yantrik-os-dc.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the three 541 statements: the second and third each restate the first;
+  - "Priya's birthday is on 4 November" and "Ravi's birthday is on 9 March" do not;
+  - "Remember I like tea" and "Remember I don't like coffee" do not;
+  - **the loop:** three `remember` steps with the 541 texts, then a reply. The store receives exactly one belief, and the second and third steps' observations say "already remembered this turn".
+  - **the loop:** two distinct facts reach the store as two beliefs.
+- K2, a mutant survives:
+  - the threshold check removed (everything restates, so distinct facts are dropped);
+  - the loop check removed (three beliefs written);
+  - the turn's list never filled.
+- K3: both suites pass.
+
+## E.MEM1 — RESULT: a rephrased fact is remembered once per turn; 3 mutants killed
+
+**Built:** `already_remembered` (content-word Jaccard ≥ 0.6); the loop's `remembered_this_turn`; a restating `remember` is not sent and its step reads "(already remembered this turn: … — not saved again)".
+
+**K1 held:**
+- **Unit:** the second and third 541 statements restate the first. Priya/Ravi and tea/coffee do not.
+- **Loop:** the three 541 phrasings leave exactly 1 belief matching "Priya", and the model is told. Two different birthdays leave 2.
+
+**K2 held: 3 mutants killed:**
+- threshold removed, caught by the unit test and the two-facts loop test;
+- loop check removed, caught by the rephrased loop test;
+- list never filled, caught by the rephrased loop test.
+
+**K3 (Windows):** full suite 2496 passed, 0 failed.

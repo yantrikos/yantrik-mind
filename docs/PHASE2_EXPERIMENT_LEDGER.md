@@ -17076,3 +17076,23 @@ All three hand private context to a provider the person did not agree to. No liv
 - the model part ignored.
 
 **K3 held:** full suite (Windows) 2476 passed, 0 failed (2471 before the 5 new tests).
+
+## E.OPT2 — PREREG: the effort the person picks in the ask bar reaches the gateway (yantrik-os #673)
+
+**Why:** `TurnOptions.effort` is `easy`, `medium`, `high` or `xhigh`, sent only for a model that thinks. The gateway turns it into the provider's own knob when it arrives as the request's `effort` (yantrik-os-dc, #675). The Mind drops it (E.OPT1 left it out), so the person's choice silently does nothing for the Mind.
+
+**What is built:**
+1. **yantrik-ml (yantrik-companion, its own PR):** `GenerationConfig.effort: Option<String>`, default None. `GenericOpenAIBackend::build_openai_body` writes `"effort"` only when it is Some, so every existing caller is unchanged.
+2. **mind-inference:** a task-local `with_effort(effort)`. `chat_scoped_tools_attributed` and `chat_streaming_sink` copy it into the config ONLY when the call's route is the gateway (`yantrik-gateway…`). Any other provider never sees the field: an unknown request field is refused by some OpenAI-compatible APIs.
+3. **mind-core harness:** the turn's `options.effort` is read and checked against the four words (anything else is ignored), and the turn is run inside `with_effort`.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **yantrik-ml:** the body carries `effort` when set, and has no `effort` key when not;
+  - **mind-inference:** inside `with_effort("high")` a call on a pool labelled `yantrik-gateway:picked` reaches the backend with `config.effort == Some("high")`; one labelled `nanogpt:x` reaches it with None; outside the scope it is None;
+  - **harness:** `options.effort` "xhigh" is passed, "turbo" and absent are not.
+- K2, a mutant survives:
+  - effort passed to every route;
+  - the body writing `effort` when None;
+  - the harness not passing it.
+- K3: both suites pass.

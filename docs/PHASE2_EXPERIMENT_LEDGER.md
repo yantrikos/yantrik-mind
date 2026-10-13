@@ -17695,3 +17695,44 @@ The `\n\n` is the harness's `remainder()`. When the final answer does not contin
 **K1 held:** the broker's three refusal texts classify as Denied, and "(connection refused)" is still not Denied (the existing priority test). **K2:** removing the marker fails `priority_order_decides_when_a_message_matches_two_arms`. **K3 (Windows):** full suite 2507 passed, 0 failed.
 
 **E.OUT2 K3, Linux (staging, c0f8036):** mind-conversation 1227 passed. K3 held.
+
+## E.LOCAL1 — PREREG: writing into an app that keeps its data on this machine is not egress
+
+**Why:** the 1ca45b0 rerun on VM 541. `new_note` with a packing list was refused by the egress broker's credential tripwire: "(refused: the arguments to `mcp.yantrik-os.os_act` look like they contain a credential/secret — I won't send that outward)". The detector matched "cards" and the "4471" of the hotel booking code "AX-4471". `egress::classify` puts every `mcp.*` tool in External, deliberately, since an MCP server can proxy the network. But `os_act` on the Notes app or the text editor writes the person's own text to the person's own disk. Nothing leaves, so the tripwire that exists to stop a secret being sent outward blocked a local write. yantrik-os-dc's view: with this fixed, a detector false positive on a local write costs nothing, and that matters more than tuning the detector.
+
+**What is built (mind-conversation):** `desktop::stays_on_machine(tool, args)`, true only when all three hold:
+- the tool is `os_act`;
+- the app is `notes` or `editor` (after F40's spelling fold);
+- the action name contains none of `send`, `share`, `mail`, `export`, `upload`, `publish`, `sync`, `post`.
+
+The agent loop's broker check skips such a call. Every other `mcp.*` call, and every other external tool, is brokered exactly as before. The detector itself (card-context-number) is unchanged here; its tuning is a separate experiment, with yantrik-os-dc's rules: a letter-led code is never a card number; short runs need their card word on the same line or a `label:` on the line before; and card words are labels, not the plain noun "cards".
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **stays_on_machine:**
+    - true for `notes.new_note` and `editor.set_content`;
+    - false for `notes.share`, `notes.export_pdf`, `email.send`, `browser.web_go`, `files.copy`, and a non-`os_act` tool.
+  - **run_agent_tool_as with a broker:**
+    - `os_act notes.new_note` carrying the 541 text is not refused by the broker;
+    - the same text in `os_act email.send` is refused ("look like they contain a credential");
+    - a `web_search` carrying it is refused.
+- K2, a mutant survives:
+  - the app check removed (email.send passes);
+  - the action word check removed (notes.share passes);
+  - the loop not consulting it (the note is refused).
+- K3: both suites pass.
+
+## E.LOCAL1 — RESULT: a write into Notes or the editor is not brokered as egress; 3 mutants killed
+
+**Built:** `desktop::stays_on_machine`; the agent loop's broker check skips a call it returns true for.
+
+**K1 held:**
+- **Unit:** notes.new_note and editor.set_content are local. notes.share, notes.export_pdf, email.send, browser.web_go, files.copy and a non-os_act tool are not.
+- **With a broker:** the 541 packing list in a `notes.new_note` is not refused. The same text in `email.send`, and in a `web_search`, is refused with the credential sentence.
+
+**K2 held: 3 mutants killed:**
+- app check removed;
+- action word check removed;
+- the loop not consulting it.
+
+**K3 (Windows):** full suite 2509 passed, 0 failed.

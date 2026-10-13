@@ -12205,10 +12205,12 @@ WINDOW: all-time, latest 200
         // transport layer + a full tool-table audit (slice 2).
         if let Some(broker) = &self.egress {
             use mind_governance::egress::{EgressClass, EgressDecision, EgressRequest};
+            // E.LOCAL1 (VM 541): writing into the Notes app or the editor stays on this machine.
             if matches!(
                 mind_governance::egress::classify(tool),
                 Some(EgressClass::External(_))
-            ) {
+            ) && !desktop::stays_on_machine(tool, args)
+            {
                 let canon = mind_governance::egress::canonicalize(args);
                 // The audit's subject, resolved across every external tool's shape (url, then repo,
                 // then query) rather than through one tool's aliases — see `egress_target`.

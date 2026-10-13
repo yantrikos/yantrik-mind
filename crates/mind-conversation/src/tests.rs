@@ -21194,3 +21194,25 @@ mod attached_files_reach_the_model {
         assert!(!llm2.last_user_prompt().contains("attached these files"));
     }
 }
+
+/// E.LOCAL1 (VM 541): the broker does not stop a local note; it still stops the same text outward.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_local_note_is_not_egress_and_the_same_text_outward_still_is() {
+    use mind_governance::egress::EgressBroker;
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let text = "Documents & money\n- ID / driver's license\n- Wallet / cards\n- Cash\n- Hotel confirmation (AX-4471)\n\nMisc";
+    let id = TurnIdentity::primary();
+    let refused = |out: &str| out.contains("look like they contain a credential");
+    let note = conv
+        .run_agent_tool_as("mcp.yantrik-os.os_act", &serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Weekend packing list", "text": text}}), &id)
+        .await;
+    assert!(!refused(&note), "a local note was refused as egress: {note}");
+    let mail = conv
+        .run_agent_tool_as("mcp.yantrik-os.os_act", &serde_json::json!({"app": "email", "action": "send", "args": {"to": "a@b.c", "text": text}}), &id)
+        .await;
+    assert!(refused(&mail), "the same text sent by mail was not refused: {mail}");
+    let search = conv.run_agent_tool_as("web_search", &serde_json::json!({"query": text}), &id).await;
+    assert!(refused(&search), "the same text in a web search was not refused: {search}");
+}

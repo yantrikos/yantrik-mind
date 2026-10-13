@@ -1783,6 +1783,40 @@ fn inner_args(args: &serde_json::Value) -> serde_json::Map<String, serde_json::V
     }
 }
 
+/// E.LOCAL1 (VM 541): a desktop action that writes into an app keeping its data on this machine --
+/// the Notes app or the text editor -- and is not one that sends or shares it. Such a call is not
+/// egress: the broker's credential tripwire, there to stop a secret leaving, refused a packing list
+/// for the person's own note because "cards" and a booking code read as a card number.
+pub(crate) fn stays_on_machine(tool: &str, args: &serde_json::Value) -> bool {
+    const OUTWARD: [&str; 8] = ["send", "share", "mail", "export", "upload", "publish", "sync", "post"];
+    match act_target(tool, args) {
+        Some((app, action)) => {
+            let action = action.to_ascii_lowercase();
+            matches!(app.as_str(), "notes" | "editor") && !OUTWARD.iter().any(|w| action.contains(w))
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod local1_tests {
+    use super::*;
+
+    fn act(app: &str, action: &str) -> serde_json::Value {
+        serde_json::json!({"app": app, "action": action, "args": {"text": "x"}})
+    }
+
+    #[test]
+    fn only_local_writes_into_notes_and_the_editor_stay_on_the_machine() {
+        assert!(stays_on_machine(ACT, &act("notes", "new_note")));
+        assert!(stays_on_machine(ACT, &act("editor", "set_content")));
+        for (app, action) in [("notes", "share"), ("notes", "export_pdf"), ("email", "send"), ("browser", "web_go"), ("files", "copy")] {
+            assert!(!stays_on_machine(ACT, &act(app, action)), "{app}.{action}");
+        }
+        assert!(!stays_on_machine("web_search", &act("notes", "new_note")), "not os_act");
+    }
+}
+
 /// E.LOOP9 (VM 541, 1ca45b0): an item this `os_act` would create, when one with its title was made
 /// this turn. With thinking off the model made "Weekend packing list" six times, each with freshly
 /// worded text, so F26's field comparison never matched. A create is an action named `new…`,

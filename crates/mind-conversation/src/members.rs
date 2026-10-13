@@ -474,7 +474,7 @@ impl super::ConversationEngine {
             .await
             .unwrap_or_default();
         let policy = id.output_policy(user_text);
-        let mut messages = crate::GatedPrompt::new(&policy, &self.persona);
+        let mut messages = crate::GatedPrompt::new(&policy, &self.persona());
         if let Some(note) = policy.prompt_note() {
             messages.trusted_system(&note);
         }

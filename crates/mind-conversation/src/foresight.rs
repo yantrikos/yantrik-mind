@@ -232,7 +232,7 @@ impl super::ConversationEngine {
                     .inference
                     .chat_grounded(
                         vec![
-                            ChatMessage::system(&self.persona),
+                            ChatMessage::system(&self.persona()),
                             ChatMessage::user(&prompt),
                         ],
                         cfg,
@@ -338,7 +338,7 @@ impl super::ConversationEngine {
                     .inference
                     .chat_grounded(
                         vec![
-                            ChatMessage::system(&self.persona),
+                            ChatMessage::system(&self.persona()),
                             ChatMessage::user(&prompt),
                         ],
                         cfg,
@@ -703,7 +703,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             // Refusal degrades to the deterministic path below rather than propagating.
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -817,7 +817,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -1191,7 +1191,7 @@ THE PERSON YOU ARE ADVISING (make the recommendation personal to THEM, not to an
                     .inference
                     .chat_grounded(
                         vec![
-                            ChatMessage::system(&self.persona),
+                            ChatMessage::system(&self.persona()),
                             ChatMessage::user(&prompt),
                         ],
                         GenerationConfig::default(),

@@ -330,7 +330,7 @@ impl super::ConversationEngine {
             // Refusal degrades to the deterministic path below rather than propagating.
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,

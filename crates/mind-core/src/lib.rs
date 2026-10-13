@@ -668,7 +668,13 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         None => Arc::new(mind_tools::DdgSearch::new()),
     };
 
+    // E.NAME2: what the persona is built from, so a rename read at a desktop turn can rebuild it.
+    let (persona_name, persona_operator) = (
+        mind_name_from(&|k| std::env::var(k).ok(), std::fs::read_to_string(std::path::Path::new(&telegram::state_dir()).join("mind.name")).ok()),
+        std::env::var("YM_OPERATOR").unwrap_or_default(),
+    );
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
+        .with_persona_parts(&persona_name, &persona_operator)
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

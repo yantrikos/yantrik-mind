@@ -699,7 +699,7 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(
-            squashed.contains("letmutmessages=GatedPrompt::new(policy,&self.persona);"),
+            squashed.contains("letmutmessages=GatedPrompt::new(policy,&self.persona());"),
             "build_prompt must build through the typed message boundary"
         );
         for escape in ["messages.push(", "messages.messages"] {
@@ -728,7 +728,7 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         assert!(
-            squashed.contains("letmutmessages=crate::GatedPrompt::new(&policy,&self.persona);"),
+            squashed.contains("letmutmessages=crate::GatedPrompt::new(&policy,&self.persona());"),
             "member_turn must build through the typed message boundary"
         );
         assert_eq!(

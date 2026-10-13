@@ -358,7 +358,7 @@ impl super::ConversationEngine {
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -587,7 +587,7 @@ impl super::ConversationEngine {
             format!("\n{}", notes.join("\n"))
         };
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system(format!(
                 "Compose a short morning briefing for the user from the data below. Lead with what \
                  needs attention; group by source; be terse and scannable (a line per item). Do NOT \

@@ -622,6 +622,11 @@ async fn serve(
         let answer = {
             let mem = mem.clone();
             let conv = conv.clone();
+            // E.NAME2: the person's name as the account database has it now -- a rename on the
+            // desktop reaches this turn, not only the next start.
+            if let Some(name) = person_name_now() {
+                conv.refresh_operator(&name);
+            }
             // E.TOKEN1 (yantrik-os #411): the desktop's tools act for this conversation's agent.
             // The token goes only into yos-mcp's environment -- never a log line, never the model.
             if let Some(token) = turn["agent_token"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
@@ -1872,6 +1877,43 @@ async fn take_turn(
         eprintln!("[harness] the person attached files to this message ({} chars rendered for the model)", a.chars().count());
     }
     mind_conversation::with_attachments(attached, mind_conversation::with_handover(handover, think(mem, conv, &message))).await
+}
+
+/// E.NAME2: the GECOS full name of `uid` in `passwd` -- the first comma field, printable characters
+/// only, stripped, at most 64 (yantrik-mind-launch's own filter). None for no such account or an
+/// empty name: a turn never falls back to the login name, so a blank keeps what the Mind has.
+pub(crate) fn gecos_name(passwd: &str, uid: u32) -> Option<String> {
+    let line = passwd.lines().find(|l| l.split(':').nth(2).and_then(|u| u.trim().parse::<u32>().ok()) == Some(uid))?;
+    let gecos = line.split(':').nth(4)?;
+    let full = gecos.split(',').next().unwrap_or("");
+    let name: String = full.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect();
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// E.NAME2: the desktop owner's name now (`YANTRIK_PERSON_UID`, set by yantrik-update), if both
+/// the uid and the account database say one.
+fn person_name_now() -> Option<String> {
+    let uid = std::env::var("YANTRIK_PERSON_UID").ok()?.trim().parse::<u32>().ok()?;
+    gecos_name(&std::fs::read_to_string("/etc/passwd").ok()?, uid)
+}
+
+#[cfg(test)]
+mod name2_tests {
+    use super::gecos_name;
+
+    #[test]
+    fn the_full_name_of_that_uid_and_nothing_else() {
+        let pw = "root:x:0:0:root:/root:/bin/bash\nalex:x:1000:1000:Alex Rivera,,,:/home/alex:/bin/bash\nsam:x:10000:10000:Sam,,,:/home/sam:/bin/bash\n";
+        assert_eq!(gecos_name(pw, 1000).as_deref(), Some("Alex Rivera"));
+        assert_eq!(gecos_name(pw, 1001), None, "no such account");
+        assert_eq!(gecos_name("sam:x:10000:10000:Sam,,,:/home/sam:/bin/bash", 1000), None, "10000 is not 1000");
+        assert_eq!(gecos_name("alex:x:1000:1000:,,,:/home/alex:/bin/bash", 1000), None, "an empty name is no word");
+        let long = format!("alex:x:1000:1000:{}\u{7}{},,,:/home/alex:/bin/bash", "A".repeat(40), "B".repeat(40));
+        let got = gecos_name(&long, 1000).unwrap();
+        assert_eq!(got.chars().count(), 64);
+        assert!(!got.contains('\u{7}'), "a control character came through");
+    }
 }
 
 /// E.OPT2: the effort the person picked for this turn, if it is one of the ask bar's four words.

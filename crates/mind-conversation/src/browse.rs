@@ -85,7 +85,7 @@ impl super::ConversationEngine {
                 max_steps()
             );
             let messages = vec![
-                ChatMessage::system(&self.persona),
+                ChatMessage::system(&self.persona()),
                 ChatMessage::system(
                     "You drive a web browser one action at a time. Output ONLY the JSON object.",
                 ),

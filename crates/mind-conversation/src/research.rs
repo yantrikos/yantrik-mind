@@ -407,7 +407,7 @@ impl super::ConversationEngine {
             res.answer
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system(
                 "You reconcile prior beliefs with fresh research. Output ONLY the JSON object.",
             ),
@@ -563,7 +563,7 @@ impl super::ConversationEngine {
         };
         // 1. Split into focused sub-questions.
         let split = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::user(format!(
                 "Break this into 3 focused, non-overlapping sub-questions to investigate. \
                  One per line, no numbering, no preamble.\nTopic: {topic}"
@@ -611,7 +611,7 @@ impl super::ConversationEngine {
         }
         // 3. Synthesize, grounded only in the findings.
         let synth = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::user(format!(
                 "Synthesize one coherent answer to '{topic}' from these parallel findings. Ground ONLY \
                  in them; note any gaps.\n\n{findings}"
@@ -629,7 +629,7 @@ impl super::ConversationEngine {
             .text;
         // 4. Adversarial verify: check the draft's claims against the findings (anti-confabulation).
         let verify = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::user(format!(
                 "You are a skeptical fact-checker. Below is a DRAFT answer and the FINDINGS it should \
                  rest on. List any claim in the draft NOT supported by the findings, one per line as \
@@ -706,7 +706,7 @@ impl super::ConversationEngine {
             .inference
             .chat_household_attributed(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 GenerationConfig::default(),
@@ -726,7 +726,7 @@ impl super::ConversationEngine {
             .inference
             .chat_household_attributed(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&verify),
                 ],
                 GenerationConfig::default(),

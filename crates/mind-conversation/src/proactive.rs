@@ -650,7 +650,7 @@ impl super::ConversationEngine {
                         c.belief_a, c.belief_b
                     );
                     let messages = vec![
-                        ChatMessage::system(&self.persona),
+                        ChatMessage::system(&self.persona()),
                         ChatMessage::system(
                             "You weigh conflicting beliefs cautiously. One sentence.",
                         ),
@@ -768,7 +768,7 @@ impl super::ConversationEngine {
                     "Here is some of what I know:\n{facts}\n\nName ONE non-obvious connection, pattern, or question that emerges across these — something worth following up. Reply with a single sentence."
                 );
                 let messages = vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::system("You free-associate to surface one genuinely useful insight or question. One sentence, no preamble."),
                     ChatMessage::user(&prompt),
                 ];

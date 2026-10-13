@@ -628,7 +628,7 @@ impl super::ConversationEngine {
                 // Refusal degrades to the deterministic path below rather than propagating.
                 .chat_grounded(
                     vec![
-                        ChatMessage::system(&self.persona),
+                        ChatMessage::system(&self.persona()),
                         ChatMessage::user(format!(
                             "In ONE terse sentence, say what this {} code does — for a tool catalog, no preamble:\n\n{code}",
                             Self::lang_str(lang)

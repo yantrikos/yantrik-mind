@@ -485,7 +485,7 @@ impl super::ConversationEngine {
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,

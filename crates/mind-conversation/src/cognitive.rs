@@ -1077,7 +1077,7 @@ impl ConversationEngine {
         }
 
         let cognition =
-            mind_agents::Cognition::new(chat_pool, research_pool, bus, self.persona.clone())
+            mind_agents::Cognition::new(chat_pool, research_pool, bus, self.persona().clone())
                 .with_grounding(grounding);
         emit_progress("working…");
         let run_started = std::time::Instant::now();

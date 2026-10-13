@@ -7713,7 +7713,7 @@ fn compose_can_never_ride_a_weaker_lane_than_the_dispatch_that_preceded_it() {
 
     // AND THE THING THAT MUST NEVER COME BACK: a Household compose.
     assert!(
-        !squashed.contains("chat_streamed_to_progress(vec![ChatMessage::system(&self.persona),ChatMessage::user(&wrap)],cfg.clone(),mind_inference::PrivacyScope::Household"),
+        !squashed.contains("chat_streamed_to_progress(vec![ChatMessage::system(&self.persona()),ChatMessage::user(&wrap)],cfg.clone(),mind_inference::PrivacyScope::Household"),
         "compose must never be handed the household lane"
     );
 }
@@ -17141,6 +17141,40 @@ mod desktop_consent_and_stall_wiring {
         let say = |t: &str| Step::Call("remember", serde_json::json!({"text": t}));
         let (priya, _) = remember_run(vec![say("Priya's birthday is on 4 November."), say("Ravi's birthday is on 9 March.")], "birthday").await;
         assert_eq!(priya, 2);
+    }
+
+    /// E.NAME2: an engine whose persona was built for `operator`, and the prompts its next turn sent.
+    async fn turn_after_rename(parts: bool, rename: &str) -> (String, Vec<String>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps: vec![], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let conv = ConversationEngine::new(memarc, pool, mind_types::persona("Mira", "Fresh Tester"));
+        let conv = if parts { conv.with_persona_parts("Mira", "Fresh Tester") } else { conv };
+        conv.refresh_operator(rename);
+        let _ = conv.agent_loop_for_eval("hello", &TurnIdentity::primary()).await;
+        let prompts = seen.lock().unwrap().clone();
+        (conv.persona(), prompts)
+    }
+
+    /// E.NAME2 (VM 541): the person renamed on the desktop is named right from the next turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renamed_person_is_named_right_from_the_next_turn() {
+        let (persona, prompts) = turn_after_rename(true, "Alex").await;
+        assert!(persona.contains("extension of Alex") && !persona.contains("Fresh Tester"), "{persona:.120}");
+        assert!(prompts.iter().any(|p| p.contains("extension of Alex")), "the turn did not speak with the new name");
+        assert!(!prompts.iter().any(|p| p.contains("Fresh Tester")), "the old name reached the model");
+    }
+
+    /// E.NAME2: a blank name, or an engine given its persona whole, changes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blank_name_or_a_whole_persona_is_left_alone() {
+        let (blank, _) = turn_after_rename(true, "   ").await;
+        assert!(blank.contains("extension of Fresh Tester"), "{blank:.120}");
+        let (whole, _) = turn_after_rename(false, "Alex").await;
+        assert!(whole.contains("extension of Fresh Tester"), "{whole:.120}");
     }
 
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.

@@ -307,7 +307,7 @@ impl super::ConversationEngine {
         let nq = self.notify_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
-        let persona = self.persona.clone();
+        let persona = self.persona().clone();
         let key2 = key.clone();
         let title2 = title.clone();
         tokio::spawn(async move {
@@ -597,7 +597,7 @@ impl super::ConversationEngine {
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -736,7 +736,7 @@ impl super::ConversationEngine {
             .inference
             .chat_household_attributed(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -1072,7 +1072,7 @@ impl super::ConversationEngine {
                     if let Ok(r) = self
                         .inference
                         .chat_household_attributed(
-                            vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                            vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                             cfg,
                             concat!(module_path!(), ":forge-panel"),
                         )
@@ -1095,7 +1095,7 @@ impl super::ConversationEngine {
                 match self
                     .inference
                     .chat_household_attributed(
-                        vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                        vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                         cfg,
                         concat!(module_path!(), ":forge-synthesize"),
                     )
@@ -1185,7 +1185,7 @@ impl super::ConversationEngine {
                 match self
                     .inference
                     .chat_household_attributed(
-                        vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                        vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                         cfg,
                         concat!(module_path!(), ":forge-spec"),
                     )
@@ -1296,7 +1296,7 @@ impl super::ConversationEngine {
                 match self
                     .inference
                     .chat_household_attributed(
-                        vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                        vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                         cfg,
                         concat!(module_path!(), ":forge-build"),
                     )
@@ -1487,7 +1487,7 @@ impl super::ConversationEngine {
                 // fall back to the default chain only if the judge provider is down.
                 let judge_label =
                     std::env::var("YM_FORGE_JUDGE").unwrap_or_else(|_| "minimax".into());
-                let msgs = vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)];
+                let msgs = vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)];
                 let judged = match self
                     .inference
                     .clone()
@@ -1795,7 +1795,7 @@ impl super::ConversationEngine {
         let nq = self.notify_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
-        let persona = self.persona.clone();
+        let persona = self.persona().clone();
         tokio::spawn(async move {
             let alnum: String = name2
                 .chars()
@@ -1923,7 +1923,7 @@ impl super::ConversationEngine {
         let nq = self.notify_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
-        let persona = self.persona.clone();
+        let persona = self.persona().clone();
         tokio::spawn(async move {
             let alnum: String = name2
                 .chars()
@@ -2198,7 +2198,7 @@ impl super::ConversationEngine {
             .inference
             .chat_household_attributed(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,

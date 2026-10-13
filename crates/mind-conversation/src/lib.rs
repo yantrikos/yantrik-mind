@@ -6008,7 +6008,11 @@ pub(crate) fn mark_coder_dead(slot: &Arc<std::sync::Mutex<Option<CoderDeath>>>, 
 pub struct ConversationEngine {
     memory: Arc<dyn MemoryFacade>,
     inference: InferencePool,
-    persona: String,
+    /// E.NAME2: behind a lock, so a renamed person is named right from the next turn.
+    persona: std::sync::RwLock<String>,
+    /// E.NAME2: the Mind's name and the person's, when the persona was built from them -- what
+    /// `refresh_operator` rebuilds it from. None for a persona given whole.
+    persona_parts: std::sync::RwLock<Option<(String, String)>>,
     /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
@@ -6193,6 +6197,39 @@ pub struct ConversationEngine {
 }
 
 impl ConversationEngine {
+    /// E.NAME2: the persona this turn speaks with.
+    pub fn persona(&self) -> String {
+        self.persona.read().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// E.NAME2: remember what the persona was built from, so a rename can rebuild it.
+    pub fn with_persona_parts(self, mind_name: &str, operator: &str) -> Self {
+        if let Ok(mut parts) = self.persona_parts.write() {
+            *parts = Some((mind_name.to_string(), operator.to_string()));
+        }
+        self
+    }
+
+    /// E.NAME2: the person's current name (the account database's, read at the start of a desktop
+    /// turn). A different, non-blank name rebuilds the persona; a blank one changes nothing, and so
+    /// does an engine whose persona was given whole.
+    pub fn refresh_operator(&self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Ok(mut parts) = self.persona_parts.write() else { return };
+        let Some((mind_name, operator)) = parts.as_mut() else { return };
+        if operator == name {
+            return;
+        }
+        eprintln!("[persona] the person's name changed since the last turn \u{2014} speaking with the new one");
+        *operator = name.to_string();
+        if let Ok(mut persona) = self.persona.write() {
+            *persona = mind_types::persona(mind_name, name);
+        }
+    }
+
     pub fn new(
         memory: Arc<dyn MemoryFacade>,
         inference: InferencePool,
@@ -6210,7 +6247,8 @@ impl ConversationEngine {
         Self {
             memory,
             inference,
-            persona: persona.into(),
+            persona: std::sync::RwLock::new(persona.into()),
+            persona_parts: std::sync::RwLock::new(None),
             recent_window: 20,
             web: None,
             mail: None,
@@ -6984,7 +7022,7 @@ impl ConversationEngine {
              commitment.\n\nCONVERSATION:\n{transcript}"
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system("You distill conversations into durable typed memory + future commitments. Output ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
@@ -7314,7 +7352,7 @@ impl ConversationEngine {
              {{\"patterns\":[{{\"insight\":\"<one specific sentence>\",\"basis\":[<fact numbers>],\"confidence\":0.0-1.0}}]}}"
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system("You find non-obvious cross-domain patterns and ground every claim in the cited facts. Never invent facts. Output ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
@@ -8083,7 +8121,7 @@ impl ConversationEngine {
             // Refusal degrades to the deterministic path below rather than propagating.
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -9658,7 +9696,7 @@ WINDOW: all-time, latest 200
                 let (detailed, tail) = tool_catalog::gate_catalog(probe, &gated_src);
                 let schemas = tool_catalog::tool_schemas(probe, &gated_src);
                 let schema_bytes = serde_json::to_string(&schemas).map(|s| s.len()).unwrap_or(0);
-                let persona = self.persona.len();
+                let persona = self.persona().len();
                 let rows: Vec<(&str, usize)> = vec![
                     ("persona (system)", persona),
                     ("rolling summary", summary),
@@ -11582,7 +11620,7 @@ WINDOW: all-time, latest 200
         pack_context: Option<&str>,
         policy: &mind_types::OutputPolicy,
     ) -> Vec<ChatMessage> {
-        let mut messages = GatedPrompt::new(policy, &self.persona);
+        let mut messages = GatedPrompt::new(policy, &self.persona());
         // Straight after the persona, before any untrusted block: this is OUR instruction, and it must
         // not sit downstream of memory or web text that the model is told never to obey.
         if let Some(note) = format_note {
@@ -13723,7 +13761,7 @@ Open reminders you're carrying for them:",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
-                ChatMessage::system(&self.persona),
+                ChatMessage::system(&self.persona()),
                 // THE THIRD TOOL DOOR (E.SEC8 slice 4). Withholding the schemas and the prose catalog
                 // still left this: a system message naming `recall` outright and ordering the model to
                 // "use ONE tool, observe, repeat". The loop went on calling recall six times a turn
@@ -14908,7 +14946,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         let compose_scope = COMPOSE_SCOPE;
         let composed = match self
             .chat_streamed_to_progress(
-                vec![ChatMessage::system(&self.persona), ChatMessage::user(&wrap)],
+                vec![ChatMessage::system(&self.persona()), ChatMessage::user(&wrap)],
                 cfg.clone(),
                 compose_scope,
             )
@@ -15361,7 +15399,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -15910,7 +15948,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 .inference
                 .chat_grounded(
                     vec![
-                        ChatMessage::system(&self.persona),
+                        ChatMessage::system(&self.persona()),
                         ChatMessage::user(&prompt),
                     ],
                     cfg,

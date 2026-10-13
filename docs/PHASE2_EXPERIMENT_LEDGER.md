@@ -17416,3 +17416,51 @@ All three were written. The barren-step guard counted the second as "returned no
 **K3 (Windows):** full suite 2496 passed, 0 failed.
 
 **E.MEM1 K3, Linux (staging, 61acba0):** mind-conversation 1218 passed. K3 held. Not in any bundle yet.
+
+## E.NAME2 — PREREG: the person's name is read from the account database each desktop turn, not only at launch
+
+**Why:** VM 541 (13 Oct). The person's display name was changed and the Mind kept calling them "Fresh Tester". The Mind's only source is YM_OPERATOR, which yantrik-mind-launch sets once at start from the person's /etc/passwd GECOS full name, and the persona is built from it once, when the engine starts. yantrik-os-dc found that the desktop's own renames (settings.yaml `user_name`, and the Companion's runtime rename in bridge.rs) never touch GECOS. They will make every desktop rename also write GECOS, so there is one source of truth, and they asked the Mind to pick a rename up without a restart. Agreed in that exchange: no second copy of the name in the turn.
+
+**What is built:**
+- **mind-core:** `gecos_name(passwd, uid) -> Option<String>`: the first comma field of the GECOS of the `passwd` line whose uid is `uid`, trimmed. None when there is no such line or the name is empty.
+- **mind-core harness:** before each desktop turn runs, with `YANTRIK_PERSON_UID` set, read /etc/passwd and pass the name to the engine. Without the uid, or with no name, nothing changes, which is today's behaviour.
+- **mind-conversation:**
+  - the engine keeps its persona behind a lock;
+  - `with_persona_parts(name, operator)` remembers what it was built from;
+  - `refresh_operator(name)` rebuilds the persona with `mind_types::persona` when the name differs, and only when the parts are known and the name is not blank;
+  - every place that read `self.persona` reads `self.persona()`.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **gecos_name:** `alex:x:1000:1000:Alex Rivera,,,:/home/alex:/bin/bash` with uid 1000 gives "Alex Rivera". An empty GECOS gives None. Uid 1001 when only 1000 is listed gives None. A line whose uid field merely contains "1000" (10000) gives None.
+  - **refresh_operator:** after `refresh_operator("Alex")` on an engine built for "Fresh Tester", the system prompt of a turn says "extension of Alex" and not "Fresh Tester". A blank name changes nothing. An engine without parts changes nothing.
+- K2, a mutant survives:
+  - uid matched by substring;
+  - a blank name accepted;
+  - the refresh never applied.
+- K3: both suites pass.
+
+**E.NAME2 prereg, aligned with yantrik-mind-launch before any code (yantrik-os-dc):** launch's `person_name()` filters the GECOS full name to printable characters only, stripped, at most 64 characters, and so does `gecos_name`. Launch falls back to the login name for an empty GECOS. The turn-time rule does not: an empty name keeps the current persona, never the login name mid-session. The key is `YANTRIK_PERSON_UID` (yantrik-update's desktop owner), not launch's one-person scan, which names nobody on a two-person machine. Added to K1: a GECOS with a control character and 80 characters comes back printable and 64 long.
+
+## E.NAME2 — RESULT: the person's name is re-read from the account database each desktop turn; 3 mutants killed
+
+**Built:**
+- `harness::gecos_name` (the uid matched by its parsed field; the first comma field; printable only; stripped; at most 64 characters) and `person_name_now` (`YANTRIK_PERSON_UID` plus /etc/passwd);
+- each desktop turn calls `conv.refresh_operator` before it runs;
+- the engine's persona sits behind a lock, with `persona()`, `with_persona_parts` and `refresh_operator`;
+- every `&self.persona` read in mind-conversation (21 files) goes through `persona()`;
+- `mind_core::engine` records the parts it built the persona from.
+
+**K1 held:**
+- **gecos_name:** "Alex Rivera" for 1000. None for 1001, for 10000 against 1000, and for an empty name. A 40+bell+40 name comes back 64 characters with no bell.
+- **Rename:** a turn after the rename sends "extension of Alex" and no "Fresh Tester".
+- **No change:** a blank name, or a persona given whole, leaves "Fresh Tester".
+
+**K2 held: 3 mutants killed:**
+- uid by substring;
+- blank name accepted;
+- refresh never applied.
+
+**K3 (Windows):** full suite 2499 passed, 0 failed.
+
+**What makes it live:** yantrik-os-dc's half, every desktop rename also writing GECOS. Until then a settings.yaml-only rename is invisible to the Mind, as it was.

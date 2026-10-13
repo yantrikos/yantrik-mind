@@ -83,7 +83,7 @@ impl super::ConversationEngine {
                 .inference
                 .chat_grounded(
                     vec![
-                        ChatMessage::system(&self.persona),
+                        ChatMessage::system(&self.persona()),
                         ChatMessage::user(&prompt),
                     ],
                     cfg,
@@ -188,7 +188,7 @@ impl super::ConversationEngine {
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&synth_prompt),
                 ],
                 cfg,
@@ -477,7 +477,7 @@ impl super::ConversationEngine {
             .inference
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -561,7 +561,7 @@ impl super::ConversationEngine {
                 .inference
                 .chat_grounded(
                     vec![
-                        ChatMessage::system(&self.persona),
+                        ChatMessage::system(&self.persona()),
                         ChatMessage::user(&prompt),
                     ],
                     cfg,

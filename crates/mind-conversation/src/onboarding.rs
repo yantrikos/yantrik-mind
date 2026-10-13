@@ -154,7 +154,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                         .inference
                         .chat_grounded(
                             vec![
-                                ChatMessage::system(&self.persona),
+                                ChatMessage::system(&self.persona()),
                                 ChatMessage::user(&prompt),
                             ],
                             cfg,
@@ -501,7 +501,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     // Refusal degrades to the deterministic path below rather than propagating.
                     .chat_grounded(
                         vec![
-                            ChatMessage::system(&self.persona),
+                            ChatMessage::system(&self.persona()),
                             ChatMessage::user(&prompt),
                         ],
                         cfg,
@@ -596,7 +596,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
                     // Refusal degrades to the deterministic path below rather than propagating.
                     .chat_grounded(
                         vec![
-                            ChatMessage::system(&self.persona),
+                            ChatMessage::system(&self.persona()),
                             ChatMessage::user(&prompt),
                         ],
                         cfg,
@@ -797,7 +797,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             "The user's main goal for me is: \"{purpose}\". Ask ONE specific, concretely useful follow-up question that would help me help them with that. Reply with ONLY the question."
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system(
                 "Ask exactly one concise, specific question. No preamble, no markdown.",
             ),
@@ -1053,7 +1053,7 @@ Which of these questions does that message ALREADY answer (fully or partly)? Out
             "User request: \"{user_text}\"\n\nCapabilities I can set up:\n{catalog}\n\nIf the request is asking me to set ONE of these up, reply ONLY JSON: {{\"capability\":\"<exact name>\",\"target\":\"<short phrase to watch for>\",\"url\":\"<url if any else empty>\"}}. If none clearly fit, reply {{\"capability\":null}}."
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system("You route a request to exactly one capability or none. Reply ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];

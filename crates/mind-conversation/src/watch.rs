@@ -597,7 +597,7 @@ impl super::ConversationEngine {
              Empty arrays if none."
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system("You separate what was observed from what was merely asserted. Output ONLY the JSON object."),
             ChatMessage::user(&prompt),
         ];
@@ -1891,7 +1891,7 @@ NEXT SAFE ACTION
              \"level\":\"the price level or trigger mentioned, or empty\",\"why\":\"one short line, their reasoning\"}}]}}"
         );
         let messages = vec![
-            ChatMessage::system(&self.persona),
+            ChatMessage::system(&self.persona()),
             ChatMessage::system("You extract typed trading signals. Output ONLY the JSON object. An empty array is a valid answer."),
             ChatMessage::user(&prompt),
         ];

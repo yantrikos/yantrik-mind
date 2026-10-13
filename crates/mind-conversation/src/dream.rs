@@ -390,7 +390,7 @@ impl super::ConversationEngine {
         let resp = match self
             .inference
             .chat_grounded(
-                vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                 cfg,
             )
             .await
@@ -538,7 +538,7 @@ impl super::ConversationEngine {
         let resp = match self
             .inference
             .chat_grounded(
-                vec![ChatMessage::system(&self.persona), ChatMessage::user(&p)],
+                vec![ChatMessage::system(&self.persona()), ChatMessage::user(&p)],
                 cfg,
             )
             .await

@@ -895,7 +895,7 @@ impl super::ConversationEngine {
             // Refusal degrades to the deterministic path below rather than propagating.
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,
@@ -954,7 +954,7 @@ impl super::ConversationEngine {
             // Refusal degrades to the deterministic path below rather than propagating.
             .chat_grounded(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&parse_prompt),
                 ],
                 cfg,
@@ -1067,7 +1067,7 @@ impl super::ConversationEngine {
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
         let inference = self.inference.clone();
-        let persona = self.persona.clone();
+        let persona = self.persona().clone();
         let theme2 = theme.clone();
         let desc2 = people_desc.clone();
         let fmt2 = format_kind.clone();
@@ -1285,7 +1285,7 @@ impl super::ConversationEngine {
         let nq = self.notify_queue.clone();
         let studies = self.studies.clone();
         let inference = self.inference.clone();
-        let persona = self.persona.clone();
+        let persona = self.persona().clone();
         tokio::spawn(async move {
             if let Some(t) = gift_task(
                 src_name,

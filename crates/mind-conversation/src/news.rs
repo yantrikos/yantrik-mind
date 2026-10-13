@@ -165,7 +165,7 @@ impl super::ConversationEngine {
             .inference
             .chat_household_attributed(
                 vec![
-                    ChatMessage::system(&self.persona),
+                    ChatMessage::system(&self.persona()),
                     ChatMessage::user(&prompt),
                 ],
                 cfg,

@@ -17306,3 +17306,5 @@ That's a Mind defect independent of the model. A model that sends `notes.new_not
 **The content-block rule, revised before K3:** the first full run failed `tool_arguments_are_unwrapped_to_what_the_tool_can_use`. Live content blocks from qwen3.8 also carry `name` (`{"content":"Bergen, Norway","name":"place","type":"text"}`), so a key whitelist of `type|text|content` left them wrapped. The rule is now: the object has `text` or `content`, and it either says `"type": "text"` or holds nothing but `text`/`content`. `{"title","text"}` is still kept; the live block and `{"text": "…"}` still unwrap. The mutant that removes the shape test is killed by the normalisation test and the loop test.
 
 **K3 (Windows):** full suite 2490 passed, 0 failed.
+
+**E.ARGS1 K3, Linux (staging, 76d6c7b):** mind-conversation 1214 passed. K3 held. Not in any bundle yet.

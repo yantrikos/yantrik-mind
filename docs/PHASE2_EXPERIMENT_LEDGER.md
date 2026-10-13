@@ -16894,3 +16894,25 @@ A dropped `complete` itself needs nothing more.
 **Ships:** the minimum Mind for yantrik-os #783 is the commit that carries this.
 
 **E.SOCK2 K3, Linux (staging, 715f276 against companion 77b108f):** mind-core 37 passed (provider_set, capability, stream, voice) and mind-net 14 passed. Bundle `yantrik-mind-715f276-linux-amd64.tar.zst` (sha256 586f024a3003411a1dea7be70f5d8bc87484ba45d5f874b093cbcc4fd8ed1609): BUILD `agent_token=1` and `cmd_answer=1`, with the marker in the binary. Not installed anywhere yet.
+
+## E.SOCK2b — PREREG: a gateway that cannot vouch is refused; the Mind tells the desktop it has no model yet
+
+**Why:** yantrik-os-dc's review of E.SOCK2 (12 Oct), and the generic model-setup design Pranab asked for.
+1. **The whoami 404 fallback has no legitimate use.** The socket exists only on an OS carrying #783, which ships `/v1/whoami` (a4fa5a2b). So on a real machine a 404 means something other than the gateway is answering on 7460, and the fallback would take a substituted token there.
+2. **The desktop has no way to know whether the Mind needs a model.** On a fresh install the OS's first run should point a model-less Mind at the gateway's picked model, as it does every other mind, and leave a Mind that has its own provider alone. The only signal today is the attach detail's sentence ("not set up yet — say hello"), which the OS should not parse.
+
+**What is built (mind-core):**
+1. `set_provider`: a 404 from whoami is refused, with "the desktop is older than this Mind: its gateway cannot say whose token this is".
+2. `attach_payload(detail, needs_model)`: a `needs_model` boolean is sent in `harness.attach`. It is true exactly when the Mind booted with no model (the scripted placeholder, `announce_needs_setup`).
+   - After a first run (chat or gateway) the Mind restarts and re-attaches with `false`.
+   - An OS that does not know the field ignores it (Attach does not deny unknown fields).
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a whoami 404 refuses the offer and leaves the file unchanged; `mind` is still taken;
+  - `attach_payload(_, true)["needs_model"] == true` and `(_, false)` gives `false`;
+  - the payload the attach sends follows `NEEDS_SETUP`.
+- K2, a mutant survives:
+  - the 404 accepted again;
+  - `needs_model` hard-coded to false.
+- K3: the suite fails.

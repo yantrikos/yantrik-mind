@@ -17738,3 +17738,33 @@ The agent loop's broker check skips such a call. Every other `mcp.*` call, and e
 **K3 (Windows):** full suite 2509 passed, 0 failed.
 
 **E.LOCAL1 K3, Linux (staging, 338f172):** mind-conversation 1229 passed. K3 held.
+
+## E.EGRESS7 — PREREG: a place the person named keeps its name, not a search phrase
+
+**Why:** the 1ca45b0 rerun on VM 541. Asked about Dallas's weather this weekend, the model called `weather {"place":"Dallas, Texas"}`, and egress planning sent `{"place":"Dallas weather forecast this weekend"}`: "couldn't find a place called …". `weather.place` is a Token field. A token passes unchanged only when it is a span of the person's words (or their task, or a file they handed over). "Dallas, Texas" is not, because the person said "Dallas". So it went to the query planner, which writes a search phrase. That's the right shape for a query and the wrong one for a place.
+
+**What is built (egress_planning):** `leading_span(token, sources, named)`. For a token that is not itself a span, take the longest leading run of its comma-separated parts that IS one ("Dallas, Texas" → "Dallas"; "Austin, TX, USA" → "Austin, TX" when the person said "Austin, TX"). The Token arm uses it before falling back to the query planner. It adds no new source: the value sent is still words the person wrote.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `leading_span("Dallas, Texas", ["what's the weather in Dallas this weekend"])` = Some("Dallas");
+  - with "Austin, TX" said, "Austin, TX, USA" → Some("Austin, TX");
+  - "Paris, France" with no "Paris" said → None;
+  - a token that is itself a span is handled before this (unchanged).
+  - **egress_clean_args for `weather {"place":"Dallas, Texas"}`** with that message gives `{"place":"Dallas"}` and calls no planner model.
+- K2, a mutant survives:
+  - the longest-prefix loop taking the first part only (the Austin case);
+  - the arm not using it (a planner call, the phrase sent).
+- K3: both suites pass.
+
+## E.EGRESS7 — RESULT: a place keeps the part of its name the person said; 2 mutants killed
+
+**K1 held:**
+- `leading_span`: Dallas, Texas → Dallas; "Austin, TX, USA" with "Austin, TX" said → "Austin, TX"; Paris, France unsaid → None.
+- `egress_clean_args_inner("weather", …)` sends `{"place":"Dallas"}`, and the planner model, scripted to write a phrase, is not used.
+
+**K2 held: 2 mutants killed:**
+- first part only;
+- the arm not using it.
+
+**K3 (Windows):** full suite 2511 passed, 0 failed.

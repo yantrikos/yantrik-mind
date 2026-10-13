@@ -617,6 +617,18 @@ pub(crate) fn token_is_a_span(token: &str, sources: &[&str], named: &[String]) -
     sources.iter().any(|s| format!(" {} ", norm(s)).contains(&needle))
 }
 
+/// E.EGRESS7 (VM 541): the longest leading run of a token's comma-separated parts that IS a span of
+/// the person's words -- "Dallas, Texas" -> "Dallas" when they said "Dallas". The query planner would
+/// write a search phrase into a place field ("Dallas weather forecast this weekend"). Nothing new
+/// leaves: what is sent is still their own words.
+pub(crate) fn leading_span(token: &str, sources: &[&str], named: &[String]) -> Option<String> {
+    let parts: Vec<&str> = token.split(',').collect();
+    (1..parts.len())
+        .rev()
+        .map(|n| parts[..n].join(",").trim().to_string())
+        .find(|candidate| token_is_a_span(candidate, sources, named))
+}
+
 /// E.EGRESS5 (Pranab, 5 Oct): the facts the person marked OK to send to a kind of service, from
 /// `YM_SHAREABLE_FACTS` -- set only by the person, through settings (the Mind never writes its own
 /// config) -- as `kind: value, value; kind: value`, e.g. `weather: Bentonville`. The kind is the
@@ -1066,6 +1078,10 @@ impl ConversationEngine {
                 // service passes as it is; any other token goes the way of a query.
                 mind_governance::egress::FieldKind::Token if shareable_fact(o.names[0], value) => value.to_string(),
                 mind_governance::egress::FieldKind::Token if token_is_a_span(value, &token_sources, &named) => value.to_string(),
+                // E.EGRESS7: a place the person named, kept as their words rather than made a query.
+                mind_governance::egress::FieldKind::Token if leading_span(value, &token_sources, &named).is_some() => {
+                    leading_span(value, &token_sources, &named).unwrap_or_default()
+                }
                 mind_governance::egress::FieldKind::Query | mind_governance::egress::FieldKind::Token => {
                     let r = Box::pin(self.egress_clean_args_with("search", user_text, serde_json::json!({ "query": value }), external_provenance, web_obs, fetched, key)).await?;
                     r.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string()
@@ -1602,5 +1618,19 @@ mod tests {
             distinctive_pii("meet at 7 on July 4 in Pune").is_empty(),
             "dates/short numbers are not distinctive PII"
         );
+    }
+}
+
+/// E.EGRESS7: a place keeps the part of its name the person said.
+#[cfg(test)]
+mod egress7_tests {
+    use super::leading_span;
+
+    #[test]
+    fn the_longest_leading_part_the_person_said() {
+        let said = ["what's the weather in Dallas this weekend"];
+        assert_eq!(leading_span("Dallas, Texas", &said, &[]).as_deref(), Some("Dallas"));
+        assert_eq!(leading_span("Austin, TX, USA", &["is it raining in Austin, TX today"], &[]).as_deref(), Some("Austin, TX"));
+        assert_eq!(leading_span("Paris, France", &said, &[]), None);
     }
 }

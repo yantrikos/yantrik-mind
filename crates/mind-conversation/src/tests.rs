@@ -21216,3 +21216,19 @@ async fn a_local_note_is_not_egress_and_the_same_text_outward_still_is() {
     let search = conv.run_agent_tool_as("web_search", &serde_json::json!({"query": text}), &id).await;
     assert!(refused(&search), "the same text in a web search was not refused: {search}");
 }
+
+/// E.EGRESS7 (VM 541): `weather {"place":"Dallas, Texas"}` after "…in Dallas this weekend" goes out as
+/// "Dallas", the person's own word -- not a search phrase the planner wrote into a place field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_place_keeps_the_name_the_person_said() {
+    use mind_governance::egress::EgressBroker;
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let planner = Arc::new(ScriptedLLM::new("{\"query\": \"PLANNER WROTE THIS\"}"));
+    let pool = InferencePool::new(planner as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+    let out = conv
+        .egress_clean_args_inner("weather", "What's the weather in Dallas this weekend?", serde_json::json!({"place": "Dallas, Texas"}), "", &[], &[], "", None)
+        .await
+        .expect("cleaned");
+    assert_eq!(out["place"], "Dallas", "{out}");
+}

@@ -96,8 +96,45 @@ pub fn scope_allows(
         PrivacyScope::Public => true,
         PrivacyScope::Household => in_list(household_csv),
         // The private lane never falls back to the household list — owned hardware or refusal.
-        PrivacyScope::Private => in_list(private_csv),
+        // E.PRIV2: and it clears a provider by name, every link of a chain, never by substring.
+        PrivacyScope::Private => private_cleared(provider, private_csv),
     }
+}
+
+/// E.PRIV2: the links a route label names -- `chain[a -> b]`, `a -> b`, `brain-pool/x[a,b]`, or one.
+fn route_links(label: &str) -> Vec<String> {
+    let l = label.trim();
+    let inner = l
+        .strip_prefix("chain[")
+        .and_then(|r| r.strip_suffix(']'))
+        .or_else(|| l.split_once('[').filter(|(head, _)| head.starts_with("brain-pool/")).and_then(|(_, r)| r.strip_suffix(']')))
+        .unwrap_or(l);
+    inner
+        .split(|c| c == ',')
+        .flat_map(|part| part.split("->"))
+        .map(|x| x.trim().to_lowercase())
+        .filter(|x| !x.is_empty())
+        .collect()
+}
+
+/// E.PRIV2: may private context go over `label`? Every link must be cleared by an entry naming its
+/// provider (an entry without a model part) or the link exactly (an entry with one). Substrings
+/// cleared `minimax` for `nim`, an `ollama-cloud:qwen…` model for `qwen`, and a whole chain for any
+/// one of its links. `ollama` is the catalogue's other name for Ollama Cloud, never the local lane.
+fn private_cleared(label: &str, private_csv: &str) -> bool {
+    let entries: Vec<String> = private_csv.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
+    let links = route_links(label);
+    !links.is_empty()
+        && links.iter().all(|link| {
+            let provider = link.split(':').next().unwrap_or("").trim();
+            entries.iter().any(|e| {
+                if e.contains(':') {
+                    e == link
+                } else {
+                    e == provider || (e == "ollama" && provider == "ollama-cloud")
+                }
+            })
+        })
 }
 
 /// Per-scope authorized-dispatch/refused counters — the audit trail `ym privacy` renders.
@@ -6075,5 +6112,53 @@ mod quota_tests {
         eprintln!("[live] {:?} after {:?}; sentence: {said:?}", format!("{e:#}").chars().take(160).collect::<String>(), t0.elapsed());
         assert!(t0.elapsed() < std::time::Duration::from_secs(10), "waited {:?}", t0.elapsed());
         assert!(said.is_some_and(|s| s.contains("has reached")), "no sentence for the person");
+    }
+}
+
+/// E.PRIV2: private context is cleared provider by provider, every link of a route, never by
+/// substring.
+#[cfg(test)]
+mod private_gate_tests {
+    use super::*;
+
+    fn private(label: &str, list: &str) -> bool {
+        scope_allows(PrivacyScope::Private, label, DEFAULT_HOUSEHOLD, list)
+    }
+
+    #[test]
+    fn every_link_of_a_chain_must_be_cleared() {
+        for chain in ["chain[ollama-cloud:x -> nanogpt:y]", "ollama-cloud:x -> nanogpt:y"] {
+            assert!(!private(chain, "ollama-cloud"), "{chain}: one link cleared");
+            assert!(private(chain, "ollama-cloud,nanogpt"), "{chain}: both cleared");
+        }
+    }
+
+    #[test]
+    fn a_name_inside_another_name_clears_nothing() {
+        assert!(!private("minimax:MiniMax-M2.7", "nim"), "nim is inside minimax");
+        assert!(private("minimax:MiniMax-M2.7", "minimax"));
+        assert!(!private("ollama-cloud:qwen3.8-flash", "qwen"), "a model name is not a provider");
+        assert!(private("nim:deepseek-ai/deepseek-v4-flash", "nim"));
+    }
+
+    #[test]
+    fn an_entry_with_a_model_clears_only_that_model() {
+        assert!(private("ollama-cloud:deepseek-v4.1-flash", "ollama-cloud:deepseek-v4.1-flash"));
+        assert!(!private("ollama-cloud:other-model", "ollama-cloud:deepseek-v4.1-flash"));
+    }
+
+    #[test]
+    fn the_local_lane_the_ollama_alias_and_the_gateway() {
+        assert!(private("ollama-local:qwen3.8:27b", "ollama-local"));
+        assert!(private("ollama-cloud:x", "ollama"), "the catalogue's other name for Ollama Cloud");
+        assert!(!private("ollama-local:x", "ollama"), "never the local lane");
+        assert!(private("yantrik-gateway:picked", "yantrik-gateway"));
+        assert!(!private("yantrik-gateway:picked", ""));
+    }
+
+    #[test]
+    fn the_household_lane_is_unchanged() {
+        assert!(scope_allows(PrivacyScope::Household, "chain[a -> b]", DEFAULT_HOUSEHOLD, ""));
+        assert!(scope_allows(PrivacyScope::Household, "minimax:MiniMax-M2.7", DEFAULT_HOUSEHOLD, ""));
     }
 }

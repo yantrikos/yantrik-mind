@@ -17051,3 +17051,28 @@ All three hand private context to a provider the person did not agree to. No liv
   - substring matching restored;
   - the model-part rule dropped (an entry with a model clears any model of that provider).
 - K3: the suite fails. Existing tests that encoded substring clearing are changed on purpose and listed in the result.
+
+## E.PRIV2 — RESULT: the private gate clears by provider name, every link of a chain; 3 mutants killed
+
+**Built (mind-inference):**
+- `scope_allows(Private, …)` calls `private_cleared`.
+- `route_links` splits `chain[a -> b]`, `a -> b` and `brain-pool/x[a,b]`.
+- Every link must be cleared: by an entry equal to its provider (an entry without a model part), or by an entry equal to the whole link (an entry with one).
+- `ollama` clears `ollama-cloud` only.
+- Household and Public are unchanged.
+
+**No existing test changed.** The full suite passed with the new rule before any test was added. No test anywhere pinned substring clearing, which is how the `nim`→`minimax` and `qwen`→model-name cases went unseen.
+
+**K1 held** (5 tests):
+- a chain with one link cleared is refused, and with both allowed (both label forms);
+- `nim` does not clear minimax, and `qwen` does not clear an ollama-cloud qwen model;
+- an entry with a model clears only that model;
+- the local lane, the `ollama` alias and the gateway;
+- Household is unchanged.
+
+**K2 held: 3 mutants killed:**
+- any-link;
+- substring restored;
+- the model part ignored.
+
+**K3 held:** full suite (Windows) 2476 passed, 0 failed (2471 before the 5 new tests).

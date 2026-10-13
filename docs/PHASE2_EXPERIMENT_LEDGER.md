@@ -17414,3 +17414,5 @@ All three were written. The barren-step guard counted the second as "returned no
 - list never filled, caught by the rephrased loop test.
 
 **K3 (Windows):** full suite 2496 passed, 0 failed.
+
+**E.MEM1 K3, Linux (staging, 61acba0):** mind-conversation 1218 passed. K3 held. Not in any bundle yet.

@@ -18549,3 +18549,7 @@ ARCH9's direction is one ledger of what this turn did, checked before any change
 **E.LEDGER1 K3, Linux (staging, a0237b4):** mind-conversation 1250 passed. K3 held. Not in a bundle yet.
 
 **E.CMP1 setup text, corrected (yantrik-os-dc, 14 Oct):** the machine had windows calendar, chromium, mind-view and terminal, with the Files SCREEN (open_app files sets the screen, not a window). It was not "four windows (Calendar, Chromium, Terminal, Files)". It was the same for every leg of E.CMP1 and E.THIN1-M, so no grade moves. The reset fingerprint is now computed from the prereg's own definition (notes, calendar month, windows by app, screen, mode/ceiling/tool_permission, private/incognito/test-approvals), and two resets in a row hash the same (2072c61925ae40d7).
+
+**Bundle `yantrik-mind-44ed2c0-linux-amd64.tar.zst`** (sha256 e39b0da14115c564431150c655981e3839bb12c03df84a417dc633c95a547369), built on staging. It is ce0df0c plus E.LEDGER1; the commits after a0237b4 touch only the ledger. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary.
+
+Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yantrik-os-dc, with an unscored ask-3 rerun requested on 541. The Mac was not installed: it answers ping, but SSH on port 22 times out. Rollback is ce0df0c.

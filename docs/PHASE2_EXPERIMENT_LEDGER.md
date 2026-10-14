@@ -18971,3 +18971,5 @@ So two different asks share at most persona + core/pinned schemas. How many byte
    - A2: "Omar's retirement dinner is on 5 December".
    Recall asks for each fact's date.
 3. **Ask 4's kill check:** dc reports, per B leg, the journal's raw args of the `weather` call (or its absence).
+
+**E.PREFIX1b K3, Linux (staging, 6f8a153):** mind-conversation 1255, mind-core 181, both passed. Bundle `yantrik-mind-6f8a153` sha256 4822686b73048436ebb6b51444ce68aef7bb3b23148b8a387512ef326d3aee74. Default off; with the switch unset it behaves as ae54fdc.

@@ -18572,3 +18572,11 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 **Thin is on for 520 (yantrik-os-dc, 14 Oct):** the install's own Lens smoke turn logged `[agent] route=thin` at 04:29:55 (520 clock), and the Mind answered. YANTRIK_MIND_RUN reaches the Mind on 520 as it does on 541. Note that 520's clock runs about 35 s behind the operator host; checks that compare times across hosts should use relative windows.
 
 **44ed2c0 on the Mac (14 Oct, after Pranab rebooted it at 10:52 CT):** `installed 44ed2c0 e39b0da14115c564 attached`, the unit is active, and there are 0 panic/stack/abort lines in the journal. The overnight outage was the Broadcom wl driver's scanning, wedged after a mesh AP dropped it at 03:28, not SSH (yantrik-os-dc). No turn has been made yet, so `route=thin` on the Mac is still to be read from the next turn. Rollback is ce0df0c. 44ed2c0 is now on all three: 541, 520 and the Mac.
+
+**route=thin on the Mac (yantrik-os-dc, 14 Oct 12:24):** dc made one turn, with Pranab's free hand and his on-screen OK for the harness switch, then switched the Mac back to Hermes. The journal shows `route=thin`, then `turn done: 1 steps in 59s ... no tools`. 44ed2c0 runs thin on all three machines.
+
+**The 59 s is the model call, not the harness:**
+- The journal has nothing between `route=thin` (12:24:08) and the reply (12:25:07): one step, no tools.
+- The Mac's brain is `nanogpt:qwen3.8-flash-next-unsloth-ud-iq4_xs` through the Strata gate, with 1 permit.
+- 520 answered the same one-word ask in 3 s.
+- Unmeasured: whether Strata was queued, loading or busy at 12:24. The Mac's OS (v0.1.0-1310) predates the #675 gateway, so it has no gateway-calls record.

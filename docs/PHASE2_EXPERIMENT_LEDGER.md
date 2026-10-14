@@ -18893,3 +18893,11 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 **K2 held, 3 mutants killed:** persona/tools swapped; system read as prompt; the previous render not kept.
 
 **K3:** Windows workspace 2543 passed, 0 failed. Linux follows.
+
+**E.PREFIX1a K3, Linux (staging, ae54fdc):** mind-conversation 1254 passed.
+
+**Bundle `yantrik-mind-ae54fdc`** (sha256 722cc459df4b96ea106e721df160a4dd837c32d25e65719b6b309b7c9a932d75): 90a87f7 plus the probe. Pranab OKed it for 541, 520 and the Mac (14 Oct).
+- **The Mac:** `installed ae54fdc 722cc459df4b96ea attached`, active, 0 crash lines. Rollback 90a87f7.
+- **541:** dc runs the baseline reading before #805.
+- **520:** dc, in place of the queued 90a87f7.
+- **Staging:** with Pranab's OK, 49 older Mind bundles were deleted. Kept: ae54fdc, 90a87f7, e2fbcb6, 5e6eae2, 44ed2c0, ce0df0c. Free space went from 1.8 GB to 4.5 GB.

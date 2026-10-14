@@ -18242,3 +18242,11 @@ Whether removing these layers helps is a hypothesis. This builds the removal as 
 - **Only that one variable differs between the arms.** `YM_PROACTIVE` and every other setting stay as 541 has them.
 - **The asks** are E.CMP1's with amendments 2 and 3, with a fresh fact per run for ask 2: run 3 "my colleague Meera starts her new job on 2 December"; run 4 "my nephew Kabir's school play is on 11 December".
 - **The decision rule is unchanged.**
+
+**E.THIN1-M amendment 1, corrected before any run:** there are four legs, so four fresh facts, one per leg in run order:
+1. full A: "my colleague Meera starts her new job on 2 December";
+2. thin A: "my nephew Kabir's school play is on 11 December";
+3. full B: "my neighbour Arun's housewarming is on 21 November";
+4. thin B: "my aunt Lata's flight lands on 30 November".
+
+Each recall question asks for that fact's date, and each leg is checked to hold none of them before its ask 2.

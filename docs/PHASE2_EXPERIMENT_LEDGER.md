@@ -18254,3 +18254,9 @@ Each recall question asks for that fact's date, and each leg is checked to hold 
 **Bundle `yantrik-mind-ce70450-linux-amd64.tar.zst`** (sha256 56ed1a79bec33c1d145639b03e6aa062f0899548bb8c7c493a207a1ab038ed42), built on staging against companion 965532e. It carries b803955 plus E.OPT1c, E.ANS1, E.MEM2 and E.THIN1 (switch off by default). BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. This is the bundle for E.THIN1-M. Not installed anywhere yet.
 
 **ce70450 on the Mac**, 14 Oct, on Pranab's direct OK: `installed ce70450 56ed1a79bec33c1d attached`, active and attached, with the thin switch off. The rollback is b803955. 541 (after E.CMP1 run 2) and 520 are handed to yantrik-os-dc.
+
+**E.CMP1 run 2, notes from yantrik-os-dc (both OS-side), recorded before the report:**
+- **Hermes ask 4.** Hermes's clarify tool asked "which day is this weekend for you?", and the desktop cannot deliver an answer: the asking turn never closes, the next message queues behind it, and new-chat is refused, so it deadlocks until clarify's 3600 s timeout. Graded fail (no answer within 600 s). A question back is not covered by the rules; that's recorded as an ambiguity, not reinterpreted.
+- **Hermes ask 5.** Never delivered (queued behind ask 4), so a fail caused by the OS. An unscored supplementary ask 5 after /stop would have passed.
+- **A confound across legs.** The desktop hand-over (#245) still fires after "+ new conversation", so each leg's ask 1 after a mind switch carried the previous mind's last four exchanges, AX-4471 included. yantrik-os-dc checked that no Hermes run-2 grade benefited. The same mechanism can reach ask 6, whose answer is AX-4471. Any leg whose ask-6 turn carried a hand-over containing it is to be marked in the report.
+- **For E.THIN1-M:** all four legs are the Mind, with no mind switch between them, so no hand-over is made. yantrik-os-dc makes sure the Mind spoke last before full A starts.

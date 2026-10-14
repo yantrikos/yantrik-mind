@@ -18553,3 +18553,9 @@ ARCH9's direction is one ledger of what this turn did, checked before any change
 **Bundle `yantrik-mind-44ed2c0-linux-amd64.tar.zst`** (sha256 e39b0da14115c564431150c655981e3839bb12c03df84a417dc633c95a547369), built on staging. It is ce0df0c plus E.LEDGER1; the commits after a0237b4 touch only the ledger. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary.
 
 Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yantrik-os-dc, with an unscored ask-3 rerun requested on 541. The Mac was not installed: it answers ping, but SSH on port 22 times out. Rollback is ce0df0c.
+
+**44ed2c0 on 541, ask 3 twice unscored (yantrik-os-dc, 14 Oct):** installed (`installed 44ed2c0 e39b0da14115c564 attached`), with 0 stack/abort lines. Both tries made 1 note with the line in it once (61 s, 47 s). Both answers came through E.ANS1b.
+- **No ledger line fired:** the model appended once and stopped both times. E.LEDGER1 is not yet shown live; it rests on the loop tests built from thin A and thin B verbatim.
+- **Repeat rate:** ask-3 repeats were 2/2 on ce70450 thin and 0/3 since. No cause is claimed at n=5.
+- **The live shape differed:** try 2 appended "- Hotel confirmation AX-4471" with no leading newline. `same_text` treats both shapes the same (whitespace collapsed, list marker dropped).
+- **520:** the queued ce0df0c install never started (the batch held the lock). 44ed2c0 is queued for 520 instead.

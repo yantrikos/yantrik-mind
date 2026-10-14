@@ -17901,3 +17901,43 @@ Its purpose is right and stays: claims the work log does not support must not re
 **On the way:** the privacy audit (no unscoped `.chat(` outside its allowlist) flagged the test's own stand-in model. It was rewritten to build its reply directly; the audit is unchanged.
 
 **K3 (Windows):** full suite 2519 passed, 0 failed. **541's latency and voice check is still to come.**
+
+## E.CMP1 — PREREG: the desktop comparison, Mind vs Hermes on one model, six asks, graded by rule
+
+**Why:** Pranab asked how far behind the other harnesses the Mind is, and why (13 Oct). The only same-model evidence is the build benchmark (cb2n), where the Mind is level: R9 26/27 vs 27/27, R8 overlapping. For everyday desktop asks there is none. Tonight's 541 runs put the Mind on a local thinking 27B and the DeepSeek harness on DeepSeek's cloud model, so they compare models as much as harnesses. This measures the harnesses on the same model, the same machine and the same asks, with the grading fixed before any run.
+
+**Setup:**
+- **Machine:** VM 541, one OS build for all legs (whatever yantrik-os-dc has there at the time, recorded), and one Mind bundle (recorded; it should carry E.CITE1).
+- **Model:** the same model for both: the LAN Qwen behind 541's account (custom provider, qwen3.5:27b), through the gateway, with #791's thinking switch present. Hermes is pointed at the same account. DeepSeek runs on its own model as a reference leg only, never scored against the other two.
+- **Each ask:**
+  - starts a new conversation with "+ new conversation" (the Mind's turn for it is not timed);
+  - is typed in the Lens;
+  - gets 600 s;
+  - is recorded as the wall time from send to final text (the Lens), the gateway calls (count, ms, tokens out), the reply verbatim, and any card raised.
+  - Cards are never answered.
+- **Order:** the six asks in order, one harness at a time, Mind first (no learning advantage either way: each conversation is new).
+- **Before each leg:** the machine is reset to a fixed state. That's one note, "Weekend packing list" (8 lines), which exists before ask 3; calendar events Thu 15 Oct 15:00 "Dentist" and nothing on Wed 14; four windows open (Calendar, Chromium, Terminal, Files). The state is recorded as a hash of `yos describe shell --json` minus the clock and resource fields.
+
+**The six asks, verbatim:**
+1. "What's on my calendar tomorrow?"
+2. "Remember that my sister Priya's birthday is on 4 November." Then, in the same conversation, "When is Priya's birthday?"
+3. "Add 'Hotel confirmation AX-4471' to my Weekend packing list note."
+4. "What will the weather be in Dallas this weekend?"
+5. "How full is my disk, and how much memory is in use?"
+6. With trip-notes.txt (the 118-byte file from E.OPT1's 541 test) attached through the picker: "What is the hotel confirmation number in this file?"
+
+**Grading, per ask: pass, partial or fail.** Each is judged from the verbatim reply and the recorded state, not from impressions.
+1. Pass: says Wed 14 Oct has nothing; mentioning the dentist is allowed. Fail: any invented event, or a wrong date.
+2. Pass: the second turn answers 4 November and exactly one belief or memory about it exists afterwards (counted in the harness's own memory). Partial: right date but duplicates stored. Fail: wrong or unknown.
+3. Pass: the existing note now contains the line and no second note with that title exists. Partial: the line is in a new note. Fail: nothing written, or a refusal shown to the person.
+4. Pass: a forecast for Sat 17 and Sun 18 Oct (any reasonable source). Partial: today's weather offered as such, or one day only. Fail: wrong place, invented numbers, or no answer.
+5. Pass: disk used/total and memory used/total within 1 GB of `yos describe shell` at the same minute, with no command run and no card raised. Partial: right numbers but a command or card. Fail: wrong, or none.
+6. Pass: AX-4471. Fail: anything else.
+
+Also, for every ask: a reply that names a tool, "the log", "source", "work log" or a raw refusal is marked "spoke internals". That's a separate count, not a fail.
+
+**Reported:** per harness, the pass/partial/fail count, the internals count, median and maximum wall time, and total gateway calls. No winner is declared from one run. The run is repeated once, and both are reported side by side (cb2n's standing rule: run-to-run variance can exceed the gap).
+
+**Who:** yantrik-os-dc runs and grades; the Mind's author does neither. Disputes about a grade are settled by the rules above as written. A rule found ambiguous is recorded as such and not reinterpreted for one harness.
+
+**Not decided by this:** whether the Mind becomes the desktop default. That's Pranab's call, with this as one input.

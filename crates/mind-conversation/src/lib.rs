@@ -4259,12 +4259,22 @@ pub(crate) fn answer_in_a_skill_call(tool: &str, v: &serde_json::Value) -> Optio
     if !matches!(name.as_str(), "answer" | "reply" | "respond" | "final_answer") {
         return None;
     }
-    ["target", "text", "input"]
-        .iter()
-        .find_map(|k| args.get(*k).and_then(|x| x.as_str()))
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
+    // E.ANS1b (E.THIN1-M full B): the longest string anywhere in the arguments, not the first
+    // field -- `{"target":"text","args":{"text":"…"}}` delivered the reply "text". A bare word is a
+    // field's name, never an answer: then this is not taken as one.
+    fn strings<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            serde_json::Value::Object(o) => o.iter().filter(|(k, _)| k.as_str() != "name").for_each(|(_, x)| strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    strings(args, &mut found);
+    let best = found.into_iter().map(str::trim).max_by_key(|s| s.chars().count())?;
+    let words = best.split_whitespace().count();
+    (words > 1 || best.chars().count() >= 12).then(|| best.to_string())
 }
 
 fn args_text(v: &serde_json::Value) -> String {
@@ -14060,7 +14070,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.ANS1 (E.CMP1 run 1, ask 6): the answer filed as a skill named after the answer action.
             let (tool, v) = match answer_in_a_skill_call(&tool, &v) {
                 Some(text) => {
-                    eprintln!("[agent] step {step}: run_skill named the answer action \u{2014} taken as the answer");
+                    let raw: String = v.to_string().chars().take(300).collect();
+                    eprintln!("[agent] step {step}: run_skill named the answer action \u{2014} taken as the answer (raw {raw})");
                     ("answer".to_string(), serde_json::json!({ "tool": "answer", "args": { "text": text } }))
                 }
                 None => (tool, v),

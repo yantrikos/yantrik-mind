@@ -18331,3 +18331,43 @@ Per ARCH9 the reliability goes into the tool, not into another layer: no new arg
 **yantrik-os #800 (fix/taint-asks-before-commands) cleared at eba79cfe, conditional on CI test passing on that head.** It closes the E.CMP1 run-2 gap: a tainted session's commands are asked every time, whatever the mode, and full bypass fails closed. Design note sent: the auto/bypass guarantee rides on the card text "cannot be undone"; a typed `must_ask` field on the approval request would be sturdier (a follow-up, with shell.run_recipe free-text inputs).
 
 **E.THIN1-M, interim (yantrik-os-dc):** full A and thin A are done, and both passed ask 6 in 16–17 s. That is the first live outing of E.OPT1c and E.ANS1; ask 6 failed in both E.CMP1 runs on b803955. Thin A journalled 6 route=thin lines.
+
+## E.ANS1b — PREREG: an answer filed as a skill is the answer's text, never a field's name
+
+**Why:** E.THIN1-M full B on ce70450 (yantrik-os-dc, 14 Oct). Two asks were answered with one bare word: ask 1's whole reply was "text", and ask 5's was "answer". Both journals show "run_skill named the answer action — taken as the answer". Each turn already had the right facts (calendar.show_date → Dentist; system-monitor → 72%, 1.7 of 5.8 GB). E.ANS1 takes the first non-empty of `target`, `text` and `input`. A model that wrote, for instance, `{"name":"answer","target":"text","args":{"text":"…"}}` gives "text". The raw arguments are not in the journal, because the conversion runs before the guard that logs them, so the exact shape is unknown. Under E.CMP1's rules both asks are fails. E.ANS1 is in both arms of E.THIN1-M, so the measurement stands as graded.
+
+**What is built:**
+- `answer_in_a_skill_call` takes the LONGEST string value anywhere in the call's arguments, nested objects included, `name` excluded.
+- It is accepted only when it is more than one word, or at least 12 characters long. A bare field-like word ("text", "answer", "reply", "response", "message") is never an answer; then the call is not taken as an answer and goes on as before.
+- The journal line for the conversion now carries the raw arguments (cut to 300 chars), so the next case is diagnosable.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `{"name":"answer","target":"text","args":{"text":"Tomorrow you have the Dentist at 15:00."}}` gives that sentence;
+  - `{"name":"answer","input":"answer","text":"Disk 72% full; memory 1.7 of 5.8 GB."}` gives the disk sentence;
+  - `{"name":"answer","target":"AX-4471 is the confirmation number."}` still gives it;
+  - `{"name":"answer","target":"text"}` gives None;
+  - `{"name":"answer"}` gives None;
+  - **the loop:** a step with the first shape ends the turn with the Dentist sentence.
+- K2, a mutant survives:
+  - first non-empty again, instead of the longest;
+  - the bare-word floor removed.
+- K3: both suites pass.
+
+**Also noted from full B, not built here:**
+- the model used the stock `quote` tool for a calendar question, which egress rewrote into a finance lookup of "calendar tomorrow schedule events";
+- a recall for a person fact surfaced a self-model "(hypothesis) …" note.
+
+## E.ANS1b — RESULT (code): the longest text in the arguments, never a bare field name; 2 mutants killed
+
+**K1 held:** the four shapes give the answer's sentence or None as specified, and the loop ends the turn with the Dentist sentence from `{"target":"text","args":{"text":…}}`.
+
+**K2 held: 2 mutants killed:**
+- first non-empty again;
+- the bare-word floor removed.
+
+**One E.ANS1 test case changed on purpose:** its " Answer " / "hi" case became "hi there". A two-letter single word now falls under the floor; the floor is the point.
+
+The journal line now carries the raw call (300 chars).
+
+**K3 (Windows):** full suite 2532 passed, 0 failed. Not in a bundle: ce70450 stays frozen for E.THIN1-M.

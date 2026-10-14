@@ -17458,7 +17458,31 @@ mod desktop_consent_and_stall_wiring {
         assert!(!r.reply.contains(COMPOSED), "compose ran");
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "weekly-report", "target": "x"}})), None);
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "answer"}})), None);
-        assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": " Answer ", "text": "hi"}})).as_deref(), Some("hi"));
+        assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": " Answer ", "text": "hi there"}})).as_deref(), Some("hi there"));
+    }
+
+    /// E.ANS1b (E.THIN1-M full B): the answer's text wherever the model put it, never a field's name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_filed_as_a_skill_is_its_text_not_a_field_name() {
+        let call = |a: serde_json::Value| crate::answer_in_a_skill_call("run_skill", &serde_json::json!({ "args": a }));
+        assert_eq!(
+            call(serde_json::json!({"name": "answer", "target": "text", "args": {"text": "Tomorrow you have the Dentist at 15:00."}})).as_deref(),
+            Some("Tomorrow you have the Dentist at 15:00.")
+        );
+        assert_eq!(
+            call(serde_json::json!({"name": "answer", "input": "answer", "text": "Disk 72% full; memory 1.7 of 5.8 GB."})).as_deref(),
+            Some("Disk 72% full; memory 1.7 of 5.8 GB.")
+        );
+        assert_eq!(call(serde_json::json!({"name": "answer", "target": "AX-4471 is the confirmation number."})).as_deref(), Some("AX-4471 is the confirmation number."));
+        assert_eq!(call(serde_json::json!({"name": "answer", "target": "text"})), None, "a field's name is not an answer");
+        assert_eq!(call(serde_json::json!({"name": "answer"})), None);
+        let r = run(
+            vec![Step::Call("run_skill", serde_json::json!({"name": "answer", "target": "text", "args": {"text": "Tomorrow you have the Dentist at 15:00."}}))],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        assert_eq!(r.reply, "Tomorrow you have the Dentist at 15:00.");
     }
 
     /// E.THIN1: one turn of the primary person, thin or not, with a model that answers "MODEL".

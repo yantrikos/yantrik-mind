@@ -18688,3 +18688,41 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 **5e6eae2 on 541 and 520 (yantrik-os-dc, 14 Oct):** both `installed 5e6eae2 b53853632cec7b1f attached`, env and mcp unchanged, 0 stack/abort lines; 520's Lens smoke took 4 s. Rollback 44ed2c0 on both. 5e6eae2 is now on all three machines.
 
 **E.PACE2 A1 started 13:11:13 CT:** YM_COMPOSE_EFFORT is confirmed absent from the process environ, and the fingerprint is 2072c61925ae40d7. 520 shares the LAN Qwen server with 541, so any 520 or background call inside an ask's window is recorded with that ask as load.
+
+## E.PACE2 — RESULT (A/B on 541, yantrik-os-dc, 14 Oct 13:11–14:00): B meets the rule; a CONNECT cost named
+
+**Setup:** 5e6eae2, thin default, LAN Qwen 27B via the gateway, legs A1 B1 B2 A2.
+- The switch was confirmed in /proc environ each leg.
+- The fingerprint was 2072c61925ae40d7 before all 24 asks.
+- 541's env was restored to 233af8be afterwards.
+
+**Passes (E.CMP1 rules + amendment 3): A 12/12, B 12/12.** Every ask passed in all four legs:
+- ask 1: Dentist Thu 15 Oct 15:00–16:00;
+- ask 2: one belief each for Rohan, Sara, Dev and Ana, with the date right;
+- ask 3: the line once, one note;
+- ask 4: the Sat and Sun forecast;
+- ask 5: no command, 0 cards;
+- ask 6: AX-4471.
+No internals were spoken.
+
+**Times:**
+
+| Arm | Compose median (n=8) | Compose range | Whole-ask median | Asks with no compose |
+|---|---|---|---|---|
+| A | 32.8 s | e.g. 57.6 s for 825 output tokens | 72.5 s | 7 |
+| B | 9.3 s | 2.1–13.4 s, 26–151 output tokens | 47.5 s | 9 |
+
+- B's compose median is **28%** of A's.
+- **Load:** no 541 background call, other harness or 520 call fell inside any ask's window. The LAN Qwen is Pranab's cluster gateway, and other clients of it are invisible.
+
+**By the rule as written: ADOPT B** (12 ≥ 11, and 28% ≤ 60%).
+
+**Named, B only (the prereg asked for it):** B's compose turns the wrap's CONNECT instruction into unsolicited advice, in 4 replies:
+- B1 ask 4 says "since you're slammed right now ... order the gift for Priya's birthday (4th) or Arun's housewarming". "Slammed" is asserted about the person with no support. The claim "warms back up next week" was not checked against the outlook.
+- B2 ask 4 suggests picking up gifts.
+- B2 ask 2b gives triage advice about family obligations.
+- B2 ask 2a says "Rohan's exam (I've got that as an open reminder already)". Whether a Rohan reminder exists is unverified, and it may be an invented claim.
+
+A links nearby dates too, but in one factual clause, never as advice. The difference is degree. The cause on the Mind side is the wrap's own words, "CONNECT: ... weave in the related plan, deadline, or open thread from what you know". Without thinking, the model carries this out literally. This is the already-listed ARCH9 item "CONNECT weaving unrelated facts".
+
+**Named, A only:** A2 ask 2b says "I don't have a confirmed date yet. My only note is tentative: 27 November 2026" about a fact stated plainly a minute earlier. It is false uncertainty, but still a pass.

@@ -18234,3 +18234,11 @@ Whether removing these layers helps is a hypothesis. This builds the removal as 
 **A stack overflow on the way, caught by the full suite:** the thin branch's second inline `self.agent_loop(..).await` grew `handle_turn_as_counted`'s future, and `cli_dispatch_routes_plugins_and_chat` overflowed the Windows test stack. It passes without the change, as checked with a stash. The thin call is now `Box::pin(..)`, the E.STACK1 shape.
 
 **K3 (Windows):** full suite 2529 passed, 0 failed.
+
+**E.THIN1 K3, Linux (staging, ebdad35):** mind-types 105, mind-recipes 100, mind-conversation 1244, mind-core 177, mind-inference 98 passed. K3 held.
+
+**E.THIN1-M amendment 1 (before any run):**
+- **The comparison arm changes.** It is no longer E.CMP1 run 2's Mind leg: that is b803955, which lacks E.OPT1c, E.ANS1 and E.MEM2, so thin-vs-full would be confounded with those fixes. Both arms run on the SAME new bundle (the one carrying E.THIN1), one with `YM_THIN_DESKTOP` unset (full) and one with `=1` (thin), two runs each, interleaved full / thin / full / thin.
+- **Only that one variable differs between the arms.** `YM_PROACTIVE` and every other setting stay as 541 has them.
+- **The asks** are E.CMP1's with amendments 2 and 3, with a fresh fact per run for ask 2: run 3 "my colleague Meera starts her new job on 2 December"; run 4 "my nephew Kabir's school play is on 11 December".
+- **The decision rule is unchanged.**

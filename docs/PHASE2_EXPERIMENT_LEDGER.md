@@ -18252,3 +18252,5 @@ Whether removing these layers helps is a hypothesis. This builds the removal as 
 Each recall question asks for that fact's date, and each leg is checked to hold none of them before its ask 2.
 
 **Bundle `yantrik-mind-ce70450-linux-amd64.tar.zst`** (sha256 56ed1a79bec33c1d145639b03e6aa062f0899548bb8c7c493a207a1ab038ed42), built on staging against companion 965532e. It carries b803955 plus E.OPT1c, E.ANS1, E.MEM2 and E.THIN1 (switch off by default). BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. This is the bundle for E.THIN1-M. Not installed anywhere yet.
+
+**ce70450 on the Mac**, 14 Oct, on Pranab's direct OK: `installed ce70450 56ed1a79bec33c1d attached`, active and attached, with the thin switch off. The rollback is b803955. 541 (after E.CMP1 run 2) and 520 are handed to yantrik-os-dc.

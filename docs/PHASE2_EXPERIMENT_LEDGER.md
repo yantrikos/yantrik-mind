@@ -17948,3 +17948,43 @@ Also, for every ask: a reply that names a tool, "the log", "source", "work log" 
 - **The reset is done from the person's side** by yantrik-os-dc's own `yos` acts, never through a mind. Earlier test notes are archived or trashed by hand before each leg.
 
 **Correction to an answer given to Pranab the same evening:** I said the 541 comparison with the DeepSeek harness (which answered all five asks correctly in the e41c3b0-era run) "compares models as much as harnesses", because DeepSeek ran on DeepSeek's cloud model. Wrong: it ran on the same LAN Qwen 27B through the same gateway. That run was a same-model comparison, though on an older Mind build, with unrecorded times and no prewritten rules, and the Mind came out behind on it.
+
+## E.SEC20 — PREREG: a booking code is not a card number
+
+**Why:** VM 541. The packing list "…\n- Wallet / cards\n- Cash\n- Hotel confirmation (AX-4471)" was refused twice: by the egress broker on 1ca45b0 (E.LOCAL1 since), and by the harm gate on aa02af4. The harm gate counts a local note as outward on purpose, because a real credential written into a note is still written down, and that stays. Both refusals come from `first_sensitive`'s card-context-number kind: "cards" is a card word, and "4471" starts within E.SEC19's 48-character window after it. The run counts as standalone because `is_embedded` only looks for a letter pressed against the digits, and here a hyphen sits between.
+
+yantrik-os-dc proposed three rules: (1) a letter-led code is never a card number; (2) short runs need their card word on the same line or a `label:` line before; (3) card words are labels, not the plain noun "cards". Rule (2) would break a pinned case: E.SEC19b H1's `cvv\n1234` has no colon and must stay refused. It also changes multi-line behaviour for every boundary this detector guards (memory writes, the outward check, the harm gate, log redaction), and the case at hand does not need it. So it is not taken here.
+
+**What is built (mind-types safety.rs):**
+1. **A letter-led code is not a card number.** A digit run directly after `<letters>-`, where the letters run back to a token start, is not a card-context number unless those letters are themselves a card word: "AX-4471" and "ORD-20931" pass; "PIN-4821" and "cvv-123" are still refused. Only the card-context rule changes; the PAN/Luhn rule, which needs 13–19 digits anyway, is untouched.
+2. **"cards" leaves `CARD_CONTEXT`.** The plural is a list item ("Wallet / cards") and not a label for a number; "card", "pin", "cvv", "cvc", "iban" and "pan" stay, and so does "pins", whose PIN-before exclusion E.SEC19c already handles.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the 541 packing list verbatim has no sensitive finding;
+  - "Hotel confirmation AX-4471, card ending 4242" is still refused (the 4242, after "card");
+  - "my card: PIN-4821" is still refused (the letters are the card word).
+
+  Corrected before any code: I first wrote "PIN-4821" alone. Probed on the unmodified detector, "PIN-4821" and "cvv-123 4" are NOT caught today, because `token_at` takes hyphens and digits into the word, so "pin-4821" never equals "pin". That gap is older than this change and is recorded here, not fixed: a separate change to this shared detector would need its own prereg.
+  - "my order ORD-20931 paid by card" passes;
+  - every existing sec19/sec19b/sec19c test passes unchanged.
+- K2, a mutant survives:
+  - the letter-led exemption removed (the 541 text is refused again);
+  - the card-word exception removed (PIN-4821 passes);
+  - "cards" put back.
+- K3: both suites pass.
+
+## E.SEC20 — RESULT: a letter-led code is not a card number, and "cards" is no longer a card word; 3 mutants killed
+
+**Built:** `letter_led_code` in the card-context rule; "cards" removed from `CARD_CONTEXT`.
+
+**K1 held:**
+- The 541 packing list, "ORD-20931 … paid by card", "card ref AX-4471" and a room number near "cards" all have no finding.
+- "AX-4471, card ending 4242", "my card: PIN-4821" and "my card pin is 4821" are still refused.
+- Every sec19, sec19b and sec19c test passes unchanged (mind-types 105).
+
+**K2 held: 3 mutants killed.** "cards put back" survived the first version of the test, because the code exemption alone clears the 541 text; a case where only the plural matters (a room number) now kills it.
+
+**One existing test changed on purpose:** E.LOCAL1's used the 541 packing list as its secret. That text is clean now, so it carries "card ending 4242" instead. Its loop mutant was re-run against the new text and is still killed.
+
+**K3 (Windows):** full suite 2520 passed, 0 failed.

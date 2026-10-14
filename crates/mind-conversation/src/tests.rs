@@ -21276,7 +21276,9 @@ async fn a_local_note_is_not_egress_and_the_same_text_outward_still_is() {
     let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(mem, pool, "JARVIS").with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
-    let text = "Documents & money\n- ID / driver's license\n- Wallet / cards\n- Cash\n- Hotel confirmation (AX-4471)\n\nMisc";
+    // E.SEC20 made the 541 packing list itself clean, so the example carries a real card number: the
+    // broker still stops it outward, and a note is still not brokered at all.
+    let text = "Documents & money\n- Wallet: card ending 4242\n- Hotel confirmation (AX-4471)";
     let id = TurnIdentity::primary();
     let refused = |out: &str| out.contains("look like they contain a credential");
     let note = conv

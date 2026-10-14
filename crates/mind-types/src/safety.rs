@@ -174,7 +174,9 @@ const TOKEN_SHAPES: &[TokenShape] = &[
 ];
 
 /// Words that make a nearby number an identity number rather than a quantity.
-const CARD_CONTEXT: &[&str] = &["card", "cards", "pin", "pins", "cvv", "cvc", "iban", "pan"];
+// E.SEC20 (VM 541): not "cards" -- the plural is a list item ("Wallet / cards"), not a label for a
+// number, and it put a hotel booking code two lines later inside the window.
+const CARD_CONTEXT: &[&str] = &["card", "pin", "pins", "cvv", "cvc", "iban", "pan"];
 const SSN_CONTEXT: &[&str] = &["ssn", "social"];
 
 /// Credential words. On their own they are conversation; with a value beside them they are not.
@@ -283,6 +285,18 @@ fn is_embedded(text: &str, start: usize, len: usize) -> bool {
     let truncated = a1 == Some('.') && a2.is_some_and(|c| c.is_ascii_digit());
 
     before || after || fractional || truncated
+}
+
+/// E.SEC20 (VM 541): is the run at `start` the number part of a letter-led code -- `AX-4471`,
+/// `ORD-20931`, a booking or an order reference? A card number, PIN or CVV is never written that
+/// way, unless the letters are the card word itself (`PIN-4821`, `cvv-123`), which stays refused.
+fn letter_led_code(text: &str, start: usize) -> bool {
+    let Some(head) = text[..start].strip_suffix('-') else { return false };
+    let letters: String = head.chars().rev().take_while(|c| c.is_ascii_alphabetic()).collect::<Vec<_>>().into_iter().rev().collect();
+    if letters.is_empty() || !at_token_start(head, head.len() - letters.len()) {
+        return false;
+    }
+    !CARD_CONTEXT.contains(&letters.to_ascii_lowercase().as_str())
 }
 
 /// E.SEC19 / E.SEC19b (M3): how far after a card/PIN word its number may start, in characters (not
@@ -643,7 +657,7 @@ fn first_sensitive_raw(text: &str) -> Option<SensitiveFinding> {
         for (start, len, digits) in digit_runs(text).into_iter().chain(dotted_groups(text)) {
             let n = digits.len();
             let standalone = !is_embedded(text, start, len) || masked_lead(text, start);
-            if n < 4 || !standalone || is_iso_date(&text[start..start + len]) {
+            if n < 4 || !standalone || is_iso_date(&text[start..start + len]) || letter_led_code(text, start) {
                 continue;
             }
             let before = word_ends.partition_point(|&end| end <= start);
@@ -1835,5 +1849,27 @@ mod sec19d {
         assert!(refused(&text), "the nearest pin word after the number decides");
         // 46 four-byte characters plus two spaces: 48 characters, 186 bytes.
         assert!(refused(&format!("pin {} 4821", "\u{1f511}".repeat(46))), "the byte bound is under 4 per char");
+    }
+}
+
+/// E.SEC20 (VM 541): a booking code beside a packing list's "cards" is not a card number.
+#[cfg(test)]
+mod sec20 {
+    use super::*;
+
+    #[test]
+    fn a_letter_led_code_is_not_a_card_number() {
+        let packing = "Weekend packing list \u{2014} two nights away\n\nDocuments & money\n- ID / driver's license\n- Wallet / cards\n- Cash\n- Hotel confirmation (AX-4471)\n\nMisc";
+        assert_eq!(first_sensitive(packing), None, "the 541 packing list");
+        assert_eq!(first_sensitive("my order ORD-20931 was paid by card"), None);
+        // The plural is a list item, not a label: a room number near it is not a card number.
+        assert_eq!(first_sensitive("- Wallet / cards
+- Cash
+- Room 4471"), None);
+        assert_eq!(first_sensitive("card ref AX-4471"), None, "a code right after the word");
+        // The exception: letters that are themselves the card word still lead a card number.
+        for text in ["Hotel confirmation AX-4471, card ending 4242", "my card: PIN-4821", "my card pin is 4821"] {
+            assert!(first_sensitive(text).is_some(), "MISSED: {text:?}");
+        }
     }
 }

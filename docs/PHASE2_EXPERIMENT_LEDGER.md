@@ -18676,3 +18676,11 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
    - the arm is switched by dc's in-place env rewrite and a restart, confirmed in /proc environ, with the env restored to its original hash at the end.
 
 **The 5-token call after compose is checked_answer, full path only.** It followed 8 of 8 full-path composes and 0 of 16 thin ones (one example: 358-token prompt, 1.5 s), so it is not in play on the thin default.
+
+**E.PACE2 K3, Linux (staging, ebfedcb):** mind-core 179, mind-conversation 1251, mind-inference 98, all passed. (The first combined run printed no result line for the last two, so each was rerun with full output; not counted as a pass until then.)
+
+**Bundle `yantrik-mind-5e6eae2-linux-amd64.tar.zst`** (sha256 b53853632cec7b1fbb206d1bb1881567c4d22964c8bc234da7557fc6f63dc321): 44ed2c0 plus E.PACE2. BUILD has `agent_token=1` and `cmd_answer=1`. Unset, it behaves as 44ed2c0.
+- Pranab OKed it directly (AskUserQuestion, 14 Oct) for 541, 520 and the Mac. A relayed OK through dc came first, and was not used.
+- **Mac:** `installed 5e6eae2 b53853632cec7b1f attached`, active, 0 crash lines.
+- **541:** dc installs and runs the A/B.
+- **520:** dc, at a free slot.

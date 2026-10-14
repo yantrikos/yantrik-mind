@@ -18973,3 +18973,8 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 3. **Ask 4's kill check:** dc reports, per B leg, the journal's raw args of the `weather` call (or its absence).
 
 **E.PREFIX1b K3, Linux (staging, 6f8a153):** mind-conversation 1255, mind-core 181, both passed. Bundle `yantrik-mind-6f8a153` sha256 4822686b73048436ebb6b51444ce68aef7bb3b23148b8a387512ef326d3aee74. Default off; with the switch unset it behaves as ae54fdc.
+
+**6f8a153:** Pranab OKed it for 541, 520 and the Mac (14 Oct).
+- **The Mac:** `installed 6f8a153 4822686b73048436 attached`, active, 0 crash lines. Rollback ae54fdc.
+- **541:** the A/B runs after #805's checklist.
+- **520:** dc, at a free slot.

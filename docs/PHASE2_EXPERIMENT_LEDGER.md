@@ -18851,3 +18851,5 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 - **The Mac:** `installed 90a87f7 2a5438c52dca10dd attached`, active, 0 crash lines. Rollback e2fbcb6.
 - **520:** dc, at a free slot.
 - 90a87f7 is now on 541 and the Mac.
+
+**520 (yantrik-os-dc):** e2fbcb6 never landed. It was waiting behind the candidate ISO's batch lock; dc stopped it, and the lock was untouched. 90a87f7 is queued instead, with rollback 5e6eae2 (still on 520).

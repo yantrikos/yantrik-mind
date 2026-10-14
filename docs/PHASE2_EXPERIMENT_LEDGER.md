@@ -18462,3 +18462,14 @@ The journal line now carries the raw call (300 chars).
 **Bundle `yantrik-mind-ce0df0c-linux-amd64.tar.zst`** (sha256 20d1c6444dfd6413af0fdf21fc94c047515dc0e056a087e1a0a5f20842dbb8eb), built on staging against companion 965532e. It carries ce70450 plus E.WX1, E.ANS1b, E.THIN2 (thin ON by default where YANTRIK_MIND_RUN is set) and E.MEM2b. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.
 
 **Pranab adopted thin as the desktop default (14 Oct).** ce0df0c is on the Mac (`installed ce0df0c 20d1c6444dfd6413 attached`, active and attached); 541 and 520 are handed to yantrik-os-dc. Rollback is ce70450. Whether the Mac's Mind sees YANTRIK_MIND_RUN, so that thin is on, is confirmed by the first `route=thin` line on its next turn. The process environ needs root there.
+
+**ce0df0c on 541, the unscored check on the new default (yantrik-os-dc, 14 Oct):** no switch line, 6 route=thin lines, so E.THIN2 is on under the OS unit. All six asks would pass by E.CMP1's rules; unscored, one sample, no claim beyond that.
+- **Ask 1:** Dentist Thu 15 Oct.
+- **Ask 2:** 12 December, with exactly 1 belief ("…12 December 2026"), so E.MEM2b held. Its reply also linked the fact, unprompted, to "the day after Kabir's school play" (compose's CONNECT).
+- **Ask 3:** two append calls, one line written, one note.
+- **Ask 4:** Saturday and Sunday forecast, from E.WX1's outlook.
+- **Ask 5:** right numbers, no command, no card.
+- **Ask 6:** AX-4471 in 16 s. E.ANS1b took the right string from `{"name":"answer","target":"text","url":"…AX-4471…"}`, exactly the shape that produced "text" before.
+- **Internals:** none.
+
+520's ce0df0c waits for a free slot.

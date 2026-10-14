@@ -18027,3 +18027,5 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 **One test approach dropped on the way:** the first loop test used a read-only scripted desktop. A mutating MCP call there never reaches the gate ("no harm-gated action runtime is configured"), so it could not have tested this. The test now builds the governed runtime with `RealHarmGate`.
 
 **E.CITE1 + E.SEC20 + E.VOICE6 K3, Linux (staging, 383e08d):** mind-types 105, mind-recipes 100, mind-conversation 1237, mind-core 177 passed. K3 held.
+
+**Bundle `yantrik-mind-b803955-linux-amd64.tar.zst`** (sha256 c034858abf07284271ff594588a904fe8c9c9b32ce5bbdb633347ff147ede914), built on staging against companion 965532e. It carries aa02af4 plus E.CITE1, E.SEC20 and E.VOICE6. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. This is the bundle for E.CMP1. Not installed anywhere yet.

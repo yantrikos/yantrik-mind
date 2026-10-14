@@ -18025,3 +18025,5 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 **K3 (Windows):** full suite 2522 passed, 0 failed.
 
 **One test approach dropped on the way:** the first loop test used a read-only scripted desktop. A mutating MCP call there never reaches the gate ("no harm-gated action runtime is configured"), so it could not have tested this. The test now builds the governed runtime with `RealHarmGate`.
+
+**E.CITE1 + E.SEC20 + E.VOICE6 K3, Linux (staging, 383e08d):** mind-types 105, mind-recipes 100, mind-conversation 1237, mind-core 177 passed. K3 held.

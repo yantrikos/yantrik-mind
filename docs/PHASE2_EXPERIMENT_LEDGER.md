@@ -18140,3 +18140,9 @@ E.MEM1's similarity test also has a defect this exposes. "Priya's birthday is on
 **Not covered:** `extract_taught_belief` (the turn path's own code capture) still writes its statement directly. Its later restatements through `remember` now reinforce it, but a code capture after an earlier `remember` would add one. If 541 shows that, it is the next row.
 
 **The ⏳ line on ask 1** was the Lens's, not the Mind's (yantrik-os-dc checked): the hand-over had no ⏳ in it, and the Mind's stored reply starts "Tomorrow — Wed 14 Oct — is clear." It is recorded as a setup artifact on the OS side.
+
+**E.CMP1 amendment 2 (written before run 2 starts):**
+- **Hermes run 1, ask 2: contaminated, not scored.** An orphaned runner left "Priya's birthday is 4 November" in Hermes's memory at 23:38, before its ask 2, so 2b would pass whatever 2a did. yantrik-os-dc recorded the baseline: memories 3, memories_fts 3, conversation_turns 1, recall_demand 1, oplog 8.
+- **No memory is deleted.** That's Pranab's standing rule for yantrik-os-dc, test VMs included.
+- **Run 2's ask 2 uses a fresh fact**, so every leg gets a scored second sample: "Remember that my brother Ravi's wedding anniversary is on 9 March." Then, in the same conversation, "When is Ravi's wedding anniversary?". Grading is as for ask 2, with the date 9 March and duplicates counted as beliefs about that anniversary added during run 2's ask 2. Before the ask, yantrik-os-dc checks that no leg's memory holds a Ravi anniversary; any leg that does is marked not scored for this ask.
+- **The other five asks are unchanged.**

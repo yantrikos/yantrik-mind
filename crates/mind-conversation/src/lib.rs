@@ -6095,6 +6095,10 @@ pub struct ConversationEngine {
     /// E.PREFIX1a: the previous agent step's prompt laid out, and the last report against it --
     /// how much a server's prompt cache could reuse (see `prefix_probe`).
     prefix_last: std::sync::Mutex<Option<(prefix_probe::Render, usize, &'static str)>>,
+    /// E.PREFIX1b: one native schema block for every turn -- core, meta, pinned and on-this-computer
+    /// -- so a server's prompt cache keeps everything up to the prompt. The tools picked for the ask
+    /// stay described in the prose catalog. Off by default; `YM_STABLE_SCHEMAS=1`.
+    stable_schemas: bool,
     /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
@@ -6290,6 +6294,12 @@ impl ConversationEngine {
         self
     }
 
+    /// E.PREFIX1b: one schema block for every turn (see the field).
+    pub fn with_stable_schemas(mut self, on: bool) -> Self {
+        self.stable_schemas = on;
+        self
+    }
+
     /// E.PACE2: the effort compose asks for when the person picked none (see the field).
     pub fn with_compose_effort(mut self, effort: Option<String>) -> Self {
         self.compose_effort = effort;
@@ -6346,6 +6356,7 @@ impl ConversationEngine {
             thin_desktop: false,
             compose_effort: None,
             prefix_last: std::sync::Mutex::new(None),
+            stable_schemas: false,
             recent_window: 20,
             web: None,
             mail: None,
@@ -13602,7 +13613,8 @@ Open reminders you're carrying for them:",
         let mut schemas = if names_nothing {
             tool_catalog::exact_catalog_schemas(&gated_src)
         } else {
-            tool_catalog::tool_schemas(user_text, &gated_src)
+            // E.PREFIX1b: with no words to score, only the fixed tools get schemas.
+            tool_catalog::tool_schemas(if self.stable_schemas { "" } else { user_text }, &gated_src)
         };
         if !names_nothing {
             if let Some(hub) = &self.mcp {

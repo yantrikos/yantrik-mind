@@ -17226,6 +17226,70 @@ mod desktop_consent_and_stall_wiring {
         assert!(*n >= conv.persona().len() + 200 && *n < now.len(), "{n}/{}", now.len());
     }
 
+    /// E.PREFIX1b: the schema names each tool step was offered, and every prompt it was sent.
+    struct SchemasSeen {
+        inner: Script,
+        names: Arc<StdMutex<Vec<Vec<String>>>>,
+    }
+    impl LLMBackend for SchemasSeen {
+        fn chat(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            if let Some(t) = t.filter(|t| !t.is_empty()) {
+                let names = t.iter().filter_map(|s| s["function"]["name"].as_str().map(String::from)).collect();
+                self.names.lock().unwrap().push(names);
+            }
+            self.inner.chat(m, c, t)
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "schemas-seen"
+        }
+    }
+
+    async fn schemas_offered(stable: bool, asks: &[&str]) -> (Vec<Vec<String>>, Vec<String>, String) {
+        let names = Arc::new(StdMutex::new(Vec::new()));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let inner = Script { at: AtomicUsize::new(0), steps: vec![], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(SchemasSeen { inner, names: names.clone() });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_stable_schemas(stable);
+        let catalog = conv.offered_catalog();
+        for ask in asks {
+            let _ = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await;
+        }
+        let names = names.lock().unwrap().clone();
+        let prompts = seen.lock().unwrap().clone();
+        (names, prompts, catalog)
+    }
+
+    /// E.PREFIX1b (E.PREFIX1a's baseline: the per-ask schemas are where two turns first differ): with
+    /// stable schemas on, every ask is offered the same block, and a tool picked for the ask is in
+    /// the prose instead; off, it is in the schemas as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stable_schemas_offer_one_block_and_keep_the_picked_tool_in_the_prose() {
+        let weather = "What's the weather in Dallas this weekend?";
+        let (_, _, catalog) = schemas_offered(false, &[]).await;
+        let name_of = |s: &serde_json::Value| s["function"]["name"].as_str().unwrap_or("").to_string();
+        let fixed: Vec<String> = tool_catalog::tool_schemas("", &catalog).iter().map(name_of).collect();
+        let picked: Vec<String> = tool_catalog::tool_schemas(weather, &catalog).iter().map(name_of).filter(|n| !fixed.contains(n)).collect();
+        assert!(!picked.is_empty(), "the weather ask picks no tool beyond the fixed set: precondition");
+
+        let (on, prompts, _) = schemas_offered(true, &[weather, "Remember that Kiran's recital is on 6 December"]).await;
+        assert!(on.len() >= 2, "{on:?}");
+        assert!(on.windows(2).all(|w| w[0] == w[1]), "the blocks differ between asks: {on:?}");
+        assert!(picked.iter().all(|p| !on[0].contains(p)), "a picked tool kept its schema: {picked:?}");
+        let first = prompts.iter().find(|p| p.contains("Dallas")).expect("the weather ask's prompt");
+        assert!(picked.iter().all(|p| first.contains(&format!("- {p}"))), "a picked tool is missing from the prose: {picked:?}");
+
+        let (off, _, _) = schemas_offered(false, &[weather]).await;
+        assert!(picked.iter().all(|p| off[0].contains(p)), "off, the picked tool should have its schema: {off:?}");
+    }
+
     /// E.PACE1b: the script, recording each call's effort and whether it offered tools.
     struct EffortSeen {
         inner: Script,

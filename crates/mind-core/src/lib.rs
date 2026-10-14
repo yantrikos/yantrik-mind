@@ -639,6 +639,26 @@ pub fn compose_effort_from(get: &dyn Fn(&str) -> Option<String>) -> Option<Strin
     }
 }
 
+/// E.PREFIX1b: one native schema block for every turn -- `YM_STABLE_SCHEMAS=1`; off otherwise.
+pub fn stable_schemas_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("YM_STABLE_SCHEMAS").is_some_and(|v| v.trim() == "1")
+}
+
+#[cfg(test)]
+mod prefix1b_tests {
+    use super::stable_schemas_from;
+
+    #[test]
+    fn stable_schemas_only_on_one() {
+        let env = |v: Option<&'static str>| move |k: &str| (k == "YM_STABLE_SCHEMAS").then_some(v).flatten().map(String::from);
+        assert!(stable_schemas_from(&env(Some("1"))));
+        assert!(stable_schemas_from(&env(Some(" 1 "))));
+        assert!(!stable_schemas_from(&env(Some("0"))));
+        assert!(!stable_schemas_from(&env(Some(" "))));
+        assert!(!stable_schemas_from(&env(None)));
+    }
+}
+
 #[cfg(test)]
 mod pace2_tests {
     use super::compose_effort_from;
@@ -760,6 +780,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_thin_desktop(thin_desktop_from(&|k| std::env::var(k).ok()))
         // E.PACE2/E.PACE2b: compose's own effort, "easy" by default for a Mind the desktop launched.
         .with_compose_effort(compose_effort_from(&|k| std::env::var(k).ok()))
+        // E.PREFIX1b: one schema block for every turn, off until the A/B on 541 decides.
+        .with_stable_schemas(stable_schemas_from(&|k| std::env::var(k).ok()))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

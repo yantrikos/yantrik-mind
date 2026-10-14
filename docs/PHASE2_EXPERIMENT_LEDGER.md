@@ -18946,3 +18946,18 @@ So two different asks share at most persona + core/pinned schemas. How many byte
   - the user text still passed when on;
   - "0" read as on.
 - K3: both suites pass.
+
+## E.PREFIX1b — RESULT (code): one schema block behind `YM_STABLE_SCHEMAS=1`; 4 mutants killed
+
+**K1 held:**
+- **Switch on:** the weather ask and a remember ask send identical schema-name lists. The tools the weather ask picks beyond the fixed set (the precondition holds: there are some) are absent from the schemas and present in the prose as `- name`.
+- **Switch off:** the picked tools are in the schemas.
+- **`stable_schemas_from`:** "1" and " 1 " are on; "0", " " and unset are off.
+
+**K2 held, 4 mutants killed:**
+- the switch ignored;
+- the user text still passed when on;
+- always stable;
+- "0" read as on.
+
+**K3:** Windows workspace 2545 passed, 0 failed. Linux follows.

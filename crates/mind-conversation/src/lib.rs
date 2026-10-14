@@ -75,6 +75,7 @@ mod guards;
 mod redact;
 /// E.VOICE2: the answer streamed to the desktop while the model writes it.
 mod answer_stream;
+mod prefix_probe;
 pub use answer_stream::{AnswerDelta, TURN_ANSWER};
 /// E.OPT1: files the person attaches in the desktop's ask bar.
 mod attachments;
@@ -6091,6 +6092,9 @@ pub struct ConversationEngine {
     /// E.PACE2: the effort compose (the answer written from the work log) asks for when the person
     /// picked none -- `YM_COMPOSE_EFFORT`. None keeps the model's default, as E.PACE1b left it.
     compose_effort: Option<String>,
+    /// E.PREFIX1a: the previous agent step's prompt laid out, and the last report against it --
+    /// how much a server's prompt cache could reuse (see `prefix_probe`).
+    prefix_last: std::sync::Mutex<Option<(prefix_probe::Render, usize, &'static str)>>,
     /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
@@ -6341,6 +6345,7 @@ impl ConversationEngine {
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
             compose_effort: None,
+            prefix_last: std::sync::Mutex::new(None),
             recent_window: 20,
             web: None,
             mail: None,
@@ -13946,6 +13951,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 unattempted_side_effect(user_text, &cost.calls).is_some(),
                 !scratch.trim().is_empty(),
             );
+            // E.PREFIX1a: how much of this step's prompt repeats the previous call's. Numbers only.
+            if let Ok(mut last) = self.prefix_last.lock() {
+                let now = prefix_probe::render(&messages, &schemas);
+                let (n, at) = last.as_ref().map(|(prev, _, _)| prefix_probe::shared(prev, &now)).unwrap_or((0, "first call"));
+                eprintln!("[agent] step {step}: prompt prefix {n}/{} bytes the same as the previous call; first difference in {at}", now.len());
+                *last = Some((now, n, at));
+            }
             let resp = match answer_stream::streamed_step(
                 forward,
                 // E.PACE1b: the Mind's own tool step goes at "easy" unless the person picked an effort.

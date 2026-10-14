@@ -17202,6 +17202,30 @@ mod desktop_consent_and_stall_wiring {
         }
     }
 
+    /// E.PREFIX1a: two turns of different asks with the same tools -- the second turn's first step
+    /// shares the persona and the schemas with the call before it and first differs in the prompt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_prefix_probe_reports_where_two_calls_differ() {
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Fail, Step::Fail],
+            seen: Arc::new(StdMutex::new(Vec::new())),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let who = TurnIdentity::primary();
+        let _ = conv.agent_loop_for_eval("Remember that Priya likes green tea", &who).await;
+        assert_eq!(conv.prefix_last.lock().unwrap().as_ref().map(|(_, _, at)| *at), Some("first call"));
+        let _ = conv.agent_loop_for_eval("Remember that Ravi likes black coffee", &who).await;
+        let last = conv.prefix_last.lock().unwrap();
+        let (now, n, at) = last.as_ref().expect("a step was probed");
+        assert_eq!(*at, "prompt", "{n}/{}", now.len());
+        assert!(*n >= conv.persona().len() + 200 && *n < now.len(), "{n}/{}", now.len());
+    }
+
     /// E.PACE1b: the script, recording each call's effort and whether it offered tools.
     struct EffortSeen {
         inner: Script,

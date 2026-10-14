@@ -18881,3 +18881,15 @@ So two different asks share at most persona + core/pinned schemas. How many byte
   - the segment boundaries swapped;
   - the previous render not kept (always "first call").
 - K3: both suites pass.
+
+## E.PREFIX1a — RESULT (code): the prefix probe; 3 mutants killed
+
+**Built:** `prefix_probe` (render, shared). Each agent step logs `[agent] step N: prompt prefix S/T bytes the same as the previous call; first difference in X`, numbers only.
+
+**K1 held:**
+- **shared():** a change in the persona gives `persona`; in a schema `tools`; in the rules `system`; in the date line `prompt`; identical renders `nothing` (S = T).
+- **The loop:** the first turn reports `first call`. The second turn (a different ask) reports `prompt`, with S at least the persona length plus 200 bytes.
+
+**K2 held, 3 mutants killed:** persona/tools swapped; system read as prompt; the previous render not kept.
+
+**K3:** Windows workspace 2543 passed, 0 failed. Linux follows.

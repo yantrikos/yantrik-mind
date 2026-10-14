@@ -18458,3 +18458,5 @@ The journal line now carries the raw call (300 chars).
 **K3 (Windows):** full suite 2533 passed, 0 failed.
 
 **E.THIN2 + E.MEM2b K3, Linux (staging, f64f988):** mind-tools 268, mind-conversation 1246, mind-core 178 passed. K3 held.
+
+**Bundle `yantrik-mind-ce0df0c-linux-amd64.tar.zst`** (sha256 20d1c6444dfd6413af0fdf21fc94c047515dc0e056a087e1a0a5f20842dbb8eb), built on staging against companion 965532e. It carries ce70450 plus E.WX1, E.ANS1b, E.THIN2 (thin ON by default where YANTRIK_MIND_RUN is set) and E.MEM2b. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.

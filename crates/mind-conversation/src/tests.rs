@@ -17177,6 +17177,31 @@ mod desktop_consent_and_stall_wiring {
         assert!(whole.contains("extension of Fresh Tester"), "{whole:.120}");
     }
 
+    /// E.CONNECT1 (E.PACE2's B arm: unsolicited advice in 4 of 12 replies): compose is told to answer
+    /// what was asked, with background as one factual clause at most and no advice -- not to weave.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compose_answers_what_was_asked_without_advice() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Call("remember", serde_json::json!({"text": "Priya likes green tea"})), Step::Fail],
+            seen: seen.clone(),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let _ = conv.agent_loop_for_eval("Remember that Priya likes green tea", &TurnIdentity::primary()).await;
+        let prompts = seen.lock().unwrap().clone();
+        let compose: Vec<&String> = prompts.iter().filter(|p| p.contains("direct final answer")).collect();
+        assert!(!compose.is_empty(), "no compose prompt: {prompts:?}");
+        for p in compose {
+            assert!(p.contains("ANSWER WHAT WAS ASKED") && p.contains("Give no advice or suggestions the person did not ask for"), "{p:.400}");
+            assert!(!p.contains("weave in") && !p.contains("CONNECT"), "{p:.400}");
+        }
+    }
+
     /// E.PACE1b: the script, recording each call's effort and whether it offered tools.
     struct EffortSeen {
         inner: Script,
@@ -21599,7 +21624,7 @@ async fn compose_and_the_check_see_the_attached_file() {
     let who = TurnIdentity::primary();
     let _ = crate::with_attachments(crate::render_attachments(&options), conv.agent_loop_for_eval("What is the hotel confirmation number in this file?", &who)).await;
     let prompts = prompts.lock().unwrap().clone();
-    let compose: Vec<&String> = prompts.iter().filter(|(t, p)| !*t && p.contains("CONNECTED final answer")).map(|(_, p)| p).collect();
+    let compose: Vec<&String> = prompts.iter().filter(|(t, p)| !*t && p.contains("direct final answer")).map(|(_, p)| p).collect();
     let check: Vec<&String> = prompts.iter().filter(|(_, p)| p.contains("You check an answer against its source")).map(|(_, p)| p).collect();
     assert!(!compose.is_empty() && compose.iter().all(|p| p.contains("ZQ-AX-4471")), "compose did not see the file");
     assert!(!check.is_empty() && check.iter().all(|p| p.contains("ZQ-AX-4471")), "the check did not see the file");

@@ -18793,3 +18793,18 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
   - E.OPT1c's attachment test still finds the file in compose (its filter moves to "direct final answer").
 - K2, a mutant survives: the old CONNECT paragraph restored.
 - K3: both suites pass.
+
+**E.PACE2b K3, Linux (staging, 5d1dd0e):** mind-core 180 passed. (mind-conversation is unchanged since 1251 passed on ebfedcb.)
+
+## E.CONNECT1 — RESULT (code)
+
+**Built:** the compose wrap now says "concise, direct final answer", followed by the new ANSWER-WHAT-WAS-ASKED paragraph.
+
+**K1 held:**
+- the compose prompt carries "ANSWER WHAT WAS ASKED" and "Give no advice or suggestions the person did not ask for";
+- it carries neither "weave in" nor "CONNECT";
+- E.OPT1c's attachment test still finds the file in compose.
+
+**K2 held:** the mutant restoring the old CONNECT paragraph was killed.
+
+**K3:** Windows workspace 2541 passed, 0 failed. Linux follows.

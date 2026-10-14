@@ -18961,3 +18961,13 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - "0" read as on.
 
 **K3:** Windows workspace 2545 passed, 0 failed. Linux follows.
+
+**E.PREFIX1b prereg amendments (yantrik-os-dc, before any run):**
+1. **The OS is not held fixed.** #805 installs on 541 before the A/B. The A/B is within-run (A B B A), so both arms share the OS and it cannot confound A against B. Any comparison with E.PREFIX1a's baseline crosses an OS change and is labelled so. A smoke ask confirms dc's reply reader works with #805's timeline before any leg.
+2. **Ask 2's fresh facts** (whole-word absence check before each), legs A1 B1 B2 A2:
+   - A1: "Farah's promotion party is on 8 November";
+   - B1: "Zubin's graduation is on 16 December";
+   - B2: "Leela's book launch is on 29 November";
+   - A2: "Omar's retirement dinner is on 5 December".
+   Recall asks for each fact's date.
+3. **Ask 4's kill check:** dc reports, per B leg, the journal's raw args of the `weather` call (or its absence).

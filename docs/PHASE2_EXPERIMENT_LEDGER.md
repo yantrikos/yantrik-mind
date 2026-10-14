@@ -18327,3 +18327,7 @@ Per ARCH9 the reliability goes into the tool, not into another layer: no new arg
 **K3 (Windows):** full suite 2531 passed, 0 failed. Not in a bundle yet: ce70450 is frozen for E.THIN1-M.
 
 **E.WX1 K3, Linux (staging, 524ab9c):** mind-tools 268, mind-conversation 1245 passed. K3 held.
+
+**yantrik-os #800 (fix/taint-asks-before-commands) cleared at eba79cfe, conditional on CI test passing on that head.** It closes the E.CMP1 run-2 gap: a tainted session's commands are asked every time, whatever the mode, and full bypass fails closed. Design note sent: the auto/bypass guarantee rides on the card text "cannot be undone"; a typed `must_ask` field on the approval request would be sturdier (a follow-up, with shell.run_recipe free-text inputs).
+
+**E.THIN1-M, interim (yantrik-os-dc):** full A and thin A are done, and both passed ask 6 in 16–17 s. That is the first live outing of E.OPT1c and E.ANS1; ask 6 failed in both E.CMP1 runs on b803955. Thin A journalled 6 route=thin lines.

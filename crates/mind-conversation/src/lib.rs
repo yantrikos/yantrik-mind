@@ -4946,8 +4946,14 @@ pub(crate) fn already_remembered<'a>(statement: &str, earlier: &'a [String]) -> 
     if now.is_empty() {
         return None;
     }
+    // E.MEM2: a different number is a different fact -- "4 November" is not "5 November", however
+    // much else the two share. Without this a corrected date counted as a repeat of the old one.
+    let numbers = |w: &std::collections::BTreeSet<String>| -> Vec<String> { w.iter().filter(|t| t.chars().any(|c| c.is_ascii_digit())).cloned().collect() };
     earlier.iter().map(String::as_str).find(|e| {
         let then = words(e);
+        if numbers(&now) != numbers(&then) {
+            return false;
+        }
         let common = now.intersection(&then).count() as f64;
         let all = now.union(&then).count() as f64;
         all > 0.0 && common / all >= 0.6
@@ -4967,6 +4973,9 @@ mod mem1_tests {
         assert_eq!(already_remembered("Ravi's birthday is on 9 March", &priya), None);
         let tea = vec!["Remember I like tea".to_string()];
         assert_eq!(already_remembered("Remember I don't like coffee", &tea), None);
+        // E.MEM2: a different number is a different fact.
+        let fourth = vec!["Priya's birthday is on 4 November".to_string()];
+        assert_eq!(already_remembered("Priya's birthday is on 5 November", &fourth), None);
         assert_eq!(already_remembered("anything", &[]), None);
     }
 }
@@ -12345,6 +12354,21 @@ WINDOW: all-time, latest 200
                 if t.len() < 4 || !t.chars().any(|c| c.is_alphabetic()) {
                     return "(nothing to remember)".to_string();
                 }
+                // E.MEM2 (E.CMP1 run 1): a fact already believed is reinforced under its own words,
+                // not stored again in new ones -- one birthday had become five beliefs.
+                let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
+                let known: Vec<String> = self
+                    .memory
+                    .beliefs_matching(&t, &ctx)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|b| b.statement)
+                    .collect();
+                let t = match already_remembered(&t, &known) {
+                    Some(same) => same.to_string(),
+                    None => t,
+                };
                 match self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await {
                     Ok(_) => "(remembered)".to_string(),
                     // The memory boundary deliberately returns only a secret-free KIND on a

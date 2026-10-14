@@ -21422,3 +21422,27 @@ async fn compose_and_the_check_see_the_attached_file() {
     assert!(!compose.is_empty() && compose.iter().all(|p| p.contains("ZQ-AX-4471")), "compose did not see the file");
     assert!(!check.is_empty() && check.iter().all(|p| p.contains("ZQ-AX-4471")), "the check did not see the file");
 }
+
+/// E.MEM2 (E.CMP1 run 1, ask 2): one fact in three wordings, across turns, is one belief that gains
+/// evidence; a corrected date is a second belief, never merged into the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fact_is_reinforced_not_restated_and_a_new_date_is_new() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "YM");
+    let id = TurnIdentity::primary();
+    for t in [
+        "My sister Priya's birthday is on 4 November.",
+        "User's sister Priya has a birthday on 4 November.",
+        "Sister Priya's birthday: 4 November.",
+    ] {
+        assert_eq!(conv.run_agent_tool_as("remember", &serde_json::json!({"text": t}), &id).await, "(remembered)");
+    }
+    let audit = mind_types::AccessContext::operator_audit();
+    let priya = mem.beliefs_matching("Priya", &audit).await.unwrap();
+    assert_eq!(priya.len(), 1, "{:?}", priya.iter().map(|b| &b.statement).collect::<Vec<_>>());
+    assert!(priya[0].evidence_count >= 2, "the repeats did not reinforce it: {}", priya[0].evidence_count);
+    assert_eq!(priya[0].statement.trim_end_matches('.'), "My sister Priya's birthday is on 4 November", "the existing wording was replaced");
+    conv.run_agent_tool_as("remember", &serde_json::json!({"text": "My sister Priya's birthday is on 5 November."}), &id).await;
+    assert_eq!(mem.beliefs_matching("Priya", &audit).await.unwrap().len(), 2, "a new date was merged into the old one");
+}

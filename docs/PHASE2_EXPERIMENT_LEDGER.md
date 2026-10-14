@@ -18094,3 +18094,49 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 - **On the way:** the first version asserted the step prompt lacked "no saved skill", but the catalogue in the prompt says those words itself. The test now asserts one model call.
 
 **K3 (Windows):** full suite 2524 passed, 0 failed. **Both ship after E.CMP1.**
+
+## E.MEM2 — PREREG: a fact already believed is reinforced, not stored again in new words; a different number is never "the same fact"
+
+**Why:** E.CMP1 run 1, Mind leg, ask 2 ("Remember that my sister Priya's birthday is on 4 November", then "When is Priya's birthday?"). Afterwards mind.db held five distinct propositions about that one birthday, each worded differently. E.MEM1 dedupes `remember` calls within one turn only. Two other writers add to it:
+- `extract_taught_belief`, in the turn path before the loop, stores "my sister Priya's birthday is on 4 November" by code;
+- then the loop's model calls `remember` with its own wording, in that turn and the next.
+
+Each wording becomes a new belief, and none reinforces the first.
+
+E.MEM1's similarity test also has a defect this exposes. "Priya's birthday is on 4 November" and "Priya's birthday is on 5 November" overlap 3/5 = 0.6, so a corrected date would count as the same fact. Within one turn that cost was small; at the store it would merge a correction into the old date.
+
+**What is built:**
+1. **`already_remembered` (mind-conversation):** two statements are never the same fact when their digit-carrying tokens differ ("4" vs "5", "2026" vs "2027"). Otherwise unchanged (content-word Jaccard ≥ 0.6).
+2. **The `remember` tool:** before writing, it looks for existing beliefs sharing its words (`beliefs_matching`, under the turn's own access context). If one is the same fact by (1), the tool re-asserts THAT belief's statement, so its evidence grows on one belief, and answers "(remembered)" as before. Otherwise it writes the new statement as now.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **already_remembered:** 4 November vs 5 November → not the same; "Sister Priya's birthday is on 4 November" vs "User's sister Priya has her birthday on 4 November." → the same;
+  - **the tool, across two turns:** one fact in three wordings through `remember` leaves one belief matching "Priya" (evidence_count ≥ 2); then a 5 November statement adds a second belief, not a merge.
+  - E.MEM1's tests still pass.
+- K2, a mutant survives:
+  - the digit rule removed;
+  - the store lookup removed (three beliefs);
+  - re-asserting the NEW wording instead of the existing one.
+- K3: both suites pass.
+
+**Ships after E.CMP1.**
+
+## E.MEM2 — RESULT (code): a known fact is reinforced, and a different number is a different fact; 3 mutants killed
+
+**Built:** `already_remembered` refuses a match whose digit tokens differ. The `remember` tool re-asserts the statement of an existing near-duplicate (found with `beliefs_matching` under the turn's own access context) instead of storing new words.
+
+**K1 held:**
+- **Unit:** 4 vs 5 November are different facts; E.MEM1's cases are unchanged.
+- **Through the tool:** three wordings of the birthday leave ONE belief, with evidence_count ≥ 2, under the first wording (the store drops the trailing full stop); then a 5 November statement makes a second belief.
+
+**K2 held: 3 mutants killed:**
+- digit rule removed;
+- store lookup removed;
+- re-asserting the new wording.
+
+**K3 (Windows):** full suite 2525 passed, 0 failed. **Ships after E.CMP1.**
+
+**Not covered:** `extract_taught_belief` (the turn path's own code capture) still writes its statement directly. Its later restatements through `remember` now reinforce it, but a code capture after an earlier `remember` would add one. If 541 shows that, it is the next row.
+
+**The ⏳ line on ask 1** was the Lens's, not the Mind's (yantrik-os-dc checked): the hand-over had no ⏳ in it, and the Mind's stored reply starts "Tomorrow — Wed 14 Oct — is clear." It is recorded as a setup artifact on the OS side.

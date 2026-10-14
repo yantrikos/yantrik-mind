@@ -17845,3 +17845,59 @@ The compose instruction says "work log" three times ("based on this work log", "
 **Bundle `yantrik-mind-aa02af4-linux-amd64.tar.zst`** (sha256 87396674d3b6017b8fee0b839df56c88196d2b50a8851c1678a8be2a76e82fa0), built on staging against companion 965532e. It carries 1ca45b0 plus E.LOOP9, E.VOICE4, E.OUT2, E.LOCAL1, E.EGRESS7, E.SLASH2, E.SYS1 and E.VOICE5. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. Not installed anywhere yet.
 
 **aa02af4 on the Mac (192.168.4.49)**, 13 Oct, on Pranab's direct OK: `installed aa02af4 87396674d3b6017b attached`, BUILD `commit=aa02af4`, `agent_token=1`, `cmd_answer=1`, active, and the startup log shows the marker and "attached to the desktop as `mind`". The rollback is fc5aa7b.
+
+## E.CITE1 — PREREG: the work-log check trims the answer it was given instead of writing another one
+
+**Why:** the aa02af4 rerun on VM 541 (yantrik-os-dc, 13 Oct):
+- **Latency:** every tool turn ends with TWO long model calls, 24–75 s each and 404–1402 tokens out (e1: 24.2 + 36.2 s; e2: 62.6 + 74.6 s).
+- **Voice:** two replies speak in a voice compose was told not to use: "The provided source does not identify what is using the most memory" (e2), and earlier "The source does not list the note's contents, so it does not confirm…" (c).
+- **Doubling:** the doubled answers E.VOICE4 removed came from the second call replacing what was streamed.
+
+The second call is `MindRecipeEngine::cited_answer`: "Answer the user's question using ONLY the source below", as a full fresh generation of JSON claims. It runs after compose (and after an in-loop direct answer) whenever the turn used a tool, and its prose REPLACES the answer. So compose's voice, its connections (the calendar's dentist line) and E.VOICE5's plain-words instruction are thrown away on every tool turn, and the person reads the citation pass's wording.
+
+Its purpose is right and stays: claims the work log does not support must not reach the person.
+
+**What is built:**
+- **mind-recipes:** `checked_answer(question, answer, evidence)`.
+  - Split the answer into sentences, keeping every character, so the pieces join back to the answer exactly.
+  - Ask the model, on the private-grounded lane with output capped at 64 tokens, for the numbers of the sentences that state something the source does not support, as `{"unsupported":[…]}`. Offers, questions, and sentences saying something was not done or is not known are never unsupported.
+  - Drop exactly those sentences, keeping the rest verbatim.
+  - Fail-safe, the same direction as before: a failed or unparseable check, or one that flags every sentence, gives None, and the caller keeps its answer.
+- **mind-conversation:** both callers (compose, and the in-loop direct answer) use `checked_answer` on the answer they have, inside `with_step_effort("easy")`, which turns thinking off where the gateway can.
+- `cited_answer` stays for its other caller (cognitive.rs).
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **the splitter:** pieces join to the input exactly, including a list, a trailing question and no final full stop;
+  - with the model answering `{"unsupported":[2]}`, a three-sentence answer comes back without sentence 2 and with sentences 1 and 3 byte-for-byte;
+  - garbage from the model gives None; `[1,2,3]` of 3 gives None; `[]` gives the answer unchanged;
+  - the request asks for at most 64 tokens;
+  - **the loop:** a tool turn's reply is compose's text minus the flagged sentence, and contains no "source".
+- K2, a mutant survives:
+  - the flagged sentence kept;
+  - the max-tokens cap removed;
+  - the compose caller using `cited_answer` again.
+- K3: both suites pass.
+- **541 (not a build gate):** the second long call is gone (its gateway line is under 10 s and under 100 tokens out), and e2's reply has no "source" wording.
+
+## E.CITE1 — RESULT (code): the work-log check trims compose's answer; 3 mutants killed
+
+**Built:**
+- **mind-recipes:** `sentences`, `unsupported_of`, `CHECK_MAX_TOKENS` (64) and `checked_answer`, on the private-grounded lane, temperature 0, thinking off;
+- **mind-conversation:** compose and the in-loop direct answer call `checked_answer(user_text, answer, work log)` inside `with_step_effort("easy")`;
+- `cited_answer` remains for cognitive.rs.
+
+**K1 held:**
+- **Splitter:** round-trips four texts exactly (a list, an ellipsis, no final stop).
+- **Check results:** `[2]` drops only sentence 2 and keeps 1 and 3 byte-for-byte; `[]` keeps the answer; garbage gives None; all flagged gives None.
+- **Request:** the check asks for 64 tokens.
+- **Loop:** a tool turn's reply is compose's text minus the flagged sentence, with the check run exactly once and no "source" in the reply.
+
+**K2 held: 3 mutants killed:**
+- flagged sentence kept;
+- the token cap removed;
+- compose using `cited_answer` again.
+
+**On the way:** the privacy audit (no unscoped `.chat(` outside its allowlist) flagged the test's own stand-in model. It was rewritten to build its reply directly; the audit is unchanged.
+
+**K3 (Windows):** full suite 2519 passed, 0 failed. **541's latency and voice check is still to come.**

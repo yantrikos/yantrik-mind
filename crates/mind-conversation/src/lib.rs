@@ -13959,9 +13959,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     } else if !scratch.is_empty() {
                         // Anti-confabulation: re-ground a factual (tool-using) answer through the recipe
                         // engine's ThinkCited→Validate, which DETERMINISTICALLY strips uncited claims.
+                        // E.CITE1: a trim of this answer, not a second one.
                         if let Some(re) = &self.recipes {
-                            if let Some(grounded) = re.cited_answer(user_text, &scratch).await {
-                                a = grounded;
+                            if let Some(checked) = mind_inference::with_step_effort("easy".to_string(), re.checked_answer(user_text, &a, &scratch)).await {
+                                a = checked;
                             }
                         }
                     }
@@ -15046,9 +15047,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // so the tool-heavy turns that ran out of steps got the LEAST-checked answer. Close that gap:
         // strip uncited claims here too when there's a work log to check against.
         if !scratch.is_empty() {
+            // E.CITE1: a trim of compose's answer, not a second one in another voice.
             if let Some(re) = &self.recipes {
-                if let Some(grounded) = re.cited_answer(user_text, &scratch).await {
-                    ans = grounded;
+                if let Some(checked) = mind_inference::with_step_effort("easy".to_string(), re.checked_answer(user_text, &ans, &scratch)).await {
+                    ans = checked;
                 }
             }
         }

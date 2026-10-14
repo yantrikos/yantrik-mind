@@ -17383,6 +17383,67 @@ mod desktop_consent_and_stall_wiring {
         assert!(r.prompts.iter().any(|p| p.contains(crate::COMPOSE_PLAIN_WORDS)), "compose was not told");
     }
 
+    /// E.CITE1: a model that plays tool steps, writes compose's answer, and answers the work-log check.
+    struct Checked {
+        steps: StdMutex<Vec<Step>>,
+        checks: Arc<StdMutex<usize>>,
+    }
+    impl LLMBackend for Checked {
+        fn chat(&self, m: &[ChatMessage], _c: &GenerationConfig, tools: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let all: String = m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n");
+            let offered = tools.is_some_and(|t| !t.is_empty());
+            let (text, tool_calls) = if all.contains("You check an answer against its source") {
+                *self.checks.lock().unwrap() += 1;
+                (r#"{"unsupported":[2]}"#.to_string(), vec![])
+            } else if offered {
+                let mut steps = self.steps.lock().unwrap();
+                match (!steps.is_empty()).then(|| steps.remove(0)) {
+                    Some(Step::Call(n, a)) => (String::new(), vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a }]),
+                    Some(Step::Fail) => anyhow::bail!("the endpoint stopped answering"),
+                    _ => ("done".to_string(), vec![]),
+                }
+            } else {
+                ("Your disk is 72% full. Firefox uses the most memory. Want me to open System Monitor?".to_string(), vec![])
+            };
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text, prompt_tokens: 0, completion_tokens: 0, tool_calls, api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "checked"
+        }
+    }
+
+    /// E.CITE1 (VM 541): after a tool turn the reply is compose's own text with the one unsupported
+    /// sentence dropped -- not a second answer in the check's voice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reply_is_compose_minus_what_the_log_does_not_support() {
+        let checks = Arc::new(StdMutex::new(0usize));
+        let model: Arc<dyn LLMBackend> = Arc::new(Checked {
+            steps: StdMutex::new(vec![Step::Call("remember", serde_json::json!({"text": "disk is 72% full"})), Step::Fail]),
+            checks: checks.clone(),
+        });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        struct NoHost;
+        #[async_trait::async_trait]
+        impl mind_recipes::RecipeHost for NoHost {
+            async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                anyhow::bail!("no tools in this test")
+            }
+        }
+        let recipes = Arc::new(mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoHost), "YM"));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_recipes(recipes);
+        let reply = conv.agent_loop_for_eval("How full is my disk?", &TurnIdentity::primary()).await.unwrap_or_default();
+        assert_eq!(*checks.lock().unwrap(), 1, "the work-log check did not run once: {reply}");
+        assert!(reply.starts_with("Your disk is 72% full. Want me to open System Monitor?"), "{reply}");
+        assert!(!reply.contains("Firefox") && !reply.to_lowercase().contains("source"), "{reply}");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

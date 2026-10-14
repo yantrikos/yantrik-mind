@@ -1117,6 +1117,55 @@ impl RecipeEngine {
         Some(render(&kept, &RenderFormat::Prose))
     }
 
+    /// E.CITE1 (VM 541): the work-log check, as a trim of the answer the turn already wrote rather
+    /// than a second answer. `cited_answer` regenerated the whole reply from the source -- 24-75 s
+    /// and 400-1400 tokens on a 27B, in a voice that said "The provided source does not identify…",
+    /// and it threw away compose's own wording. Here the model only names the sentences the source
+    /// does not support (a few tokens out), and code drops exactly those; the rest is kept verbatim.
+    ///
+    /// None -- the caller keeps its answer -- when the check fails, cannot be read, or flags every
+    /// sentence: the same fail-open direction `cited_answer`'s None had.
+    pub async fn checked_answer(&self, question: &str, answer: &str, evidence: &str) -> Option<String> {
+        let pieces = sentences(answer);
+        let numbered: String = pieces
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("[{}] {}\n", i + 1, p.trim()))
+            .collect();
+        let messages = vec![
+            ChatMessage::system(
+                "You check an answer against its source. List the numbers of the sentences that state a fact \
+                 the source does not support. Offers, questions, and sentences that say something was not done \
+                 or is not known are never unsupported. Output ONLY JSON: {\"unsupported\":[numbers]}.",
+            ),
+            ChatMessage::user(format!(
+                "QUESTION: {question}\n\nSOURCE:\n{evidence}\n\nANSWER, by sentence:\n{numbered}\nOutput ONLY {{\"unsupported\":[numbers]}}."
+            )),
+        ];
+        let cfg = GenerationConfig {
+            max_tokens: CHECK_MAX_TOKENS,
+            temperature: 0.0,
+            think: mind_inference::think_for("reasoning", Some(false)),
+            ..GenerationConfig::default()
+        };
+        // PRIVATE-GROUNDED, as `cited_answer`: the evidence is the work log, recall output included.
+        let raw = self.inference.chat_grounded(messages, cfg).await.ok()?.text;
+        let flagged = unsupported_of(&raw)?;
+        if flagged.iter().filter(|n| (1..=pieces.len()).contains(*n)).count() >= pieces.len() {
+            return None;
+        }
+        Some(
+            pieces
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !flagged.contains(&(i + 1)))
+                .map(|(_, p)| *p)
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        )
+    }
+
     pub async fn run_with(&self, recipe: &Recipe, vars: HashMap<String, Value>) -> RunOutcome {
         self.run_with_identity(recipe, vars, RecipeRunIdentity::other())
             .await
@@ -3052,6 +3101,48 @@ Hope it helps."
     }
 }
 
+/// E.CITE1: the most the work-log check may write -- a list of sentence numbers.
+pub const CHECK_MAX_TOKENS: usize = 64;
+
+/// E.CITE1: an answer cut into sentences that join back to it exactly: each piece runs to the end of
+/// a sentence (`.`, `!`, `?` or `…` before whitespace) or of a line, whitespace after it included.
+pub fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let (_, c) = chars[i];
+        let next_ws = chars.get(i + 1).map_or(true, |(_, n)| n.is_whitespace());
+        if c == '\n' || (matches!(c, '.' | '!' | '?' | '\u{2026}') && next_ws) {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].1.is_whitespace() {
+                j += 1;
+            }
+            let end = chars.get(j).map_or(text.len(), |(b, _)| *b);
+            if !text[start..end].trim().is_empty() {
+                out.push(&text[start..end]);
+                start = end;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// E.CITE1: the sentence numbers in a check's `{"unsupported":[…]}`, or None when it cannot be read.
+fn unsupported_of(raw: &str) -> Option<Vec<usize>> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    let v: Value = serde_json::from_str(raw.get(start..=end)?).ok()?;
+    v.get("unsupported")?.as_array()?.iter().map(|n| n.as_u64().map(|n| n as usize)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3168,6 +3259,60 @@ print(1)").with_stop_reason(reason));
             e.cited_answer("q", "EVIDENCE: none").await.is_none(),
             "ungrounded claims must yield None"
         );
+    }
+
+    /// E.CITE1: the check trims the answer it was given; it never writes another.
+    #[tokio::test]
+    async fn the_check_drops_only_the_flagged_sentence() {
+        let answer = "Your disk is 72% full. Firefox uses the most memory. Want me to open System Monitor?";
+        let e = engine(r#"{"unsupported":[2]}"#);
+        assert_eq!(
+            e.checked_answer("disk?", answer, "disk 72%").await.as_deref(),
+            Some("Your disk is 72% full. Want me to open System Monitor?")
+        );
+        assert_eq!(engine(r#"{"unsupported":[]}"#).checked_answer("q", answer, "s").await.as_deref(), Some(answer));
+        assert_eq!(engine("I think sentence two").checked_answer("q", answer, "s").await, None, "unreadable");
+        assert_eq!(engine(r#"{"unsupported":[1,2,3]}"#).checked_answer("q", answer, "s").await, None, "all flagged");
+    }
+
+    #[test]
+    fn sentences_join_back_to_the_answer() {
+        for text in [
+            "One. Two! Three?",
+            "A list:\n- milk\n- eggs\nThat is all",
+            "Ends without a stop",
+            "Dentist on Thu 15 Oct, 3:00 PM. Nothing tomorrow\u{2026} Want a reminder?",
+        ] {
+            assert_eq!(sentences(text).concat(), text, "{text:?}");
+        }
+        assert_eq!(sentences("One. Two! Three?"), vec!["One. ", "Two! ", "Three?"]);
+    }
+
+    /// E.CITE1: the check asks for a few tokens, not an answer.
+    #[tokio::test]
+    async fn the_check_asks_for_a_few_tokens() {
+        struct Sees(std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+        impl LLMBackend for Sees {
+            fn chat(&self, _: &[ChatMessage], c: &GenerationConfig, _: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                self.0.lock().unwrap().push(c.max_tokens);
+                Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: r#"{"unsupported":[]}"#.into(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![], api_tool_calls: vec![], stop_reason: "stop".into() })
+            }
+            fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                Self::chat(self, m, c, t)
+            }
+            fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+                Ok(t.len() / 4)
+            }
+            fn backend_name(&self) -> &str {
+                "sees"
+            }
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pool = InferencePool::new(Arc::new(Sees(seen.clone())) as Arc<dyn LLMBackend>, 1);
+        let e = RecipeEngine::new(pool, Arc::new(ScriptedHost), "You are JARVIS.");
+        let _ = e.checked_answer("q", "One. Two.", "s").await;
+        assert_eq!(*seen.lock().unwrap(), vec![CHECK_MAX_TOKENS]);
+        assert!(CHECK_MAX_TOKENS <= 64);
     }
 
     /// `Summary` is still bullets — the briefing recipe genuinely IS a list of items, and the fix

@@ -18853,3 +18853,31 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 - 90a87f7 is now on 541 and the Mac.
 
 **520 (yantrik-os-dc):** e2fbcb6 never landed. It was waiting behind the candidate ISO's batch lock; dc stopped it, and the lock was untouched. 90a87f7 is queued instead, with rollback 5e6eae2 (still on 520).
+
+## E.PREFIX1a — PREREG: measure how much of each step's prompt repeats the previous call's, before changing it
+
+**Why:** Pranab chose (14 Oct) to fix the Mind's prompt prefix before touching Strata or the coder lanes. Step 1 of an ask is mostly cold: 18% of Mind model time on 541, and 20 s on the Mac under contention.
+
+**What the code shows, but nothing has measured:** a step's request is laid out as:
+1. the persona (a system message);
+2. then, as the chat template renders it, the tool schemas: core + meta + pinned + on-this-computer, then the ask's relevance-picked top-K;
+3. then the agent-rules system message;
+4. then the user message, which opens with "Current date/time".
+
+So two different asks share at most persona + core/pinned schemas. How many bytes sit on each side is unknown. The fix (reorder, keep the schema set stable, or move the date) depends on it. This codebase's rule: measure before choosing an allowance.
+
+**What is built (an instrument only; behaviour unchanged):**
+- `prefix_probe::render(messages, schemas)` lays out the text in that order. `prefix_probe::shared(prev, now)` gives the shared byte count and the segment of the first difference: `persona`, `tools`, `system`, `prompt`, or `nothing`.
+- The engine keeps the previous step call's render. Each step logs `[agent] step N: prompt prefix S/T bytes the same as the previous call; first difference in X`.
+- The line carries numbers and a segment name only, never prompt text.
+
+**Reading (541, dc, after install):** E.CMP1's six asks once, plus the same ask twice in a row. Report per step: S, T, X, and whether the previous call was the same turn or an earlier one. This baseline designs E.PREFIX1b.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **shared():** a persona change gives `persona`; a schema change `tools`; an agent-rules change `system`; a date-line change `prompt`; identical renders give `nothing` with S = T.
+  - **The loop:** after two turns of different asks with the same tools, the second turn's first step reports `prompt`, with S at least the persona length plus the schema JSON.
+- K2, a mutant survives:
+  - the segment boundaries swapped;
+  - the previous render not kept (always "first call").
+- K3: both suites pass.

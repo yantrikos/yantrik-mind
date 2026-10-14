@@ -18808,3 +18808,15 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 **K2 held:** the mutant restoring the old CONNECT paragraph was killed.
 
 **K3:** Windows workspace 2541 passed, 0 failed. Linux follows.
+
+**E.CONNECT1 prereg amendments (yantrik-os-dc, before any run):**
+1. **Ask 2's fresh facts:**
+   - C1: "Remember that my cousin Tanvi's recital is on 6 December." / "When is Tanvi's recital?"
+   - C2: "Remember that my friend Ishaan's wedding is on 19 December." / "When is Ishaan's wedding?"
+   Both sit beside dates already in memory (3, 9, 11 and 12 Dec), so the old behaviour has every chance to show. dc checks mind.db with a whole-word match that neither name is present.
+2. **The "advice reply" rule:**
+   - An offer of the Mind's own help, as a question or "if you want, I can…", is NOT advice.
+   - A sentence telling the person what they should, might want to, or could do IS advice.
+   - A statement about the person (busy, slammed, stretched, how they feel) that neither the work log nor what-you-know shows IS advice.
+   Under this rule the control is 4/12: B1 2a, B1 4, B2 2b, B2 4.
+3. **Offers are counted separately in both arms**, as data, not as a criterion.

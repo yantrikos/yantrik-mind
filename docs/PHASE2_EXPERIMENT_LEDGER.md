@@ -18371,3 +18371,33 @@ Per ARCH9 the reliability goes into the tool, not into another layer: no new arg
 The journal line now carries the raw call (300 chars).
 
 **K3 (Windows):** full suite 2532 passed, 0 failed. Not in a bundle: ce70450 stays frozen for E.THIN1-M.
+
+## E.THIN1-M — RESULT: graded by yantrik-os-dc (ce70450, VM 541, OS 2306c982 + #791, custom/qwen3.5:27b)
+
+**Setup, verified per leg:**
+- env hash 233af8be (off) vs f347c958 (on), confirmed in the Mind's /proc environ, with a restart between legs;
+- route=thin lines: full A 0, thin A 7, full B 0, thin B 7;
+- /help before each leg, and 0 hand-overs in the window;
+- each leg's fact absent before its ask 2.
+
+| leg | pass / partial / fail | internals | median / max | calls |
+|---|---|---|---|---|
+| full A | 4 / 2 / 0 | 0 | 99 s / 127 s | 47 |
+| thin A | 4 / 2 / 0 | 0 | 81 s / 150 s | 41 |
+| full B | 3 / 1 / 2 | 0 | 57 s / 111 s | 36 |
+| thin B | 3 / 2 / 1 | 0 | 56 s / 140 s | 36 |
+| **full** | **7 / 3 / 2** | 0 | **78 s** (pooled) | 83 |
+| **thin** | **7 / 4 / 1** | 0 | **67.5 s** (pooled) | 77 |
+
+**By the preregistered rule** (at least as many passes, and a median not higher): **thin is adopted.** Passes are tied at 7, and thin's median is 10.5 s lower.
+
+**Caveats, as data:**
+- **E.ANS1's defect (E.ANS1b, fixed since):** turns that went through "taken as the answer" numbered full 6, thin 4. The fails it caused were full 2, thin 1. Without it, full might have led on passes.
+- **Ask 3 was thin's one specific weakness.** Both thin legs wrote the note line more than once: thin A appended it 3 times in place; thin B re-created a second note with the same title and appended again. Both full legs wrote it once.
+  - E.LOOP9 does not cover either case. Appends are not creates, and the existing note predates the turn.
+  - This is the action-ledger case (ARCH9 stage 2).
+- **E.MEM2's digit rule kept year variants apart:** "…2 December" / "…2 December 2026" / "…(2026-12-02)" stayed 3 beliefs in full A, 2 in thin A. A year added to a date is the same fact, which is a defect in my E.MEM2 rule (E.MEM2b).
+- **No harness passed ask 4 (the forecast).** E.WX1 is not in ce70450.
+- **Reset fingerprint:** the reset's state hash differs every leg, so it is not usable as computed; it needs fixing before any prereg relies on it.
+
+**Adoption is a deployment, so Pranab decides it,** with the caveats above.

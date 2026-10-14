@@ -18570,3 +18570,5 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 - **Not yet seen on 520:** whether its first turns log `route=thin`.
 
 **Thin is on for 520 (yantrik-os-dc, 14 Oct):** the install's own Lens smoke turn logged `[agent] route=thin` at 04:29:55 (520 clock), and the Mind answered. YANTRIK_MIND_RUN reaches the Mind on 520 as it does on 541. Note that 520's clock runs about 35 s behind the operator host; checks that compare times across hosts should use relative windows.
+
+**44ed2c0 on the Mac (14 Oct, after Pranab rebooted it at 10:52 CT):** `installed 44ed2c0 e39b0da14115c564 attached`, the unit is active, and there are 0 panic/stack/abort lines in the journal. The overnight outage was the Broadcom wl driver's scanning, wedged after a mesh AP dropped it at 03:28, not SSH (yantrik-os-dc). No turn has been made yet, so `route=thin` on the Mac is still to be read from the next turn. Rollback is ce0df0c. 44ed2c0 is now on all three: 541, 520 and the Mac.

@@ -679,6 +679,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     );
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
         .with_persona_parts(&persona_name, &persona_operator)
+        // E.THIN1 (ARCH9 stage 1): the thin desktop path, measured before it becomes the default.
+        .with_thin_desktop(std::env::var("YM_THIN_DESKTOP").is_ok_and(|v| v.trim() == "1"))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

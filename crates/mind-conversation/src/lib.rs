@@ -6049,6 +6049,10 @@ pub struct ConversationEngine {
     /// E.NAME2: the Mind's name and the person's, when the persona was built from them -- what
     /// `refresh_operator` rebuilds it from. None for a persona given whole.
     persona_parts: std::sync::RwLock<Option<(String, String)>>,
+    /// E.THIN1 (ARCH9 stage 1): the thin desktop path -- the primary person's turn goes from the
+    /// commands and the Mind's own pending questions straight to the agent loop, with no shortcut
+    /// answering first and no pass rewriting after. Off by default; `YM_THIN_DESKTOP=1`.
+    thin_desktop: bool,
     /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
@@ -6238,6 +6242,12 @@ impl ConversationEngine {
         self.persona.read().map(|p| p.clone()).unwrap_or_default()
     }
 
+    /// E.THIN1: turn the thin desktop path on (see the field).
+    pub fn with_thin_desktop(mut self, on: bool) -> Self {
+        self.thin_desktop = on;
+        self
+    }
+
     /// E.NAME2: remember what the persona was built from, so a rename can rebuild it.
     pub fn with_persona_parts(self, mind_name: &str, operator: &str) -> Self {
         if let Ok(mut parts) = self.persona_parts.write() {
@@ -6285,6 +6295,7 @@ impl ConversationEngine {
             inference,
             persona: std::sync::RwLock::new(persona.into()),
             persona_parts: std::sync::RwLock::new(None),
+            thin_desktop: false,
             recent_window: 20,
             web: None,
             mail: None,
@@ -11348,6 +11359,16 @@ WINDOW: all-time, latest 200
     /// Returns `Some(reply)` if this turn was an action turn (handled), `None` to fall through to chat.
     #[deny(unused_variables)]
     async fn handle_action(&self, user_text: &str) -> Option<String> {
+        if let Some(reply) = self.handle_pending_action(user_text).await {
+            return Some(reply);
+        }
+        self.propose_action(user_text).await
+    }
+
+    /// E.THIN1: the half of `handle_action` that answers the Mind's OWN pending questions -- an
+    /// action waiting for "yes", a recipe paused on a question. The thin path keeps this and not the
+    /// other half, which parses new requests out of the text.
+    async fn handle_pending_action(&self, user_text: &str) -> Option<String> {
         let runtime = self.runtime.as_ref()?;
 
         // 1. Resolve a pending confirmation first.
@@ -11380,6 +11401,12 @@ WINDOW: all-time, latest 200
                 return Some(self.handle_recipe_outcome(out));
             }
         }
+        None
+    }
+
+    /// The half of `handle_action` that proposes a new gated action from the message's text.
+    async fn propose_action(&self, user_text: &str) -> Option<String> {
+        let runtime = self.runtime.as_ref()?;
 
         // 2a. Draft-and-send recipe: the LLM drafts the body (Think), then the Act step proposes the
         // gated send. If the body wasn't given, an AskUser step PAUSES to ask for it, then resumes.
@@ -14004,8 +14031,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     } else if !scratch.is_empty() {
                         // Anti-confabulation: re-ground a factual (tool-using) answer through the recipe
                         // engine's ThinkCited→Validate, which DETERMINISTICALLY strips uncited claims.
-                        // E.CITE1: a trim of this answer, not a second one.
-                        if let Some(re) = &self.recipes {
+                        // E.CITE1: a trim of this answer, not a second one. E.THIN1: none on the thin path.
+                        if let Some(re) = self.recipes.as_ref().filter(|_| !self.thin_desktop) {
                             let evidence = format!("{scratch}\n\n{}", attachments::attachments_section());
                             if let Some(checked) = mind_inference::with_step_effort("easy".to_string(), re.checked_answer(user_text, &a, &evidence)).await {
                                 a = checked;
@@ -15106,8 +15133,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // so the tool-heavy turns that ran out of steps got the LEAST-checked answer. Close that gap:
         // strip uncited claims here too when there's a work log to check against.
         if !scratch.is_empty() {
-            // E.CITE1: a trim of compose's answer, not a second one in another voice.
-            if let Some(re) = &self.recipes {
+            // E.CITE1: a trim of compose's answer, not a second one in another voice. E.THIN1: none
+            // on the thin path.
+            if let Some(re) = self.recipes.as_ref().filter(|_| !self.thin_desktop) {
                 // E.OPT1c: the check reads the attached files too, or it marks their facts unsupported.
                 let evidence = format!("{scratch}\n\n{}", attachments::attachments_section());
                 if let Some(checked) = mind_inference::with_step_effort("easy".to_string(), re.checked_answer(user_text, &ans, &evidence)).await {
@@ -15674,6 +15702,34 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 .append_message_scoped("assistant", &reply, ws.clone())
                 .await;
             return Ok(reply);
+        }
+        // E.THIN1 (ARCH9 stage 1): the thin desktop path. The primary person's turn keeps only what
+        // answers the Mind's OWN pending questions -- an erase it asked about, an action it asked to
+        // confirm -- and then goes straight to the agent loop: no keyword shortcut answers first, no
+        // code captures a belief or a task, no second loop competes for the turn.
+        if self.thin_desktop && matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
+            stage("erase");
+            if let Some((reply, needle)) = self.handle_pending_erase(user_text).await {
+                let said = mind_types::erase_text::replace_ci(
+                    user_text,
+                    &needle.trim().to_ascii_lowercase(),
+                    mind_types::erase_text::ERASED,
+                );
+                let _ = self.memory.append_message_scoped("user", &said, ws.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                return Ok(reply);
+            }
+            stage("action");
+            if let Some(reply) = self.handle_pending_action(user_text).await {
+                let _ = self.memory.append_message_scoped("user", user_text, ws.clone()).await;
+                let _ = self.memory.append_message_scoped("assistant", &reply, ws).await;
+                return Ok(reply);
+            }
+            stage("route");
+            eprintln!("[agent] route=thin");
+            // Boxed: a second inline await of the loop doubled this function's future and
+            // overflowed a 1 MiB Windows test stack (the E.STACK1 shape).
+            return Box::pin(self.agent_loop(user_text, &id)).await;
         }
         // ARCH-1 slice 2: every memory read this turn makes — directly or via an intercept
         // (drafting, grounding, pinning) — carries the speaker's Principal ctx.

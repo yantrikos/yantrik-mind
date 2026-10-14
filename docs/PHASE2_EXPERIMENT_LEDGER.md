@@ -18167,3 +18167,70 @@ No winner from one run (cb2n's rule). The Mind's two non-passes with a cause in 
 - **Ask 1 is graded against the calendar for the actual tomorrow at the time of the ask.** Run 2 runs on 14 Oct, so tomorrow is Thu 15 Oct. Pass: names the Dentist at 15:00 on Thu 15 Oct and invents nothing. Fail: says nothing is on, invents an event, or gives a wrong date.
 - **Run 1's ask 1 grades stand as recorded**, DeepSeek's "ambiguous" included; this amendment does not regrade them.
 - Amendment 2 (Ravi, 9 March) applies to run 2's ask 2.
+
+## E.THIN1 — PREREG: the thin desktop path, behind a switch (ARCH9 stage 1)
+
+**Why:** Pranab's direction (14 Oct): one person, one desktop, and remove layers rather than add rules. About twenty components in `handle_turn_as_counted` can answer or redirect a turn before the model sees it. Two days on VM 541 found most defects in exactly those layers:
+- the photo follow-up took an attached-picture turn;
+- the mail and news guesses;
+- code-captured "taught" beliefs duplicated what the model's `remember` stored;
+- the console text rewrite of "/new".
+
+The end-of-turn work-log check is another call per tool turn.
+
+Whether removing these layers helps is a hypothesis. This builds the removal as a switch, so it can be measured against the current path on the same bundle, the same machine and the same model.
+
+**What is built (mind-conversation + mind-core):**
+- `ConversationEngine::with_thin_desktop(bool)`. mind-core sets it from `YM_THIN_DESKTOP=1`. **Off by default:** with the switch off, every path is byte-identical to today.
+- With it on, for the primary person's own turn, `handle_turn_as_counted` runs, in order:
+  - the presence ingest, the handed-over bookkeeping and the slash commands (unchanged, before the switch);
+  - the self-model registry (`self_claims`), kept so the Mind cannot make false claims about itself; it is ablated separately later with its own asks;
+  - a pending erase confirmation and a pending action confirmation (stateful answers to the Mind's own questions, never guesses);
+  - then **directly the classic agent loop** (`route=thin` in the journal).
+- **Skipped when on:** episode, proactive and ledger resolution; knock replies; drop; the courier; onboarding/whois capture; the primer; emotion recording; the regret baseline; the news, creative, photo, mail, researchops, draft, skills and sandbox shortcuts; taught-belief and commitment capture by code; the arithmetic/clock grammar; and the cognitive bounded loop.
+- **The work-log check (E.CITE1) is skipped in both of its places** when the switch is on.
+- Member and group turns are unchanged; thin applies to the primary viewer only.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails, with the switch ON:
+  - a photo-follow-up phrase ("What is in this picture?") reaches the model;
+  - a mail-lookup phrase reaches the model;
+  - "Remember that my sister Priya's birthday is on 4 November" writes no belief by code (zero beliefs when the scripted model does not call `remember`);
+  - "what is 2+2" reaches the model;
+  - "/new" is still answered by code;
+  - a pending action confirmation is still settled by its "yes";
+  - the journal says route=thin;
+  - a tool turn makes no work-log check call.
+- K1, with the switch OFF: the same photo phrase with a photo session still takes the photo follow-up, and the full suite is unchanged.
+- K2, a mutant survives:
+  - the switch ignored;
+  - the action confirmation dropped from the thin path;
+  - the check still run when thin.
+- K3: both suites pass.
+
+**The measurement (E.THIN1-M), preregistered here before any run:**
+- **Setup:** VM 541, one bundle, one model (as E.CMP1). The Mind is run with `YM_THIN_DESKTOP=1`, on E.CMP1's six asks with amendments 2 and 3, graded by E.CMP1's rules by yantrik-os-dc.
+- **Compared against:** the Mind's E.CMP1 run-2 leg (switch off). Two runs.
+- **Reported:** pass/partial/fail, internals, median and maximum wall time, and gateway calls per ask, side by side.
+- **Decision rule, fixed now:** thin is adopted as the desktop default if, over the two runs, it scores at least as many passes as the full path AND its median wall time is not higher. If it scores fewer passes, the asks it lost name the layers that earned their keep. Those are put back one at a time, each with its own measured row. A tie on passes with lower latency counts as adopted.
+
+## E.THIN1 — RESULT (code): the thin desktop path is built behind `YM_THIN_DESKTOP`; 3 mutants killed
+
+**Built:**
+- `with_thin_desktop`, set in mind-core from `YM_THIN_DESKTOP=1`; off by default.
+- The thin branch sits right after `self_claims`.
+- `handle_action` is split into `handle_pending_action` (the Mind's own pending questions, kept on the thin path) and `propose_action` (parsing a new action out of text, which is NOT on the thin path). The full path calls both, as before.
+- Both work-log check sites are filtered off when thin.
+
+**K1 held:**
+- **Thin on:** "What is in this picture?", a mail lookup and "what is 2+2" all reach the model; "/new" is answered by code; "Remember that my sister Priya's…" writes zero beliefs by code; a pending send's "yes" sends it (made in full mode, then switched); a tool turn runs zero checks.
+- **Thin off:** the photo follow-up still takes its phrase, and the code capture writes its belief.
+
+**K2 held: 3 mutants killed:**
+- the switch ignored;
+- the pending action dropped from the thin path;
+- the check still run when thin (both sites).
+
+**A stack overflow on the way, caught by the full suite:** the thin branch's second inline `self.agent_loop(..).await` grew `handle_turn_as_counted`'s future, and `cli_dispatch_routes_plugins_and_chat` overflowed the Windows test stack. It passes without the change, as checked with a stash. The thin call is now `Box::pin(..)`, the E.STACK1 shape.
+
+**K3 (Windows):** full suite 2529 passed, 0 failed.

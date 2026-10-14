@@ -17461,6 +17461,82 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": " Answer ", "text": "hi"}})).as_deref(), Some("hi"));
     }
 
+    /// E.THIN1: one turn of the primary person, thin or not, with a model that answers "MODEL".
+    async fn thin_turn(thin: bool, text: &str) -> (String, MemoryHandle) {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let model = Arc::new(ScriptedLLM::new("MODEL"));
+        let pool = InferencePool::new(model.clone() as Arc<dyn LLMBackend>, 1).with_provider("script").with_private_backend(model, "script");
+        let conv = ConversationEngine::new(Arc::new(mem.clone()) as Arc<dyn MemoryFacade>, pool, "YM").with_thin_desktop(thin);
+        let reply = conv.handle_turn_as_counted(text, TurnIdentity::primary()).await.unwrap_or_else(|e| format!("ERR {e}"));
+        (reply, mem)
+    }
+
+    /// E.THIN1 (ARCH9 stage 1): on the thin path the model answers what a shortcut took before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_the_thin_path_the_model_answers_what_a_shortcut_took() {
+        for text in ["What is in this picture?", "find my mail about the invoice from Acme", "what is 2+2"] {
+            let (thin, _) = thin_turn(true, text).await;
+            assert_eq!(thin, "MODEL", "a shortcut answered {text:?} on the thin path");
+        }
+        // Off, the photo follow-up still takes it.
+        let (full, _) = thin_turn(false, "What is in this picture?").await;
+        assert!(full.contains("working set"), "the full path changed: {full}");
+        // "/new" is a command, answered by code either way.
+        let (new, _) = thin_turn(true, "/new").await;
+        assert!(new.starts_with("New conversation"), "{new}");
+    }
+
+    /// E.THIN1: no belief is written by code on the thin path -- what the model stores is all there is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_the_thin_path_code_captures_no_belief() {
+        let ask = "Remember that my sister Priya's birthday is on 4 November";
+        let audit = mind_types::AccessContext::operator_audit();
+        let (_, thin) = thin_turn(true, ask).await;
+        assert_eq!(thin.beliefs_matching("Priya", &audit).await.unwrap().len(), 0, "code captured a belief on the thin path");
+        let (_, full) = thin_turn(false, ask).await;
+        assert_eq!(full.beliefs_matching("Priya", &audit).await.unwrap().len(), 1, "the full path no longer captures (control)");
+    }
+
+    /// E.THIN1: the Mind's own pending question is still answered on the thin path -- a "yes" to a
+    /// send it asked to confirm sends it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_the_thin_path_a_pending_confirmation_is_settled() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let model = Arc::new(ScriptedLLM::new("MODEL"));
+        let pool = InferencePool::new(model.clone() as Arc<dyn LLMBackend>, 1).with_provider("script").with_private_backend(model, "script");
+        let sender = Arc::new(ScriptedMailSender::new());
+        let mut conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_runtime(gated_runtime(sender.clone()));
+        let asked = conv.handle_turn_as_counted("send an email to test@example.com saying hello", TurnIdentity::primary()).await.unwrap();
+        assert!(asked.to_lowercase().contains("confirm"), "{asked}");
+        conv.thin_desktop = true;
+        let done = conv.handle_turn_as_counted("yes", TurnIdentity::primary()).await.unwrap();
+        assert!(done.starts_with("Done"), "the thin path dropped the pending confirmation: {done}");
+        assert_eq!(sender.sent.lock().unwrap().len(), 1);
+    }
+
+    /// E.THIN1: no work-log check on the thin path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_the_thin_path_no_work_log_check_runs() {
+        let checks = Arc::new(StdMutex::new(0usize));
+        let model: Arc<dyn LLMBackend> = Arc::new(Checked {
+            steps: StdMutex::new(vec![Step::Call("remember", serde_json::json!({"text": "disk is 72% full"})), Step::Fail]),
+            checks: checks.clone(),
+        });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        struct NoHost;
+        #[async_trait::async_trait]
+        impl mind_recipes::RecipeHost for NoHost {
+            async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                anyhow::bail!("no tools in this test")
+            }
+        }
+        let recipes = Arc::new(mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoHost), "YM"));
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_recipes(recipes).with_thin_desktop(true);
+        let _ = conv.agent_loop_for_eval("How full is my disk?", &TurnIdentity::primary()).await;
+        assert_eq!(*checks.lock().unwrap(), 0, "the work-log check ran on the thin path");
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

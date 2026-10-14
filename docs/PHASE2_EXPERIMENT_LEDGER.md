@@ -18260,3 +18260,30 @@ Each recall question asks for that fact's date, and each leg is checked to hold 
 - **Hermes ask 5.** Never delivered (queued behind ask 4), so a fail caused by the OS. An unscored supplementary ask 5 after /stop would have passed.
 - **A confound across legs.** The desktop hand-over (#245) still fires after "+ new conversation", so each leg's ask 1 after a mind switch carried the previous mind's last four exchanges, AX-4471 included. yantrik-os-dc checked that no Hermes run-2 grade benefited. The same mechanism can reach ask 6, whose answer is AX-4471. Any leg whose ask-6 turn carried a hand-over containing it is to be marked in the report.
 - **For E.THIN1-M:** all four legs are the Mind, with no mind switch between them, so no hand-over is made. yantrik-os-dc makes sure the Mind spoke last before full A starts.
+
+## E.CMP1 — RESULT: two runs, graded by yantrik-os-dc (b803955, OS 2306c982 + #791, all on custom/qwen3.5:27b)
+
+| | Mind | Hermes | DeepSeek |
+|---|---|---|---|
+| run 1 (pass/partial/fail) | 3 / 2 / 1 of 6 | 4 / 0 / 1 of 5 (ask 2 unscored) | 4 / 1 / 0 of 5 (ask 1 ambiguous) |
+| run 2 | 4 / 1 / 1 of 6 | 2 / 1 / 3 of 6 | 5 / 1 / 0 of 6 |
+| both runs | 7 / 3 / 2 of 12 | 6 / 1 / 4 of 11 | 9 / 2 / 0 of 11 |
+| internals | 0 / 12 | 11 / 11 | 12 / 12 |
+| median wall (r1, r2) | 85 s, 93 s | 85 s, 99 s | 51 s, 40 s |
+| max wall (r1, r2) | 135 s, 196 s | 180 s, 608 s | 236 s, 258 s |
+
+**My reading**, as the Mind's author; no winner is declared, per the prereg:
+- **DeepSeek leads on outcome and speed.** Its ask 6 passed both runs by finding trip-notes.txt already open in the editor, a machine state the reset did not name, not through the attachment.
+- **The Mind is second on outcome, and the only one that never showed internals.**
+  - Its two fails are both ask 6 (the attachment). The cause is fixed in ce70450 (E.OPT1c, E.ANS1) and not yet measured.
+  - Its run-2 ask 2 had exactly one belief, where run 1 had five; E.MEM2 is not in b803955, so that difference is not E.MEM2's doing.
+- **Hermes is third, hurt by two OS defects:** the clarify deadlock (ask 4, and ask 5 never delivered) and attachments not reaching it (ask 6).
+- **Weekend forecast:** no harness produced one in any run.
+
+**Notes the report raises for the Mind:**
+- **The hand-over check, done:**
+  - No leg's ask 6 carried a hand-over in either run, so no ask 6 is confounded.
+  - The Mind's run-2 ask 1 carried DeepSeek's hand-over, which included AX-4471. Its run-2 ask 3 reply then offered "a reminder for Saturday 7pm with Ravi", which no ask requested. That came from the hand-over's trip notes, woven in by compose's CONNECT instruction. It's a candidate for the thin path (no CONNECT weaving into an unrelated ask), measured not assumed.
+- **Hermes ask 2's "exactly one memory" with consolidated rows** is recorded as an ambiguity: strict reading partial, active-only pass.
+
+**Security, OS-side (yos-mcp), dispatched as fix/taint-asks-before-commands:** in DeepSeek's run-2 ask 4, after the taint rule refused web_go, the model ran `run_command curl …open-meteo…`. That command was graded as ordinary, because the taint rule covers hand-offs only. In auto or bypass mode a session rule would answer it unasked. It needs my clearance of the exact head and yantrik-os-dc's security review.

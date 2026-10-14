@@ -14901,15 +14901,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // the bounded loop through `EngineBus::is_terminal` so the two loops cannot drift on
             // which outputs are load-bearing verbatim.
             if self.terminal_delivery(&tool, &obs) {
+                // E.VOICE6 (VM 541): a refusal ends the turn in the person's words, not the gate's.
+                let reply = desktop::person_denial(&obs).unwrap_or_else(|| obs.clone());
                 let _ = self
                     .memory
                     .append_message_scoped("user", user_text, id.write_scope())
                     .await;
                 let _ = self
                     .memory
-                    .append_message_scoped("assistant", &obs, id.write_scope())
+                    .append_message_scoped("assistant", &reply, id.write_scope())
                     .await;
-                return Ok(obs);
+                return Ok(reply);
             }
             // SOTA finding: a result that did not advance the goal must CHANGE the next action —
             // feeding it back for a verbatim retry is the dominant loop trigger.

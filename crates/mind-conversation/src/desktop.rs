@@ -1783,6 +1783,43 @@ fn inner_args(args: &serde_json::Value) -> serde_json::Map<String, serde_json::V
     }
 }
 
+/// E.VOICE6 (VM 541): what the person reads when an action was refused and the turn ends on it --
+/// never the gate's own "(I can't run mcp.yantrik-os.os_act — …)". None for anything else.
+pub(crate) fn person_denial(obs: &str) -> Option<String> {
+    let rest = obs.trim_start().strip_prefix("(I can't run ")?;
+    let reason = rest.split_once(" \u{2014} ").map_or(rest, |(_, r)| r).to_ascii_lowercase();
+    eprintln!("[agent] refused, as the gate said it: {}", obs.trim());
+    Some(
+        if reason.contains("secret") || reason.contains("credential") {
+            "I didn't do that: what I was about to write looked like a password, PIN or card number, and I don't write \
+             those down. If it isn't one, tell me and I'll put it differently."
+        } else if reason.contains("recipients") {
+            "I didn't send that: it was addressed to more people at once than I'm allowed to message."
+        } else if reason.contains("not granted") {
+            "I didn't do that: I haven't been given permission for it on this computer."
+        } else {
+            "I didn't do that: it isn't something I'm allowed to do here."
+        }
+        .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod voice6_tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_is_said_in_the_persons_words() {
+        let secret = person_denial("(I can't run mcp.yantrik-os.os_act \u{2014} outward action appears to contain a secret/credential.)").unwrap();
+        assert!(secret.starts_with("I didn't do that: what I was about to write looked like a password"), "{secret}");
+        assert!(!secret.contains("mcp.") && !secret.contains('('), "{secret}");
+        assert!(person_denial("(I can't run x \u{2014} message addresses 40 recipients (max 10).)").unwrap().starts_with("I didn't send that"));
+        assert!(person_denial("(I can't run x \u{2014} not granted.)").unwrap().contains("haven't been given permission"));
+        assert!(person_denial("(I can't run x \u{2014} unknown capability 'y' denied by default.)").unwrap().contains("isn't something I'm allowed"));
+        assert_eq!(person_denial("Ready to send the email to Asha."), None);
+    }
+}
+
 /// E.LOCAL1 (VM 541): a desktop action that writes into an app keeping its data on this machine --
 /// the Notes app or the text editor -- and is not one that sends or shares it. Such a call is not
 /// egress: the broker's credential tripwire, there to stop a secret leaving, refused a packing list

@@ -21308,3 +21308,34 @@ async fn a_place_keeps_the_name_the_person_said() {
         .expect("cleaned");
     assert_eq!(out["place"], "Dallas", "{out}");
 }
+
+/// E.VOICE6 (VM 541): a refused mutating desktop action ends the turn in the person's words. The real
+/// harm gate refuses a note carrying a card number; the person reads a sentence, not the gate's text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_action_ends_the_turn_in_plain_words() {
+    let hub = Arc::new(mind_tools::McpHub::new());
+    let act = mind_tools::McpTool {
+        server: "yantrik-os".into(),
+        name: "os_act".into(),
+        description: "act on this computer".into(),
+        read_only: false,
+        open_world: false,
+        destructive: false,
+        input_schema: serde_json::json!({"type": "object"}),
+    };
+    hub.add_scripted_tool(act, vec![Ok("Done \u{2014} a note was made".to_string())]).unwrap();
+    let executor = Arc::new(ToolActionExecutor::new().with_mcp_hub(hub.clone()));
+    let runtime: Arc<dyn ActionRuntime> = Arc::new(GovernedActionRuntime::new(
+        Arc::new(RealHarmGate::new()),
+        executor,
+        vec![Capability::Network, Capability::LocalControl],
+    ));
+    let model = Arc::new(ScriptedLLM::new(r#"{"tool":"mcp.yantrik-os.os_act","args":{"app":"notes","action":"new_note","args":{"title":"Wallet","text":"Wallet: card ending 4242"}}}"#));
+    let pool = InferencePool::new(model.clone() as Arc<dyn LLMBackend>, 1).with_provider("script").with_private_backend(model, "script");
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone()).with_runtime(runtime);
+    let reply = conv.agent_loop_for_eval("Make a wallet note", &TurnIdentity::primary()).await.unwrap_or_default();
+    assert!(reply.starts_with("I didn't do that: what I was about to write looked like a password"), "{reply}");
+    assert!(!reply.contains("mcp.") && !reply.contains("(I can't run"), "{reply}");
+    assert!(!hub.scripted_calls().iter().any(|(t, _)| t.ends_with("os_act")), "the refused note reached the desktop");
+}

@@ -17988,3 +17988,40 @@ yantrik-os-dc proposed three rules: (1) a letter-led code is never a card number
 **One existing test changed on purpose:** E.LOCAL1's used the 541 packing list as its secret. That text is clean now, so it carries "card ending 4242" instead. Its loop mutant was re-run against the new text and is still killed.
 
 **K3 (Windows):** full suite 2520 passed, 0 failed.
+
+## E.VOICE6 — PREREG: a refused action ends the turn in the person's words
+
+**Why:** VM 541 on aa02af4 (c). The note was refused by the harm gate, and the person's whole reply was the gate's text: "(I can't run mcp.yantrik-os.os_act — outward action appears to contain a secret/credential.)", tool name and all. A refused mutating MCP call ends the turn (`terminal_delivery` → `mutating_mcp_result_ends_the_turn`, so the loop does not try to route around a refusal), and the loop returns the observation verbatim as the reply.
+
+**What is built (desktop.rs + the loop):** `desktop::person_denial(obs)`. For an observation of the form "(I can't run <tool> — <reason>.)" it gives a sentence without the tool name:
+- **a secret or credential:** "I didn't do that: what I was about to write looked like a password, PIN or card number, and I don't write those down. If it isn't one, tell me and I'll put it differently."
+- **too many recipients:** "I didn't send that: it was addressed to more people at once than I'm allowed to message."
+- **"not granted":** "I didn't do that: I haven't been given permission for it on this computer."
+- **anything else:** "I didn't do that: it isn't something I'm allowed to do here."
+
+When the loop ends a turn on a terminal delivery, it stores and returns `person_denial(obs)` when there is one, else `obs` as before. The gate's own text still goes to the journal.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the 541 text verbatim gives the credential sentence, with no "mcp." and no "(";
+  - each of the other three reasons gives its sentence;
+  - "Ready to send …" gives None (not a refusal);
+  - **the loop:** a scripted `os_act` whose MCP result is the refusal text ends the turn with the person's sentence.
+- K2, a mutant survives:
+  - the loop returning `obs` again;
+  - the credential mapping removed (falls to the generic sentence).
+- K3: both suites pass.
+
+## E.VOICE6 — RESULT: a refused action ends the turn in the person's words; 2 mutants killed
+
+**K1 held:**
+- **Unit:** the 541 text gives the credential sentence (no "mcp.", no "("); the recipients, not-granted and generic reasons give theirs; "Ready to send…" gives None.
+- **Loop, with the REAL harm gate:** a note carrying "card ending 4242" is refused before it reaches the desktop, and the turn ends with "I didn't do that: what I was about to write looked like a password…". The gate's own text is in the journal.
+
+**K2 held: 2 mutants killed:**
+- the loop returning `obs` again;
+- the credential mapping removed.
+
+**K3 (Windows):** full suite 2522 passed, 0 failed.
+
+**One test approach dropped on the way:** the first loop test used a read-only scripted desktop. A mutating MCP call there never reaches the gate ("no harm-gated action runtime is configured"), so it could not have tested this. The test now builds the governed runtime with `RealHarmGate`.

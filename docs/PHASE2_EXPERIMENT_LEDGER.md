@@ -18031,3 +18031,5 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 **Bundle `yantrik-mind-b803955-linux-amd64.tar.zst`** (sha256 c034858abf07284271ff594588a904fe8c9c9b32ce5bbdb633347ff147ede914), built on staging against companion 965532e. It carries aa02af4 plus E.CITE1, E.SEC20 and E.VOICE6. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. This is the bundle for E.CMP1. Not installed anywhere yet.
 
 **b803955 on the Mac**, 13 Oct, on Pranab's direct OK: `installed b803955 c034858abf072842 attached`, BUILD `commit=b803955`, active, and "attached to the desktop as `mind`". The rollback is aa02af4. 541 and 520 are handed to yantrik-os-dc.
+
+**#783 live on 520 (yantrik-os main 5d719b5a, OS v0.1.0-1507), 13 Oct, reported by yantrik-os-dc:** Mind aa02af4. The env hash is unchanged (0fa9eb8f6a34da2c) and there is no .pre-gateway. The loopback egress set is 7440,7450,7451,7460,8341. `/run/yantrik-mind/1000/memory.sock` is srw-rw---- yantrik-mind:yantrik. No "NOT serving" lines; the brain is its own provider (ollama-cloud:deepseek-v4.1-flash), not the gateway. The first time E.SOCK2/#783 is live outside a proof.

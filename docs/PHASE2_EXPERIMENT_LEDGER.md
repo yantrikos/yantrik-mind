@@ -18568,3 +18568,5 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
   - the four-leg-tested thin path itself.
 - **Rollback for 520 is b803955**, the last build it ran, not ce0df0c.
 - **Not yet seen on 520:** whether its first turns log `route=thin`.
+
+**Thin is on for 520 (yantrik-os-dc, 14 Oct):** the install's own Lens smoke turn logged `[agent] route=thin` at 04:29:55 (520 clock), and the Mind answered. YANTRIK_MIND_RUN reaches the Mind on 520 as it does on 541. Note that 520's clock runs about 35 s behind the operator host; checks that compare times across hosts should use relative windows.

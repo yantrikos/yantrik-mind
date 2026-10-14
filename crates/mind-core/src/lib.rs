@@ -614,6 +614,38 @@ fn engine_persona(get: &dyn Fn(&str) -> Option<String>, chosen_at_setup: Option<
     mind_types::persona(&mind_name_from(get, chosen_at_setup), &operator)
 }
 
+/// E.THIN2 (Pranab, 14 Oct, after E.THIN1-M): the thin desktop path is the default for a Mind the
+/// desktop launched -- `YANTRIK_MIND_RUN`, which only the Yantrik OS unit sets. A Mind run any other
+/// way (the family's production service) is unchanged. `YM_THIN_DESKTOP=1` or `=0` decides outright.
+pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    match get("YM_THIN_DESKTOP").as_deref().map(str::trim) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => get("YANTRIK_MIND_RUN").is_some_and(|v| !v.trim().is_empty()),
+    }
+}
+
+#[cfg(test)]
+mod thin2_tests {
+    use super::thin_desktop_from;
+
+    #[test]
+    fn thin_by_default_only_for_a_mind_the_desktop_launched() {
+        let env = |thin: Option<&'static str>, run: Option<&'static str>| {
+            move |k: &str| match k {
+                "YM_THIN_DESKTOP" => thin.map(String::from),
+                "YANTRIK_MIND_RUN" => run.map(String::from),
+                _ => None,
+            }
+        };
+        assert!(thin_desktop_from(&env(None, Some("/run/yantrik-minds"))));
+        assert!(!thin_desktop_from(&env(None, None)));
+        assert!(!thin_desktop_from(&env(Some("0"), Some("/run/yantrik-minds"))));
+        assert!(thin_desktop_from(&env(Some("1"), None)));
+        assert!(!thin_desktop_from(&env(None, Some("  "))));
+    }
+}
+
 pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> ConversationEngine {
     let chosen = std::fs::read_to_string(std::path::Path::new(&telegram::state_dir()).join("mind.name")).ok();
     let persona = engine_persona(&|k| std::env::var(k).ok(), chosen);
@@ -679,8 +711,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
     );
     let mut eng = ConversationEngine::new(memory.clone(), chat_pool, persona.clone())
         .with_persona_parts(&persona_name, &persona_operator)
-        // E.THIN1 (ARCH9 stage 1): the thin desktop path, measured before it becomes the default.
-        .with_thin_desktop(std::env::var("YM_THIN_DESKTOP").is_ok_and(|v| v.trim() == "1"))
+        // E.THIN1/E.THIN2 (ARCH9): the thin desktop path, the default for a Mind the desktop launched.
+        .with_thin_desktop(thin_desktop_from(&|k| std::env::var(k).ok()))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

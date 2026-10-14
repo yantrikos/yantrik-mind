@@ -18401,3 +18401,58 @@ The journal line now carries the raw call (300 chars).
 - **Reset fingerprint:** the reset's state hash differs every leg, so it is not usable as computed; it needs fixing before any prereg relies on it.
 
 **Adoption is a deployment, so Pranab decides it,** with the caveats above.
+
+**Pranab, 14 Oct, on E.THIN1-M: "Adopt thin as default".** It goes into the next bundle with E.ANS1b, E.WX1 and E.MEM2b; the action ledger (thin's repeated note writes) is the next build.
+
+## E.THIN2 — PREREG: the thin path is the default for a Mind the desktop launched
+
+**What is built (mind-core):** `thin_desktop_from(env)`. An explicit `YM_THIN_DESKTOP` of `1` or `0` wins. Otherwise the thin path is on exactly when `YANTRIK_MIND_RUN` is set, which only the Yantrik OS unit sets, for a Mind attached to a desktop. A Mind run any other way is unchanged: the family's production service on .90 is a plain Debian service without that variable.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - unset + YANTRIK_MIND_RUN set → on;
+  - unset + no YANTRIK_MIND_RUN → off;
+  - "0" + YANTRIK_MIND_RUN → off;
+  - "1" without it → on;
+  - a blank YANTRIK_MIND_RUN → off.
+- K2, a mutant survives:
+  - the default ignoring YANTRIK_MIND_RUN;
+  - "0" not overriding.
+- K3: both suites pass.
+
+## E.MEM2b — PREREG: a date with its year added is the same fact
+
+**Why:** E.THIN1-M full A stored "…2 December", "…2 December 2026" and "…2 December (2026-12-02)" as three beliefs (thin A: two). E.MEM2's rule makes any differing digit token a different fact, and it counts digit tokens in the word overlap, so a year or an ISO date kept them apart.
+
+**What is built (`already_remembered`):**
+- Numbers compare as sets with leading zeros dropped ("02" is 2). Two statements can be one fact only when one's numbers are a subset of the other's: "2 December" ⊆ "2 December 2026" ⊆ "(2026-12-02)". "4 November" vs "5 November" is still not.
+- The word overlap (Jaccard ≥ 0.6) is over the non-number words only.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the three full-A wordings are one fact pairwise;
+  - 4 vs 5 November is not;
+  - "2 December" vs "12 December" is not;
+  - E.MEM1's and E.MEM2's tests pass unchanged.
+- K2, a mutant survives:
+  - an equality test on the numbers (the year variants split again);
+  - leading zeros not normalised.
+- K3: both suites pass.
+
+## E.THIN2 + E.MEM2b — RESULTS (code): 4 mutants killed
+
+**E.THIN2:**
+- **Built:** `mind_core::thin_desktop_from`; the engine is built with it.
+- **K1 held:** the five env cases.
+- **K2 held: 2 mutants killed:**
+  - the default ignoring YANTRIK_MIND_RUN;
+  - "0" not overriding.
+
+**E.MEM2b:**
+- **Built:** numbers are split from words, with leading zeros dropped; one fact when one number set holds the other; Jaccard over the words only.
+- **K1 held:** the three full-A wordings are one fact pairwise; the ISO form alone ("on 2026-12-02") is the same fact as "on 2 December"; 12 December and 5 November are different; E.MEM1's and E.MEM2's tests are unchanged.
+- **K2 held: 2 mutants killed:**
+  - numbers by equality;
+  - leading zeros kept. This survived the first test set, where every ISO wording also wrote "2" itself. The ISO-only case kills it.
+
+**K3 (Windows):** full suite 2533 passed, 0 failed.

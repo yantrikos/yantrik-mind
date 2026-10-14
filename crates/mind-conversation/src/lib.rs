@@ -4952,16 +4952,27 @@ pub(crate) fn already_remembered<'a>(statement: &str, earlier: &'a [String]) -> 
             .map(str::to_string)
             .collect()
     };
-    let now = words(statement);
+    // E.MEM2b (E.THIN1-M full A): numbers apart from words. "2 December", "2 December 2026" and
+    // "2 December (2026-12-02)" were three beliefs: a year or an ISO date added digit tokens that
+    // both failed E.MEM2's equality test and diluted the word overlap.
+    let is_number = |t: &String| t.chars().any(|c| c.is_ascii_digit());
+    let split = |t: &str| -> (std::collections::BTreeSet<String>, std::collections::BTreeSet<String>) {
+        let all = words(t);
+        let numbers = all.iter().filter(|w| is_number(w)).map(|w| {
+            let n = w.trim_start_matches('0');
+            if n.is_empty() { "0".to_string() } else { n.to_string() }
+        }).collect();
+        (all.into_iter().filter(|w| !is_number(w)).collect(), numbers)
+    };
+    let (now, now_n) = split(statement);
     if now.is_empty() {
         return None;
     }
-    // E.MEM2: a different number is a different fact -- "4 November" is not "5 November", however
-    // much else the two share. Without this a corrected date counted as a repeat of the old one.
-    let numbers = |w: &std::collections::BTreeSet<String>| -> Vec<String> { w.iter().filter(|t| t.chars().any(|c| c.is_ascii_digit())).cloned().collect() };
     earlier.iter().map(String::as_str).find(|e| {
-        let then = words(e);
-        if numbers(&now) != numbers(&then) {
+        let (then, then_n) = split(e);
+        // E.MEM2: a different number is a different fact -- "4 November" is not "5 November". A
+        // number ADDED (the year, the ISO form) is the same fact: one set holds the other.
+        if !(now_n.is_subset(&then_n) || then_n.is_subset(&now_n)) {
             return false;
         }
         let common = now.intersection(&then).count() as f64;
@@ -4986,6 +4997,20 @@ mod mem1_tests {
         // E.MEM2: a different number is a different fact.
         let fourth = vec!["Priya's birthday is on 4 November".to_string()];
         assert_eq!(already_remembered("Priya's birthday is on 5 November", &fourth), None);
+        // E.MEM2b: a year or an ISO date added is the same fact; a different day is not.
+        let wordings = [
+            "My colleague Meera starts her new job on 2 December",
+            "My colleague Meera starts her new job on 2 December 2026",
+            "My colleague Meera starts her new job on 2 December (2026-12-02)",
+        ];
+        for a in wordings {
+            for b in wordings {
+                assert!(already_remembered(a, &[b.to_string()]).is_some(), "{a:?} vs {b:?}");
+            }
+        }
+        assert_eq!(already_remembered("Meera starts her new job on 12 December", &[wordings[0].to_string()]), None);
+        // The ISO form alone: "02" is the day 2.
+        assert!(already_remembered("My colleague Meera starts her new job on 2026-12-02", &[wordings[0].to_string()]).is_some());
         assert_eq!(already_remembered("anything", &[]), None);
     }
 }

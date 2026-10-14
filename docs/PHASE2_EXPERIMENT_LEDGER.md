@@ -18658,3 +18658,21 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 - blank not filtered.
 
 **K3:** Windows workspace 2539 passed, 0 failed. Linux follows.
+
+**E.PACE2 prereg amendments (yantrik-os-dc, 14 Oct, written before any run):**
+1. **Finding the compose call.** Compose is the gateway call whose start matches the journal's `compose took Ns` line (start = log time − N s, within ±2 s). This replaces "output ≥200 tokens", which would misfile a short B compose as a step. dc checks the rule against A's ≥200 calls before the run. The gateway's `at` is a call's START. An ask that ends at the in-loop answer (E.ANS1b) has no compose; it counts in whole-ask time only.
+2. **Ask 2's fresh facts**, one per leg in run order A B B A:
+   - "my cousin Rohan's exam is on 9 December";
+   - "my friend Sara's concert is on 14 November";
+   - "my uncle Dev's surgery is on 3 December";
+   - "my colleague Ana's farewell is on 27 November".
+   Each recall asks for that fact's date, and dc checks mind.db holds none of them before its ask 2.
+3. **Resets.** Before each of asks 1–6: reset, then a new conversation. Ask 2 (2a then 2b) is one conversation under one reset. Any fingerprint other than 2072c61925ae40d7 is recorded.
+4. **Pinned:**
+   - both arms run the same bundle (ebfedcb's);
+   - /help before each leg, so ask 1 carries no hand-over;
+   - ask 1 is graded against the actual tomorrow (E.CMP1 amendment 3);
+   - whole-ask time is dc's send-to-final-text wall time;
+   - the arm is switched by dc's in-place env rewrite and a restart, confirmed in /proc environ, with the env restored to its original hash at the end.
+
+**The 5-token call after compose is checked_answer, full path only.** It followed 8 of 8 full-path composes and 0 of 16 thin ones (one example: 358-token prompt, 1.5 s), so it is not in play on the thin default.

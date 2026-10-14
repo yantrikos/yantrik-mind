@@ -18325,3 +18325,5 @@ Per ARCH9 the reliability goes into the tool, not into another layer: no new arg
 - °F shown as °C.
 
 **K3 (Windows):** full suite 2531 passed, 0 failed. Not in a bundle yet: ce70450 is frozen for E.THIN1-M.
+
+**E.WX1 K3, Linux (staging, 524ab9c):** mind-tools 268, mind-conversation 1245 passed. K3 held.

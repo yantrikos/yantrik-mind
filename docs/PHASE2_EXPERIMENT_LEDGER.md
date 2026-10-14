@@ -18829,3 +18829,20 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 - **The Mac:** `installed e2fbcb6 9261c9c300f5f50c attached`, active, 0 crash lines. On the Mac, E.PACE2b changes nothing: its Mind reaches Strata directly, not through the OS gateway, so `effort_for` sends no effort. Its compose already runs with think:false, the dispatch config it shares.
 - **541** gets 90a87f7 (it supersedes e2fbcb6 there).
 - **520** gets e2fbcb6 at a free slot (dc).
+
+## E.CONNECT1 — RESULT (541, yantrik-os-dc, 14 Oct 15:42–16:03): ADOPT by the rule
+
+**Setup:** 90a87f7, the OS unchanged from E.PACE2's control, thin default, no YM_COMPOSE_EFFORT, legs C1 and C2.
+- The fingerprint was 2072c61925ae40d7 before all 12 asks; route=thin 6 per leg.
+- Tanvi and Ishaan were both absent before ask 2 (whole-word check).
+
+**Easy compose by default (E.PACE2b) is confirmed:** compose wrote 10–97 output tokens (n=10, median 7.5 s), against arm A's 300–836. Whole-ask median 51.0 s. No load in any window.
+
+**Passes 12/12.** Advice replies **1/12** (control 4/12): C1 ask 4, "pack a light layer if you're heading out". Offers (data only): 3/12, against the control's 8/12, so advice did not turn into offers.
+
+**Decision: ADOPT** (12 ≥ 11, and 1 ≤ 1).
+
+**Seen, not criteria:**
+- **Connections dropped.** C1 2a no longer mentions the nearby dates (Kabir, Dev, Rohan around 6 Dec); C2 2b is the bare "19 December 2026". This was the intent, and the cost of the useful birthday + gift case is still unmeasured, as said in the prereg.
+- **A grounding slip, C2 ask 4:** "Sunny ... Both days are dry and clear". The weather tool maps code 3 to "overcast" (`wmo`), Open-Meteo gives code 3 for both days, and C1 said "overcast" nine minutes earlier. So "Sunny" came from the model, not from a mapping. It is a pass by ask 4's rule, but a wrong statement. The journal keeps only a tool result's first line, so what the tool returned in C2 can't be shown; that is an audit gap to close.
+- **False uncertainty, C2 2a:** "I didn't confirm the year with you".

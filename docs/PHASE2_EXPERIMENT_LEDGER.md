@@ -18029,3 +18029,5 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 **E.CITE1 + E.SEC20 + E.VOICE6 K3, Linux (staging, 383e08d):** mind-types 105, mind-recipes 100, mind-conversation 1237, mind-core 177 passed. K3 held.
 
 **Bundle `yantrik-mind-b803955-linux-amd64.tar.zst`** (sha256 c034858abf07284271ff594588a904fe8c9c9b32ce5bbdb633347ff147ede914), built on staging against companion 965532e. It carries aa02af4 plus E.CITE1, E.SEC20 and E.VOICE6. BUILD has `agent_token=1` and `cmd_answer=1`, and the marker is in the binary. This is the bundle for E.CMP1. Not installed anywhere yet.
+
+**b803955 on the Mac**, 13 Oct, on Pranab's direct OK: `installed b803955 c034858abf072842 attached`, BUILD `commit=b803955`, active, and "attached to the desktop as `mind`". The rollback is aa02af4. 541 and 520 are handed to yantrik-os-dc.

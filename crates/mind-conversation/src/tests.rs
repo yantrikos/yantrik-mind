@@ -17444,6 +17444,23 @@ mod desktop_consent_and_stall_wiring {
         assert!(!reply.contains("Firefox") && !reply.to_lowercase().contains("source"), "{reply}");
     }
 
+    /// E.ANS1 (E.CMP1 run 1, ask 6): the answer filed as `run_skill {"name":"answer"}` is the answer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_filed_as_a_skill_is_the_answer() {
+        let r = run(
+            vec![Step::Call("run_skill", serde_json::json!({"name": "answer", "target": "AX-4471 is the confirmation number."}))],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        assert_eq!(r.reply, "AX-4471 is the confirmation number.");
+        assert_eq!(r.prompts.len(), 1, "a second step or compose ran: {} model calls", r.prompts.len());
+        assert!(!r.reply.contains(COMPOSED), "compose ran");
+        assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "weekly-report", "target": "x"}})), None);
+        assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "answer"}})), None);
+        assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": " Answer ", "text": "hi"}})).as_deref(), Some("hi"));
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {
@@ -21338,4 +21355,70 @@ async fn a_refused_action_ends_the_turn_in_plain_words() {
     assert!(reply.starts_with("I didn't do that: what I was about to write looked like a password"), "{reply}");
     assert!(!reply.contains("mcp.") && !reply.contains("(I can't run"), "{reply}");
     assert!(!hub.scripted_calls().iter().any(|(t, _)| t.ends_with("os_act")), "the refused note reached the desktop");
+}
+
+/// E.OPT1c (E.CMP1 run 1, ask 6): a turn with a file attached that ends in compose -- compose and the
+/// work-log check both see the file's text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compose_and_the_check_see_the_attached_file() {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    struct Sees {
+        prompts: Arc<std::sync::Mutex<Vec<(bool, String)>>>,
+        steps: std::sync::Mutex<usize>,
+    }
+    impl LLMBackend for Sees {
+        fn chat(&self, m: &[ChatMessage], _c: &GenerationConfig, tools: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let all: String = m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n");
+            let offered = tools.is_some_and(|t| !t.is_empty());
+            self.prompts.lock().unwrap().push((offered, all.clone()));
+            let (text, tool_calls) = if all.contains("You check an answer against its source") {
+                (r#"{"unsupported":[]}"#.to_string(), vec![])
+            } else if offered {
+                let mut n = self.steps.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    (String::new(), vec![yantrik_ml::ToolCall { name: "remember".into(), arguments: serde_json::json!({"text": "a trip to Austin"}) }])
+                } else {
+                    anyhow::bail!("the endpoint stopped answering")
+                }
+            } else {
+                ("AX-4471 is the confirmation number.".to_string(), vec![])
+            };
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text, prompt_tokens: 0, completion_tokens: 0, tool_calls, api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            Self::chat(self, m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "sees"
+        }
+    }
+    struct NoHost;
+    #[async_trait::async_trait]
+    impl mind_recipes::RecipeHost for NoHost {
+        async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+            anyhow::bail!("no tools in this test")
+        }
+    }
+    let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let model: Arc<dyn LLMBackend> = Arc::new(Sees { prompts: prompts.clone(), steps: std::sync::Mutex::new(0) });
+    let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+    let recipes = Arc::new(mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoHost), "YM"));
+    let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+    let conv = ConversationEngine::new(mem, pool, "YM").with_recipes(recipes);
+    let file = b"Trip to Austin, 23-25 October\nHotel: The Driskill, confirmation ZQ-AX-4471\nDinner Saturday 7pm with Ravi\n";
+    let sha: String = sha2::Sha256::digest(file).iter().map(|b| format!("{b:02x}")).collect();
+    let options = serde_json::json!({"attachments": [{"name": "trip-notes.txt", "mime": "text/plain", "size": file.len(), "sha256": sha,
+        "content_b64": base64::engine::general_purpose::STANDARD.encode(file)}]});
+    let who = TurnIdentity::primary();
+    let _ = crate::with_attachments(crate::render_attachments(&options), conv.agent_loop_for_eval("What is the hotel confirmation number in this file?", &who)).await;
+    let prompts = prompts.lock().unwrap().clone();
+    let compose: Vec<&String> = prompts.iter().filter(|(t, p)| !*t && p.contains("CONNECTED final answer")).map(|(_, p)| p).collect();
+    let check: Vec<&String> = prompts.iter().filter(|(_, p)| p.contains("You check an answer against its source")).map(|(_, p)| p).collect();
+    assert!(!compose.is_empty() && compose.iter().all(|p| p.contains("ZQ-AX-4471")), "compose did not see the file");
+    assert!(!check.is_empty() && check.iter().all(|p| p.contains("ZQ-AX-4471")), "the check did not see the file");
 }

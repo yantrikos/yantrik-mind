@@ -18033,3 +18033,64 @@ When the loop ends a turn on a terminal delivery, it stores and returns `person_
 **b803955 on the Mac**, 13 Oct, on Pranab's direct OK: `installed b803955 c034858abf072842 attached`, BUILD `commit=b803955`, active, and "attached to the desktop as `mind`". The rollback is aa02af4. 541 and 520 are handed to yantrik-os-dc.
 
 **#783 live on 520 (yantrik-os main 5d719b5a, OS v0.1.0-1507), 13 Oct, reported by yantrik-os-dc:** Mind aa02af4. The env hash is unchanged (0fa9eb8f6a34da2c) and there is no .pre-gateway. The loopback egress set is 7440,7450,7451,7460,8341. `/run/yantrik-mind/1000/memory.sock` is srw-rw---- yantrik-mind:yantrik. No "NOT serving" lines; the brain is its own provider (ollama-cloud:deepseek-v4.1-flash), not the gateway. The first time E.SOCK2/#783 is live outside a proof.
+
+## E.OPT1c — PREREG: compose and the work-log check see the files attached to the turn
+
+**Why:** E.CMP1 run 1, the Mind's leg on VM 541 (b803955), ask 6. With trip-notes.txt attached ("What is the hotel confirmation number in this file?"), the step prompt carried the file ("212 chars rendered for the model"). The model put the right answer into `run_skill {"name":"answer","target":"AX-4471 — …"}` twice. The person got: "I don't have the file's contents in this chat, so I can't give you the hotel confirmation number." The test graded it a fail. It passed on e41c3b0 (AX-4471 in 31 s).
+
+`attachments_section()` is read in exactly one place, the agent step's prompt (lib.rs). Compose's instruction (`based on this work log and what you know`) and E.CITE1's check (`evidence` = the work log) never carry the file. So whenever the turn reaches compose, the answer is written by a call that has never seen the attachment, and the check would mark an attachment-grounded sentence unsupported. Which path ask 6 took (the barren/repeat stop to compose) is to be confirmed from the journal yantrik-os-dc is sending. This fix is right either way.
+
+**What is built:**
+- Compose's instruction carries `attachments_section()` beside the work log.
+- Both `checked_answer` callers pass the work log plus the attachments section as the evidence.
+- Nothing else changes; a turn without attachments is byte-identical.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **the loop, attachment turn, scripted:** a tool step, then a failed step, so the turn composes. Compose's prompt contains the attachment's fenced text, and the check's evidence contains it too.
+  - a turn with no attachment has a compose prompt without the attachments preamble.
+- K2, a mutant survives:
+  - compose without the section;
+  - the check's evidence without it.
+- K3: both suites pass.
+
+**Ships after E.CMP1** (b803955 is frozen for both runs).
+
+**E.OPT1c, the cause confirmed (yantrik-os-dc, ask 6 journal, turn 55):** the model wrote its correct answer into `run_skill {"name":"answer","target":"AX-4471 — …"}` three times. The first gave "(no saved skill named 'answer')"; the next two were "repeated run_skill call — nudging it onward", because egress planning had rewritten each target to "hotel confirmation number", so their signatures matched. Then "compose took 15s". Compose had never seen the file and wrote "I don't have the file's contents". E.CITE1 was not the cause. On the passing e41c3b0-era run, tool steps still thought (#791 not yet on 541), which makes thinking-off the likely reason the model misfiled its answer. That is E.ANS1 below.
+
+## E.ANS1 — PREREG: an answer the model files as a skill call is taken as the answer
+
+**Why:** the same ask-6 turn. `answer {text}` is the catalogue's terminal action, and the loop already normalises a native `answer` call and the free-text `{"tool":"answer"}` form (2026-08-11). A thinking-off 27B wrote it as `run_skill {"name":"answer","target":"<the answer>"}`. That is not a skill call anyone could mean: the name is the terminal action's own. It went to the skill dispatcher ("no saved skill named 'answer'") and through egress planning, which rewrote the answer into a search phrase.
+
+**What is built (lib.rs):** right after the loop reads a step's tool name, a `run_skill` whose `name` is `answer`, `reply`, `respond` or `final_answer` (trimmed, any case), with non-empty text in `target`, `text` or `input`, becomes `{"tool":"answer","args":{"text": that}}`, and the existing terminal `answer` path takes it. Any other `run_skill` is unchanged.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **the loop:** a step `run_skill {"name":"answer","target":"AX-4471 is the confirmation number."}` ends the turn with exactly that text, makes no skill dispatch, and runs no compose;
+  - `run_skill {"name":"weekly-report","target":"x"}` is still a skill call;
+  - `run_skill {"name":"answer"}` with no text is not an answer.
+- K2, a mutant survives:
+  - the normalisation removed;
+  - the name check widened to any `run_skill`.
+- K3: both suites pass.
+
+**Ships after E.CMP1.**
+
+## E.OPT1c + E.ANS1 — RESULTS (code): 4 mutants killed
+
+**E.OPT1c:**
+- **Built:** compose's instruction carries `attachments_section()`, and both `checked_answer` callers pass the work log plus that section.
+- **K1 held:** in a turn that ran a tool, failed a step and composed with trip-notes.txt attached, compose's prompt and the check's prompt both carry the file's text.
+- **K2 held: 2 mutants killed:**
+  - compose without the section;
+  - the evidence without it (both call sites).
+
+**E.ANS1:**
+- **Built:** `answer_in_a_skill_call`, applied right after a step's tool is read.
+- **K1 held:** `run_skill {"name":"answer","target":"AX-4471 is the confirmation number."}` ends the turn with exactly that text, in one model call. Another skill name, or no text, is not an answer, and " Answer " with `text` is.
+- **K2 held: 2 mutants killed:**
+  - the normalisation removed;
+  - any `run_skill` taken.
+- **On the way:** the first version asserted the step prompt lacked "no saved skill", but the catalogue in the prompt says those words itself. The test now asserts one model call.
+
+**K3 (Windows):** full suite 2524 passed, 0 failed. **Both ship after E.CMP1.**

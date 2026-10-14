@@ -18146,3 +18146,24 @@ E.MEM1's similarity test also has a defect this exposes. "Priya's birthday is on
 - **No memory is deleted.** That's Pranab's standing rule for yantrik-os-dc, test VMs included.
 - **Run 2's ask 2 uses a fresh fact**, so every leg gets a scored second sample: "Remember that my brother Ravi's wedding anniversary is on 9 March." Then, in the same conversation, "When is Ravi's wedding anniversary?". Grading is as for ask 2, with the date 9 March and duplicates counted as beliefs about that anniversary added during run 2's ask 2. Before the ask, yantrik-os-dc checks that no leg's memory holds a Ravi anniversary; any leg that does is marked not scored for this ask.
 - **The other five asks are unchanged.**
+
+**E.CMP1 run 1 — graded by yantrik-os-dc (b803955, OS 2306c982, all three legs on custom/qwen3.5:27b):**
+
+| | Mind | Hermes | DeepSeek |
+|---|---|---|---|
+| 1 calendar | pass | pass | ambiguous (asked after midnight; correct for Thu 15) |
+| 2 remember/recall | partial (5 beliefs) | not scored (contaminated) | pass (1 belief) |
+| 3 note line | pass (line written twice: ambiguity noted) | pass | pass |
+| 4 weekend weather | partial (today only) | fail (delegated, no answer) | partial (today only) |
+| 5 disk/memory | pass | pass | pass |
+| 6 attached file | fail (answer filed as run_skill; compose lacked the file) | pass (found the file by search; the attachment never reached it) | pass |
+| scored | 3 pass / 2 partial / 1 fail of 6 | 4 / 0 / 1 of 5 | 4 / 1 / 0 of 5 |
+| spoke internals | 0 / 6 | 6 / 6 (raw ⚙️/📚 lines; 541 predates #792) | 6 / 6 (⚙️ lines) |
+| median / max wall | ~85 s / 135 s | ~85 s / 180 s | ~51 s / 236 s |
+
+No winner from one run (cb2n's rule). The Mind's two non-passes with a cause in Mind code (ask 2, ask 6) have fixes pushed after the freeze: E.MEM2, E.OPT1c and E.ANS1. Ask 4 (weekend forecast) beat all three harnesses.
+
+**E.CMP1 amendment 3 (written before run 2 starts):**
+- **Ask 1 is graded against the calendar for the actual tomorrow at the time of the ask.** Run 2 runs on 14 Oct, so tomorrow is Thu 15 Oct. Pass: names the Dentist at 15:00 on Thu 15 Oct and invents nothing. Fail: says nothing is on, invents an event, or gives a wrong date.
+- **Run 1's ask 1 grades stand as recorded**, DeepSeek's "ambiguous" included; this amendment does not regrade them.
+- Amendment 2 (Ravi, 9 March) applies to run 2's ask 2.

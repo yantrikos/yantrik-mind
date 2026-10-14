@@ -18580,3 +18580,58 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 - The Mac's brain is `nanogpt:qwen3.8-flash-next-unsloth-ud-iq4_xs` through the Strata gate, with 1 permit.
 - 520 answered the same one-word ask in 3 s.
 - Unmeasured: whether Strata was queued, loading or busy at 12:24. The Mac's OS (v0.1.0-1310) predates the #675 gateway, so it has no gateway-calls record.
+
+## E.PREFIX1 / E.PACE2 — baseline (yantrik-os-dc, 14 Oct, read-only)
+
+**The Mac's 59 s one-word turn, from the Strata gate and Strata's logs:**
+- The Mind's call was a cold 6543-token prefill: 0 reused, 20.7 s at 317 tok/s.
+- At the same time a coder lane was cold-reading 29.7k tokens.
+- Generation was trivial.
+- Pranab (14 Oct, AskUserQuestion): leave Strata and the coder-lane shim as they are; fix the Mind's prefix first, then measure again.
+
+**Strata has one Mind call in 3 days.** It has no in-turn baseline.
+
+**VM 541's gateway record (LAN Qwen 27B, the E.THIN1-M and default-check runs; 34 asks, 196 Mind calls):**
+
+| Calls | Prompt (median) | Time (median) | Per 1k prompt tokens | Share of Mind model time |
+|---|---|---|---|---|
+| Step 1 (n=34) | 7104 | 10.1 s | 1383 ms | 18% |
+| Steps 2+ (n=138) | 8528 | 3.7 s | 413 ms | 31% |
+| Output ≥200 tokens (n=24) | 1898 | 28.2 s (max 94 s) | — | 50% |
+
+- Steps within a turn reuse their prefix; step 1 is mostly cold.
+- The output-≥200 calls are mostly compose. They write a median of 447 output tokens for replies of one to three sentences.
+
+**Why compose thinks:** E.PACE1b put the Mind's tool steps at effort "easy" (thinking off through the gateway, #791) and left compose deliberately unwrapped, at the model's default. That left compose as the one call that thinks, and it is half of the model time. So compose's effort is the bigger lever. E.PACE2 comes first; E.PREFIX1 (step 1, ~18%) after.
+
+## E.PACE2 — PREREG: compose at effort "easy" when the person picked none, A/B on 541
+
+**Hypothesis:** for a thin desktop turn, the steps have already done the work; compose writes one to three sentences from the work log. Thinking there costs about half the model time and is not needed for answer quality. It may even hurt: the CONNECT weaving of unrelated facts is an open defect.
+
+**What is built:**
+- `ConversationEngine::with_compose_effort(Option<String>)`. Compose (`chat_streamed_to_progress`, both branches) runs inside `with_step_effort(e)` when it is set. The person's pick still wins (`effort_for`), and a route that isn't the gateway still gets none.
+- mind-core: `compose_effort_from(get)` reads `YM_COMPOSE_EFFORT`, trimmed; empty or unset means None.
+- **The default stays unchanged** (no compose effort) until the A/B decides.
+
+**The A/B, on 541 (LAN Qwen 27B via the gateway, thin default):**
+- **Asks:** E.CMP1's six asks, two legs per arm (A = unset, B = `YM_COMPOSE_EFFORT=easy`), interleaved A B B A.
+- **Conditions:** a fresh reset (the same fingerprint) before each ask; graded by dc on E.CMP1's written rules, which are unchanged.
+- **Times:** from the gateway record with dc's prefix_baseline.py grouping, comparing compose time and whole-ask time.
+
+**Decision (written now):**
+- **Adopt B as the default** if B's passes ≥ A's passes − 1 over the 12 asks per arm AND B's median compose time is ≤ 60% of A's.
+- **Keep A** if B loses 2 or more passes. Any CONNECT or grounding failure that appears only in B is named in the result.
+- **n is small (12 per arm):** a tie in passes is read as "no measured quality cost", not as "equal".
+
+**Kill criteria for the build (each one fails it):**
+- K1, a test fails:
+  - **The loop (gateway pool, scripted):**
+    - with compose effort "easy", every tool step carries "easy" and every compose call carries "easy", plain and streamed;
+    - without it, compose carries none (E.PACE1b's test, unchanged);
+    - inside `with_effort("high")`, compose carries "high".
+  - **compose_effort_from:** "easy" gives Some("easy"); " " and unset give None.
+- K2, a mutant survives:
+  - the compose wrap removed;
+  - the value ignored (always None);
+  - the person's effort losing to compose's.
+- K3: both suites pass.

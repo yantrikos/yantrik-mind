@@ -18901,3 +18901,48 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - **541:** dc runs the baseline reading before #805.
 - **520:** dc, in place of the queued 90a87f7.
 - **Staging:** with Pranab's OK, 49 older Mind bundles were deleted. Kept: ae54fdc, 90a87f7, e2fbcb6, 5e6eae2, 44ed2c0, ce0df0c. Free space went from 1.8 GB to 4.5 GB.
+
+## E.PREFIX1a — RESULT (541 baseline, yantrik-os-dc, 14 Oct)
+
+**Setup:** ae54fdc on 541 and 520. On 541: one ungraded leg of E.CMP1's six asks (all six right), plus the weather ask twice in a row. Steps were matched to gateway calls 1:1 (within 1.5 s).
+
+| Turn's step 0 | S (shared bytes) | T (total bytes) | First difference | ms per 1k prompt tokens |
+|---|---|---|---|---|
+| After a different ask | 14,095–14,124 | 26.5k–30.5k | **tools** (the per-ask top-K schemas) | 1292–1801 |
+| After a turn that picked the same tools (2b after 2a; weather repeat 2) | 17,367 and 16,959 | — | **prompt** ("Current date/time") | 855 and 747 |
+
+**Steps 1+:** S = T − (500–1400), first difference in the prompt tail, 349–750 ms/1k (median ~560).
+
+**The server kept the prefix across the previous turn's compose call** (1.5–3.9k tokens, which the probe does not see). Real reuse at step 0 tracks the probe's S anyway. The probe compares agent steps only; the server's "previous call" can differ.
+
+**Reading:** about 14.1k bytes (the persona + the fixed schemas) are stable. The per-ask scored schemas (~3k bytes) are the first divergence, and they cost everything after them, including the ~2.9k-byte agent rules. With the same tools, step 0 costs about half per token.
+
+## E.PREFIX1b — PREREG: one schema block for every turn (core, meta, pinned, on-this-computer); A/B on 541
+
+**What is built:**
+- `ConversationEngine::with_stable_schemas(bool)`. When on, the agent loop's native schemas are `tool_schemas("", src)`: core + meta + pinned + on-this-computer, the same for every ask.
+- The relevance-picked tools stay fully described in the prompt's prose catalog (unchanged). Dispatch already accepts a call to any enabled tool, however it was rendered.
+- The restricted-turn path is unchanged.
+- mind-core `stable_schemas_from(get)`: `YM_STABLE_SCHEMAS=1` is on; anything else is off.
+- **The default stays off** until the A/B decides.
+- **The risk this measures:** whether the model still calls a picked tool with no native schema. Ask 4 (weather, a scored, non-pinned tool) exercises it.
+
+**The A/B (541, the current OS, ae54fdc's successor bundle):**
+- Two legs per arm, interleaved A B B A. A = unset, B = `YM_STABLE_SCHEMAS=1`.
+- E.CMP1's six asks, graded by E.CMP1's rules with every amendment used in E.PACE2 and E.CONNECT1: a reset before each ask; fresh ask-2 facts named by dc before the run with a whole-word absence check; /help before each leg; the actual tomorrow.
+- **Measured:** each step 0's S, X and ms/1k (probe + gateway, as in E.PREFIX1a); the whole-ask median.
+
+**Decision (written now):**
+- **Adopt B as the default** if B's passes ≥ A's − 1 AND B's median step-0 ms/1k ≤ 75% of A's.
+- **Keep A** if B loses 2 or more passes, or if any ask 4 in B fails to call the weather tool. The prereg names that failure specifically.
+
+**Kill criteria for the build (each one fails it):**
+- K1, a test fails:
+  - with stable schemas on, two different asks send identical schema-name lists, and a scored tool that `tool_schemas(ask)` would add is absent from the schemas but present in the prompt's prose;
+  - with it off, the scored tool is in the schemas (today's behaviour);
+  - `stable_schemas_from`: "1" is on; unset, "0" and " " are off.
+- K2, a mutant survives:
+  - the switch ignored;
+  - the user text still passed when on;
+  - "0" read as on.
+- K3: both suites pass.

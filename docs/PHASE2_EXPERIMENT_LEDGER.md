@@ -18820,3 +18820,12 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
    - A statement about the person (busy, slammed, stretched, how they feel) that neither the work log nor what-you-know shows IS advice.
    Under this rule the control is 4/12: B1 2a, B1 4, B2 2b, B2 4.
 3. **Offers are counted separately in both arms**, as data, not as a criterion.
+
+**Bundles (14 Oct):**
+- **`yantrik-mind-e2fbcb6`** (sha256 9261c9c300f5f50cd39cbc462adf772cb1d062c28dfeb0928019ffbc7cd3826c) is E.PACE2b. Pranab OKed it for 541, 520 and the Mac.
+- **`yantrik-mind-90a87f7`** (sha256 2a5438c52dca10dd452f0c0dd6ad019d9a2731e83e5a53c0e279db4c887dedca) is E.PACE2b + E.CONNECT1. Pranab OKed it for 541 ONLY, for the measurement. Linux mind-conversation passed 1252 at 90a87f7.
+
+**Installs:**
+- **The Mac:** `installed e2fbcb6 9261c9c300f5f50c attached`, active, 0 crash lines. On the Mac, E.PACE2b changes nothing: its Mind reaches Strata directly, not through the OS gateway, so `effort_for` sends no effort. Its compose already runs with think:false, the dispatch config it shares.
+- **541** gets 90a87f7 (it supersedes e2fbcb6 there).
+- **520** gets e2fbcb6 at a free slot (dc).

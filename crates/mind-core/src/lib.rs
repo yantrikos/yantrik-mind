@@ -625,6 +625,25 @@ pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
+/// E.PACE2: the effort compose asks for when the person picked none -- `YM_COMPOSE_EFFORT`
+/// (`easy`, ...). Unset or blank keeps the model's default.
+pub fn compose_effort_from(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    get("YM_COMPOSE_EFFORT").map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod pace2_tests {
+    use super::compose_effort_from;
+
+    #[test]
+    fn compose_effort_is_read_trimmed_and_blank_is_none() {
+        let env = |v: Option<&'static str>| move |k: &str| (k == "YM_COMPOSE_EFFORT").then_some(v).flatten().map(String::from);
+        assert_eq!(compose_effort_from(&env(Some(" easy "))), Some("easy".to_string()));
+        assert_eq!(compose_effort_from(&env(Some("  "))), None);
+        assert_eq!(compose_effort_from(&env(None)), None);
+    }
+}
+
 #[cfg(test)]
 mod thin2_tests {
     use super::thin_desktop_from;
@@ -713,6 +732,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_persona_parts(&persona_name, &persona_operator)
         // E.THIN1/E.THIN2 (ARCH9): the thin desktop path, the default for a Mind the desktop launched.
         .with_thin_desktop(thin_desktop_from(&|k| std::env::var(k).ok()))
+        // E.PACE2: compose's own effort, unset by default until the A/B on 541 decides.
+        .with_compose_effort(compose_effort_from(&|k| std::env::var(k).ok()))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

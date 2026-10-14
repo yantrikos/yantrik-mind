@@ -6088,6 +6088,9 @@ pub struct ConversationEngine {
     /// commands and the Mind's own pending questions straight to the agent loop, with no shortcut
     /// answering first and no pass rewriting after. Off by default; `YM_THIN_DESKTOP=1`.
     thin_desktop: bool,
+    /// E.PACE2: the effort compose (the answer written from the work log) asks for when the person
+    /// picked none -- `YM_COMPOSE_EFFORT`. None keeps the model's default, as E.PACE1b left it.
+    compose_effort: Option<String>,
     /// E.PORT1-B: how long the delegation router may take before the deterministic kind stands.
     /// A field rather than a constant so a test can drive the timeout path in milliseconds instead
     /// of making every suite run wait out a production-sized budget.
@@ -6283,6 +6286,12 @@ impl ConversationEngine {
         self
     }
 
+    /// E.PACE2: the effort compose asks for when the person picked none (see the field).
+    pub fn with_compose_effort(mut self, effort: Option<String>) -> Self {
+        self.compose_effort = effort;
+        self
+    }
+
     /// E.NAME2: remember what the persona was built from, so a rename can rebuild it.
     pub fn with_persona_parts(self, mind_name: &str, operator: &str) -> Self {
         if let Ok(mut parts) = self.persona_parts.write() {
@@ -6331,6 +6340,7 @@ impl ConversationEngine {
             persona: std::sync::RwLock::new(persona.into()),
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
+            compose_effort: None,
             recent_window: 20,
             web: None,
             mail: None,
@@ -15099,14 +15109,19 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // may see it. A turn with empty grounding — a total prohibition, or a question that recalled
         // nothing — is carrying no household material and may use the household lane.
         let compose_scope = COMPOSE_SCOPE;
-        let composed = match self
-            .chat_streamed_to_progress(
-                vec![ChatMessage::system(&self.persona()), ChatMessage::user(&wrap)],
-                cfg.clone(),
-                compose_scope,
-            )
-            .await
-        {
+        // Boxed (E.STACK1): held across either arm below, the compose future inline overflowed the
+        // Windows test stack in `cli_dispatch_routes_plugins_and_chat`.
+        let compose_call = Box::pin(self.chat_streamed_to_progress(
+            vec![ChatMessage::system(&self.persona()), ChatMessage::user(&wrap)],
+            cfg.clone(),
+            compose_scope,
+        ));
+        // E.PACE2: compose at its own effort when one is set; the person's pick still wins, and only
+        // the gateway is sent one (`effort_for`).
+        let composed = match match self.compose_effort.clone() {
+            Some(effort) => mind_inference::with_step_effort(effort, compose_call).await,
+            None => compose_call.await,
+        } {
             Ok(r) => {
                 let (reasoning, visible) = split_reasoning(&r.text);
                 emit_thinking(&reasoning);

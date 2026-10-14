@@ -18635,3 +18635,26 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
   - the value ignored (always None);
   - the person's effort losing to compose's.
 - K3: both suites pass.
+
+## E.PACE2 — RESULT (code): compose's own effort, behind `YM_COMPOSE_EFFORT`; 5 mutants killed
+
+**Built:**
+- `with_compose_effort`; compose runs inside `with_step_effort(e)` when it is set.
+- mind-core `compose_effort_from` reads `YM_COMPOSE_EFFORT`, trimmed, with blank meaning None.
+- **The default is unchanged.**
+- The compose future is boxed. Inline, it overflowed the Windows test stack in `cli_dispatch_routes_plugins_and_chat` (E.STACK1's failure, found by the full suite).
+
+**K1 held:**
+- With "easy", compose carries "easy", plain and streamed.
+- Without it, compose carries none (E.PACE1b's test).
+- With the person's "high", every call carries "high".
+- `compose_effort_from`: " easy " gives "easy"; blank and unset give None.
+
+**K2 held: 5 mutants killed** (both before and after the box):
+- the wrap removed;
+- the value ignored;
+- the person losing to compose;
+- compose always "easy";
+- blank not filtered.
+
+**K3:** Windows workspace 2539 passed, 0 failed. Linux follows.

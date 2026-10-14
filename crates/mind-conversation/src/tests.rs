@@ -17207,7 +17207,30 @@ mod desktop_consent_and_stall_wiring {
         effort_run(true).await;
     }
 
+    /// E.PACE2: with compose's own effort set, compose goes at it too -- plain and streamed -- and the
+    /// person's pick still wins over it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compose_goes_at_its_own_effort_when_set() {
+        for streamed in [false, true] {
+            let calls = effort_calls(streamed, Some("easy"), "").await;
+            let compose: Vec<_> = calls.iter().filter(|(tools, _)| !*tools).collect();
+            assert!(!compose.is_empty() && compose.iter().all(|(_, e)| e.as_deref() == Some("easy")), "streamed {streamed}: {calls:?}");
+        }
+        let calls = effort_calls(false, Some("easy"), "high").await;
+        assert!(calls.iter().any(|(tools, _)| !*tools), "{calls:?}");
+        assert!(calls.iter().all(|(_, e)| e.as_deref() == Some("high")), "the person's pick lost: {calls:?}");
+    }
+
     async fn effort_run(streamed: bool) {
+        let calls = effort_calls(streamed, None, "").await;
+        let steps: Vec<_> = calls.iter().filter(|(tools, _)| *tools).collect();
+        let compose: Vec<_> = calls.iter().filter(|(tools, _)| !*tools).collect();
+        assert!(!steps.is_empty() && steps.iter().all(|(_, e)| e.as_deref() == Some("easy")), "{calls:?}");
+        assert!(!compose.is_empty(), "no compose call was made (streamed: {streamed}): {calls:?}");
+        assert!(compose.iter().all(|(_, e)| e.is_none()), "compose was sent an effort (streamed: {streamed}): {calls:?}");
+    }
+
+    async fn effort_calls(streamed: bool, compose_effort: Option<&str>, person: &str) -> Vec<(bool, Option<String>)> {
         let calls = Arc::new(StdMutex::new(Vec::new()));
         let inner = Script {
             at: AtomicUsize::new(0),
@@ -17220,17 +17243,14 @@ mod desktop_consent_and_stall_wiring {
             .with_provider("yantrik-gateway:picked")
             .with_private_backend(model, "yantrik-gateway:picked");
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
-        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM")
+            .with_compose_effort(compose_effort.map(String::from));
         let who = TurnIdentity::primary();
-        let turn = mind_inference::with_effort(String::new(), conv.agent_loop_for_eval("Remember that Priya likes green tea", &who));
+        let turn = mind_inference::with_effort(person.to_string(), conv.agent_loop_for_eval("Remember that Priya likes green tea", &who));
         let (ptx, _prx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let reply = if streamed { crate::TURN_PROGRESS.scope(ptx, turn).await } else { turn.await }.unwrap_or_default();
+        let _ = if streamed { crate::TURN_PROGRESS.scope(ptx, turn).await } else { turn.await };
         let calls = calls.lock().unwrap().clone();
-        let steps: Vec<_> = calls.iter().filter(|(tools, _)| *tools).collect();
-        let compose: Vec<_> = calls.iter().filter(|(tools, _)| !*tools).collect();
-        assert!(!steps.is_empty() && steps.iter().all(|(_, e)| e.as_deref() == Some("easy")), "{calls:?}");
-        assert!(!compose.is_empty(), "no compose call was made (streamed: {streamed}): {calls:?} / {reply}");
-        assert!(compose.iter().all(|(_, e)| e.is_none()), "compose was sent an effort (streamed: {streamed}): {calls:?}");
+        calls
     }
 
     /// E.OPT1b: one chat turn, optionally with files attached; the reply and the model's prompts.

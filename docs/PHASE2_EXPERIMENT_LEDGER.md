@@ -18684,3 +18684,7 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 - **Mac:** `installed 5e6eae2 b53853632cec7b1f attached`, active, 0 crash lines.
 - **541:** dc installs and runs the A/B.
 - **520:** dc, at a free slot.
+
+**5e6eae2 on 541 and 520 (yantrik-os-dc, 14 Oct):** both `installed 5e6eae2 b53853632cec7b1f attached`, env and mcp unchanged, 0 stack/abort lines; 520's Lens smoke took 4 s. Rollback 44ed2c0 on both. 5e6eae2 is now on all three machines.
+
+**E.PACE2 A1 started 13:11:13 CT:** YM_COMPOSE_EFFORT is confirmed absent from the process environ, and the fingerprint is 2072c61925ae40d7. 520 shares the LAN Qwen server with 541, so any 520 or background call inside an ask's window is recorded with that ask as load.

@@ -18768,3 +18768,28 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 **K2 held, 3 mutants killed:** RUN ignored; "default" not honoured; blank RUN counted as set.
 
 **K3:** Windows workspace 2540 passed, 0 failed. Linux follows.
+
+## E.CONNECT1 — PREREG: compose adds related facts as one clause at most, never advice
+
+**Why:** E.PACE2's B arm (easy compose) passed 12/12 but turned the wrap's instruction into unsolicited advice in 4 of 12 replies. The instruction: "CONNECTED final answer ... CONNECT: when your answer touches a person or a date, weave in the related plan, deadline, or open thread from what you know (a birthday + the gift you two discussed + when to order it by) — one connected answer". The grounding gives compose the 7-day upcoming spine and the people roster, so every reply had Priya's birthday and Arun's housewarming to weave in. Pranab adopted B with "fix the advice next". ARCH9: narrow the instruction rather than add a checker.
+
+**What is built:** the compose wrap only.
+- "concise, direct, CONNECTED final answer" becomes "concise, direct final answer".
+- The CONNECT paragraph becomes: "ANSWER WHAT WAS ASKED. What you know is background: use something from it only when it bears directly on this answer (the same person, date or thing), as one short factual clause. Give no advice or suggestions the person did not ask for, and say nothing about how busy they are or how they feel."
+- The rest stays: compose fresh, the actions-only claim, COMPOSE_PLAIN_WORDS.
+
+**The test:**
+- **Where:** 541, a bundle carrying E.PACE2b + E.CONNECT1, thin default, easy compose by default, two legs (C1, C2) of E.CMP1's six asks.
+- **Control:** E.PACE2's B arm, the same machine, setup, model and asks, run on 14 Oct. It is a historical control, and the ledger says so.
+- **"Advice reply" (dc grades):** a reply containing a sentence that recommends an action the person did not ask about, or states something about the person (busy, stretched, how they feel) that neither the work log nor what-you-know shows.
+- **Ask 2's fresh facts:** two new ones, named by dc before the run and checked absent first, as amendment 2.
+- **Adopt** if passes ≥ 11/12 AND advice replies ≤ 1/12 (control: 4/12).
+- **Unmeasured, said now:** whether a relevant connection is still made when it would help (the birthday + gift case). None of the six asks exercises it.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - the compose prompt carries "ANSWER WHAT WAS ASKED" and "no advice";
+  - it does not carry "weave in";
+  - E.OPT1c's attachment test still finds the file in compose (its filter moves to "direct final answer").
+- K2, a mutant survives: the old CONNECT paragraph restored.
+- K3: both suites pass.

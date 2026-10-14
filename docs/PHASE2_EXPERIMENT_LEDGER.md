@@ -18559,3 +18559,12 @@ Pranab OKed it for 541, 520 and the Mac (14 Oct). 541 and 520 are handed to yant
 - **Repeat rate:** ask-3 repeats were 2/2 on ce70450 thin and 0/3 since. No cause is claimed at n=5.
 - **The live shape differed:** try 2 appended "- Hotel confirmation AX-4471" with no leading newline. `same_text` treats both shapes the same (whitespace collapsed, list marker dropped).
 - **520:** the queued ce0df0c install never started (the batch held the lock). 44ed2c0 is queued for 520 instead.
+
+**44ed2c0 on 520 (yantrik-os-dc, 14 Oct, 04:30:21 CT, the first free slot):** `installed 44ed2c0 e39b0da14115c564 attached`. env and mcp unchanged, a token-less call gets 401, 0 stack/abort lines, and the lens smoke answered in 3 s.
+- **This jumps 520 from b803955.** ce70450 and ce0df0c never ran there. 520 therefore gets, in one step:
+  - the thin default (E.THIN2);
+  - E.WX1, E.ANS1b, E.MEM2b;
+  - E.LEDGER1;
+  - the four-leg-tested thin path itself.
+- **Rollback for 520 is b803955**, the last build it ran, not ce0df0c.
+- **Not yet seen on 520:** whether its first turns log `route=thin`.

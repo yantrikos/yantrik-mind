@@ -17941,3 +17941,10 @@ Also, for every ask: a reply that names a tool, "the log", "source", "work log" 
 **Who:** yantrik-os-dc runs and grades; the Mind's author does neither. Disputes about a grade are settled by the rules above as written. A rule found ambiguous is recorded as such and not reinterpreted for one harness.
 
 **Not decided by this:** whether the Mind becomes the desktop default. That's Pranab's call, with this as one input.
+
+**E.CMP1 amendment 1 (before any run, from yantrik-os-dc's check of 541):**
+- **DeepSeek is a scored third leg.** It does not run "on its own model": 541's gateway has one picked model for every harness, so DeepSeek is wired to the same LAN Qwen as the Mind and Hermes. It is scored under the same rules.
+- **Memory is not shared.** Each harness keeps its own memory (Hermes its embedded YantrikDB until #586, the Mind its own, DeepSeek its own). Ask 2 is self-contained per leg, and no ask relies on what another harness was told.
+- **The reset is done from the person's side** by yantrik-os-dc's own `yos` acts, never through a mind. Earlier test notes are archived or trashed by hand before each leg.
+
+**Correction to an answer given to Pranab the same evening:** I said the 541 comparison with the DeepSeek harness (which answered all five asks correctly in the e41c3b0-era run) "compares models as much as harnesses", because DeepSeek ran on DeepSeek's cloud model. Wrong: it ran on the same LAN Qwen 27B through the same gateway. That run was a same-model comparison, though on an older Mind build, with unrecorded times and no prewritten rules, and the Mind came out behind on it.

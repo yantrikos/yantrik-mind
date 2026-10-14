@@ -267,14 +267,46 @@ fn nws_daily(lat: f64, lon: f64) -> anyhow::Result<Vec<DayForecast>> {
     Ok(out)
 }
 
+/// E.WX1: a forecast as the lines the weather tool shows after its report -- one per day, with the
+/// weekday and date a person names ("Sat 17 Oct"), the sky, the range in °C and °F, and the chance of
+/// rain. "This weekend" was answered with today because the tool never showed the days ahead.
+pub fn outlook_lines(days: &[DayForecast]) -> String {
+    let c = |f: f64| ((f - 32.0) * 5.0 / 9.0).round() as i64;
+    days.iter()
+        .map(|d| {
+            let when = chrono::NaiveDate::parse_from_str(&d.date, "%Y-%m-%d")
+                .map(|nd| nd.format("%a %-d %b").to_string())
+                .unwrap_or_else(|_| format!("{} {}", d.weekday, d.date));
+            format!(
+                "- {when}: {}, {}\u{2013}{}\u{b0}C ({}\u{2013}{}\u{b0}F), rain {}%",
+                d.desc,
+                c(d.lo_f),
+                c(d.hi_f),
+                d.lo_f.round() as i64,
+                d.hi_f.round() as i64,
+                d.precip_prob.round() as i64
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Deterministic weather for tests.
 pub struct ScriptedWeather {
     pub line: String,
+    /// E.WX1: the days ahead, when a test wants an outlook.
+    pub outlook: Vec<DayForecast>,
 }
 
 impl ScriptedWeather {
     pub fn new(line: impl Into<String>) -> Self {
-        Self { line: line.into() }
+        Self { line: line.into(), outlook: Vec::new() }
+    }
+
+    /// E.WX1: with the days ahead.
+    pub fn with_outlook(mut self, days: Vec<DayForecast>) -> Self {
+        self.outlook = days;
+        self
     }
 }
 
@@ -282,6 +314,13 @@ impl ScriptedWeather {
 impl WeatherClient for ScriptedWeather {
     async fn report(&self, _place: &str) -> anyhow::Result<String> {
         Ok(self.line.clone())
+    }
+
+    async fn daily_outlook(&self, _place: &str, _days: u32) -> anyhow::Result<Vec<DayForecast>> {
+        if self.outlook.is_empty() {
+            anyhow::bail!("no outlook scripted");
+        }
+        Ok(self.outlook.clone())
     }
 }
 
@@ -294,5 +333,24 @@ mod tests {
         assert_eq!(wmo(0), "clear sky");
         assert_eq!(wmo(95), "thunderstorm");
         assert_eq!(wmo(61), "rain");
+    }
+}
+
+/// E.WX1: the days ahead, as the tool shows them.
+#[cfg(test)]
+mod wx1_tests {
+    use super::*;
+
+    pub(crate) fn day(date: &str, desc: &str, lo_f: f64, hi_f: f64, rain: f64) -> DayForecast {
+        DayForecast { date: date.into(), weekday: String::new(), desc: desc.into(), hi_f, lo_f, precip_prob: rain, wind_mph: 5.0, sunset: "18:50".into() }
+    }
+
+    #[test]
+    fn each_day_is_one_line_a_person_can_read() {
+        let lines = outlook_lines(&[day("2026-10-17", "partly cloudy", 70.0, 86.0, 10.0), day("2026-10-18", "clear sky", 64.0, 84.0, 0.0)]);
+        assert_eq!(
+            lines,
+            "- Sat 17 Oct: partly cloudy, 21\u{2013}30\u{b0}C (70\u{2013}86\u{b0}F), rain 10%\n- Sun 18 Oct: clear sky, 18\u{2013}29\u{b0}C (64\u{2013}84\u{b0}F), rain 0%"
+        );
     }
 }

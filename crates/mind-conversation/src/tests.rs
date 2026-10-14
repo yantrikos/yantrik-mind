@@ -21522,3 +21522,25 @@ async fn a_fact_is_reinforced_not_restated_and_a_new_date_is_new() {
     conv.run_agent_tool_as("remember", &serde_json::json!({"text": "My sister Priya's birthday is on 5 November."}), &id).await;
     assert_eq!(mem.beliefs_matching("Priya", &audit).await.unwrap().len(), 2, "a new date was merged into the old one");
 }
+
+/// E.WX1 (E.CMP1 ask 4): the weather tool shows the days ahead when the backend has them, and is
+/// unchanged when it does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_weather_tool_shows_the_days_ahead() {
+    let day = |date: &str, desc: &str, lo_f: f64, hi_f: f64| mind_tools::DayForecast {
+        date: date.into(), weekday: String::new(), desc: desc.into(), hi_f, lo_f, precip_prob: 10.0, wind_mph: 5.0, sunset: "18:50".into(),
+    };
+    let report = "Dallas, United States: mainly clear, 32\u{b0}C. Today 25\u{2013}35\u{b0}C.";
+    let engine = |w: mind_tools::ScriptedWeather| {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);
+        ConversationEngine::new(mem, pool, "YM").with_weather(Arc::new(w))
+    };
+    let id = TurnIdentity::primary();
+    let with = engine(mind_tools::ScriptedWeather::new(report).with_outlook(vec![day("2026-10-17", "partly cloudy", 70.0, 86.0), day("2026-10-18", "clear sky", 64.0, 84.0)]))
+        .run_agent_tool_as("weather", &serde_json::json!({"place": "Dallas"}), &id)
+        .await;
+    assert!(with.starts_with(report) && with.contains("Next days:\n- Sat 17 Oct: partly cloudy") && with.contains("- Sun 18 Oct:"), "{with}");
+    let without = engine(mind_tools::ScriptedWeather::new(report)).run_agent_tool_as("weather", &serde_json::json!({"place": "Dallas"}), &id).await;
+    assert_eq!(without, report);
+}

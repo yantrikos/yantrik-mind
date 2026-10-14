@@ -18287,3 +18287,41 @@ Each recall question asks for that fact's date, and each leg is checked to hold 
 - **Hermes ask 2's "exactly one memory" with consolidated rows** is recorded as an ambiguity: strict reading partial, active-only pass.
 
 **Security, OS-side (yos-mcp), dispatched as fix/taint-asks-before-commands:** in DeepSeek's run-2 ask 4, after the taint rule refused web_go, the model ran `run_command curl …open-meteo…`. That command was graded as ordinary, because the taint rule covers hand-offs only. In auto or bypass mode a session rule would answer it unasked. It needs my clearance of the exact head and yantrik-os-dc's security review.
+
+## E.WX1 — PREREG: the weather tool answers "this weekend" with the coming days, not just today
+
+**Why:** E.CMP1 ask 4 ("What will the weather be in Dallas this weekend?") was graded partial or fail for every harness in both runs; no harness produced a forecast. The Mind's `weather` tool returns `WeatherClient::report`: current conditions plus today's high and low ("Dallas, United States: mainly clear, 32°C … Today 25–35°C."). The Mind then answered with today, or said it had no weekend forecast. The client already has `daily_outlook(place, days)` (open-meteo daily, NWS fallback), but the tool never calls it.
+
+Per ARCH9 the reliability goes into the tool, not into another layer: no new argument for the model to discover, no rule about the word "weekend".
+
+**What is built:**
+- **mind-conversation, the weather capability:** after `report`, it asks `daily_outlook(place, 7)`. When that gives days, the result gains "Next days:" with one line per day, e.g. `- Sat 17 Oct: partly cloudy, 21–30°C (70–86°F), rain 10%`.
+- **No outlook** (an error, or a backend without one) leaves the result exactly as today.
+- **mind-tools:** `outlook_lines(&[DayForecast])`, a pure formatter.
+- **mind-tools:** `ScriptedWeather` gains an optional outlook for tests.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `outlook_lines` of two days gives exactly two lines, with weekday, day and month, description, °C and °F ranges, and rain %;
+  - **the tool, with a scripted client that has an outlook:** the result carries the report AND a Saturday line;
+  - **with a client without one:** the result equals the report, byte for byte.
+- K2, a mutant survives:
+  - the outlook not appended;
+  - the °C conversion wrong (shows °F as °C).
+- K3: both suites pass.
+- **541 (E.THIN1-M asks, not a build gate):** ask 4 names Saturday's and Sunday's weather.
+
+## E.WX1 — RESULT (code): the weather tool shows the next days; 2 mutants killed
+
+**Built:** `mind_tools::outlook_lines`; the weather capability appends "Next days:" from `daily_outlook(place, 7)` when it gives days; `ScriptedWeather::with_outlook`.
+
+**K1 held:**
+- two days give exactly the two expected lines (21–30°C (70–86°F) for 70–86°F);
+- the tool with an outlook carries the report plus "Next days:\n- Sat 17 Oct: partly cloudy…" and a Sunday line;
+- without an outlook it equals the report byte for byte.
+
+**K2 held: 2 mutants killed:**
+- the outlook not appended;
+- °F shown as °C.
+
+**K3 (Windows):** full suite 2531 passed, 0 failed. Not in a bundle yet: ce70450 is frozen for E.THIN1-M.

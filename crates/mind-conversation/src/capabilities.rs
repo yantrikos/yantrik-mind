@@ -153,10 +153,17 @@ impl CapabilityHandler for WeatherCapability {
     ) -> Option<String> {
         Some(match tool {
             "weather" => match &host.weather {
-                Some(w) => match w.report(&targ(tool, args, "place")).await {
-                    Ok(r) => r,
-                    Err(e) => format!("(weather: {e})"),
-                },
+                Some(w) => {
+                    let place = targ(tool, args, "place");
+                    match w.report(&place).await {
+                        // E.WX1 (E.CMP1 ask 4): the days ahead too, so "this weekend" has an answer.
+                        Ok(r) => match w.daily_outlook(&place, 7).await {
+                            Ok(days) if !days.is_empty() => format!("{r}\nNext days:\n{}", mind_tools::outlook_lines(&days)),
+                            _ => r,
+                        },
+                        Err(e) => format!("(weather: {e})"),
+                    }
+                }
                 None => "(weather isn't configured)".to_string(),
             },
             _ => return None,

@@ -133,7 +133,7 @@ pub mod news;
 pub use news::{render_news, GoogleNews, NewsClient, NewsItem, ScriptedNews};
 
 pub mod weather;
-pub use weather::{DayForecast, OpenMeteo, ScriptedWeather, WeatherClient};
+pub use weather::{outlook_lines, DayForecast, OpenMeteo, ScriptedWeather, WeatherClient};
 
 pub mod wikipedia;
 pub use wikipedia::{ScriptedWiki, WikiClient, Wikipedia};

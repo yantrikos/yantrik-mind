@@ -14621,9 +14621,17 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.ARENA1-F26: a change already made, re-sent with a field more or less.
                 eprintln!("[agent] step {step}: {tool} is a change already made this turn \u{2014} not sent");
                 Some(note)
+            } else if let Some(note) = desktop::same_change_this_turn(&tool, &args, &made) {
+                // E.LEDGER1: the same change again, whether or not its app moved on since.
+                eprintln!("[agent] step {step}: {tool} repeats a change made this turn \u{2014} not sent");
+                Some(note)
             } else if let Some(note) = desktop::item_made_again(&tool, &args, &made) {
                 // E.LOOP9: the same item made again under new wording.
                 eprintln!("[agent] step {step}: {tool} would make an item already made this turn \u{2014} not sent");
+                Some(note)
+            } else if let Some(note) = desktop::note_exists_already(&tool, &args, &scratch) {
+                // E.LEDGER1: a note with this title is already in the turn's results.
+                eprintln!("[agent] step {step}: {tool} would create a note that exists \u{2014} not sent");
                 Some(note)
             } else {
                 // E.ARENA1-F15: an app acted on without a describe this turn has its grades read

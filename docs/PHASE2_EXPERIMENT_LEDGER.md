@@ -18473,3 +18473,75 @@ The journal line now carries the raw call (300 chars).
 - **Internals:** none.
 
 520's ce0df0c waits for a free slot.
+
+## E.LEDGER1 — PREREG: a change made this turn is not made again; a note that exists is not created again (ARCH9 stage 2, Mind side)
+
+**Why:** E.THIN1-M ask 3 ("Add 'Hotel confirmation AX-4471' to my Weekend packing list note"), thin's one weakness.
+- **thin A:** appended the line three times into the existing note (lines 10, 12, 13).
+- **thin B:** appended, appended again, called home_control nonsense, ran `new_note` with the existing note's title (a byte-identical second note), and appended again.
+
+The existing guards miss both:
+- **F26** (`same_change_again`) only compares against changes whose app "has not moved past since". An append moves the note's revision, so the same append afterwards is treated as new.
+- **E.LOOP9** blocks only items created in the same turn; this note existed before the turn.
+
+ARCH9's direction is one ledger of what this turn did, checked before any change, instead of field-matching heuristics.
+
+**What is built (desktop.rs + the loop's not-sent chain):**
+1. **`same_change_this_turn(tool, args, made)`**, over every change that RAN this turn, with no "still current" filter.
+   - A desktop action is not sent again when the same app and action already ran with the same details.
+   - "The same details" compares each string field normalised: lowercased, whitespace collapsed, and a leading list marker (`-`, `*`, `•`, `1.`) and trailing punctuation dropped. Non-string fields compare exactly.
+   - Commands are exempt, as F26's E.ARENA1-F46 exemption.
+   - The note says the change already ran, quotes its result, and says that running it again would do it twice.
+2. **`note_exists_already(tool, args, work_log)`**, for the Notes app only. A `new…`/`create…` whose title the turn's own observations already show in quotes (`"Weekend packing list"`, from a result or a description) is not sent. The note says a note with that title exists and to change that one instead.
+   - Calendar and other apps are excluded: an event's title legitimately repeats on other dates.
+- **E.LOOP9 and F26 stay for now;** folding them into the ledger is a later row, measured.
+- **The real shapes are requested from yantrik-os-dc** (the raw args of thin A's and thin B's note calls). A test against them is added before this ships, and the normalisation is adjusted to them if they differ from these cases.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - **same_change_this_turn:**
+    - the same append after it ran → Some, even when the made entry is "not current";
+    - "- Hotel confirmation AX-4471" vs "Hotel confirmation AX-4471." → Some;
+    - a different line → None;
+    - a command → None;
+    - nothing made → None.
+  - **note_exists_already:**
+    - `notes.new_note {title:"Weekend packing list"}` with a log carrying `"Weekend packing list" open (10 lines, saved)` → Some;
+    - the same with the title absent from the log → None;
+    - `calendar.add_event {title:"Dentist"}` with "Dentist" in the log → None.
+  - **The loop:**
+    - three appends of the same line (the second with a list marker) reach the desktop once;
+    - a `new_note` for a title the turn's first result showed is not sent.
+- K2, a mutant survives:
+  - the normalisation removed (the list-marker case passes through);
+  - the Notes-only restriction removed (the calendar case blocked);
+  - either check dropped from the chain.
+- K3: both suites pass.
+
+**E.LEDGER1 amendment (before its result; found by the full suite):**
+- **Same-change rule (1) narrowed to ADDING actions only:** names starting append, add, insert, prepend, new or create. A save or a set captures the current state, so repeating it after the content changed is a new save. E.ARENA1-F36 take 7 (`the_same_save_after_a_new_draft_runs_again`) protects exactly that, and E.LEDGER1 broke it. An identical save with nothing in between stays F36's and the repeat guard's.
+- **Order:** E.LOOP9's `item_made_again` runs before `note_exists_already`, so a same-turn duplicate keeps E.LOOP9's own wording (its test asserts it).
+
+**Real shapes received (yantrik-os-dc):** the appends are bare strings, "\n- Hotel confirmation AX-4471", one of them "\n\n- …". The normalisation covers them, and both sequences are now loop tests verbatim: `thin_a_appends_the_line_once` and `thin_b_makes_no_second_note`. Their journals show the ledger stopping exactly the calls that slipped through on 541 ("again, but its app has changed since — running it", then "repeats a change made this turn — not sent").
+
+## E.LEDGER1 — RESULT (code): an added item is not added again; a note that exists is not created again; 5 mutants killed
+
+**Built:**
+- `desktop::same_change_this_turn`, for adding actions only (append, add, insert, prepend, new, create), over every change that ran this turn, with field text normalised;
+- `desktop::note_exists_already` (Notes only), keyed on the title in quotes in the turn's own results;
+- both in the loop's not-sent chain: same-change, then E.LOOP9, then note-exists.
+
+**K1 held:**
+- **Unit:** an append repeated is caught (with a list marker or a full stop too); a different line, a command, an open and an empty ledger pass; a note seen in the log is caught; one not seen, and a calendar event, pass.
+- **Loop, with the 541 calls verbatim:**
+  - thin A's seven note calls write the line once;
+  - thin B's sequence writes it once and makes no second note.
+- **Existing tests:** E.ARENA1-F36 take 7 (a save after a new draft runs again) and E.LOOP9's wording pass again. Both broke under the first draft and led to the amendment.
+
+**K2 held: 5 mutants killed:**
+- normalisation removed;
+- Notes-only restriction removed;
+- each check dropped from the chain (2);
+- the adding-only restriction removed (F36 take 7 fails).
+
+**K3 (Windows):** full suite 2537 passed, 0 failed.

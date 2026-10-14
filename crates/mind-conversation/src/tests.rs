@@ -17561,6 +17561,68 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(*checks.lock().unwrap(), 0, "the work-log check ran on the thin path");
     }
 
+    /// E.LEDGER1: the note results as VM 541's Notes app wrote them (E.THIN1-M ask 3).
+    fn note_result(lines: u32, notes: u32, rev: &str) -> String {
+        format!("Done \u{2014} Notes \u{2014} \"Weekend packing list\" open ({lines} lines, saved), {notes} note accepted: True, settled: True revision: {rev}")
+    }
+    fn notes_call(action: &str, args: serde_json::Value) -> Step {
+        Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"action": action, "app": "notes", "args": args}))
+    }
+    fn appends(r: &Run) -> usize {
+        acts_reached(r).iter().filter(|a| a["action"] == "append").count()
+    }
+
+    /// E.LEDGER1, thin A's ask 3 verbatim: open, append, open, append with an extra newline, append,
+    /// open, append -- the line went in three times. Now once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_a_appends_the_line_once() {
+        let open = || notes_call("open_note", serde_json::json!({"title": "Weekend packing list"}));
+        let line = |s: &str| notes_call("append", serde_json::json!(s));
+        let r = run_with(
+            "Add 'Hotel confirmation AX-4471' to my Weekend packing list note",
+            vec![open(), line("\n- Hotel confirmation AX-4471"), open(), line("\n\n- Hotel confirmation AX-4471"), line("\n- Hotel confirmation AX-4471"), open(), line("\n- Hotel confirmation AX-4471")],
+            vec!["Notes is open."],
+            vec![
+                note_result(8, 1, "d433dff168e7").leak(),
+                note_result(10, 1, "1398837d7c5").leak(),
+                note_result(10, 1, "1398837d7c6").leak(),
+                note_result(12, 1, "5fab25ce726").leak(),
+                note_result(13, 1, "5fab25ce727").leak(),
+                note_result(13, 1, "5fab25ce728").leak(),
+                note_result(14, 1, "5fab25ce729").leak(),
+            ],
+        )
+        .await;
+        assert_eq!(appends(&r), 1, "the line went in more than once: {:?}", acts_reached(&r));
+    }
+
+    /// E.LEDGER1, thin B's ask 3 verbatim: after the line went in, `new_note` with the same title made a
+    /// second, identical note. Now neither the repeat append nor the new note is sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_b_makes_no_second_note() {
+        let line = || notes_call("append", serde_json::json!("\n- Hotel confirmation AX-4471"));
+        let r = run_with(
+            "Add 'Hotel confirmation AX-4471' to my Weekend packing list note",
+            vec![
+                notes_call("open_note", serde_json::json!({"title": "Weekend packing list"})),
+                line(),
+                line(),
+                notes_call("new_note", serde_json::json!({"text": "- Clothes for 2 nights\n- Toothbrush, charger", "title": "Weekend packing list"})),
+                line(),
+            ],
+            vec!["Notes is open."],
+            vec![
+                note_result(8, 1, "d433dff168e7").leak(),
+                note_result(10, 1, "1398837d7c5").leak(),
+                note_result(10, 2, "8271f34fceb").leak(),
+                note_result(11, 2, "8271f34fcec").leak(),
+            ],
+        )
+        .await;
+        assert_eq!(appends(&r), 1, "{:?}", acts_reached(&r));
+        assert!(!acts_reached(&r).iter().any(|a| a["action"] == "new_note"), "a second note was made: {:?}", acts_reached(&r));
+    }
+
     /// E.ARENA1-F43's other half: a repeat of an act that RAN still meets F12's note.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_repeated_act_that_ran_still_meets_the_already_ran_note() {

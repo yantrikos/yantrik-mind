@@ -1854,6 +1854,114 @@ mod local1_tests {
     }
 }
 
+/// E.LEDGER1: a field's text as a change compares: lowercased, whitespace collapsed, a leading list
+/// marker and trailing punctuation dropped -- "- Hotel confirmation AX-4471" and "Hotel confirmation
+/// AX-4471." are one line.
+fn same_text(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::String(s) => {
+            let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+            let t = one.trim_start_matches(|c: char| matches!(c, '-' | '*' | '\u{2022}') || c.is_whitespace());
+            let t = match t.split_once(". ") {
+                Some((n, rest)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => rest,
+                _ => t,
+            };
+            serde_json::Value::String(t.trim_end_matches(|c: char| matches!(c, '.' | '!' | ',' | ';')).trim().to_string())
+        }
+        other => other.clone(),
+    }
+}
+
+/// E.LEDGER1 (ARCH9 stage 2; E.THIN1-M ask 3): a desktop change this turn ALREADY MADE, by app,
+/// action and details -- over every change that ran, whether or not its app has moved on since. F26
+/// looks only at changes whose app has not moved past them, and an append moves the note on, so the
+/// same append three times went through.
+pub(crate) fn same_change_this_turn(
+    tool: &str,
+    args: &serde_json::Value,
+    made: &[(serde_json::Value, String)],
+) -> Option<String> {
+    if runs_a_command(tool, args) {
+        return None;
+    }
+    let (app, action) = act_target(tool, args)?;
+    // ADDING actions only: each run adds again. A save or a set captures the current state, and a
+    // save after a new draft is a new save (E.ARENA1-F36 take 7) -- F36 and the repeat guard own those.
+    // Bringing something into view adds nothing.
+    if !["append", "add", "insert", "prepend", "new", "create"].iter().any(|p| action.starts_with(p)) {
+        return None;
+    }
+    let norm = |a: &serde_json::Value| -> std::collections::BTreeMap<String, serde_json::Value> {
+        inner_args(a).iter().map(|(k, v)| (k.clone(), same_text(v))).collect()
+    };
+    let now = norm(args);
+    if now.is_empty() {
+        return None;
+    }
+    made.iter().find_map(|(prev, head)| {
+        let (p_app, p_action) = act_target(ACT, prev)?;
+        (p_app == app && p_action == action && norm(prev) == now).then(|| {
+            format!(
+                "({app}.{action} already ran this turn with these details: {}. Running it again would do it twice \
+                 -- don't. Take the next step the request still needs, or answer.)",
+                head.trim()
+            )
+        })
+    })
+}
+
+/// E.LEDGER1: a note this `notes.new…`/`create…` would make, when the turn's own observations already
+/// show a note with its title (in quotes, as the Notes app writes it). thin B made a second, identical
+/// "Weekend packing list". Notes only: an event's title legitimately repeats on other dates.
+pub(crate) fn note_exists_already(tool: &str, args: &serde_json::Value, work_log: &str) -> Option<String> {
+    let (app, action) = act_target(tool, args)?;
+    if app != "notes" || !["new", "create"].iter().any(|p| action.starts_with(p)) {
+        return None;
+    }
+    let inner = inner_args(args);
+    let title = inner.get("title").and_then(|v| v.as_str())?.trim();
+    if title.is_empty() || !work_log.to_lowercase().contains(&format!("\"{}\"", title.to_lowercase())) {
+        return None;
+    }
+    Some(format!(
+        "(a note titled \"{title}\" already exists -- this turn's results show it. Change that note instead of making \
+         another, or say why a second one is wanted.)"
+    ))
+}
+
+#[cfg(test)]
+mod ledger1_tests {
+    use super::*;
+
+    fn act(app: &str, action: &str, inner: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"app": app, "action": action, "args": inner})
+    }
+
+    #[test]
+    fn a_change_made_this_turn_is_not_made_again() {
+        let append = |text: &str| act("notes", "append", serde_json::json!({"title": "Weekend packing list", "text": text}));
+        let made = vec![(append("- Hotel confirmation AX-4471"), "Done \u{2014} Notes \u{2014} \"Weekend packing list\" open (10 lines, saved)".to_string())];
+        assert!(same_change_this_turn(ACT, &append("- Hotel confirmation AX-4471"), &made).is_some());
+        assert!(same_change_this_turn(ACT, &append("Hotel confirmation AX-4471."), &made).is_some(), "a list marker and a full stop");
+        assert_eq!(same_change_this_turn(ACT, &append("Passport"), &made), None);
+        assert_eq!(same_change_this_turn(ACT, &append("- Hotel confirmation AX-4471"), &[]), None);
+        let run = act("shell", "agent_run", serde_json::json!({"command": "df -h"}));
+        assert_eq!(same_change_this_turn(ACT, &run, &[(run.clone(), "Done".to_string())]), None, "a command");
+        let open = act("notes", "open_note", serde_json::json!({"title": "Weekend packing list"}));
+        assert_eq!(same_change_this_turn(ACT, &open, &[(open.clone(), "Done".to_string())]), None, "opening is not a change");
+    }
+
+    #[test]
+    fn a_note_the_turn_has_seen_is_not_created_again() {
+        let log = "\n[4] mcp.yantrik-os.os_act -> Done \u{2014} Notes \u{2014} \"Weekend packing list\" open (10 lines, saved)";
+        let new_note = act("notes", "new_note", serde_json::json!({"title": "Weekend packing list", "text": "x"}));
+        assert!(note_exists_already(ACT, &new_note, log).is_some());
+        assert_eq!(note_exists_already(ACT, &new_note, "\n[1] nothing yet"), None);
+        let event = act("calendar", "add_event", serde_json::json!({"title": "Dentist"}));
+        assert_eq!(note_exists_already(ACT, &event, "\"Dentist\" on Thu 15 Oct"), None, "events repeat");
+    }
+}
+
 /// E.LOOP9 (VM 541, 1ca45b0): an item this `os_act` would create, when one with its title was made
 /// this turn. With thinking off the model made "Weekend packing list" six times, each with freshly
 /// worded text, so F26's field comparison never matched. A create is an action named `new…`,

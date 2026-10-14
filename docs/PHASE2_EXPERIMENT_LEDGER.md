@@ -18846,3 +18846,8 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
 - **Connections dropped.** C1 2a no longer mentions the nearby dates (Kabir, Dev, Rohan around 6 Dec); C2 2b is the bare "19 December 2026". This was the intent, and the cost of the useful birthday + gift case is still unmeasured, as said in the prereg.
 - **A grounding slip, C2 ask 4:** "Sunny ... Both days are dry and clear". The weather tool maps code 3 to "overcast" (`wmo`), Open-Meteo gives code 3 for both days, and C1 said "overcast" nine minutes earlier. So "Sunny" came from the model, not from a mapping. It is a pass by ask 4's rule, but a wrong statement. The journal keeps only a tool result's first line, so what the tool returned in C2 can't be shown; that is an audit gap to close.
 - **False uncertainty, C2 2a:** "I didn't confirm the year with you".
+
+**E.CONNECT1 adopted.** Pranab OKed 90a87f7 for 520 and the Mac (14 Oct, AskUserQuestion).
+- **The Mac:** `installed 90a87f7 2a5438c52dca10dd attached`, active, 0 crash lines. Rollback e2fbcb6.
+- **520:** dc, at a free slot.
+- 90a87f7 is now on 541 and the Mac.

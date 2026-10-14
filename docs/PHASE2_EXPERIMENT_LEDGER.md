@@ -18726,3 +18726,33 @@ No internals were spoken.
 A links nearby dates too, but in one factual clause, never as advice. The difference is degree. The cause on the Mind side is the wrap's own words, "CONNECT: ... weave in the related plan, deadline, or open thread from what you know". Without thinking, the model carries this out literally. This is the already-listed ARCH9 item "CONNECT weaving unrelated facts".
 
 **Named, A only:** A2 ask 2b says "I don't have a confirmed date yet. My only note is tentative: 27 November 2026" about a fact stated plainly a minute earlier. It is false uncertainty, but still a pass.
+
+**E.PACE2 checks (yantrik-os-dc, read-only):** neither claim was invented.
+- **Rohan:** an open task (node 1073741827) exists. A1 (arm A) made it unbidden from "Remember that…", and mind.db carries it across legs.
+- **Weather:** "warms back up next week" matches the 7-day outlook (Open-Meteo, fetched afterwards: Tue 20 19.7–25.3, Wed 21 to Fri 23 29.9–31.2).
+- **B's named cost** is therefore the unsolicited advice alone, including the one unsupported "you're slammed".
+- **Arm A also acted unbidden:** it made tasks from plain "Remember that…" facts (Rohan; Ana "plan gift/goodbyes"). That is the agent rules' "when they mention a date or commitment, add_reminder".
+
+**Pranab adopted B (14 Oct, AskUserQuestion: "Adopt, fix the advice next").**
+
+## E.PACE2b — PREREG: compose at "easy" by default for a Mind the desktop launched
+
+**What is built:**
+- `compose_effort_from(get)` changes:
+  - an explicit non-blank `YM_COMPOSE_EFFORT` decides: `default` gives None (the model's default); any other word gives that word;
+  - unset or blank gives Some("easy") when `YANTRIK_MIND_RUN` is non-blank (as E.THIN2), else None.
+- **The family's production service is unchanged:** it does not set YANTRIK_MIND_RUN.
+- **Next (E.CONNECT1, separate):** trim the compose wrap's CONNECT instruction so related facts come as at most one factual clause, never advice. It is measured the same way.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails. `compose_effort_from`:
+  - unset with RUN set gives "easy";
+  - unset without RUN gives None;
+  - "default" with RUN gives None;
+  - "high" without RUN gives "high";
+  - blank with RUN gives "easy".
+- K2, a mutant survives:
+  - RUN ignored;
+  - "default" not honoured;
+  - blank RUN counted as set.
+- K3: both suites pass.

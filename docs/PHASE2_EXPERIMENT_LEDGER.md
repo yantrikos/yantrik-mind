@@ -18456,3 +18456,5 @@ The journal line now carries the raw call (300 chars).
   - leading zeros kept. This survived the first test set, where every ISO wording also wrote "2" itself. The ISO-only case kills it.
 
 **K3 (Windows):** full suite 2533 passed, 0 failed.
+
+**E.THIN2 + E.MEM2b K3, Linux (staging, f64f988):** mind-tools 268, mind-conversation 1246, mind-core 178 passed. K3 held.

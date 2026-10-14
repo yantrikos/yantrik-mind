@@ -18756,3 +18756,15 @@ A links nearby dates too, but in one factual clause, never as advice. The differ
   - "default" not honoured;
   - blank RUN counted as set.
 - K3: both suites pass.
+
+## E.PACE2b — RESULT (code): compose at "easy" by default for a Mind the desktop launched; 3 mutants killed
+
+**K1 held:**
+- unset with RUN set gives "easy"; blank with RUN set gives "easy";
+- "default" with RUN set gives None;
+- unset without RUN, or with a blank RUN, gives None;
+- " easy " and "high" are taken as written.
+
+**K2 held, 3 mutants killed:** RUN ignored; "default" not honoured; blank RUN counted as set.
+
+**K3:** Windows workspace 2540 passed, 0 failed. Linux follows.

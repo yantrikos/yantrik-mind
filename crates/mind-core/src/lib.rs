@@ -625,22 +625,48 @@ pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
-/// E.PACE2: the effort compose asks for when the person picked none -- `YM_COMPOSE_EFFORT`
-/// (`easy`, ...). Unset or blank keeps the model's default.
+/// E.PACE2 / E.PACE2b (Pranab, 14 Oct, after the A/B on 541): the effort compose asks for when the
+/// person picked none. A non-blank `YM_COMPOSE_EFFORT` decides (`default` keeps the model's own);
+/// otherwise a Mind the desktop launched (`YANTRIK_MIND_RUN`, as E.THIN2) composes at "easy", and
+/// any other Mind keeps the model's default.
 pub fn compose_effort_from(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    get("YM_COMPOSE_EFFORT").map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    match get("YM_COMPOSE_EFFORT").map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        Some(v) if v == "default" => None,
+        Some(v) => Some(v),
+        None => get("YANTRIK_MIND_RUN")
+            .is_some_and(|v| !v.trim().is_empty())
+            .then(|| "easy".to_string()),
+    }
 }
 
 #[cfg(test)]
 mod pace2_tests {
     use super::compose_effort_from;
 
+    fn env(effort: Option<&'static str>, run: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
+        move |k: &str| match k {
+            "YM_COMPOSE_EFFORT" => effort.map(String::from),
+            "YANTRIK_MIND_RUN" => run.map(String::from),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn compose_effort_is_read_trimmed_and_blank_is_none() {
-        let env = |v: Option<&'static str>| move |k: &str| (k == "YM_COMPOSE_EFFORT").then_some(v).flatten().map(String::from);
-        assert_eq!(compose_effort_from(&env(Some(" easy "))), Some("easy".to_string()));
-        assert_eq!(compose_effort_from(&env(Some("  "))), None);
-        assert_eq!(compose_effort_from(&env(None)), None);
+    fn compose_effort_is_read_trimmed_and_blank_falls_to_the_default() {
+        assert_eq!(compose_effort_from(&env(Some(" easy "), None)), Some("easy".to_string()));
+        assert_eq!(compose_effort_from(&env(Some("  "), None)), None);
+        assert_eq!(compose_effort_from(&env(None, None)), None);
+        assert_eq!(compose_effort_from(&env(Some("high"), None)), Some("high".to_string()));
+    }
+
+    /// E.PACE2b: "easy" by default only for a Mind the desktop launched; `default` turns it off.
+    #[test]
+    fn easy_by_default_only_for_a_mind_the_desktop_launched() {
+        let run = Some("/run/yantrik-minds");
+        assert_eq!(compose_effort_from(&env(None, run)), Some("easy".to_string()));
+        assert_eq!(compose_effort_from(&env(Some(" "), run)), Some("easy".to_string()));
+        assert_eq!(compose_effort_from(&env(Some("default"), run)), None);
+        assert_eq!(compose_effort_from(&env(None, Some("  "))), None);
     }
 }
 
@@ -732,7 +758,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_persona_parts(&persona_name, &persona_operator)
         // E.THIN1/E.THIN2 (ARCH9): the thin desktop path, the default for a Mind the desktop launched.
         .with_thin_desktop(thin_desktop_from(&|k| std::env::var(k).ok()))
-        // E.PACE2: compose's own effort, unset by default until the A/B on 541 decides.
+        // E.PACE2/E.PACE2b: compose's own effort, "easy" by default for a Mind the desktop launched.
         .with_compose_effort(compose_effort_from(&|k| std::env::var(k).ok()))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure

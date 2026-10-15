@@ -18986,3 +18986,8 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - approvals_off_for_test is back off. dc held iso.yml until this result.
 
 **Mind gate on 520, OS f063fcef (6ebe7787 + #813 #816 #810 #819) + Mind 6f8a153 (15 Oct 13:07 CDT, run wuk): 7/7, 0 false claims, median 7.2 s.** Notes showed "All changes saved" with no note files changed today. It was closed by pid and reopened after; its 21 files are unchanged. The 6ebe7787 nightly was not published: CI's ISO boot test caught #796's GRUB theme crashing legacy BIOS, fixed by #819.
+
+**yantrik-os #817 (taint per conversation), cleared at 1de3a749 (15 Oct).**
+- The Mind sets YANTRIK_AGENT_TOKEN at the start of every harness turn (E.TOKEN1), which respawns its yos-mcp bridge as `mind:main`, so its taint follows the person's Lens +.
+- A seam checked and found not to arise on the desktop: a private read on a tokenless bridge before the first token would not carry into the token bridge. But every code-initiated desktop read in the Mind (os_describe in the agent loop, folder_repeat_note, approvals_off_for_test) runs inside a turn, after the token is set.
+- A turn that arrives with no token (an older desktop) keeps the last bridge, as before #817.

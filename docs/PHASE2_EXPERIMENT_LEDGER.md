@@ -18993,3 +18993,9 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - A turn that arrives with no token (an older desktop) keeps the last bridge, as before #817.
 
 **6f8a153 on VM 561 (the live stream; sealed, no personal data, Auto mode):** Pranab OKed it directly (15 Oct, AskUserQuestion). dc installs it, restarting only yantrik-mind; rollback e248474 (2 Oct). Thin has not been measured on long Director build missions, only on desktop asks. dc watches the first missions; YM_THIN_DESKTOP=0 is the step before a rollback. Through 561's gate proxy, easy compose does not apply (not an OS-gateway route).
+
+**6f8a153 is live on 561** (`installed 6f8a153 4822686b73048436 attached`, route=thin on the Director's missions).
+- Two OS-side stalls, neither the Mind's:
+  - f063fcef's egress proxy refused the gate 10.99.0.1:8443 as a private address (fixed on 561; PR #822 makes it permanent).
+  - Auto mode asks once per session before commands, and the card lapses in 110 s on a stream with no one at it. Waiting on Pranab.
+- An OS nit: install-mind with a relative path says "no bundle".

@@ -18978,3 +18978,9 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - **The Mac:** `installed 6f8a153 4822686b73048436 attached`, active, 0 crash lines. Rollback ae54fdc.
 - **541:** the A/B runs after #805's checklist.
 - **520:** dc, at a free slot.
+
+**Mind gate on 520, OS 6ebe7787 + Mind 6f8a153 (15 Oct 09:47 CDT, run jga): 7/7, 0 false claims, median 6.5 s.**
+- The gate was first held at 04:35 because Pranab's Notes had been open since 12 Oct. He answered directly ("Run it; Notes is saved").
+- The arena's #558 guard refuses while Notes runs and has no override, so Notes was closed by pid (SIGTERM), then reopened after.
+- His notes store is untouched (21 files, newest 23 Sep).
+- approvals_off_for_test is back off. dc held iso.yml until this result.

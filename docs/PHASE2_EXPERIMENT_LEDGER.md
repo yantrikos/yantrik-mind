@@ -18991,3 +18991,5 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - The Mind sets YANTRIK_AGENT_TOKEN at the start of every harness turn (E.TOKEN1), which respawns its yos-mcp bridge as `mind:main`, so its taint follows the person's Lens +.
 - A seam checked and found not to arise on the desktop: a private read on a tokenless bridge before the first token would not carry into the token bridge. But every code-initiated desktop read in the Mind (os_describe in the agent loop, folder_repeat_note, approvals_off_for_test) runs inside a turn, after the token is set.
 - A turn that arrives with no token (an older desktop) keeps the last bridge, as before #817.
+
+**6f8a153 on VM 561 (the live stream; sealed, no personal data, Auto mode):** Pranab OKed it directly (15 Oct, AskUserQuestion). dc installs it, restarting only yantrik-mind; rollback e248474 (2 Oct). Thin has not been measured on long Director build missions, only on desktop asks. dc watches the first missions; YM_THIN_DESKTOP=0 is the step before a rollback. Through 561's gate proxy, easy compose does not apply (not an OS-gateway route).

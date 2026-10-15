@@ -18984,3 +18984,5 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - The arena's #558 guard refuses while Notes runs and has no override, so Notes was closed by pid (SIGTERM), then reopened after.
 - His notes store is untouched (21 files, newest 23 Sep).
 - approvals_off_for_test is back off. dc held iso.yml until this result.
+
+**Mind gate on 520, OS f063fcef (6ebe7787 + #813 #816 #810 #819) + Mind 6f8a153 (15 Oct 13:07 CDT, run wuk): 7/7, 0 false claims, median 7.2 s.** Notes showed "All changes saved" with no note files changed today. It was closed by pid and reopened after; its 21 files are unchanged. The 6ebe7787 nightly was not published: CI's ISO boot test caught #796's GRUB theme crashing legacy BIOS, fixed by #819.

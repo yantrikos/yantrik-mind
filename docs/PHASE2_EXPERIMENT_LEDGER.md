@@ -19543,3 +19543,37 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - E.ERASE's plants used "locker code" for data an OLDER gate let through. The gate now refuses it, so the plants say "unit tag" (the canary values, which the tests are about, are unchanged).
   - E.LOOP10's own test used "gym locker code" as its harmless fact; it now uses "My bike is a blue Trek".
   - The two denied-write tests now expect the person's sentence, not the raw gate string.
+
+## E.HELD1 — PREREG: results handed over on a turn are in that turn's prompt
+
+**Why (541, 63fe0ed):** "thanks" after a finished research job ran `recall` ×2 and `research` again (egress built the query from "thanks"). The reply opened with a false ack before the held findings, and the junk result became a Delegated notice. The held results are appended AFTER the answer (cognitive.rs), so the model never knows they were delivered.
+
+**What is built:**
+- The turn takes its held notes BEFORE the loop and keeps them for this turn.
+- The agent loop's prompt carries "Finished while they were away and handed over with this reply (don't start it again): <first line of each>".
+- After the answer, they are appended under "— finished while you were away —" as today.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - with one held research result, the loop's first prompt carries its first line under that heading;
+  - the reply ends with the held text;
+  - with none held, the heading is absent.
+- K2, a mutant survives: the prompt section removed; the notes taken after the turn instead of before.
+- K3: both suites pass.
+- **Live (541):** the check-2 recheck, then "thanks". It kills if the thanks turn calls `research`, or if its reply carries an "On it — researching" ack.
+
+## E.LOOP11 — PREREG: a write tool that succeeded is withdrawn for the rest of the turn
+
+**Why:** E.LOOP10's instruction in the tool result did not change Qwen 27B's behaviour — remember ×3, add_reminder ×5. Only the guards stopped the repeats, at one model call each.
+
+**What is built:** after a step where `remember` or `add_reminder` ran and succeeded (`Outcome::Ok`), that tool's native schema is removed from `schemas` for the remaining steps of the turn. It cannot be called natively again; a text-JSON call is still caught by the existing guards.
+- The cost, said now: the schema block changes once mid-turn, so later steps lose prompt-cache reuse after a write. These are 1–2 more steps on a short turn.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a scripted turn of remember then remember: the second step's offered schemas lack `remember` and the first step's carry it;
+  - a refused remember does not withdraw it;
+  - `add_reminder` likewise.
+- K2, a mutant survives: the withdrawal removed; withdrawing on a refusal too.
+- K3: both suites pass.
+- **Live (541, Qwen 27B):** three remember turns at most 2 model calls each in 3 of 3, and one "remind me in 2 minutes" turn at most 3. Any reply that claims a save that did not happen kills it.

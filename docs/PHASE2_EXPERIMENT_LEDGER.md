@@ -19235,3 +19235,15 @@ Drive-tests 1 and 2 (dc, on 541) record what actually happens today before any c
   - the HA allowlist removed.
 - K3: both suites pass.
 - **Live (with dc's OS half):** on 541, a 2-minute reminder reaches the inbox once, survives a Mind restart while pending, and is not duplicated after reconnect.
+
+**E.NOTICE1 amendment (before any code): reuse the existing outbox, do not add one** (ARCH9: an existing owner first). L3b/L3c's `mind_notices` plus its hash-chained receipts already gives the durable outbox:
+- queued, then leased (lease_id, lease_until), then shown;
+- a unique dedupe key per operator, show-by expiry, verified chains.
+
+"Retry until stored" is a lease that expires unacked and is leased again. So the build becomes:
+- **New kinds:** `NoticeKind::Reminder` and `Delegated` (obligations, not engaging).
+- **A new event:** `NoticeEvent::Delivered` (the OS stored it durably). It is distinct from `Shown` (rendered to the person) and, like Shown, ends leasing.
+- **The sender:** leases, sends through a `NoticeSink`, and records Delivered on the OS's ack. With no sink (no OS capability), nothing is leased.
+- **Producers:** due reminders become `queue_notice(Reminder, dedupe "reminder:<task>:<due>")`; delegated `notify_queue` entries become `queue_notice(Delegated, ...)`.
+
+K1/K2 are restated against these: dedupe by key; an expired lease is resent; Delivered stops resending; the per-occurrence reminder key. The OS transport binding (a harness method, the envelope) waits on yantrik-os-dc's answer and is tested with a fake sink until then.

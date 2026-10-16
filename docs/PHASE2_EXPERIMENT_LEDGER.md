@@ -20454,3 +20454,4 @@ Mutants killed (3/3): the claim check removed at the loop exits; `read_only_comm
 Windows workspace: 2598 passed, 0 failed.
 
 **The 561 case under this build:** its six `cat`/`ls`/`head` runs are reads, so nothing changed, and "FINISHED … wrote … ran the page check" is sent back once. If it repeats, it is corrected in the reply.
+- **Linux (staging, 86e328e), E.GROUND1 + E.CLAIM2:** mind-conversation 1285 passed, mind-core 197 passed. **Bundle:** yantrik-mind-86e328e-linux-amd64.tar.zst, sha256 9fd70ac3070b40e208bec48cffbe5304e092889afcdb97074266adb92fa41b3e. Staging disk: 93%, 2.9 GB free.

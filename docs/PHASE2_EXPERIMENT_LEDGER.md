@@ -19350,3 +19350,26 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
   - E.REM1's merge test now expects "Saved as a reminder" on a host without delivery.
 - **K2:** the flag ignored (always pings) was killed.
 - **K3:** Windows workspace 2561 passed, 0 failed. Linux follows.
+
+**E.ANS2 live (542, Claude Sonnet 5.5, f89a419, yantrik-os-dc, 16 Oct): PASSES its prereg.** 0 of 6 replies list what isn't known or offer anything, and none speculates about a same-date item. Data:
+- **A same-date fact appeared in B3** (the recall answer, allowed) and **in A3, the REMEMBER confirmation** ("I've saved that your sister Mira's recital is on 3 December. Leila's book launch and Arjun's flight landing are on that date too."). A3 breaks Pranab's E.REM1c rule ("nothing about other facts or events" for a remember confirmation): E.ANS2's same-date clause leaked from answers into confirmations.
+- **New, outside the prereg's categories:** all three recalls add a confidence hedge to facts the person stated minutes earlier ("I've only heard it once, so I'm not very sure of it"). A told belief with one source sits at 0.68, and "the fact and where it came from" invites saying so. Doubting what the person just said reads as distrust; Jarvis would not.
+
+## E.ANS3 — PREREG: a told fact is stated plainly; a confirmation never carries another fact
+
+**What is built (agent rules):**
+- The remember clause gains "(even one on the same date)" after "nothing about other facts or events".
+- The answer clause's provenance becomes plain: "a fact the person told you is stated as they told it, with no doubt about it; say you're unsure only about what you inferred or where sources disagree". The same-date clause is scoped to "when answering a question".
+
+**Kill criteria (each one fails the build):**
+- K1: the rules carry "even one on the same date", "stated as they told it" and "only about what you inferred or where sources disagree".
+- K2: a mutant restoring the E.ANS2 text is killed.
+- K3: both suites pass.
+- **Live (542, Claude, a fresh conversation, the same 6-reply shape with new facts, one same-date):** kills if a remember confirmation carries any other fact, OR a recall of a told fact hedges its certainty, in 2 or more of the 6, or if E.ANS2's extras return in 2 or more of the 6.
+
+**E.REM1d K3, Linux (staging, ac583ae):** see the bundle line (sha256 47ced2ad…). That bundle is not shipped on its own: it goes out together with E.ANS3.
+
+## E.ANS3 — RESULT (code)
+- **K1 held:** "(even one on the same date)", "stated as they told it", "only about what you inferred or where sources disagree".
+- **K2:** the E.ANS2 text restored was killed.
+- **K3:** mind-conversation 1260 passed (a text-only change since the 2561-pass workspace run). Linux and a bundle carrying E.REM1d + E.ANS3 follow.

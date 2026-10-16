@@ -883,6 +883,9 @@ fn reminders_are_set_only_when_asked() {
     // E.ANS2 (542, 16 Oct): recall answers listed what they lacked and offered help.
     assert!(src.contains("answer what was asked") && src.contains("no list of what you don't know"));
     assert!(src.contains("no offer of more help unless they asked"));
+    // E.ANS3 (542): a confirmation leaked a same-date fact; told facts were hedged.
+    assert!(src.contains("(even one on the same date)") && src.contains("stated as they told it"));
+    assert!(src.contains("only about what you inferred or where sources disagree"));
     assert!(!src.contains(&["remembered, ", "not scheduled"].concat()));
     assert!(!tool_catalog::CORE_HEAD.contains("so you ping them when due"));
 }

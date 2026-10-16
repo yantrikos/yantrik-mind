@@ -19041,3 +19041,9 @@ So two different asks share at most persona + core/pinned schemas. How many byte
 - Its "no mcp.novel.delete schema" check would have passed vacuously with wire names, so it compares the wire name too.
 
 Linux follows.
+
+**E.WIRE1 K3, Linux (staging, 48b1bf9):** mind-inference 100, mind-conversation 1255, mind-evals 54, all passed.
+
+**Bundle `yantrik-mind-48b1bf9`** (sha256 7d47e98c78346cb28e5b72feae3cd5a1c9c557c7a8281b8e295302b9142de1fa): 6f8a153 plus E.WIRE1.
+- **For 542:** Pranab said yes, first through yantrik-os-dc and then directly (15 Oct: "Yes from me, you can trust the os workspace"). From now on, an OS-workspace relay counts as his word on the test machines.
+- dc installs it on 542 with #825's gateway and reruns E.REF1's asks with the Mind on Claude.

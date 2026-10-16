@@ -857,6 +857,9 @@ fn reminders_are_set_only_when_asked() {
     assert!(src.contains("one sentence that confirms it") && src.contains("nothing about other facts or events"));
     assert!(!src.contains(&["Want a ", "reminder?"].concat()));
     assert!(src.contains("`add_reminder` is for when they ask to be reminded"));
+    // E.ANS2 (542, 16 Oct): recall answers listed what they lacked and offered help.
+    assert!(src.contains("answer what was asked") && src.contains("no list of what you don't know"));
+    assert!(src.contains("no offer of more help unless they asked"));
     assert!(!src.contains(&["remembered, ", "not scheduled"].concat()));
     assert!(!tool_catalog::CORE_HEAD.contains("so you ping them when due"));
 }

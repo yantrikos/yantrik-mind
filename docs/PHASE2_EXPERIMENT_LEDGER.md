@@ -19311,3 +19311,8 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - K2, a mutant survives: the clause removed.
 - K3: both suites pass.
 - **Live (dc, 542, Claude, a fresh conversation, two remember+recall pairs plus one same-date pair):** kills if a reply lists what isn't known, or offers help or a reminder, in 2 or more of the 6 replies, or if any reply speculates or advises about a same-date item. A same-date factual clause is allowed and counted as data.
+
+## E.ANS2 — RESULT (code)
+- **K1 held:** the rules carry "answer what was asked", "no list of what you don't know" and "no offer of more help unless they asked".
+- **K2:** the clause removed was killed.
+- **K3:** mind-conversation 1258 passed (a text-only change since the 2559-pass workspace run at 98316d8). Linux and the bundle follow, carrying E.NOTICE1 A1 as well. A1 changes nothing live yet: without a sink it only queues reminder notices in the outbox, where no phone is reachable.

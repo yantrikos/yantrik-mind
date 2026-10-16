@@ -20269,3 +20269,4 @@ A calendar with nothing on it, or no desktop at all, keeps today's wording.
 - **Live (541):** "What do I have coming up this week?" must not open with "nothing is scheduled".
 
 **E.CAL2c — RESULT: PASS (Windows).** `beside_listed_events_the_reminders_are_scoped` passes. The mutant (scoping only when unread) kills it. Windows workspace (E.VOICE8 + E.CAL2c): 2591 passed, 0 failed, on the second run. The first run failed once in `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it`, which passes 3/3 alone. It is a pre-existing race: the test sets the process-global `YM_WEB_DIR` while others run in parallel. That code is untouched here; noted as a flake to fix.
+- **Linux (staging, f06d9cd), E.VOICE8 + E.CAL2c:** mind-conversation 1278 passed, mind-core 197 passed. **Bundle:** yantrik-mind-f06d9cd-linux-amd64.tar.zst, sha256 887dac3b5247f53fabd3f026942d60a3dedc711412b345daf7a5180940b865e1

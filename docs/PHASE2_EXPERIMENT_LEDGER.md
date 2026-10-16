@@ -18999,3 +18999,31 @@ So two different asks share at most persona + core/pinned schemas. How many byte
   - f063fcef's egress proxy refused the gate 10.99.0.1:8443 as a private address (fixed on 561; PR #822 makes it permanent).
   - Auto mode asks once per session before commands, and the card lapses in 110 s on a stream with no one at it. Waiting on Pranab.
 - An OS nit: install-mind with a relative path says "no bundle".
+
+## E.WIRE1 — PREREG: tool names a provider accepts (Claude refused the Mind's dotted MCP names)
+
+**Why (yantrik-os-dc, VM 542, 15 Oct):** a fresh install with the Mind on yantrik-gateway:picked = anthropic/claude-sonnet-5-5 failed its first ask.
+- Upstream 400: "tools.23.custom.name: String should match pattern '^[a-zA-Z0-9_-]{1,128}$'".
+- The Mind sends its MCP tools under their internal names (`mcp.yantrik-os.os_act`).
+- Anthropic allows `[a-zA-Z0-9_-]` up to 128 characters; OpenAI allows the same characters up to 64. Ollama and DeepSeek accept dots, which is why this never surfaced.
+- (A second Claude error, `temperature` deprecated, is the gateway's: dc's fix/gateway-drop-refused-temperature.)
+
+**What is built (mind-inference, the one boundary every tool-bearing call passes: `chat_scoped_tools_attributed`):**
+- `wire_tool_name(name)`:
+  - a name already matching `[A-Za-z0-9_-]{1,64}` is unchanged;
+  - otherwise `.` becomes `__` and any other character `_` (`mcp.yantrik-os.os_act` → `mcp__yantrik-os__os_act`, Hermes's convention);
+  - a result over 64 characters is cut to 55 and given `_` plus 8 hex of an FNV hash of the full name.
+- Before the call, each schema's `function.name` is replaced by its wire name, recording wire → internal for this call. A wire name that collides with another schema's gets the hash suffix.
+- After the call, each `tool_calls[].name` and `api_tool_calls[].function.name` found in that table is mapped back. Names not in it pass through, so the loop downstream sees only internal names.
+- The text-JSON fallback is unchanged: a backend that ignores schemas never sees a wire name.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `wire_tool_name`: valid names are unchanged; the MCP name maps as above; a 100-character dotted name gives ≤ 64 characters matching the pattern; two long names differing only at the end give different wire names.
+  - **Through the pool (scripted backend):** every schema name the backend receives matches `^[a-zA-Z0-9_-]{1,64}$`; a tool call the backend returns as `mcp__yantrik-os__os_act` comes back from `chat_grounded_tools` as `mcp.yantrik-os.os_act` (both `tool_calls` and `api_tool_calls`); a call to `remember` is untouched.
+- K2, a mutant survives:
+  - the encoding skipped;
+  - the decoding skipped;
+  - the length cap removed.
+- K3: both suites pass.
+- **Live check:** dc reruns E.REF1's asks on 542 with the Mind on Claude once the gateway temperature fix is in.

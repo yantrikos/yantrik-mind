@@ -19485,3 +19485,5 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - E.MEM1's remembered_this_turn compares against the const (its tests updated).
 - **K2: 3 mutants killed** (the research arm; the remember text reverted; the reminder sentence removed).
 - **K3:** Windows workspace 2565 passed, 0 failed. Linux follows, in a bundle with A2.
+
+**E.NOTICE1 A2 + E.LOOP10, Linux (staging, 63fe0ed):** mind-conversation passed. Bundle `yantrik-mind-63fe0ed` sha256 09376cc024dbaade1d3b44dbe99b10936c7942bbe4c59a0444bb468690dfec0a, for yantrik-os-dc's check-2 recheck and the E.LOOP10 live run on 541.

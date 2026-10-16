@@ -20107,3 +20107,4 @@ For a one-ask message (`one_ask`), such a read goes straight to the reply. An em
 - **Live (541):** "What do I have coming up this week?" must not call the 18:00 event tomorrow.
 
 **E.CAL2 — RESULT: PASS (Windows).** `list_events_json_becomes_lines_and_garbage_is_an_error` asserts `today 18:00`, `tomorrow 09:00`, `Mon 19 Oct` and quoted titles, with today fixed. Mutants killed (2/2): the relative labels removed; the quotes removed. **Windows workspace (A3c + E.CAL2):** 2590 passed, 0 failed.
+- **Linux (staging, 536731e), A3c + E.CAL2:** mind-conversation 1277 passed, mind-core 197 passed. **Bundle:** yantrik-mind-536731e-linux-amd64.tar.zst, sha256 e01cbda3f5bfea2016e4b9ea017b69eb40fa82d298c43d2e0143a35406fc7fc0

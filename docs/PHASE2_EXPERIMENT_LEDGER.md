@@ -19027,3 +19027,17 @@ So two different asks share at most persona + core/pinned schemas. How many byte
   - the length cap removed.
 - K3: both suites pass.
 - **Live check:** dc reruns E.REF1's asks on 542 with the Mind on Claude once the gateway temperature fix is in.
+
+## E.WIRE1 — RESULT (code): tool names a provider accepts; 3 mutants killed
+
+**K1 held:**
+- **`wire_tool_name`:** valid names are unchanged; `mcp.yantrik-os.os_act` gives `mcp__yantrik-os__os_act`; 100-character dotted names give valid, distinct wire names.
+- **Through the pool:** every schema name the backend received is valid. Its `mcp__yantrik-os__os_act` call came back as `mcp.yantrik-os.os_act` in both `tool_calls` and `api_tool_calls`, and `remember` was untouched.
+
+**K2 held, 3 mutants killed:** the encoding skipped; the decoding skipped; the length cap removed.
+
+**K3:** Windows workspace 2547 passed, 0 failed.
+- mind-evals' `unfamiliar_mcp_schema_repairs…` read the backend's schema by its internal name; it now looks it up by `wire_tool_name`.
+- Its "no mcp.novel.delete schema" check would have passed vacuously with wire names, so it compares the wire name too.
+
+Linux follows.

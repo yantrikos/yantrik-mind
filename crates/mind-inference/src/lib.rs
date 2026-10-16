@@ -803,6 +803,21 @@ impl InferencePool {
         tools: Vec<serde_json::Value>,
         callsite: &'static str,
     ) -> anyhow::Result<LLMResponse> {
+        // E.WIRE1: names a provider accepts on the way out, the Mind's own names on the way back.
+        let (tools, wired) = wire_tools(tools);
+        let mut r = Box::pin(self.chat_scoped_tools_wired(messages, config, scope, tools, callsite)).await?;
+        unwire_calls(&mut r, &wired);
+        Ok(r)
+    }
+
+    async fn chat_scoped_tools_wired(
+        &self,
+        messages: Vec<ChatMessage>,
+        config: GenerationConfig,
+        scope: PrivacyScope,
+        tools: Vec<serde_json::Value>,
+        callsite: &'static str,
+    ) -> anyhow::Result<LLMResponse> {
         // ONE SYSTEM MESSAGE. Every caller here builds its prompt as several system blocks —
         // persona, then agent instructions, with pack rules and a format note INSERTED at index 1 —
         // and some chat templates refuse that outright. Diagnosed 2026-08-15 through a logging
@@ -3364,6 +3379,152 @@ impl Router {
         let mut v: Vec<String> = self.roles.keys().cloned().collect();
         v.sort();
         v
+    }
+}
+
+/// E.WIRE1 (VM 542, 15 Oct: Claude refused `mcp.yantrik-os.os_act`): a tool's name as a provider
+/// accepts it. Anthropic allows `[a-zA-Z0-9_-]` up to 128 characters and OpenAI the same up to 64;
+/// a name already within that is unchanged. Otherwise `.` becomes `__` (Hermes's convention for MCP
+/// tools) and anything else `_`, and a name still over 64 is cut and given a hash of the whole name,
+/// so two long names that differ only at the end stay two names.
+pub fn wire_tool_name(name: &str) -> String {
+    let ok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if !name.is_empty() && name.len() <= WIRE_MAX && name.chars().all(ok) {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    for c in name.chars() {
+        match c {
+            '.' => out.push_str("__"),
+            c if ok(c) => out.push(c),
+            _ => out.push('_'),
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    if out.len() > WIRE_MAX { hashed_wire(&out, name) } else { out }
+}
+
+const WIRE_MAX: usize = 64;
+
+fn hashed_wire(wire: &str, name: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in name.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{}_{:08x}", &wire[..wire.len().min(55)], h as u32)
+}
+
+/// The schemas with their wire names, and wire -> the Mind's name for every name that changed.
+fn wire_tools(mut tools: Vec<serde_json::Value>) -> (Vec<serde_json::Value>, HashMap<String, String>) {
+    let mut wired: HashMap<String, String> = HashMap::new();
+    let originals: std::collections::HashSet<String> = tools
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+        .collect();
+    for t in tools.iter_mut() {
+        let Some(name) = t["function"]["name"].as_str().map(String::from) else { continue };
+        let mut wire = wire_tool_name(&name);
+        if wire == name {
+            continue;
+        }
+        if wired.contains_key(&wire) || originals.contains(&wire) {
+            wire = hashed_wire(&wire, &name);
+        }
+        t["function"]["name"] = serde_json::Value::String(wire.clone());
+        wired.insert(wire, name);
+    }
+    (tools, wired)
+}
+
+/// The model's tool calls under the Mind's own names.
+fn unwire_calls(r: &mut LLMResponse, wired: &HashMap<String, String>) {
+    for tc in r.tool_calls.iter_mut() {
+        if let Some(name) = wired.get(&tc.name) {
+            tc.name = name.clone();
+        }
+    }
+    for tc in r.api_tool_calls.iter_mut() {
+        if let Some(name) = wired.get(&tc.function.name) {
+            tc.function.name = name.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod wire1_tests {
+    use super::*;
+
+    fn valid(n: &str) -> bool {
+        !n.is_empty() && n.len() <= 64 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[test]
+    fn names_are_made_acceptable_and_stay_distinct() {
+        assert_eq!(wire_tool_name("remember"), "remember");
+        assert_eq!(wire_tool_name("web_fetch"), "web_fetch");
+        assert_eq!(wire_tool_name("mcp.yantrik-os.os_act"), "mcp__yantrik-os__os_act");
+        let long_a = format!("mcp.{}.tool_a", "x".repeat(90));
+        let long_b = format!("mcp.{}.tool_b", "x".repeat(90));
+        let (a, b) = (wire_tool_name(&long_a), wire_tool_name(&long_b));
+        assert!(valid(&a) && valid(&b), "{a} / {b}");
+        assert_ne!(a, b);
+    }
+
+    struct Wants {
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+    impl LLMBackend for Wants {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<LLMResponse> {
+            let names: Vec<String> = t.unwrap_or_default().iter().filter_map(|s| s["function"]["name"].as_str().map(String::from)).collect();
+            self.seen.lock().unwrap().extend(names);
+            let api = |n: &str| yantrik_ml::ApiToolCall {
+                id: "c1".into(),
+                call_type: "function".into(),
+                function: yantrik_ml::ApiToolCallFunction { name: n.into(), arguments: "{}".into() },
+            };
+            Ok(LLMResponse {
+                text: String::new(),
+                thinking: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                tool_calls: vec![
+                    ToolCall { name: "mcp__yantrik-os__os_act".into(), arguments: serde_json::json!({}) },
+                    ToolCall { name: "remember".into(), arguments: serde_json::json!({}) },
+                ],
+                api_tool_calls: vec![api("mcp__yantrik-os__os_act"), api("remember")],
+                stop_reason: "tool_calls".into(),
+            })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "wants"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_backend_gets_wire_names_and_the_loop_gets_its_own() {
+        let backend = Arc::new(Wants { seen: std::sync::Mutex::new(Vec::new()) });
+        let model: Arc<dyn LLMBackend> = backend.clone();
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let schema = |n: &str| serde_json::json!({"type": "function", "function": {"name": n, "parameters": {"type": "object"}}});
+        let r = pool
+            .chat_grounded_tools(vec![ChatMessage::user("hi")], GenerationConfig::default(), vec![schema("mcp.yantrik-os.os_act"), schema("remember")])
+            .await
+            .unwrap();
+        let seen = backend.seen.lock().unwrap().clone();
+        assert!(!seen.is_empty() && seen.iter().all(|n| valid(n)), "{seen:?}");
+        let names: Vec<&str> = r.tool_calls.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["mcp.yantrik-os.os_act", "remember"]);
+        let api: Vec<&str> = r.api_tool_calls.iter().map(|t| t.function.name.as_str()).collect();
+        assert_eq!(api, ["mcp.yantrik-os.os_act", "remember"]);
     }
 }
 

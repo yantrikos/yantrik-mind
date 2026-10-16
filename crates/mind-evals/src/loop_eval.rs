@@ -520,7 +520,8 @@ mod tests {
         let required_at = |call: usize| {
             seq.tools_at(call)
                 .into_iter()
-                .find(|schema| schema["function"]["name"] == tool_name)
+                // E.WIRE1: the backend is sent the wire name.
+                .find(|schema| schema["function"]["name"] == mind_inference::wire_tool_name(tool_name).as_str())
                 .and_then(|schema| {
                     schema["function"]["parameters"]["required"]
                         .as_array()
@@ -539,6 +540,6 @@ mod tests {
         assert!(seq
             .tools_at(0)
             .iter()
-            .all(|schema| schema["function"]["name"] != "mcp.novel.delete"));
+            .all(|schema| schema["function"]["name"] != mind_inference::wire_tool_name("mcp.novel.delete").as_str()));
     }
 }

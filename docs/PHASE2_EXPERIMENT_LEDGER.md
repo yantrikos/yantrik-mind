@@ -20220,3 +20220,4 @@ dc's next labels follow the policy as written: no fault for an allowed same-date
 **Bar:** unchanged. Rule agreement ≥ 0.90; for each of unasked_offer, contradicts_facts and unasked_tie_in, recall ≥ 0.75 and precision ≥ 0.6; unasked_advice is reported against the same bar.
 
 **Data:** fresh replies, unread by me before scoring.
+- **Linux (staging, 7023a98), E.CAL2b:** mind-conversation 1277 passed, mind-core 197 passed. The first bundle attempt failed because I pushed ledger commits mid-build. Rebuilt at c37ba49, which differs from 7023a98 only in the ledger. **Bundle:** yantrik-mind-c37ba49-linux-amd64.tar.zst, sha256 dc9be03da844f70167258e6ac5e41b7ed4cb212a5c00e7c7ef65c1184c0bfd3a

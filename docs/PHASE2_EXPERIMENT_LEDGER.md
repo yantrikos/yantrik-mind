@@ -19720,3 +19720,30 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 4. **Nothing consults the OS calendar** for "this week" or "tomorrow": "Trip reminder — Dallas tomorrow" at 18:00 today was missed 8 of 8. `upcoming` reads only the Mind's own stores.
 5. **`about_person` misses a just-saved person** whom recall finds.
 6. **A note-tool result printed as raw JSON** for the answer.
+
+## E.REM2 + E.LOOP13 — PREREG: a reminder that came due is announced and closed; one read answers one question
+
+**Why:** the 541 bugs 1–3 above.
+
+**What is built:**
+1. **E.REM2.** When `queue_due_reminders_at` handles a reminder in the 24 h catch-up window:
+   - it holds "⏰ Reminder: <text> (due <HH:MM>)" for the next reply (`hold_for_next_turn`). That is a real delivery on the desktop today, before A3;
+   - it completes the task (`complete_task`), whether its notice was fresh or queued earlier. Earlier-queued ones are 541's backlog of stretch, water and oven; they are closed but not held again.
+   - A reminder overdue by more than 24 h is untouched: it is a follow-through matter, not a firing.
+2. **E.REM2.** `upcoming_list` opens with "Today is <Ddd D Mon>." so "tomorrow" has a reference.
+3. **E.LOOP13.** After a sent, Ok `upcoming` read, if the message is one ask (`one_ask`: none of " and ", " then ", " also ", " plus "; a "?" is allowed for a read), the loop composes. It is the read-side twin of E.LOOP12, with the same safe-direction heuristic.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a reminder due 1 h ago: after one scan there is one notice, one held "⏰ Reminder:" note and the task is completed; a second scan holds nothing new;
+  - a past-due reminder that was queued earlier but is still open gets completed and is not held;
+  - one overdue by 2 days is untouched (still open, nothing held);
+  - after it closes, add_reminder with the same text adds a new one;
+  - upcoming_list starts with "Today is ";
+  - "What do I have coming up this week?" with upcoming then upcoming scripted: one tool step;
+  - "What's on Thursday and what's the weather?": continues.
+- K2, a mutant survives: the completion removed; the hold removed; the read stop removed; `one_ask` replaced by `single_request` (a question then would never stop).
+- K3: both suites pass.
+- **Live (541, Qwen 27B):**
+  - "remind me in 2 minutes to stretch" (same text as an old one), then after 3 minutes "ok": the second reply carries "⏰ Reminder: stretch…", and the task is completed in mind.db;
+  - "What do I have coming up this week?" in at most 2 calls, with no past-due item called tomorrow.

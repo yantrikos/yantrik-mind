@@ -19316,3 +19316,26 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - **K1 held:** the rules carry "answer what was asked", "no list of what you don't know" and "no offer of more help unless they asked".
 - **K2:** the clause removed was killed.
 - **K3:** mind-conversation 1258 passed (a text-only change since the 2559-pass workspace run at 98316d8). Linux and the bundle follow, carrying E.NOTICE1 A1 as well. A1 changes nothing live yet: without a sink it only queues reminder notices in the outbox, where no phone is reachable.
+
+**Stage 0 check 1 (541, ae54fdc on qwen3.5:27b via the gateway, yantrik-os-dc, 16 Oct), driven:** "remind me in 2 minutes to stretch".
+- **The Mind** replied "Done — I'll ping you in 2 minutes to stretch."
+  - The task was saved with the right deadline (02:55:19 CDT) and was still Pending at 03:00.
+  - 0 notices, 0 receipts, 0 triggers. No journal line about it. Nothing in the notification store, the Lens or a toast.
+  - **The static finding is confirmed:** on the desktop nothing watches a reminder's deadline.
+  - 6 steps for one reminder: add_reminder ×4 (deduped), `now`, and an unbidden `remember` of a profile summary.
+- **Hermes** has no scheduling tool. It delegated a subagent to "wait 120 s then ping"; the subagent raised an agent_run approval card nobody asked for; the card expired; nothing was delivered. Its reply said "Timer's running — I'll ping you in about 2 minutes".
+- **Both minds promise a ping the desktop cannot deliver.** A line for E.NOTICE1: Hermes needs a reminder tool on the same notice path, outside this stage.
+
+## E.REM1d — PREREG: the reminder tool says what is true for this host
+
+**Why:** `add_reminder` answers "Reminder set … I'll ping you when it's due", and the model repeats the promise. On the desktop it is false today, and it stays false until A3 binds the sink. That is the E.REM1 pattern: a tool's observation must say what actually happens.
+
+**What is built:**
+- `ConversationEngine` carries `reminders_deliverable`, false by default. It is set true by the Telegram host (its reminder_loop pings) and by A3 when the desktop advertises `notice_inbox_v1`.
+- `add_reminder` with a readable date says "Reminder set: … — I'll ping you when it's due" only when it is true. Otherwise it says "Saved as a reminder for <when>, but this desktop can't alert you when it's due yet — check back, or ask me".
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails: with deliverable false, the reply carries "can't alert you" and no "ping"; with deliverable true, it carries "I'll ping you"; the Telegram host sets it true.
+- K2, a mutant survives: the flag ignored (always pings).
+- K3: both suites pass.
+- **Live (541):** "remind me in 2 minutes to stretch" gives a reply that does not promise a ping.

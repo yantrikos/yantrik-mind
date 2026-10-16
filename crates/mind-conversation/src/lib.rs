@@ -2074,6 +2074,20 @@ pub(crate) fn last_reply_asked(recent: &[(String, String)]) -> bool {
     recent.iter().rev().find(|(r, _)| r == "assistant").is_some_and(|(_, t)| t.trim_end().ends_with('?'))
 }
 
+/// E.GROUND1: what a turn that refused on approval grounds without trying anything is told.
+pub(crate) const APPROVAL_UNTRIED: &str =
+    "(nothing was tried this turn -- approvals and permissions change; try the action, and the desktop will ask the person if it must)";
+
+/// E.GROUND1 (561: "every command needs your approval … waited out the 110-second window", from
+/// lapsed cards earlier in the conversation): does this answer refuse on approval grounds?
+pub(crate) fn refuses_for_approval(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("approv")
+        && ["can't", "cannot", "won't", "need your", "needs your", "waited out", "timed out", "time out", "not at the keyboard"]
+            .iter()
+            .any(|w| t.contains(w))
+}
+
 /// E.LOOP13: one ask, question or not -- no joining word. The read-side twin of `single_request`
 /// (a read answers a question, so a "?" does not make it two).
 pub(crate) fn one_ask(text: &str) -> bool {
@@ -14148,6 +14162,10 @@ Open reminders you're carrying for them:",
         let mut unsaved_doc = false;
         // E.ARENA1-F58: how many times this turn was told its document is still unsaved.
         let mut unsaved_nudges: usize = 0;
+        // E.GROUND1: whether any tool was sent this turn, and whether a stale approval refusal was
+        // already sent back once.
+        let mut any_sent = false;
+        let mut approval_nudged = false;
         // E.ARENA1-F21: the one reminder that the path the request asked for is still missing.
         // E.ARENA1-F54: how many times this turn was told its goal is still missing.
         let mut goal_nudges: usize = 0;
@@ -14329,7 +14347,7 @@ Open reminders you're carrying for them:",
                 if names_nothing {
                     ChatMessage::system("You have been asked not to reveal private facts. Private memory, external data, configuration, clock, discovery, and mutating tools are withheld. You may use only the explicitly listed pure-local tools, with arguments copied from the current request; do not attempt any lookup or recall. Otherwise answer at the level of SHAPE and KIND from what is already in front of you, name no people, projects, accounts, purchases, places or dates, and say plainly that you cannot cite private specifics here. A short honest answer is correct; guessing to fill the gap is not.")
                 } else {
-                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) -- nothing about other facts or events (even one on the same date); `add_reminder` is for when they ask to be reminded; when you answer a question, answer what was asked: a fact the person told you is stated as they told it, with no doubt about it -- say you're unsure only about what you inferred or where sources disagree; no list of what you don't know, and no offer of more help unless they asked for it; at most one short factual clause about something on the same date or for the same person, stated as a fact, not a worry or a suggestion; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
+                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) -- nothing about other facts or events (even one on the same date); `add_reminder` is for when they ask to be reminded; when you answer a question, answer what was asked: a fact the person told you is stated as they told it, with no doubt about it -- say you're unsure only about what you inferred or where sources disagree; no list of what you don't know, and no offer of more help unless they asked for it; at most one short factual clause about something on the same date or for the same person, stated as a fact, not a worry or a suggestion; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Whether an action was allowed, needed approval or failed earlier in this conversation is history too: approvals and permissions change. When they ask for an action, try it this turn -- the desktop asks the person if it must -- and never answer that it can't run, needs approval or will time out without a tool result THIS turn that says so. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
                 },
                 ChatMessage::user(&prompt),
             ];
@@ -14500,6 +14518,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
                 // E.ANS4: never the person's reply as a JSON object.
                 let mut a = unwrapped_answer(ans).unwrap_or_default();
+                // E.GROUND1: the same backstop on the answer action.
+                if !any_sent && !approval_nudged && !ack_only && refuses_for_approval(&a) {
+                    approval_nudged = true;
+                    eprintln!("[agent] step {step}: an approval refusal with nothing tried this turn \u{2014} sent back once");
+                    scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
+                    continue;
+                }
                 if !a.is_empty() {
                     // A WHOLE DOCUMENT, not merely text containing markup. `looks_like_html` alone
                     // asks whether the reply CONTAINS `<div>`/`<table>`/`<body>`, which a reply ABOUT
@@ -14672,6 +14697,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // indistinguishable from one still running — 17 minutes of "is it wedged?" on
                 // 2026-08-16 was this exact silence.
                 // Before this counts as the answer: was part of what was asked never attempted?
+                // E.GROUND1 (561: nine turns of "it needs your approval" from lapsed cards earlier in
+                // the conversation, with a session rule in place and no attempt): try first.
+                if !any_sent && !approval_nudged && !ack_only && refuses_for_approval(&a) {
+                    approval_nudged = true;
+                    eprintln!("[agent] step {step}: an approval refusal with nothing tried this turn \u{2014} sent back once");
+                    scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
+                    continue;
+                }
                 // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
                 if unsaved_doc {
                     if desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
@@ -15335,6 +15368,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // world has changed (the loop's ordinary repeat nudge still meets an immediate retry).
             // E.ARENA1-F22: "nothing was run" is not a success, however the classifier scored it.
             let ran = outcome == crate::tool_outcome::Outcome::Ok && !desktop::nothing_was_run(&obs);
+            any_sent |= sent;
             // E.LOOP11 (541: remember x3, add_reminder x5 -- an instruction in the result did not
             // stop Qwen 27B): a write that succeeded is withdrawn for the rest of the turn.
             if sent && matches!(tool.as_str(), "remember" | "add_reminder") && outcome == crate::tool_outcome::Outcome::Ok {

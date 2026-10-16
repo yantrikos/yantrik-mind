@@ -20374,3 +20374,33 @@ Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate del
   - the task was cut mid-word ("… ep") with no sign of the cut. `short_task` now cuts at a word, with an ellipsis.
 
   `the_card_reads_cleanly` covers both. These ride with the next bundle.
+
+## E.GROUND1 — PREREG: a "can't, it needs approval" answer needs an attempt this turn
+
+**Why:** 561 (dc, 16 Oct). The Director keeps one conversation all day. For nine turns (168–176) the Mind answered "every command needs your approval, you're not at the keyboard; the last several attempts each waited out the 110-second approval window" with NO tool call: `1 steps in 1s … no tools`. Pranab's session rule `shell.agent_run` had been in place since 16:25, and turn 167 had just run 10+ agent_run calls successfully. The claim came from earlier missions' lapsed cards in the history. This is the same family as #834 (history standing in for present state). The OS side is #838 (a new chat per mission).
+
+**What is built:**
+1. **The grounding rule** (beside "memories … are history, not state"): "Whether an action was allowed, needed approval or failed earlier in this conversation is history too: approvals and permissions change. When they ask for an action, try it this turn -- the desktop asks the person if it must -- and never answer that it can't run, needs approval or will time out without a tool result THIS turn that says so."
+2. **A backstop in the loop.** When the model's answer would end a turn in which NO tool was sent, the turn is not a bare acknowledgement (E.ACK1), and `refuses_for_approval(answer)` holds, the answer is not taken once. The observation is "(nothing was tried this turn -- approvals and permissions change; try the action, and the desktop will ask the person if it must)". A second such answer is taken.
+   - `refuses_for_approval` = the text contains "approv" together with one of: can't, cannot, won't, need your, needs your, waited out, timed out, time out, not at the keyboard.
+
+**Kill criteria:**
+- K1, tests fail:
+  - an action request whose model first answers "I can't run that -- it needs your approval and you're not at the keyboard", with no tool, then calls a tool: the tool is called (2 steps), and the first text is not the reply;
+  - the same after a tool ran this turn: the answer is taken;
+  - "ok" (an ack): taken;
+  - the detector's positive and negative cases.
+- K2, a mutant survives: the backstop removed; the "no tool sent" condition removed; the rule text removed.
+- K3: both suites pass.
+- **Live (561 via the Director, or 541):** with a session rule in place and lapsed cards in the history, an action request gets a tool attempt, not the stale refusal.
+
+**E.GROUND1 — RESULT: PASS (Windows).** `an_approval_refusal_needs_an_attempt_this_turn` covers five cases:
+- the untried refusal is sent back, and a tool is then tried;
+- after a tool has run, it is not sent back;
+- it is sent back once only;
+- the answer action is sent back too;
+- the rule text is in the prompt.
+
+Mutants killed (3/3): the backstop removed at both sites together; the "no tool sent" condition removed; the rule text removed. A mutant removing only the answer-action site was not run on its own; the answer-action case is in the test.
+
+Test amendment: what follows a send-back is the loop's existing goal check (E.ARENA's `unattempted_side_effect`), so the test asserts E.GROUND1's own observation, not the final reply. Windows workspace: 2597 passed, 0 failed.

@@ -18163,6 +18163,37 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
     }
 
+    /// E.GROUND1 (561: nine turns of "it needs your approval" from lapsed cards, with nothing tried):
+    /// an approval refusal with no tool sent this turn goes back once; after a try, or the second
+    /// time, it stands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_approval_refusal_needs_an_attempt_this_turn() {
+        let refuse = "I can't run that -- every command needs your approval and you're not at the keyboard.";
+        let ask = "Run the build script in my project";
+        let tried = || Step::Call("recall", serde_json::json!({"query": "build script"}));
+        let r = run_with(ask, vec![Step::Say(refuse), tried(), Step::Say("Ran it; the build passed.")], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(!r.reply.contains("needs your approval"), "the untried refusal was the reply: {}", r.reply);
+        assert!(r.prompts.iter().any(|p| p.contains(crate::APPROVAL_UNTRIED)), "the loop was not told");
+        assert!(r.prompts.iter().any(|p| p.contains("recall -> ")), "nothing was tried after the nudge");
+        // (What happens next is the loop's own goal check, E.ARENA; E.GROUND1 is only whether it was
+        // sent back.) After a tool ran this turn, it is not sent back.
+        let told = |r: &Run| r.prompts.iter().filter(|p| p.contains(crate::APPROVAL_UNTRIED)).count();
+        let r = run_with(ask, vec![tried(), Step::Say(refuse)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert_eq!(told(&r), 0, "sent back after a tool had run");
+        // Sent back once only: the second refusal is not sent back again.
+        let r = run_with(ask, vec![Step::Say(refuse), Step::Say(refuse), Step::Fail], vec!["UNUSED"], vec!["UNUSED"]).await;
+        let last = r.prompts.last().unwrap();
+        assert_eq!(last.matches(crate::APPROVAL_UNTRIED).count(), 1, "sent back twice");
+        // The answer action is held to the same.
+        let r = run_with(ask, vec![Step::Call("answer", serde_json::json!({"text": refuse})), tried(), Step::Fail], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert_eq!(r.prompts.last().unwrap().matches(crate::APPROVAL_UNTRIED).count(), 1, "the answer action was not sent back once");
+        // And the turn is told the rule.
+        assert!(r.prompts[0].contains("Whether an action was allowed, needed approval or failed earlier in this conversation is history too"));
+        assert!(crate::refuses_for_approval("That command needs your approval, and the card timed out."));
+        assert!(!crate::refuses_for_approval("I can't find a build script in that folder."));
+        assert!(!crate::refuses_for_approval("Approved items: 3."));
+    }
+
     /// E.ANS1b (E.THIN1-M full B): the answer's text wherever the model put it, never a field's name.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_answer_filed_as_a_skill_is_its_text_not_a_field_name() {

@@ -20353,3 +20353,10 @@ No model call anywhere: deterministic detection plus templates, per the plan, un
 
 Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate delivered as a held note; the guard keeping the job. The loop step `run_initiative_shadow` runs every 60 s on every box. Windows workspace: 2594 passed, 0 failed.
 - **Linux (staging, 260dc7c), E.INIT1:** mind-conversation 1281 passed, mind-core 197 passed. **Bundle:** yantrik-mind-260dc7c-linux-amd64.tar.zst, sha256 b3e8594f4f0e0247ec948fdd403a63bee67fdc5e48119d51f90fab2ee6db01d6. Staging disk: 3.0 GB free (92%).
+
+## E.INIT1 — live (541, 260dc7c on OS test/batch3 7be5dee4, yantrik-os-dc, 16 Oct): the negative case PASS, the positive case not yet seen
+
+- A broad `/research` finished in about 4 min, under the 15-min threshold. As it should: no shadow journal line, no `initiative_candidates` row, and no `initiative_candidate` event in `mind.db.decisions.jsonl`.
+- Nothing extra was delivered: `mind_notices` 10 → 11 and desktop cards 66 → 67, the research result only. The reply was unchanged.
+- **Amendment 3, for the positive case:** `YM_STALL_MINUTES=<n>` overrides every kind's stall threshold. It is documented as a drive knob, read on each pass, and a value that is unset, zero or unparseable keeps the defaults. dc sets it to 1 on 541 and runs a research job. Expected: one candidate, the textless decision event, and nothing delivered.
+- **Amendment 3 — RESULT:** `the_stall_knob_overrides_only_when_it_is_usable` passes. Windows workspace: 2595 passed, 0 failed.

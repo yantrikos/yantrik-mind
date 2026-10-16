@@ -58,8 +58,17 @@ impl Drop for JobGuard {
     }
 }
 
-/// How long a delegation of this kind may run before it counts as stalled.
+/// How long a delegation of this kind may run before it counts as stalled. `YM_STALL_MINUTES`
+/// overrides every kind (a drive knob, so a live check need not wait for a naturally slow job);
+/// unset, zero or unparseable keeps the defaults.
 pub(crate) fn stall_ms(kind: &str) -> u64 {
+    stall_ms_with(kind, std::env::var("YM_STALL_MINUTES").ok().as_deref())
+}
+
+pub(crate) fn stall_ms_with(kind: &str, minutes: Option<&str>) -> u64 {
+    if let Some(m) = minutes.and_then(|m| m.trim().parse::<u64>().ok()).filter(|m| *m > 0) {
+        return m * 60_000;
+    }
     match kind {
         "research" => 15 * 60_000,
         _ => 30 * 60_000,
@@ -216,6 +225,18 @@ mod init1_tests {
         assert_eq!(src.matches("host.start_job(\"research\"").count(), 1);
         assert_eq!(src.matches("host.start_job(\"code\"").count(), 1);
         assert_eq!(src.matches("let _running = running;").count(), 2, "a guard is not moved into its task");
+    }
+
+    /// Amendment 3: the drive knob overrides every kind; nothing usable keeps the defaults.
+    #[test]
+    fn the_stall_knob_overrides_only_when_it_is_usable() {
+        assert_eq!(stall_ms_with("research", None), 15 * MIN);
+        assert_eq!(stall_ms_with("code", None), 30 * MIN);
+        assert_eq!(stall_ms_with("research", Some("1")), MIN);
+        assert_eq!(stall_ms_with("code", Some(" 2 ")), 2 * MIN);
+        for bad in ["0", "", "soon", "-3"] {
+            assert_eq!(stall_ms_with("research", Some(bad)), 15 * MIN, "{bad:?}");
+        }
     }
 
     /// A job that panics is still taken out of the registry.

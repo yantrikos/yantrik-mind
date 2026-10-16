@@ -6128,10 +6128,11 @@ pub struct ConversationEngine {
     /// E.PACE2: the effort compose (the answer written from the work log) asks for when the person
     /// picked none -- `YM_COMPOSE_EFFORT`. None keeps the model's default, as E.PACE1b left it.
     compose_effort: Option<String>,
-    /// E.REM1d: whether a reminder set here will actually reach the person when it comes due -- a
-    /// reachable phone (Telegram's reminder loop), or the desktop's notice inbox once bound. False
-    /// until a host says so: on 541 the tool promised a ping nothing delivered.
-    reminders_deliverable: std::sync::atomic::AtomicBool,
+    /// E.REM1d / E.NOTICE1 A2: whether something can reach the person when nobody asked just now --
+    /// a due reminder, a finished background job. A reachable phone (Telegram's loops), or the
+    /// desktop's notice inbox once bound. False until a host says so: on 541 the reminder tool and
+    /// the research tool both promised a delivery nothing made.
+    unprompted_delivery: std::sync::atomic::AtomicBool,
     /// E.PREFIX1a: the previous agent step's prompt laid out, and the last report against it --
     /// how much a server's prompt cache could reuse (see `prefix_probe`).
     prefix_last: std::sync::Mutex<Option<(prefix_probe::Render, usize, &'static str)>>,
@@ -6287,6 +6288,9 @@ pub struct ConversationEngine {
     /// Results from delegated background jobs (research/code) waiting to be pushed to the user. The
     /// poll loop drains this each tick via `take_notifications()` and sends to the active chat.
     notify_queue: Arc<Mutex<Vec<String>>>,
+    /// E.NOTICE1 A2: results of work the person delegated (research, code, delegate jobs) -- the
+    /// typed half of the notify queue, the only results that become obligation notices.
+    delegated_queue: Arc<Mutex<Vec<String>>>,
     /// Finished results that could not reach any chat — delivered on the next exchange, any channel.
     held_notes: Arc<Mutex<Vec<String>>>,
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
@@ -6335,11 +6339,11 @@ impl ConversationEngine {
     }
 
     /// E.REM1d: a host that will deliver due reminders says so (see the field).
-    pub fn set_reminders_deliverable(&self, yes: bool) {
-        self.reminders_deliverable.store(yes, std::sync::atomic::Ordering::Relaxed);
+    pub fn set_unprompted_delivery(&self, yes: bool) {
+        self.unprompted_delivery.store(yes, std::sync::atomic::Ordering::Relaxed);
     }
-    pub fn reminders_deliverable(&self) -> bool {
-        self.reminders_deliverable.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn unprompted_delivery(&self) -> bool {
+        self.unprompted_delivery.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// E.PREFIX1b: one schema block for every turn (see the field).
@@ -6403,7 +6407,7 @@ impl ConversationEngine {
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
             compose_effort: None,
-            reminders_deliverable: std::sync::atomic::AtomicBool::new(false),
+            unprompted_delivery: std::sync::atomic::AtomicBool::new(false),
             prefix_last: std::sync::Mutex::new(None),
             stable_schemas: false,
             recent_window: 20,
@@ -6474,6 +6478,7 @@ impl ConversationEngine {
             last_turn_answer: Mutex::new(None),
             turn_packs: Mutex::new(Vec::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
+            delegated_queue: Arc::new(Mutex::new(Vec::new())),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
             last_sent_photo: Arc::new(Mutex::new(None)),
@@ -6721,7 +6726,43 @@ impl ConversationEngine {
     /// Drain results from finished delegated background jobs (research/code) — the poll loop calls
     /// this each tick and delivers each to the active chat. Empty when nothing has completed.
     pub fn take_notifications(&self) -> Vec<String> {
-        std::mem::take(&mut *self.notify_queue.lock().unwrap())
+        let mut all = std::mem::take(&mut *self.notify_queue.lock().unwrap());
+        all.extend(std::mem::take(&mut *self.delegated_queue.lock().unwrap()));
+        all
+    }
+
+    /// E.NOTICE1 A2: where no phone drains the queues, every finished result is held for the next
+    /// reply, and a delegated one is also queued as an obligation notice for the desktop's inbox.
+    /// Returns (held, queued as notices).
+    pub fn route_results_without_a_phone(&self, now_ms: u64) -> anyhow::Result<(usize, usize)> {
+        let other = std::mem::take(&mut *self.notify_queue.lock().unwrap());
+        let delegated = std::mem::take(&mut *self.delegated_queue.lock().unwrap());
+        let held = other.len() + delegated.len();
+        for note in other.iter().chain(delegated.iter()) {
+            self.hold_for_next_turn(note);
+        }
+        let mut queued = 0;
+        for text in &delegated {
+            let key = format!("delegated:{}", &mind_spec::sha256_hex(text.as_bytes())[..32]);
+            if self.has_notice_queue() {
+                let q = self.notice_engine()?.queue_notice(
+                    Self::NOTICE_OPERATOR,
+                    mind_spec::NoticeKind::Delegated,
+                    text,
+                    &key,
+                    now_ms,
+                )?;
+                if q.fresh {
+                    queued += 1;
+                }
+            }
+        }
+        Ok((held, queued))
+    }
+
+    /// E.NOTICE1 A2: a delegated job's result, as the job sites push it.
+    pub fn push_delegated_result(&self, text: &str) {
+        self.delegated_queue.lock().unwrap().push(text.to_string());
     }
 
     /// Hold a finished result that could not reach any chat right now, for delivery on the user's
@@ -12989,7 +13030,7 @@ WINDOW: all-time, latest 200
                 }
                 match added {
                     // E.REM1d: a ping is promised only where one will be delivered.
-                    Ok(_) if due.is_some() && self.reminders_deliverable() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
+                    Ok(_) if due.is_some() && self.unprompted_delivery() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
                     Ok(_) if due.is_some() => format!(
                         "Saved as a reminder: \"{text}\" — {when}. This desktop can't alert you when it's due yet -- check back, or ask me."
                     ),

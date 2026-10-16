@@ -19410,3 +19410,27 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
   - the notice made for every note (allowlist removed).
 - K3: both suites pass.
 - **Live (541 or 542):** the check-2 ask, then "thanks" a few minutes later. The second reply carries the results under "finished while you were away".
+
+## E.NOTICE1 A2 — RESULT (code): delegated results held for the next reply and queued as notices where no phone is reachable
+
+**Built:**
+- `delegated_queue` (8 job sites: capabilities 2, code.rs 3, delegate.rs 3);
+- `take_notifications` drains both queues, so Telegram is unchanged;
+- `route_results_without_a_phone`: everything is held, and delegated results are also queued as `Delegated` notices keyed on the text's sha;
+- `loops::run_job_results` every wake, gated on no phone;
+- the flag renamed `unprompted_delivery`, which now gates the research and coder replies too ("I'll put what I find in my next reply once it's done").
+
+**K1 held:**
+- with a phone, nothing is held and `take_notifications` returns both;
+- without one, 2 are held and 1 notice is made (the research, not the photo line);
+- the promise text is gated;
+- a source guard: the delegated-work files never hand a job `notify_queue`, and count their `delegated_queue` sites.
+
+**K2: 5 mutants killed:**
+- the research site pushing to `notify_queue` (needed the source guard: the first anchor missed and showed the behavioural test could not see a site regressing);
+- the phone gate removed;
+- the allowlist removed;
+- `take_notifications` draining one queue;
+- the research promise ungated.
+
+**K3:** Windows workspace 2564 passed, 0 failed. Linux follows.

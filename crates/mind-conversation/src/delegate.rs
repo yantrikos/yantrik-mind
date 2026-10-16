@@ -1842,7 +1842,7 @@ impl super::ConversationEngine {
         // carried it — the accounting would have been right for three paths and wrong for a fourth.
         let opportunity = mind_inference::current_opportunity();
         let (q, jobs, mem) = (
-            self.notify_queue.clone(),
+            self.delegated_queue.clone(),
             self.bg_jobs.clone(),
             self.memory.clone(),
         );
@@ -2111,7 +2111,7 @@ impl super::ConversationEngine {
         };
 
         let (q, jobs, mem) = (
-            self.notify_queue.clone(),
+            self.delegated_queue.clone(),
             self.bg_jobs.clone(),
             self.memory.clone(),
         );
@@ -2810,7 +2810,7 @@ impl super::ConversationEngine {
             }
 
             let memory = self.memory.clone();
-            let queue = self.notify_queue.clone();
+            let queue = self.delegated_queue.clone();
             let jobs = self.bg_jobs.clone();
             let house = self.inference.clone();
             let named_critic = critic_from_env(&house);

@@ -2011,7 +2011,7 @@ pub async fn run(token: String, mem: MemoryHandle, conv: ConversationEngine) -> 
     {
         tokio::spawn(reminder_loop(api.clone(), mem.clone(), active_chat.clone()));
         // E.REM1d: this host pings due reminders, so the tool may promise it.
-        conv.set_reminders_deliverable(true);
+        conv.set_unprompted_delivery(true);
     }
 
     let mut offset = load_offset();

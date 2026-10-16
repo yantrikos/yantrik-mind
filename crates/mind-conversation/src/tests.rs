@@ -855,7 +855,7 @@ async fn a_reminder_promises_a_ping_only_where_one_is_delivered() {
     let conv = ConversationEngine::new(memarc, pool, "YM");
     let here = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})).await;
     assert!(here.contains("can't alert you") && !here.contains("ping"), "{here}");
-    conv.set_reminders_deliverable(true);
+    conv.set_unprompted_delivery(true);
     let phone = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Call the bank", "when": "tomorrow"})).await;
     assert!(phone.contains("I'll ping you"), "{phone}");
 }
@@ -865,7 +865,7 @@ async fn a_reminder_promises_a_ping_only_where_one_is_delivered() {
 fn the_telegram_host_says_its_reminders_are_delivered() {
     let src = include_str!("../../mind-core/src/telegram.rs");
     let at = src.find("tokio::spawn(reminder_loop(").expect("the reminder loop spawn");
-    assert!(src[at..at + 300].contains("conv.set_reminders_deliverable(true)"));
+    assert!(src[at..at + 300].contains("conv.set_unprompted_delivery(true)"));
 }
 
 /// E.REM1 (Pranab, 16 Oct: "Only when asked"): the agent rules no longer tell the model to set a

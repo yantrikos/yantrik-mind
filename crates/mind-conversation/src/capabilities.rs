@@ -472,7 +472,7 @@ impl CapabilityHandler for ResearchCapability {
                 }
                 let (r, q, jobs, topic2) = (
                     r.clone(),
-                    host.notify_queue.clone(),
+                    host.delegated_queue.clone(),
                     host.bg_jobs.clone(),
                     topic.clone(),
                 );
@@ -488,7 +488,12 @@ impl CapabilityHandler for ResearchCapability {
                     q.lock().unwrap().push(msg);
                     jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 });
-                format!("On it — researching \"{topic}\" in the background. I'll send what I find here when it's done.")
+                // E.NOTICE1 A2: a delivery is promised only where one will be made.
+                if host.unprompted_delivery() {
+                    format!("On it — researching \"{topic}\" in the background. I'll send what I find here when it's done.")
+                } else {
+                    format!("On it — researching \"{topic}\" in the background. I'll put what I find in my next reply once it's done.")
+                }
             }
             None => "(research isn't configured)".to_string(),
         })
@@ -542,7 +547,7 @@ impl CapabilityHandler for CoderCapability {
                 }
                 let (c, q, jobs, task2, dead_slot) = (
                     c.clone(),
-                    host.notify_queue.clone(),
+                    host.delegated_queue.clone(),
                     host.bg_jobs.clone(),
                     task.clone(),
                     host.coder_dead.clone(),
@@ -569,7 +574,11 @@ impl CapabilityHandler for CoderCapability {
                     q.lock().unwrap().push(out);
                     jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 });
-                format!("On it — building \"{task}\" in the background (isolated sandbox; can take a few minutes). I'll send the result here when it's done.")
+                if host.unprompted_delivery() {
+                    format!("On it — building \"{task}\" in the background (isolated sandbox; can take a few minutes). I'll send the result here when it's done.")
+                } else {
+                    format!("On it — building \"{task}\" in the background (isolated sandbox; can take a few minutes). I'll put the result in my next reply once it's done.")
+                }
             }
             None => "(the coder isn't configured)".to_string(),
         })

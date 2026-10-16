@@ -140,6 +140,65 @@ mod tests {
         assert_eq!(conv.lease_obligation_notices(now + 1, NOTICE_LEASE_MS, 10).unwrap().len(), 1);
     }
 
+    /// E.NOTICE1 A2 (541, check 2: a research result evaporated): with no phone, a delegated result
+    /// is held for the next reply AND queued as a notice; any other result is only held; Telegram's
+    /// queues are left for the phone's poll loop to drain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finished_results_are_held_and_delegated_ones_become_notices() {
+        use std::sync::atomic::AtomicI64;
+        let (conv, _mem) = engine();
+        conv.push_delegated_result("Research — ext4 vs btrfs: btrfs snapshots, ext4 simpler.");
+        conv.push_notification("Google Photos connected".to_string());
+        let phone = crate::delivery::Delivery::new(
+            conv.clone(),
+            Some(crate::delivery::TelegramTarget { api: "unused".into(), active_chat: Arc::new(AtomicI64::new(42)) }),
+        );
+        crate::loops::run_job_results(&conv, &phone);
+        assert!(conv.take_held_notes().is_empty(), "the phone drains its own queues");
+        let both = conv.take_notifications();
+        assert_eq!(both.len(), 2, "take_notifications drains both queues: {both:?}");
+
+        conv.push_delegated_result("Research — ext4 vs btrfs: btrfs snapshots, ext4 simpler.");
+        conv.push_notification("Google Photos connected".to_string());
+        let desk = crate::delivery::Delivery::new(conv.clone(), None);
+        crate::loops::run_job_results(&conv, &desk);
+        let held = conv.take_held_notes();
+        assert_eq!(held.len(), 2, "{held:?}");
+        let notices = conv.lease_obligation_notices(crate::telegram::now_ms() + 1, NOTICE_LEASE_MS, 10).unwrap();
+        assert_eq!(notices.len(), 1, "only the delegated result is an obligation");
+        assert!(notices[0].text.contains("ext4"), "{}", notices[0].text);
+        assert!(conv.take_notifications().is_empty(), "drained");
+    }
+
+    /// E.NOTICE1 A2: every delegated-work site hands its job the typed queue, never notify_queue --
+    /// a site that slipped back would make its results un-noticeable again.
+    #[test]
+    fn delegated_work_reports_through_the_typed_queue() {
+        for (name, src, sites) in [
+            ("capabilities.rs", include_str!("../../mind-conversation/src/capabilities.rs"), 2),
+            ("code.rs", include_str!("../../mind-conversation/src/code.rs"), 3),
+            ("delegate.rs", include_str!("../../mind-conversation/src/delegate.rs"), 3),
+        ] {
+            assert!(!src.contains("notify_queue.clone()"), "{name} hands a job the untyped queue");
+            assert_eq!(src.matches("delegated_queue.clone()").count(), sites, "{name}");
+        }
+    }
+
+    /// The delegated tools promise a delivery only where one will be made.
+    #[test]
+    fn the_delegated_tools_promise_only_what_is_delivered() {
+        let src = include_str!("../../mind-conversation/src/capabilities.rs");
+        for (send, next) in [
+            ("I'll send what I find here when it's done", "I'll put what I find in my next reply once it's done"),
+            ("I'll send the result here when it's done", "I'll put the result in my next reply once it's done"),
+        ] {
+            let at = src.find(send).unwrap_or_else(|| panic!("{send}"));
+            let before = &src[at.saturating_sub(300)..at];
+            assert!(before.contains("if host.unprompted_delivery()"), "{send} is not gated");
+            assert!(src.contains(next), "{next}");
+        }
+    }
+
     /// The console's own lines are not obligations: the desktop sender never takes them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_desktop_sender_leaves_the_consoles_lines_alone() {

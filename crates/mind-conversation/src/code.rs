@@ -304,7 +304,7 @@ impl super::ConversationEngine {
         } else {
             String::new()
         };
-        let nq = self.notify_queue.clone();
+        let nq = self.delegated_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();
@@ -1792,7 +1792,7 @@ impl super::ConversationEngine {
         let skeleton = det.skeleton.clone();
         let det_facts = det.facts;
         let name2 = name.clone();
-        let nq = self.notify_queue.clone();
+        let nq = self.delegated_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();
@@ -1920,7 +1920,7 @@ impl super::ConversationEngine {
         let total_files: usize = modules.iter().map(|m| m.file_count).sum();
         let module_count = modules.len();
         let name2 = name.clone();
-        let nq = self.notify_queue.clone();
+        let nq = self.delegated_queue.clone();
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();

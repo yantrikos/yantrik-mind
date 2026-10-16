@@ -100,6 +100,9 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
         state.last_housekeeping = run_housekeeping(&conv, state.last_housekeeping).await;
         // E.NOTICE1: due reminders become obligation notices where no phone is reachable.
         state.last_reminders = run_reminders(&conv, &delivery, state.last_reminders).await;
+        // E.NOTICE1 A2: finished results are held for the next reply (and delegated ones queued as
+        // notices) where no phone drains them.
+        run_job_results(&conv, &delivery);
         // Serial, legacy order; no spawn.
         state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals, cycle).await;
         state.last_lease_sweep =
@@ -178,6 +181,18 @@ pub(crate) async fn run_reminders(conv: &ConversationEngine, delivery: &Delivery
         }
     }
     now
+}
+
+/// E.NOTICE1 A2: where no phone is reachable, nothing drains the notify queues -- a research
+/// job's result evaporated on 541. Hold every result for the next reply, and queue a delegated one
+/// as an obligation notice. A reachable phone's poll loop drains them as before.
+pub(crate) fn run_job_results(conv: &ConversationEngine, delivery: &Delivery) {
+    if delivery.telegram_reachable() {
+        return;
+    }
+    if let Err(e) = conv.route_results_without_a_phone(now_ms()) {
+        eprintln!("[loops] job results: {e:#}");
+    }
 }
 
 /// L3c: the housekeeping cadence — the one process-hosted owner of the stale resolvers.

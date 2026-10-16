@@ -20147,3 +20147,61 @@ Two judgments are decided in code, not by a model score: a reply that parses as 
 - **Live (541):** "What do I have coming up this week?" must not call the 18:00 event tomorrow. Graded by eye and by `reply-grade` (`contradicts_facts`).
 
 **E.CAL2b — RESULT: PASS (Windows).** Mutants killed (2/2): the note removed; the note added even when the word matches. Amendment: an absolute day reads "is on Fri 16 Oct". Windows workspace: 2590 passed, 0 failed.
+
+## E.GRADE1b — PREREG: the Jev reply grader on dc's held-out set (written before scoring)
+
+**Data:** 73 replies from 16 Oct, labelled by yantrik-os-dc (`jev-heldout-2026-10-16.jsonl` in dc's scratchpad).
+- Excluded: every `comp542*` row (the built-in Companion, not the Mind), and any row whose reply text equals one of my 10 calibration replies.
+- `facts` = "Today is <date>. " + dc's `context`.
+
+**dc's labels mapped to the grader's rules (fixed before the run):**
+
+| dc's label | Grader rule |
+|---|---|
+| offer | unasked_offer |
+| unknowns_list | unknowns_list |
+| tie_in, confirmation_extra_fact | unasked_tie_in |
+| unasked_advice | unasked_advice |
+| wrong_date, stale_claim, false_claim | contradicts_facts |
+| raw_json, raw_markup | not_plain |
+| incomplete_list | answers_ask failing |
+| hedge_told_fact, silent_action | no rule. Reported as uncovered, not scored. |
+
+**Reported:**
+- per-rule true and false positives and negatives, and overall rule agreement;
+- per reply, whether any covered fault was flagged, against dc's covered labels;
+- the number of rows with a fault only in the uncovered labels.
+
+**Bar for use as an A/B screen** (set now):
+- held-out rule agreement ≥ 90%;
+- for each of unasked_offer, contradicts_facts and unasked_tie_in, recall ≥ 0.75 and precision ≥ 0.6.
+
+A rule below the bar is reported and not used to decide an A/B.
+
+**E.GRADE1b — RESULT: the grader as a whole FAILS the bar. Two rules pass and may be used as screens.**
+
+60 replies were scored; the 10 Companion rows and the 3 calibration replies were excluded. Rule agreement: 376/420 = **0.895**, against a bar of 0.90. Reply-level any-fault agreement: 52/60. 3 rows had only uncovered faults.
+
+| Rule | tp | fp | fn | tn | Precision | Recall | Verdict |
+|---|---|---|---|---|---|---|---|
+| unasked_offer | 11 | 6 | 0 | 43 | 0.65 | 1.00 | **PASS** |
+| contradicts_facts | 9 | 1 | 2 | 48 | 0.90 | 0.82 | **PASS** |
+| unasked_tie_in | 9 | 12 | 0 | 39 | 0.43 | 1.00 | FAIL |
+| unasked_advice | 1 | 10 | 0 | 49 | 0.09 | 1.00 | FAIL |
+| unknowns_list | 3 | 2 | 0 | 55 | 0.60 | 1.00 | below the 0.75/0.6 bar it was not set against |
+| not_plain | 2 | 0 | 0 | 58 | 1.00 | 1.00 | |
+| answers_ask (incomplete_list) | 0 | 6 | 5 | 49 | 0 | 0 | useless |
+
+**Why tie_in and advice over-flag.** Reading every disagreement, they sit where our reply policy has exceptions that the grader's questions do not encode:
+- one same-date or same-person factual clause is allowed (E.CONNECT1): "Kabir's play is on 3 Dec. Leila's book launch… are also on that day";
+- the no-ping reminder reply's "check back with me" follows the tool's own words;
+- items further ahead for "Anything due soon?" are borderline, and dc left them unlabelled.
+
+The two contradicts_facts misses are:
+- a stale "drink water" claim inside a long reply (0.18);
+- "I don't have any information about … Ines" when memory held her (0.32). That is a false absence, which the question's wording ("wrong day… pending… different day") does not name.
+
+**Use from now on:**
+- `unasked_offer` and `contradicts_facts` screen A/B replies. Their flags still get read.
+- tie_in, advice and answers_ask are not used for decisions.
+- Encoding the policy exceptions in those questions is the next step. It needs a NEW held-out set, since this one has now been read.

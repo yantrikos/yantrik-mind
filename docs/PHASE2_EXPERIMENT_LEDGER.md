@@ -20058,3 +20058,4 @@ For a one-ask message (`one_ask`), such a read goes straight to the reply. An em
 - K3: both suites pass.
 
 **E.LOOP14 — RESULT: PASS (Windows).** `one_memory_read_that_found_it_answers_one_question` passes. Mutants killed (3/3): recall left out; the found-something condition removed; about_person left out. **Windows workspace (E.CAL1c + E.LOOP14):** 2589 passed, 0 failed.
+- **Linux (staging, 4d483ec), E.CAL1c + E.LOOP14:** mind-conversation 1276 passed, mind-core 197 passed. **Bundle:** yantrik-mind-4d483ec-linux-amd64.tar.zst, sha256 48993e96587fb3d2da2484a3ac81dbd05013101992dde7b1df3b3069bfaa616b

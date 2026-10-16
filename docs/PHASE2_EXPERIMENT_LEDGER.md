@@ -19120,3 +19120,22 @@ Linux follows.
 **K3:** Windows workspace 2550 passed, 0 failed. Linux follows.
 
 **E.REM1 K3, Linux (staging, 8802723):** mind-conversation 1258 passed. Bundle `yantrik-mind-8802723` sha256 e8ffca67456ae28f108ca5bf0c1cb0e729f514a0b2cbaee7a11fea19ab426054, handed to yantrik-os-dc for the 2a/2b rerun on Claude on 542 (OS-workspace relay counts, per Pranab).
+
+**E.REM1 live (542, Claude Sonnet 5.5, yantrik-os-dc, 16 Oct):** "Remember that my friend Tomas's art show opens on 14 November", then "When does Tomas's art show open?"
+- **PASS:** one belief and nothing else (no task, no reminder); no false side-effect claim; 2 calls/16 s and 1 call/15 s.
+- **FAIL against Pranab's "Only when asked":**
+  - both replies offer a reminder ("Want one a few days before?");
+  - both narrate the rule back ("I haven't set a reminder, because you only asked me to remember it");
+  - 2a adds an unasked tie-in ("Leila's book launch on 3 December is also coming up, so I could set both").
+  Pranab chose "Only when asked" over "Offer, don't do", so the offers miss it.
+- **Reading:** a rule phrased as a prohibition about reminders put reminders on the model's mind; it complied and then talked about complying.
+
+## E.REM1b — PREREG: say what to do with a told fact, not what not to do
+
+**What is built (agent rules only):** the clause "set a reminder (`add_reminder`) only when they ask to be reminded -- a date they mention is remembered, not scheduled" becomes: "when they ask you to remember something, `remember` it and confirm it in one sentence (what, and when if there is a date), then stop; `add_reminder` is for when they ask to be reminded". It carries no prohibition wording and no mention of offers. The catalog line is unchanged ("set a reminder the person asked for").
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails: the rules carry "confirm it in one sentence" and "`add_reminder` is for when they ask to be reminded", and no longer carry "remembered, not scheduled".
+- K2, a mutant survives: the old text restored.
+- K3: both suites pass.
+- **Live (dc, 542, Claude, a fresh conversation, two new facts):** 2a and 2b each make no offer, no tie-in to another fact, and no narration of what was not done; the fact is remembered, and no task or reminder is made. **Kill:** an offer or a tie-in in 2 or more of the 4 replies.

@@ -28,6 +28,10 @@ pub enum NoticeKind {
     Digest,
     /// L3c: a get-to-know-you question — engaging.
     Ask,
+    /// E.NOTICE1: a reminder the person asked for, come due — an obligation, not engaging.
+    Reminder,
+    /// E.NOTICE1: the outcome of work the person delegated — an obligation, not engaging.
+    Delegated,
 }
 
 impl NoticeKind {
@@ -40,6 +44,8 @@ impl NoticeKind {
             Self::Knock => "knock",
             Self::Digest => "digest",
             Self::Ask => "ask",
+            Self::Reminder => "reminder",
+            Self::Delegated => "delegated",
         }
     }
     pub fn parse(text: &str) -> Option<Self> {
@@ -51,6 +57,8 @@ impl NoticeKind {
             "knock" => Some(Self::Knock),
             "digest" => Some(Self::Digest),
             "ask" => Some(Self::Ask),
+            "reminder" => Some(Self::Reminder),
+            "delegated" => Some(Self::Delegated),
             _ => None,
         }
     }
@@ -202,6 +210,10 @@ pub enum NoticeEvent {
     /// L3c: the prediction the shown notice carried was committed by the engine — the durable
     /// outbox completion; follows `shown` only; nothing follows it.
     Committed,
+    /// E.NOTICE1: the desktop stored the notice durably (its inbox) under the live lease — a
+    /// RECEIPT, not attention: the person may not have seen it. Closes the SAME live lease it
+    /// follows; nothing follows it, so a delivered notice is never sent again.
+    Delivered,
 }
 
 impl NoticeEvent {
@@ -212,6 +224,7 @@ impl NoticeEvent {
             Self::Shown => "shown",
             Self::Expired => "expired",
             Self::Committed => "committed",
+            Self::Delivered => "delivered",
         }
     }
 }
@@ -288,7 +301,7 @@ impl NoticeReceipt {
                         .is_some_and(|until| until > self.occurred_at_ms)
                     && self.previous_receipt_sha256.is_some()
             }
-            NoticeEvent::Shown => {
+            NoticeEvent::Shown | NoticeEvent::Delivered => {
                 self.lease_id.is_some()
                     && self.lease_until_ms.is_none()
                     && self.previous_receipt_sha256.is_some()

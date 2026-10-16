@@ -98,6 +98,8 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
         // L3c: engagement housekeeping first — the stale resolvers and the shown-marker outbox —
         // so an unanswered claim closes on every box within a minute of its deadline.
         state.last_housekeeping = run_housekeeping(&conv, state.last_housekeeping).await;
+        // E.NOTICE1: due reminders become obligation notices where no phone is reachable.
+        state.last_reminders = run_reminders(&conv, &delivery, state.last_reminders).await;
         // Serial, legacy order; no spawn.
         state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals, cycle).await;
         state.last_lease_sweep =
@@ -133,6 +135,8 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
 pub(crate) struct RunnerState {
     /// L3c: the housekeeping step's own clock (≤ 60 s).
     pub(crate) last_housekeeping: u64,
+    /// E.NOTICE1: the reminder scan's own clock (60 s).
+    pub(crate) last_reminders: u64,
     pub(crate) last_ics: u64,
     pub(crate) last_lease_sweep: u64,
     pub(crate) last_resolve: u64,
@@ -155,6 +159,26 @@ pub(crate) struct RunnerState {
 
 /// L3b: "spoke" for the process host — a proactive line was SENT within this window.
 const SPOKE_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// E.NOTICE1: how often due reminders are scanned.
+const REMINDER_PERIOD_MS: u64 = 60_000;
+
+/// E.NOTICE1: a reminder the person asked for, come due, becomes ONE obligation notice in the
+/// durable outbox (`ConversationEngine::queue_due_reminders_at`). Only where no phone is reachable:
+/// the Telegram host keeps its own `reminder_loop`, so a reminder is never announced twice. Calls
+/// no model; speaks to nobody itself -- the desktop sender carries the notice.
+pub(crate) async fn run_reminders(conv: &ConversationEngine, delivery: &Delivery, last: u64) -> u64 {
+    let now = now_ms();
+    if now.saturating_sub(last) < REMINDER_PERIOD_MS {
+        return last;
+    }
+    if !delivery.telegram_reachable() && conv.has_notice_queue() {
+        if let Err(e) = conv.queue_due_reminders_at(now).await {
+            eprintln!("[loops] reminders: {e:#}");
+        }
+    }
+    now
+}
 
 /// L3c: the housekeeping cadence — the one process-hosted owner of the stale resolvers.
 const HOUSEKEEPING_PERIOD_MS: u64 = 60_000;

@@ -2783,7 +2783,7 @@ impl RecipeStore {
             let terminal = receipts.last().is_some_and(|r| {
                 matches!(
                     r.event,
-                    NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                    NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered
                 )
             });
             if !terminal {
@@ -2818,7 +2818,7 @@ impl RecipeStore {
                 let terminal = receipts.last().is_some_and(|r| {
                     matches!(
                         r.event,
-                        NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                        NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered
                     )
                 });
                 if !terminal {
@@ -2913,7 +2913,7 @@ impl RecipeStore {
             };
             let terminal = matches!(
                 last.event,
-                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered
             );
             let live_lease = last.event == NoticeEvent::Leased
                 && last.lease_until_ms.is_some_and(|until| until > now_ms);
@@ -3016,6 +3016,19 @@ impl RecipeStore {
         lease_ms: u64,
         limit: usize,
     ) -> anyhow::Result<Vec<LeasedNotice>> {
+        self.lease_notices_where(operator_id, now_ms, lease_ms, limit, &|_| true)
+    }
+
+    /// E.NOTICE1: lease only notices whose kind `keep` admits -- the desktop sender takes the
+    /// obligation kinds and leaves the console's own kinds for the console.
+    pub fn lease_notices_where(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+        keep: &dyn Fn(NoticeKind) -> bool,
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
         if lease_ms == 0 {
             anyhow::bail!("a notice lease needs a positive duration");
         }
@@ -3032,13 +3045,16 @@ impl RecipeStore {
             // The row and its chain are verified whole before anything is read from them; a
             // forged `shown` row cannot hide a notice, and a mutated text cannot be rendered.
             let verified = verify_notice_row(&row, operator_id)?;
+            if !keep(verified.kind) {
+                continue;
+            }
             let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;
             let Some(last) = receipts.last() else {
                 anyhow::bail!("notice without a queued receipt");
             };
             if matches!(
                 last.event,
-                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered
             ) {
                 continue;
             }
@@ -3129,6 +3145,7 @@ impl RecipeStore {
                 anyhow::bail!("notice already shown under another lease");
             }
             NoticeEvent::Expired => anyhow::bail!("notice expired unshown"),
+            NoticeEvent::Delivered => anyhow::bail!("notice was delivered to the desktop, not shown here"),
             NoticeEvent::Queued => anyhow::bail!("notice is not leased"),
             NoticeEvent::Leased => {
                 if last.lease_id.as_deref() != Some(lease_id) {
@@ -3157,6 +3174,56 @@ impl RecipeStore {
             kind: verified.kind,
             marker: verified.marker,
         })
+    }
+
+    /// E.NOTICE1: the desktop stored a leased notice durably. Closes the live lease with a
+    /// `delivered` receipt, once; the same lease again is idempotent (true -> false), any other
+    /// state an error. A lease that ran out must be leased again -- that is the retry.
+    pub fn ack_notice_delivered(&self, notice_id: &str, lease_id: &str, now_ms: u64) -> anyhow::Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let row: Option<NoticeRow> = tx
+            .query_row(
+                &format!("SELECT {NOTICE_COLUMNS} FROM mind_notices WHERE notice_id=?1"),
+                [notice_id],
+                notice_row_from,
+            )
+            .optional()?;
+        let Some(row) = row else {
+            anyhow::bail!("no notice matches that id");
+        };
+        let operator_id = row.operator_id.clone();
+        verify_notice_row(&row, &operator_id)?;
+        let receipts = Self::load_notice_chain(&tx, notice_id, &operator_id)?;
+        let Some(last) = receipts.last() else {
+            anyhow::bail!("notice without a queued receipt");
+        };
+        match last.event {
+            NoticeEvent::Delivered if last.lease_id.as_deref() == Some(lease_id) => return Ok(false),
+            NoticeEvent::Delivered => anyhow::bail!("notice already delivered under another lease"),
+            NoticeEvent::Leased => {
+                if last.lease_id.as_deref() != Some(lease_id) {
+                    anyhow::bail!("lease does not match the live lease");
+                }
+                if !last.lease_until_ms.is_some_and(|until| until > now_ms) {
+                    anyhow::bail!("lease expired: lease the notice again");
+                }
+            }
+            other => anyhow::bail!("notice is {} -- not deliverable", other.as_str()),
+        }
+        let receipt = NoticeReceipt::issue(
+            notice_id,
+            operator_id.as_str(),
+            NoticeEvent::Delivered,
+            now_ms,
+            Some(lease_id.to_string()),
+            None,
+            Some(last.receipt_sha256.clone()),
+        )
+        .ok_or_else(|| anyhow::anyhow!("delivered notice receipt has an invalid shape"))?;
+        Self::insert_notice_receipt(&tx, &receipt)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Every notice for an operator, newest first, each with its verified chain. A corrupt chain
@@ -3208,7 +3275,7 @@ impl RecipeStore {
             };
             if matches!(
                 last.event,
-                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed
+                NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered
             ) {
                 continue;
             }
@@ -3272,7 +3339,7 @@ impl RecipeStore {
                 || receipt.previous_receipt_sha256.as_deref()
                     != previous.map(|p| p.receipt_sha256.as_str())
                 || previous.is_some_and(|p| {
-                    matches!(p.event, NoticeEvent::Expired | NoticeEvent::Committed)
+                    matches!(p.event, NoticeEvent::Expired | NoticeEvent::Committed | NoticeEvent::Delivered)
                 })
                 || (previous.is_some_and(|p| p.event == NoticeEvent::Shown)
                     && receipt.event != NoticeEvent::Committed)
@@ -3291,11 +3358,13 @@ impl RecipeStore {
                             NoticeEvent::Leased => prev
                                 .lease_until_ms
                                 .is_some_and(|until| receipt.occurred_at_ms >= until),
-                            NoticeEvent::Shown | NoticeEvent::Expired | NoticeEvent::Committed => {
-                                false
-                            }
+                            NoticeEvent::Shown
+                            | NoticeEvent::Expired
+                            | NoticeEvent::Committed
+                            | NoticeEvent::Delivered => false,
                         },
-                        NoticeEvent::Shown => {
+                        // E.NOTICE1: delivered, like shown, closes the same live lease it follows.
+                        NoticeEvent::Shown | NoticeEvent::Delivered => {
                             prev.event == NoticeEvent::Leased
                                 && prev.lease_id == receipt.lease_id
                                 && prev

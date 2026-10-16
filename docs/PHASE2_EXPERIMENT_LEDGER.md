@@ -19256,3 +19256,35 @@ K1/K2 are restated against these: dedupe by key; an expired lease is resent; Del
   - **A2:** delegated results through a typed path. notify_queue is an untyped `Vec<String>` mixing book, watch, photo, code and delegate jobs, so the allowlist needs a source type.
   - **A3:** the real harness transport, after yantrik-os-dc's spec.
 - **K1 adds:** a task overdue by 2 days gives no notice; one due 1 h ago gives one; a verdict notice is never leased by the desktop sender.
+
+## E.NOTICE1 A1 — RESULT (code): the delivered receipt, the obligation kinds, due reminders as notices, the sender behind a sink
+
+**Built:**
+- **mind-spec:** `NoticeKind::Reminder` and `Delegated` (not engaging); `NoticeEvent::Delivered` (shaped like Shown).
+- **Store:**
+  - Delivered closes the SAME live lease and is terminal: it is in every terminal set (5 sites) and in the chain's transition rules;
+  - `ack_notice_delivered` is idempotent under its lease;
+  - `lease_notices_where` takes a kind filter.
+- **ConversationEngine:**
+  - `queue_due_reminders_at`: one notice per (task, due), with a 24 h catch-up window;
+  - `lease_obligation_notices` (reminder and delegated only);
+  - `ack_notice_delivered`.
+- **mind-core:**
+  - `notice_sender` (a `NoticeSink` trait, `send_obligations`: lease, store, Delivered on the ack);
+  - `loops::run_reminders` every 60 s, only where no phone is reachable (Telegram keeps `reminder_loop`).
+  - No live sink yet (A3).
+
+**K1 held** (5 store tests + 4 sender tests):
+- the kinds round-trip;
+- delivered closes a lease once, is idempotent, is never re-leased, and is not shown-ackable;
+- an expired lease is re-leased and only the live lease delivers;
+- nothing follows delivered;
+- a forged delivered under a foreign lease fails the chain;
+- a reminder due 1 h ago gives one notice across 3 scans, 2 days overdue gives none, a future one none;
+- a kept notice is not resent, an unkept one is resent after the lease;
+- a verdict line is never taken by the desktop sender;
+- with a reachable phone nothing is queued, without one it is.
+
+**K2: 6 of 7 mutants killed:** the per-scan key; the catch-up window removed; the ack check removed; the kind filter removed; the telegram gate removed; delivered re-leased. **One equivalent mutant:** removing Delivered from the chain's "nothing follows a terminal" check changes nothing, because the transition rules already admit no event after Delivered (as they do for Expired and Committed). It is kept as defence in depth and reported as equivalent, not as killed.
+
+**K3:** Windows workspace 2559 passed, 0 failed. Linux follows.

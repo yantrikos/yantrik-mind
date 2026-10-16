@@ -1008,6 +1008,22 @@ impl RecipeEngine {
         self.notice_store()?
             .ack_notice_shown(notice_id, lease_id, now_ms)
     }
+    /// E.NOTICE1: lease only the given kinds.
+    pub fn lease_notices_of_kinds(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+        kinds: &[mind_spec::NoticeKind],
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
+        self.notice_store()?
+            .lease_notices_where(operator_id, now_ms, lease_ms, limit, &|k| kinds.contains(&k))
+    }
+    /// E.NOTICE1: the desktop stored a leased notice.
+    pub fn ack_notice_delivered(&self, notice_id: &str, lease_id: &str, now_ms: u64) -> anyhow::Result<bool> {
+        self.notice_store()?.ack_notice_delivered(notice_id, lease_id, now_ms)
+    }
     /// L3c: queue an engaging notice with its marker and show-by bound.
     #[allow(clippy::too_many_arguments)]
     pub fn queue_engaging_notice(
@@ -2976,6 +2992,8 @@ mod ef3_tests;
 mod l3b_tests;
 #[cfg(test)]
 mod l3c_tests;
+#[cfg(test)]
+mod notice1_tests;
 
 #[cfg(test)]
 mod ecb2f_document_condition {

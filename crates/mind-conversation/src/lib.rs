@@ -6900,6 +6900,62 @@ impl ConversationEngine {
         self.notice_engine()?
             .queue_notice(Self::NOTICE_OPERATOR, notice_kind, text, &key, now)
     }
+    /// E.NOTICE1: the kinds the desktop is owed -- obligations, not the console's own lines.
+    pub const OBLIGATION_KINDS: [mind_spec::NoticeKind; 2] =
+        [mind_spec::NoticeKind::Reminder, mind_spec::NoticeKind::Delegated];
+    /// E.NOTICE1 (amendment 2): how far back a reminder may have come due and still be announced.
+    /// An older overdue task is not "coming due" -- announcing every one on the first scan would
+    /// flood the inbox.
+    pub const REMINDER_CATCH_UP_MS: u64 = 24 * 3_600_000;
+
+    /// E.NOTICE1: every open task whose due time passed within the catch-up window becomes ONE
+    /// reminder notice per occurrence (keyed on task id and due time), however often this runs.
+    /// Returns how many were newly queued.
+    pub async fn queue_due_reminders_at(&self, now_ms: u64) -> anyhow::Result<usize> {
+        let tasks = self.memory.list_tasks(false).await?;
+        let mut fresh = 0;
+        for t in tasks.iter().filter(|t| t.is_open()) {
+            let Some(due) = t.due_ms else { continue };
+            if due > now_ms || now_ms - due > Self::REMINDER_CATCH_UP_MS {
+                continue;
+            }
+            let key = format!("reminder:{}:{due}", t.id);
+            let text = format!("Reminder: {}", t.description.trim());
+            let q = self.notice_engine()?.queue_notice(
+                Self::NOTICE_OPERATOR,
+                mind_spec::NoticeKind::Reminder,
+                &text,
+                &key,
+                now_ms,
+            )?;
+            if q.fresh {
+                fresh += 1;
+            }
+        }
+        Ok(fresh)
+    }
+
+    /// E.NOTICE1: lease the obligation notices for the desktop sender.
+    pub fn lease_obligation_notices(
+        &self,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<mind_recipes::LeasedNotice>> {
+        self.notice_engine()?.lease_notices_of_kinds(
+            Self::NOTICE_OPERATOR,
+            now_ms,
+            lease_ms,
+            limit,
+            &Self::OBLIGATION_KINDS,
+        )
+    }
+
+    /// E.NOTICE1: the desktop stored a leased notice durably.
+    pub fn ack_notice_delivered(&self, notice_id: &str, lease_id: &str, now_ms: u64) -> anyhow::Result<bool> {
+        self.notice_engine()?.ack_notice_delivered(notice_id, lease_id, now_ms)
+    }
+
     pub fn lease_notices(
         &self,
         lease_ms: u64,

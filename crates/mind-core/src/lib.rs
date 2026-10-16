@@ -16,6 +16,7 @@ pub mod first_run;
 /// The desktop channel: attaching to Yantrik OS as a harness.
 pub mod harness;
 mod loops;
+mod notice_sender;
 pub mod setup;
 pub mod provider_set;
 pub mod anthropic_gateway;

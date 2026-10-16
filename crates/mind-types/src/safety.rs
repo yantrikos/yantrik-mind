@@ -221,6 +221,10 @@ const PHYSICAL_CREDENTIAL_PHRASES: &[&str] = &[
     "gate code",
     "alarm code",
     "lock code",
+    // E.SEC21 (542, 16 Oct): "locker code" does not contain "lock code", and a gym locker's
+    // code was saved where a bike lock's was refused.
+    "locker code",
+    "locker combination",
     "keypad code",
     "entry code",
     "access code",
@@ -230,6 +234,20 @@ const PHYSICAL_CREDENTIAL_PHRASES: &[&str] = &[
 
 /// A token credential's value is long. A household code is short and numeric.
 const DIGITAL_VALUE_MIN: usize = 6;
+
+#[cfg(test)]
+mod sec21_tests {
+    use super::contains_secret;
+
+    #[test]
+    fn a_locker_code_is_a_physical_credential_and_a_locker_number_is_not() {
+        assert!(contains_secret("My gym locker code is 3318"));
+        assert!(contains_secret("the locker combination is 4471"));
+        assert!(contains_secret("my bike lock code is 7741"), "E.SEC5's case, unchanged");
+        assert!(!contains_secret("my locker is number 12"));
+        assert!(!contains_secret("the locker room code of conduct"));
+    }
+}
 const PHYSICAL_VALUE_MIN: usize = 4;
 
 /// Is this byte offset the start of a token (rather than the middle of a word)?

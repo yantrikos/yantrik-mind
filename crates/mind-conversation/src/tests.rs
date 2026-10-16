@@ -854,7 +854,7 @@ async fn a_one_shot_success_says_it_is_done() {
     let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
     let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
     let conv = ConversationEngine::new(memarc, pool, "YM");
-    let r = conv.run_agent_tool("remember", &serde_json::json!({"text": "My gym locker code is 3318"})).await;
+    let r = conv.run_agent_tool("remember", &serde_json::json!({"text": "My bike is a blue Trek"})).await;
     assert!(r.contains("don't save it again"), "{r}");
     let set = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})).await;
     assert!(set.contains("Don't set it again"), "{set}");
@@ -2228,9 +2228,10 @@ async fn a_denied_remember_is_terminal_before_the_model_can_claim_it_succeeded()
         .await
         .unwrap();
 
+    // E.VOICE7: the gate's postcondition, in the person's words -- never a model success claim.
     assert_eq!(
         answer,
-        super::MEMORY_WRITE_GATE_REFUSAL,
+        crate::desktop::person_denial(super::MEMORY_WRITE_GATE_REFUSAL).unwrap(),
         "the gate's postcondition must replace any model-authored success claim"
     );
     assert_eq!(
@@ -2307,7 +2308,7 @@ async fn a_denied_reminder_is_terminal_secret_free_and_never_persisted() {
         .await
         .unwrap();
 
-    assert_eq!(answer, super::REMINDER_WRITE_GATE_REFUSAL);
+    assert_eq!(answer, crate::desktop::person_denial(super::REMINDER_WRITE_GATE_REFUSAL).unwrap());
     assert_eq!(
         llm.call_count(),
         1,
@@ -19928,7 +19929,7 @@ async fn erase_engine(tag: &str) -> (mind_types::scratch::Scratch, mind_types::s
     let db = mind_types::scratch::file(&format!("erase_conv_{tag}"), "db");
     let log = mind_types::scratch::file(&format!("erase_conv_{tag}_decisions"), "jsonl");
     let handle = MemoryHandle::spawn(&db.as_str(), 8).unwrap();
-    for statement in [format!("The storage locker code is {ERASE_SECRET}"), format!("The gym locker code is {ERASE_NEAR}")] {
+    for statement in [format!("The storage unit tag is {ERASE_SECRET}"), format!("The gym unit tag is {ERASE_NEAR}")] {
         handle
             .remember_as_belief(mind_types::memory::BeliefAssertion {
                 statement,
@@ -19940,11 +19941,11 @@ async fn erase_engine(tag: &str) -> (mind_types::scratch::Scratch, mind_types::s
             .await
             .unwrap();
     }
-    handle.record(format!("Note: locker code {ERASE_SECRET}")).await.unwrap();
-    handle.append_message("user", &format!("remember my storage locker code is {ERASE_SECRET}")).await.unwrap();
+    handle.record(format!("Note: unit tag {ERASE_SECRET}")).await.unwrap();
+    handle.append_message("user", &format!("remember my storage unit tag is {ERASE_SECRET}")).await.unwrap();
     let recorder = Arc::new(mind_observability::DecisionLog::open(log.path()));
     let mut e = mind_observability::DecisionEvent::new("t-erase", "user_message");
-    e.goal = Some(format!("remember the storage locker code {ERASE_SECRET}"));
+    e.goal = Some(format!("remember the storage unit tag {ERASE_SECRET}"));
     recorder.record(e);
     let mem: Arc<dyn MemoryFacade> = Arc::new(handle);
     let pool = InferencePool::new(Arc::new(ScriptedLLM::new("ok")) as Arc<dyn LLMBackend>, 1);

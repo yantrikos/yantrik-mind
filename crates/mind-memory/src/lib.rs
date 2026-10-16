@@ -12735,7 +12735,7 @@ mod erase_tests {
             db.set_foreign_sqlite_mode(yantrikdb_core::ForeignSqliteMode::Warn).unwrap();
         }
         let mem = MemoryHandle::spawn(&s.as_str(), 8).unwrap();
-        for statement in [format!("The storage locker code is {SECRET}"), format!("The gym locker code is {NEAR}")] {
+        for statement in [format!("The storage unit tag is {SECRET}"), format!("The gym unit tag is {NEAR}")] {
             mem.remember_as_belief(BeliefAssertion {
                 statement,
                 polarity: 1.0,
@@ -12746,8 +12746,8 @@ mod erase_tests {
             .await
             .unwrap();
         }
-        mem.record(format!("Note: locker code {SECRET}, keep it safe")).await.unwrap();
-        mem.append_message("user", &format!("please remember: my storage locker code is {}", SECRET.to_lowercase()))
+        mem.record(format!("Note: unit tag {SECRET}, keep it safe")).await.unwrap();
+        mem.append_message("user", &format!("please remember: my storage unit tag is {}", SECRET.to_lowercase()))
             .await
             .unwrap();
         (s, mem)
@@ -12785,7 +12785,7 @@ mod erase_tests {
         assert!(mem.erase_literal(NEAR, false).await.unwrap().remaining_cells > 0, "the near miss was erased too");
         assert!(hits(&file_bytes(&path), NEAR) > 0, "the near miss is gone from disk");
         let ctx = mind_types::AccessContext::operator_audit();
-        let left = mem.beliefs_matching_n("locker code", 50, &ctx).await.unwrap();
+        let left = mem.beliefs_matching_n("unit tag", 50, &ctx).await.unwrap();
         assert!(left.iter().all(|b| !b.statement.to_ascii_lowercase().contains(&SECRET.to_ascii_lowercase())), "{left:?}");
         assert!(left.iter().any(|b| b.statement.contains(NEAR)), "the near miss belief is gone: {left:?}");
     }

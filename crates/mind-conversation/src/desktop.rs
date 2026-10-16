@@ -1786,6 +1786,14 @@ fn inner_args(args: &serde_json::Value) -> serde_json::Map<String, serde_json::V
 /// E.VOICE6 (VM 541): what the person reads when an action was refused and the turn ends on it --
 /// never the gate's own "(I can't run mcp.yantrik-os.os_act — …)". None for anything else.
 pub(crate) fn person_denial(obs: &str) -> Option<String> {
+    // E.VOICE7 (541, 16 Oct): the memory gate's own refusal reached the person raw.
+    if [crate::MEMORY_WRITE_GATE_REFUSAL, crate::REMINDER_WRITE_GATE_REFUSAL].contains(&obs.trim()) {
+        eprintln!("[agent] refused, as the gate said it: {}", obs.trim());
+        return Some(
+            "I didn't save that: it looks like a password, PIN or a code that opens something, and I don't keep those."
+                .to_string(),
+        );
+    }
     let rest = obs.trim_start().strip_prefix("(I can't run ")?;
     let reason = rest.split_once(" \u{2014} ").map_or(rest, |(_, r)| r).to_ascii_lowercase();
     eprintln!("[agent] refused, as the gate said it: {}", obs.trim());
@@ -1807,6 +1815,16 @@ pub(crate) fn person_denial(obs: &str) -> Option<String> {
 #[cfg(test)]
 mod voice6_tests {
     use super::*;
+
+    /// E.VOICE7: the memory gate's refusals, in the person's words.
+    #[test]
+    fn a_memory_gate_refusal_is_said_in_words() {
+        for raw in [crate::MEMORY_WRITE_GATE_REFUSAL, crate::REMINDER_WRITE_GATE_REFUSAL] {
+            let said = person_denial(raw).unwrap();
+            assert!(said.starts_with("I didn't save that"), "{said}");
+            assert!(!said.contains('(') && !said.contains("gate"), "{said}");
+        }
+    }
 
     #[test]
     fn a_refusal_is_said_in_the_persons_words() {

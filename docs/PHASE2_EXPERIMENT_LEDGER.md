@@ -19531,3 +19531,15 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - E.VOICE6's existing cases are unchanged.
 - K2, a mutant survives: the phrase removed; the mapping removed.
 - K3: both suites pass.
+
+## E.SEC21 + E.VOICE7 — RESULT (code)
+- **K1 held:**
+  - "My gym locker code is 3318" and "the locker combination is 4471" are refused;
+  - E.SEC5's bike-lock case is unchanged;
+  - "my locker is number 12" and "the locker room code of conduct" are not refused;
+  - both gate refusals map to "I didn't save that: …" with no "(" and no "gate".
+- **K2: 2 mutants killed** (the phrase removed; the mapping removed).
+- **K3:** Windows workspace 2567 passed, 0 failed, after three fixture updates the change required:
+  - E.ERASE's plants used "locker code" for data an OLDER gate let through. The gate now refuses it, so the plants say "unit tag" (the canary values, which the tests are about, are unchanged).
+  - E.LOOP10's own test used "gym locker code" as its harmless fact; it now uses "My bike is a blue Trek".
+  - The two denied-write tests now expect the person's sentence, not the raw gate string.

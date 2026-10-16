@@ -19655,3 +19655,30 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
     - M1's REMEMBER confirmation carried a same-date tie-in and an offer ("same day as Ravi's wedding anniversary … let me know"), against E.REM1c/E.ANS3;
     - M4 added an unasked tie-in and offer about Dev's surgery.
 - **DATA-LOSS RISK (two runs now):** Qwen calls `drop_reminder` on the reminder it set in the same turn. It failed only because the words did not match ("in 2 minutes" was not stored). A slightly different phrasing would close the person's reminder in the same turn and still report it as set.
+
+## E.LOOP12 — PREREG: a reminder set this turn is not dropped this turn; a single write goes straight to the reply
+
+**Why (541, a654c1c):**
+- With the write withdrawn (E.LOOP11), Qwen 27B moved its "check what I did" loop to recall and `drop_reminder`: 5–6 calls per one-fact turn.
+- In two runs it called `drop_reminder` on the reminder set seconds earlier in the same turn, and was saved only by a word mismatch. That is a data-loss risk.
+- On Claude these turns take 2 calls; the desktop default (520, 541) is Qwen 27B.
+
+**What is built:**
+1. **The safety guard** (the not-sent chain): in a turn where `add_reminder` succeeded, `drop_reminder` is not sent unless the person's own words ask to stop or cancel (`followthrough::is_stop_tracking`). The model is told the reminder it set stays and nothing was dropped.
+2. **A single write goes straight to the reply:** after a successful `remember` or `add_reminder`, if the person's message is one request — no "?", and none of " and ", " then ", " also ", " plus " — the loop stops calling tools and composes.
+   - **This is a heuristic, and it fails only in the safe direction:** a message it reads as multi-part just keeps today's behaviour (more calls), and it never drops a request.
+   - "remember X and tell me Y" carries " and ", so it continues.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - add_reminder then drop_reminder in one turn: the drop is not sent and the task stays open;
+  - with the person's "cancel that reminder", a drop_reminder in a turn that set none is sent (unchanged);
+  - "Remember that my plumber is Tomasz" with remember then recall scripted: one tool step, then compose (the recall is never offered);
+  - "Remember my flight is at 3 and what's the weather?": the loop continues after the remember.
+- K2, a mutant survives: the guard removed; the single-request stop removed; the stop applied to multi-part too.
+- K3: both suites pass.
+- **Live (541, Qwen 27B):**
+  - three remember turns at most 2 calls each, 3 of 3;
+  - "remind me in 2 minutes to check the oven" at most 2 calls, with no drop_reminder sent;
+  - one "remember X and tell me Y" turn answers both parts.
+  - Kill if any reply claims an action that did not happen.

@@ -19373,3 +19373,5 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - **K1 held:** "(even one on the same date)", "stated as they told it", "only about what you inferred or where sources disagree".
 - **K2:** the E.ANS2 text restored was killed.
 - **K3:** mind-conversation 1260 passed (a text-only change since the 2561-pass workspace run). Linux and a bundle carrying E.REM1d + E.ANS3 follow.
+
+**E.REM1d + E.ANS3, Linux (staging, 0a8f0a2):** mind-conversation passed (see the bundle output). Bundle `yantrik-mind-0a8f0a2` sha256 fcae9efe6ae2c72fca8b776c721ce97d63a660df87f3bcf5ee3e772a41496b5b, for the 542 run.

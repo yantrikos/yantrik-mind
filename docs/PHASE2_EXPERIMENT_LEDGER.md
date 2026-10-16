@@ -19180,3 +19180,19 @@ Pranab asked for the proactive loop to be explored again with GPT-6 Astra (brain
 - **K3:** mind-conversation 1258 passed (a text-only change since the 2550-pass workspace run). Linux follows.
 
 **Pranab, after the Astra plan (16 Oct): "You have to understand meaningful proactive communication is very important for me. Consider Jarvis."** The Astra plan's "speak unprompted only for obligations; Stage 4 only on request" is therefore NOT adopted as the target. The reliability work (a durable outbox, the OS inbox, real reminders) stays as the foundation, and meaningful proactive communication becomes a first-class goal with its own quality bar. The plan is being redone around it before any Stage 0 code.
+
+## Proactive communication: the plan Pranab chose (16 Oct)
+
+Second Astra pass (Jarvis framing, ~$0.18): **grounded initiative** on top of a reliable obligation channel. The details are in memory, not here. Pranab's choices (AskUserQuestion):
+- **First families, all four:**
+  - delegated work and machine state;
+  - calendar heads-ups (on by default, one-tap off);
+  - discoveries in enabled projects;
+  - a start-of-day card.
+- **Budget:** at most 2 attention-seeking moments per 24 h, a ceiling and never a quota. Everything else waits in the inbox.
+- **Order:**
+  - **A, foundation:** a durable Mind outbox plus the OS inbox, ack and dedupe, with an extended Notice envelope.
+  - **B:** shadow detectors writing candidates to a ledger.
+  - **C:** live — delegated and machine first, then calendar and the start-of-day card, then one discovery lane.
+- **Required at the first live delivery:** a global quiet switch, per-family off, and "why you got this".
+- **Background model calls stay off** until a paired latency test passes; until then detection is deterministic and the wording comes from templates.

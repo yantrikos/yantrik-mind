@@ -103,6 +103,8 @@ async fn run_loops(conv: Arc<ConversationEngine>, delivery: Arc<Delivery>) {
         // E.NOTICE1 A2: finished results are held for the next reply (and delegated ones queued as
         // notices) where no phone drains them.
         run_job_results(&conv, &delivery);
+        // E.INIT1 (Stage B): initiative candidates to the shadow ledger; nothing is delivered.
+        state.last_initiative = run_initiative_shadow(&conv, state.last_initiative).await;
         // Serial, legacy order; no spawn.
         state.last_ics = run_ics(&conv, process_start_ms, state.last_ics, &mut signals, cycle).await;
         state.last_lease_sweep =
@@ -140,6 +142,8 @@ pub(crate) struct RunnerState {
     pub(crate) last_housekeeping: u64,
     /// E.NOTICE1: the reminder scan's own clock (60 s).
     pub(crate) last_reminders: u64,
+    /// E.INIT1: the initiative shadow pass's own clock (60 s).
+    pub(crate) last_initiative: u64,
     pub(crate) last_ics: u64,
     pub(crate) last_lease_sweep: u64,
     pub(crate) last_resolve: u64,
@@ -162,6 +166,23 @@ pub(crate) struct RunnerState {
 
 /// L3b: "spoke" for the process host — a proactive line was SENT within this window.
 const SPOKE_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// E.INIT1: how often the initiative detectors run in shadow.
+const INITIATIVE_PERIOD_MS: u64 = 60_000;
+
+/// E.INIT1 (Stage B): run the initiative detectors in shadow -- candidates go to the ledger, and
+/// nothing is leased, queued or shown, whatever channel this box has. Calls no model.
+pub(crate) async fn run_initiative_shadow(conv: &ConversationEngine, last: u64) -> u64 {
+    let now = now_ms();
+    if now.saturating_sub(last) < INITIATIVE_PERIOD_MS {
+        return last;
+    }
+    let fresh = conv.shadow_initiative_at(now).await;
+    if fresh > 0 {
+        eprintln!("[loops] initiative shadow: {fresh} new candidate(s)");
+    }
+    now
+}
 
 /// E.NOTICE1: how often due reminders are scanned.
 const REMINDER_PERIOD_MS: u64 = 60_000;

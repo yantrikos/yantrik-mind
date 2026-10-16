@@ -47,6 +47,7 @@ mod desktop;
 pub use desktop::DESKTOP_SERVER;
 mod calendar;
 mod capabilities;
+pub mod initiative;
 mod entrypoint;
 mod freshness;
 mod pyimports;
@@ -6374,6 +6375,8 @@ pub struct ConversationEngine {
     /// E.HELD1: results being handed over with THIS turn's reply -- in its prompt, so the model
     /// knows they are delivered and does not start the work again.
     held_this_turn: Mutex<Vec<String>>,
+    /// E.INIT1: research and coder jobs running now, for the stalled-work detector.
+    pub(crate) running_jobs: initiative::JobRegistry,
     /// E.NOTICE1 A3c: cards the desktop showed since the last reply, for the next turn's prompt.
     cards_shown: Mutex<Vec<String>>,
     /// Finished results that could not reach any chat — delivered on the next exchange, any channel.
@@ -6572,6 +6575,7 @@ impl ConversationEngine {
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             delegated_queue: Arc::new(Mutex::new(Vec::new())),
             held_this_turn: Mutex::new(Vec::new()),
+            running_jobs: Arc::new(Mutex::new(Vec::new())),
             cards_shown: Mutex::new(Vec::new()),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),

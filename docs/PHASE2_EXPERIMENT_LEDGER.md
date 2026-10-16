@@ -20333,3 +20333,22 @@ No model call anywhere: deterministic detection plus templates, per the plan, un
 - **The early 30–90 min heads-up only for events with a location.** Other events get only their own reminder.
 - **Proposed to dc:** the event's own reminder counts as an obligation (no budget); the early location heads-up counts as initiative (budget, quiet, off, inbox_only).
 - The OS spec is dc's. The Mind's calendar detector is withdrawn from Stage B.
+
+**E.INIT1 — amendment 2, before code (storage and thresholds):**
+- **Storage.** Candidates are kept in a private profile entry, `initiative_candidates`, holding the newest 500. This follows the `delegations` ledger's pattern. They are NOT kept in the decision log, which by design holds no source text, and card text quotes the person's tasks. The decision log gets a textless `initiative_candidate` event per candidate (family, trigger, dedupe key), for counting.
+- **Stall thresholds.** A research job is stalled past 15 min, a coder job past 30 min, and any other delegation past 30 min.
+- **A stalled-work candidate is inbox-only** (`would_interrupt: false`): nothing needs the person. Its text: `Still working on "<task>": <N> minutes in, longer than this usually takes. Nothing needs you; I'll bring the result when it's done.`
+- **The job registry.** The research and coder jobs from capabilities.rs register `{id, kind, task, started_ms}` in memory through a guard that removes the entry when the job ends, a panic included. The detector reads this registry plus the `delegations` rows still "running".
+- **K1, revised** (the calendar items are withdrawn):
+  - a research job past 15 min → one candidate, exactly one however many passes run;
+  - a job at 5 min → none;
+  - a finished job → none;
+  - a pass queues no notice, holds no note and changes no task.
+- **K2:** the dedupe removed; the threshold removed; a candidate queued as a notice; the guard not removing on drop.
+
+**E.INIT1 — RESULT: PASS (Windows).** The `init1_tests` (3) pass:
+- a stalled research job is one candidate across passes; 5 min and a finished job give none; a pass delivers nothing (no held note, no notification, no task);
+- a panicking job leaves the registry;
+- a source guard checks that the research and coder sites register their jobs and move the guard into the task.
+
+Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate delivered as a held note; the guard keeping the job. The loop step `run_initiative_shadow` runs every 60 s on every box. Windows workspace: 2594 passed, 0 failed.

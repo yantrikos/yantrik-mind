@@ -476,7 +476,10 @@ impl CapabilityHandler for ResearchCapability {
                     host.bg_jobs.clone(),
                     topic.clone(),
                 );
+                // E.INIT1: running, for the stalled-work detector, until this task ends.
+                let running = host.start_job("research", &topic);
                 tokio::spawn(async move {
+                    let _running = running;
                     let res = r.run(&topic2).await;
                     let mut msg = format!("🔎 Research — {topic2}:\n\n{}", res.answer);
                     if !res.sources.is_empty() {
@@ -552,7 +555,10 @@ impl CapabilityHandler for CoderCapability {
                     task.clone(),
                     host.coder_dead.clone(),
                 );
+                // E.INIT1: running, for the stalled-work detector, until this task ends.
+                let running = host.start_job("code", &task);
                 tokio::spawn(async move {
+                    let _running = running;
                     let out = match c.run(&task2).await {
                         Ok(r) => {
                             let marked = if !r.ok && r.files.is_empty() {

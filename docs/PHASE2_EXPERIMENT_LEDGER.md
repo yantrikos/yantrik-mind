@@ -20326,3 +20326,10 @@ No model call anywhere: deterministic detection plus templates, per the plan, un
   - This is raised with dc and Pranab.
 - **dc's Stage C caveat, adopted now:** candidates that later feed a turn carry private data into a session that was never marked. A consuming turn must be treated as private, or candidates go only through `harness.notice`.
 - **The delegated detector's coverage gap:** the delegation ledger (`delegations`) holds only delegate.rs jobs. The research and coder jobs from capabilities.rs, the desktop's main delegated work, keep only an in-memory counter. Stage B therefore registers those jobs with a start time (in memory, kind, task, started_ms) so the stalled detector sees them. Without that, it would watch the wrong population.
+
+**E.INIT1 — Pranab's calendar decisions (16 Oct):**
+- **(a) The OS raises calendar heads-ups itself.** It extends notifications-service's existing calendar timer, `reminders.rs`, which already announces each timed event once at its `reminder_minutes`, filing them as `family: calendar` Notices. The Mind gets no new authority. Its join (e.g. a remembered "bring the passport") stays at turn time through `upcoming`.
+- **On by default with a one-tap off**, per his earlier family decision.
+- **The early 30–90 min heads-up only for events with a location.** Other events get only their own reminder.
+- **Proposed to dc:** the event's own reminder counts as an obligation (no budget); the early location heads-up counts as initiative (budget, quiet, off, inbox_only).
+- The OS spec is dc's. The Mind's calendar detector is withdrawn from Stage B.

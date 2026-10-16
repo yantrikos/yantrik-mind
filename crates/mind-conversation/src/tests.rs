@@ -852,8 +852,10 @@ fn reminders_are_set_only_when_asked() {
     let src = include_str!("lib.rs");
     assert!(!src.contains("`add_reminder` so you follow up"));
     // E.REM1b (542, 16 Oct): a prohibition put reminders on the model's mind; say what to do instead.
-    // Pranab (16 Oct): save, confirm, ONE short offer -- nothing about other events.
-    assert!(src.contains("ask once: Want a reminder?") && src.contains("nothing about other facts or events"));
+    // Pranab (16 Oct, E.REM1c): save and confirm -- no reminder offer while the desktop cannot
+    // deliver one (it returns with Stage 2), and nothing about other events.
+    assert!(src.contains("one sentence that confirms it") && src.contains("nothing about other facts or events"));
+    assert!(!src.contains(&["Want a ", "reminder?"].concat()));
     assert!(src.contains("`add_reminder` is for when they ask to be reminded"));
     assert!(!src.contains(&["remembered, ", "not scheduled"].concat()));
     assert!(!tool_catalog::CORE_HEAD.contains("so you ping them when due"));

@@ -19173,3 +19173,10 @@ Pranab asked for the proactive loop to be explored again with GPT-6 Astra (brain
 - K2: the E.REM1b text restored → killed.
 - K3: both suites pass.
 - **Live (dc, 542, Claude, a fresh conversation, two facts):** a reply with anything beyond the one-sentence confirmation (an offer, a narration, a tie-in) in 2 or more of the 4 kills it.
+
+## E.REM1c — RESULT (code)
+- **K1 held:** the rules carry "one sentence that confirms it" and "nothing about other facts or events", and no "Want a reminder?".
+- **K2:** the E.REM1b text restored was killed.
+- **K3:** mind-conversation 1258 passed (a text-only change since the 2550-pass workspace run). Linux follows.
+
+**Pranab, after the Astra plan (16 Oct): "You have to understand meaningful proactive communication is very important for me. Consider Jarvis."** The Astra plan's "speak unprompted only for obligations; Stage 4 only on request" is therefore NOT adopted as the target. The reliability work (a durable outbox, the OS inbox, real reminders) stays as the foundation, and meaningful proactive communication becomes a first-class goal with its own quality bar. The plan is being redone around it before any Stage 0 code.

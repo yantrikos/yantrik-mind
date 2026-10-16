@@ -20352,3 +20352,4 @@ No model call anywhere: deterministic detection plus templates, per the plan, un
 - a source guard checks that the research and coder sites register their jobs and move the guard into the task.
 
 Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate delivered as a held note; the guard keeping the job. The loop step `run_initiative_shadow` runs every 60 s on every box. Windows workspace: 2594 passed, 0 failed.
+- **Linux (staging, 260dc7c), E.INIT1:** mind-conversation 1281 passed, mind-core 197 passed. **Bundle:** yantrik-mind-260dc7c-linux-amd64.tar.zst, sha256 b3e8594f4f0e0247ec948fdd403a63bee67fdc5e48119d51f90fab2ee6db01d6. Staging disk: 3.0 GB free (92%).

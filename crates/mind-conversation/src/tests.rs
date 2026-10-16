@@ -851,7 +851,11 @@ async fn an_unreadable_reminder_date_saves_nothing() {
 fn reminders_are_set_only_when_asked() {
     let src = include_str!("lib.rs");
     assert!(!src.contains("`add_reminder` so you follow up"));
-    assert!(src.contains("only when they ask to be reminded"));
+    // E.REM1b (542, 16 Oct): a prohibition put reminders on the model's mind; say what to do instead.
+    // Pranab (16 Oct): save, confirm, ONE short offer -- nothing about other events.
+    assert!(src.contains("ask once: Want a reminder?") && src.contains("nothing about other facts or events"));
+    assert!(src.contains("`add_reminder` is for when they ask to be reminded"));
+    assert!(!src.contains(&["remembered, ", "not scheduled"].concat()));
     assert!(!tool_catalog::CORE_HEAD.contains("so you ping them when due"));
 }
 

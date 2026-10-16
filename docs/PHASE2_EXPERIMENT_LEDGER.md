@@ -19139,3 +19139,13 @@ Linux follows.
 - K2, a mutant survives: the old text restored.
 - K3: both suites pass.
 - **Live (dc, 542, Claude, a fresh conversation, two new facts):** 2a and 2b each make no offer, no tie-in to another fact, and no narration of what was not done; the fact is remembered, and no task or reminder is made. **Kill:** an offer or a tie-in in 2 or more of the 4 replies.
+
+**E.REM1b amendment (before any run). Pranab's decision, relayed by yantrik-os-dc (16 Oct):** when the person asks only to remember a dated fact, save it, confirm it, and add ONE short offer ("Saved: Tomas's art show is on 14 November. Want a reminder?"). Nothing more: no narration of what was not done, and no cross-references to other upcoming events. The reminder itself stays "only when asked".
+- **The rule text becomes:** "when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) and, when it has a date, ask once: Want a reminder? -- nothing about other facts or events; `add_reminder` is for when they ask to be reminded".
+- **K1:** the rules carry "ask once: Want a reminder?" and "nothing about other facts or events".
+- **Live kill:** a reply with more than the confirmation plus one offer (a narration, a tie-in, a second offer) in 2 or more of the 4.
+
+## E.REM1b — RESULT (code): confirm, one offer, nothing about other events; 2 mutants killed
+- **K1 held:** the rules carry "ask once: Want a reminder?", "nothing about other facts or events" and "`add_reminder` is for when they ask to be reminded".
+- **K2:** the E.REM1 text restored and the offer dropped were both killed.
+- **K3:** Windows workspace 2550 passed (at the first wording), and mind-conversation 1258 passed at this one. Linux follows.

@@ -19445,3 +19445,32 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 1. **B3's same-date clause was a PARTIAL list:** Leila and Arjun named, Mira (told in an earlier conversation, also 3 Dec) missing. A partial list reads as complete. It goes to the Stage 0 spine/retrieval ablation: the clause either lists every same-date item held, from a tool that can, or names none.
 2. **A2 (a locker code) took 3 calls against 2,** possibly the sensitive-value path. Unexamined.
 3. **R1's wording flips** to a promise only when `unprompted_delivery` is true (A3 sets it on `notice_inbox_v1`).
+
+## E.LOOP10 — PREREG: a successful one-shot tool says it is done; a research ack ends the turn
+
+**Why (yantrik-os-dc, three driven turns, 16 Oct):** after a successful call the model calls the same tool again.
+- Check 1: `add_reminder` ×4 for one reminder.
+- Check 2: `research` ×4 for 2 jobs.
+- 542 A2: `remember` twice for one fact, differing only by a trailing period.
+The dedupe guards absorbed every repeat, but each costs a model call (5–15 s on these servers).
+- `code`'s "On it — building" ack is already terminal (the 2026-08-16 scar: four near-identical jobs in one turn); `research`'s "On it — researching" ack is not.
+- `remember` answers a bare "(remembered)", which tells the model nothing about what to do next.
+
+**What is built:**
+1. `terminal_delivery("research", obs)` is true when obs starts with "On it — researching". The ack is the reply, verbatim, as `code`'s is. After E.NOTICE1 A2 it says honestly where the result will arrive.
+2. `remember`'s success observation becomes the const `REMEMBERED`: "(remembered — saved; don't save it again. Answer, or do the next part of the request.)". The loop's `remembered_this_turn` check compares against the const.
+3. `add_reminder`'s success observations end with "Don't set it again; answer, or do the next part of the request."
+- Not terminal for `remember` or `add_reminder`: "remember X and tell me Y" must go on.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a research ack is terminal and "(research isn't configured)" is not;
+  - `remember` returns `REMEMBERED`;
+  - add_reminder's observation carries "Don't set it again";
+  - E.MEM1's remembered_this_turn still records.
+- K2, a mutant survives:
+  - the research arm removed;
+  - the remember text reverted to "(remembered)";
+  - the reminder sentence removed.
+- K3: both suites pass.
+- **Live (dc):** a remember turn takes at most 2 model calls in 3 of 3; a "remind me in N minutes" turn at most 2; a background research turn 1 (no compose). A reply that echoes "Don't set it again" or "don't save it again" in any turn kills it.

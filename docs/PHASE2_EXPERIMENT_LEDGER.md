@@ -20517,3 +20517,11 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Privacy:** on Ollama Cloud, what the Mind reads on the desktop goes to Ollama's servers. That is Pranab's explicit call (20 Sep, again 16 Oct). The private lane stays as configured.
 
 **Not decided by this A/B:** retiring any guard. That waits for the adopted arm's own fault profile.
+
+**E.MODEL2 — setup notes, before the run (dc, 541):**
+- **Arm A** is AIG `qwen3.5:27b` through the shell's gateway (`YM_PRIMARY_BRAIN=yantrik-gateway:picked`; providers.yaml's primary is `custom-onboarding`, `https://aig.mycluster.cyou/v1`).
+- **The switch is option (a):** an Ollama Cloud entry in providers.yaml, with `is_primary` flipped per arm, so only the model differs.
+- **Privacy:** `YM_PRIVATE_PROVIDERS=yantrik-gateway`, so during arms B and C the private lane also goes to Ollama Cloud. That is covered by Pranab's explicit call (20 Sep; 16 Oct). AIG is restored as primary afterwards.
+- **Caps:** none on 541. Pranab's key is used directly, written to a 0600 file without being printed, and removed after the run.
+- **Preflight:** an ungraded turn per arm confirms the model served, a tool round-trip and a reply. A failed preflight stops that arm.
+- **Void rule:** any turn served through a fallback, such as the leftover Anthropic entry, is void.

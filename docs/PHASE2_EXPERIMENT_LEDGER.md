@@ -19978,3 +19978,4 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - **mind.db:** the open tasks are the same as before. The reminder was delivered and closed, and no new Stretch task was made.
 - **Open:** the "ok" turn took 24 s for one no-tool call, and compose took 17 s on K1, both slow on Qwen.
 - **Windows workspace (E.ANS4 + E.HELD1b):** 2588 passed, 0 failed.
+- **Linux (staging, b251b36), E.PEOPLE1 + E.ANS4 + E.HELD1b:** mind-conversation 1275 passed, mind-core 197 passed. The bundle is held until 520's A3 run is done (dc), so the A3 evidence comes from 7689851 alone.

@@ -19913,3 +19913,12 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - The harness wiring (attach, `feedback_ack` on poll, the send pass while idle) is `cfg(unix)`: it first compiles on staging.
 
 **Windows suite (A3 + E.ACK1 + E.CAL1b):** 2586 passed, 0 failed.
+
+**E.NOTICE1 A3 / E.ACK1 / E.CAL1b — Linux (staging .95):**
+- At f813fc8, mind-core's tests did NOT compile: two unix-only tests called `serve` with 5 arguments. The bundle built anyway but was never sent.
+- Fixed in 7689851, which also adds the driven unix test `a_due_reminder_reaches_the_inbox_once_between_turns`. A fake desktop that keeps notices gets exactly one card (family reminder, title "Stretch"), `feedback_ack` 4 comes back on the next poll, and the notice is no longer owed afterwards.
+- Results at 7689851:
+  - mind-core: 197 passed;
+  - the two wiring mutants (the send pass off; `feedback_ack` not sent) both fail the test;
+  - mind-recipes: 105 passed, and mind-conversation: 1273 passed (both at f813fc8, unchanged since).
+- **Bundle:** yantrik-mind-7689851-linux-amd64.tar.zst, sha256 bc878bf34bcfbecc6fc16858c6c81c296a844d247438a7ba1b1d963978aa47b6

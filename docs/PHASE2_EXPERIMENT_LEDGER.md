@@ -19375,3 +19375,38 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - **K3:** mind-conversation 1260 passed (a text-only change since the 2561-pass workspace run). Linux and a bundle carrying E.REM1d + E.ANS3 follow.
 
 **E.REM1d + E.ANS3, Linux (staging, 0a8f0a2):** mind-conversation passed (see the bundle output). Bundle `yantrik-mind-0a8f0a2` sha256 fcae9efe6ae2c72fca8b776c721ce97d63a660df87f3bcf5ee3e772a41496b5b, for the 542 run.
+
+**Stage 0 check 2 (541, ae54fdc on qwen3.5:27b, yantrik-os-dc, 16 Oct), driven:** "Research in the background: ext4 vs btrfs for a home desktop. Let me know when it's done."
+- **The jobs ran but nothing arrived.** `research` was called 4 times (2 distinct jobs after egress reduced the query); each answered "I'll send what I find here when it's done". The two job calls returned 200 at about +83 s and +105 s (~1,500 output tokens).
+- **Then nothing:** no job-finish, notify, held or deliver line; 0 rows in mind_notices or any job table; nothing in the Lens or notifications for 10 minutes.
+- **The reply** said "I don't have the results back yet … Want me to try pulling it again now…" — an offer, and neither a promise nor a delivery.
+- **The static finding is confirmed:** on a headless desktop nothing drains `notify_queue`, so delegated results evaporate. The research tool's "I'll send what I find here" is E.REM1d's false-promise pattern, and the 4 calls for 2 jobs is check 1's repeat loop.
+
+## E.NOTICE1 A2 — PREREG: delegated results are held for the next reply and queued as notices where no phone is reachable
+
+**What is built:**
+1. **`delegated_queue`** beside `notify_queue`, the typed half. The delegated-work sites push there:
+   - research and coder in capabilities.rs;
+   - the code jobs in code.rs;
+   - every result in delegate.rs.
+   Everything else (book, photo sign-ins, HA alerts, push_notification) stays in `notify_queue`. `take_notifications` drains both, so the Telegram host is unchanged.
+2. **`loops::run_job_results`,** every runner wake, only where no phone is reachable:
+   - every `notify_queue` entry is held for the next reply (`hold_for_next_turn`, the existing follow-through that Telegram already uses when no chat is pinned);
+   - every `delegated_queue` entry is held AND queued as a `Delegated` obligation notice (key `delegated:<sha of text>`), ready for A3's sink.
+3. **One flag, renamed honestly:** E.REM1d's `reminders_deliverable` becomes `unprompted_delivery` (a reachable phone, or the bound inbox), and the delegated tools' reply follows it:
+   - "I'll send what I find when it's done" only when it is true;
+   - otherwise "I'll put what I find in my next reply once it's done".
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - a research result pushed with no phone becomes one held note and one Delegated notice;
+  - a photo sign-in line becomes a held note and no notice;
+  - with a reachable phone the runner takes nothing (Telegram drains);
+  - `take_notifications` returns both queues;
+  - the research tool says "next reply" without delivery and "I'll send" with it.
+- K2, a mutant survives:
+  - delegated results pushed to `notify_queue` (no notice);
+  - the phone gate removed;
+  - the notice made for every note (allowlist removed).
+- K3: both suites pass.
+- **Live (541 or 542):** the check-2 ask, then "thanks" a few minutes later. The second reply carries the results under "finished while you were away".

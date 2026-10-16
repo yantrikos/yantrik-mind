@@ -2122,6 +2122,100 @@ mod voice_loop_tests {
         }
     }
 
+    /// E.NOTICE1 A3: a desktop that keeps notices -- empty polls, the first carrying feedback; every
+    /// `harness.notice` kept and recorded; every poll's `feedback_ack` recorded.
+    #[derive(Default)]
+    struct Inbox {
+        notices: std::sync::Mutex<Vec<serde_json::Value>>,
+        acks: std::sync::Mutex<Vec<u64>>,
+        polls: AtomicUsize,
+        stop: AtomicBool,
+    }
+
+    fn fake_inbox(path: &std::path::Path, desk: Arc<Inbox>) {
+        let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let mut line = String::new();
+                if BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let req: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let p = &req["params"];
+                let result = match req["method"].as_str().unwrap_or_default() {
+                    "harness.poll" if desk.stop.load(Ordering::SeqCst) => {
+                        let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "error": { "message": "session ended" } }));
+                        continue;
+                    }
+                    "harness.poll" => {
+                        if let Some(seq) = p["feedback_ack"].as_u64() {
+                            desk.acks.lock().unwrap().push(seq);
+                        }
+                        if desk.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                            serde_json::json!({ "initiative": {"quiet": false, "off": [], "inbox_only": false},
+                                "notice_feedback": [{"seq": 4, "notice_id": "notice:x", "kind": "not_now", "at": 1}] })
+                        } else {
+                            serde_json::json!({})
+                        }
+                    }
+                    "harness.notice" => {
+                        desk.notices.lock().unwrap().push(p.clone());
+                        serde_json::json!({ "stored": true, "notice_id": p["notice"]["notice_id"] })
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let _ = writeln!(&stream, "{}", serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result }));
+            }
+        });
+    }
+
+    /// E.NOTICE1 A3: between turns, a reminder that came due reaches a desktop that keeps notices,
+    /// once, and is closed; the feedback a poll carried is acked on the next poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_due_reminder_reaches_the_inbox_once_between_turns() {
+        let dir = std::env::temp_dir().join(format!("ym-inbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("harness.sock");
+        let desk = Arc::new(Inbox::default());
+        fake_inbox(&path, desk.clone());
+
+        struct NoTools;
+        #[mind_recipes::async_trait_rt::async_trait]
+        impl mind_recipes::RecipeHost for NoTools {
+            async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+                anyhow::bail!("no tools in this fixture")
+            }
+        }
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("unused")) as Arc<dyn LLMBackend>, 1);
+        let store = Arc::new(mind_recipes::RecipeStore::open(":memory:").unwrap());
+        let recipes = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoTools), "YM").with_store(store);
+        let facade: Arc<dyn mind_types::MemoryFacade> = Arc::new(mem.clone());
+        let conv = Arc::new(ConversationEngine::new(facade.clone(), pool, "YM").with_recipes(Arc::new(recipes)));
+        conv.set_unprompted_delivery(true);
+        let now = crate::telegram::now_ms();
+        facade.add_task("Stretch", "medium", Some(now - 60_000)).await.unwrap();
+        assert_eq!(conv.queue_due_reminders_at(now).await.unwrap(), 1);
+
+        let (m, c, addr) = (mem.clone(), conv.clone(), path.to_string_lossy().into_owned());
+        let task = tokio::spawn(async move { serve(&m, &c, &addr, "s-inbox", Duration::from_secs(10), true).await });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        desk.stop.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(10), task).await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let sent = desk.notices.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0]["session"], "s-inbox");
+        assert_eq!(sent[0]["notice"]["family"], "reminder");
+        assert_eq!(sent[0]["notice"]["title"], "Stretch");
+        assert!(desk.acks.lock().unwrap().contains(&4), "the feedback was never acked");
+        let later = now + 10 * crate::notice_sender::NOTICE_LEASE_MS;
+        assert!(conv.lease_obligation_notices(later, crate::notice_sender::NOTICE_LEASE_MS, 10).unwrap().is_empty(), "the delivered notice is still owed");
+    }
+
     #[derive(Default)]
     struct Desk {
         handed: AtomicBool,
@@ -2187,7 +2281,7 @@ mod voice_loop_tests {
         let watch = mem.clone();
         let conv = Arc::new(crate::engine(&mem, InferencePool::new(Arc::new(slow) as Arc<dyn LLMBackend>, 1)));
         let addr = path.to_string_lossy().into_owned();
-        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-voice", Duration::from_secs(10)).await });
+        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-voice", Duration::from_secs(10), false).await });
         // Long enough for an uninterrupted turn to run several model calls.
         tokio::time::sleep(Duration::from_secs(16)).await;
         desk.stop.store(true, Ordering::SeqCst);
@@ -2471,7 +2565,7 @@ mod stream_loop_tests {
         let watch = mem.clone();
         let conv = Arc::new(crate::engine(&mem, pool));
         let addr = path.to_string_lossy().into_owned();
-        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-stream", Duration::from_secs(10)).await });
+        let task = tokio::spawn(async move { serve(&mem, &conv, &addr, "s-stream", Duration::from_secs(10), false).await });
         let started = Instant::now();
         while started.elapsed() < run_for {
             tokio::time::sleep(Duration::from_millis(250)).await;

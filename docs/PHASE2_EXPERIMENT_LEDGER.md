@@ -19769,3 +19769,30 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - bug 5: `about_person` misses a just-saved person;
 - bug 6: a note result printed as raw JSON;
 - the "handed over above" wording nit.
+
+## E.CAL1 — PREREG: `upcoming` reads the desktop calendar too (541 bug 4)
+
+**Why:** "Trip reminder — Dallas tomorrow" (today 18:00) was missed in 8 of 8 upcoming turns. `upcoming` reads only the Mind's own stores, and on the desktop the calendar belongs to calendar-service.
+
+**What yantrik-os-dc verified live on 541 (OS 76bb082b):**
+- `calendar list_events {start_date, end_date}` is graded `safe`.
+- It returns a JSON array of events: id, title, start, end (naive local time), is_all_day, location, ….
+- calendar-service starts on demand (`shell start_service {name: calendar}`); until it starts, the reply says "no socket".
+- The service owns calendar data: read it, never copy it into mind.db.
+
+**What is built:**
+- When a desktop is attached, `upcoming_list(days)` calls `os_act {app: calendar, action: list_events, args: {start_date: today, end_date: today+days}}`.
+- On a "no socket" reply it calls `os_act shell start_service {name: calendar}` ONCE and retries.
+- It parses the JSON array (the first `[` … last `]` of the result) into "Ddd D Mon HH:MM: <title>" lines (all-day: no time), listed under "On your calendar:" before the Mind's own items.
+- Unreadable or unavailable: one line, "(the desktop calendar could not be read)". It is never silent and never guessed.
+- **Taint:** a calendar read is a private read in yos-mcp's sense. That is correct — the calendar is private. The effect is bounded because `upcoming` is called for time questions.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails (a scripted MCP hub as the desktop):
+  - a list_events reply with one event gives "On your calendar:" and its title and time in `upcoming`;
+  - a "no socket" reply then success: start_service is called once, then list_events, and the event is listed;
+  - a garbage reply gives the "could not be read" line;
+  - with no desktop attached, there is no calendar section and no MCP call.
+- K2, a mutant survives: the calendar call removed; the start-once retry removed; a garbage reply treated as empty.
+- K3: both suites pass.
+- **Live (541):** "What do I have coming up this week?" lists the Dallas trip reminder in at most 2 model calls, with calendar-service stopped beforehand (the start-once path).

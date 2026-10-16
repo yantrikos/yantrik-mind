@@ -19047,3 +19047,9 @@ Linux follows.
 **Bundle `yantrik-mind-48b1bf9`** (sha256 7d47e98c78346cb28e5b72feae3cd5a1c9c557c7a8281b8e295302b9142de1fa): 6f8a153 plus E.WIRE1.
 - **For 542:** Pranab said yes, first through yantrik-os-dc and then directly (15 Oct: "Yes from me, you can trust the os workspace"). From now on, an OS-workspace relay counts as his word on the test machines.
 - dc installs it on 542 with #825's gateway and reruns E.REF1's asks with the Mind on Claude.
+
+**Mind on Claude (542), the OS side (yantrik-os #825, cleared at b51a849d once CI is green):**
+- The gateway drops `temperature` up front for Claude 5+ on Anthropic's endpoint, and retries once on a 400 naming a deprecated or unsupported parameter.
+- With thinking on, it fits sampling to Anthropic's rule (no temperature ≠ 1, no top_p < 0.95, no top_k). This was the third 400 on the first battery (`top_p` under thinking).
+- Effort "easy" on AnthropicBudget is now thinking OFF (no field), as on Qwen. Before, it was a 1,024-token budget, so every E.PACE1b/E.PACE2b step on Claude paid for thinking it had asked not to do.
+- **First 542 battery (48b1bf9):** E.WIRE1 and the temperature drop worked, but all 6 asks failed on the top_p 400. A rerun at b51a849d is queued.

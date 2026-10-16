@@ -19699,3 +19699,5 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - the stop applied to multi-part too.
 
 **K3:** Windows workspace 2574 passed, 0 failed. Linux and a bundle carrying E.SPINE1 and E.LOOP12 follow.
+
+**E.SPINE1 + E.LOOP12, Linux (staging, c527663):** mind-core and mind-conversation passed (see the bundle output). Bundle `yantrik-mind-c527663` sha256 4040bbd3a4f4547a4b56ea73a2ec59930a15d2bacf189efbf0cb4745cf2bdd55, for the (b') and (d) runs on 541.

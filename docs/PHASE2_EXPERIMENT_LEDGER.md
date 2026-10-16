@@ -20270,3 +20270,11 @@ A calendar with nothing on it, or no desktop at all, keeps today's wording.
 
 **E.CAL2c — RESULT: PASS (Windows).** `beside_listed_events_the_reminders_are_scoped` passes. The mutant (scoping only when unread) kills it. Windows workspace (E.VOICE8 + E.CAL2c): 2591 passed, 0 failed, on the second run. The first run failed once in `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it`, which passes 3/3 alone. It is a pre-existing race: the test sets the process-global `YM_WEB_DIR` while others run in parallel. That code is untouched here; noted as a flake to fix.
 - **Linux (staging, f06d9cd), E.VOICE8 + E.CAL2c:** mind-conversation 1278 passed, mind-core 197 passed. **Bundle:** yantrik-mind-f06d9cd-linux-amd64.tar.zst, sha256 887dac3b5247f53fabd3f026942d60a3dedc711412b345daf7a5180940b865e1
+
+## E.CAL2c + E.VOICE8 — live (541, f06d9cd on OS test/batch2 with #831's inbox, yantrik-os-dc, 16 Oct): PASS
+
+- **E.CAL2c**, "What do I have coming up this week?" (2 calls) → "Nothing on your calendar for this week beyond the reminder set for today at 18:00 about your trip to Dallas tomorrow. You don't have any other scheduled events or reminders…".
+  - It does not open with a bare "nothing is scheduled", it gets "today at 18:00" right, and it adds no December list and no offer.
+  - The journal cuts the tool result, so the "My reminders" header was not seen directly; the pass rests on the behaviour.
+- **E.VOICE8**, "remind me in 2 minutes to stretch" (2 calls) → "Done — I'll ping you in two minutes to stretch." No non-action narration. The ping promise is valid: this OS keeps notices.
+- **Screened by `reply-grade`** (unasked_offer and contradicts_facts, the rules that passed E.GRADE1b): both replies clean, with no rule at or above 0.5.

@@ -20002,3 +20002,4 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - K3: both suites pass.
 
 **E.NOTICE1 A3b — RESULT: PASS (Windows).** The sender test asserts no line for an unkept notice, and exactly one ending ": Reminder: Stretch)" once the notice is kept. Mutants killed (2/2): the append removed; the append made on every answer. Windows workspace: 2588 passed, 0 failed.
+- **Linux (staging, 987d8ab), A3b + PEOPLE1 + ANS4 + HELD1b:** mind-core 197 passed, mind-conversation 1275 passed. **Bundle:** yantrik-mind-987d8ab-linux-amd64.tar.zst, sha256 5d4233b3bcde8fc10cb57fdd1c00c170d421e6f85343a7aef2b319794583c5d8

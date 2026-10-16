@@ -20221,3 +20221,51 @@ dc's next labels follow the policy as written: no fault for an allowed same-date
 
 **Data:** fresh replies, unread by me before scoring.
 - **Linux (staging, 7023a98), E.CAL2b:** mind-conversation 1277 passed, mind-core 197 passed. The first bundle attempt failed because I pushed ledger commits mid-build. Rebuilt at c37ba49, which differs from 7023a98 only in the ledger. **Bundle:** yantrik-mind-c37ba49-linux-amd64.tar.zst, sha256 dc9be03da844f70167258e6ac5e41b7ed4cb212a5c00e7c7ef65c1184c0bfd3a
+
+## E.NOTICE1 A3 + A3c on #831's final head — live (520, 536731e on OS test/batch2 f75187fd = main + #831@5780acff, yantrik-os-dc, 16 Oct): PASS, steps 1–4
+
+- The card carries the identity the host established: `{id: mind, uid: 999, verified yantrik-mind}`.
+- "ok" → "Stretch reminder fired at 11:26 — done, not pending.", with no tools. A3c holds.
+- "Not now" reached the Mind's poll, and the queue is empty.
+- The #831 wire is unchanged from 7dc2fd9e. Only internal host and store code moved: feedback is now bound to the attaching account and program, and shared attaches of one harness id share one feedback cursor.
+- **OS finding (dc, on #831):** rolling back to a pre-#831 build rewrites the store and strips each notice's fields. After a downgrade the Mind sees no `notice_inbox_v1` and falls back to held lines (correct), but its outbox still says `delivered` for cards the OS no longer holds as notices. Harmless to the Mind.
+- **Mind extras:**
+  - R1 added "One thing I didn't do: nothing else was asked, so nothing else happened. If you meant a recurring nudge…": narration of non-actions, plus an offer.
+  - "ok" ended with an offer.
+
+## E.VOICE8 — PREREG: say what was asked and not done, never what was not asked
+
+**Why:** compose is told to "say in plain words what you did and did not do" and "anything else, say plainly it was not done". On a request that was fully done, Qwen narrated non-actions nobody asked about (520, R1 above).
+
+**What is built:**
+- `COMPOSE_PLAIN_WORDS` says: "say in plain words what you did, and anything they asked for that you did not do and why when it matters (…example…); say nothing about things they did not ask for."
+- The compose wrap's last clause becomes: "Only claim actions the work log shows a tool ACTUALLY performed -- if something they asked for was not done, say so plainly."
+
+**Kill criteria:**
+- K1: the compose prompt carries "anything they asked for that you did not do" and "say nothing about things they did not ask for", and no longer carries "what you did and did not do".
+- K2: the old wording restored kills the test.
+- K3: both suites pass.
+- **Live (541 or 520):** "remind me in 2 minutes to stretch". The reply carries no "didn't do" narration, graded by eye and by `reply-grade`.
+
+**E.VOICE8 — RESULT: PASS (Windows, the unit criterion).** `compose_is_told_to_speak_plainly` asserts the new scoped wording and the absence of the old. The old wrap clause restored kills it (checked by copy and restore).
+
+## E.CAL2b — live (541, c37ba49 on OS test/batch2 f75187fd, yantrik-os-dc, 16 Oct): date PASS, new contradiction
+
+- The tool line was as designed. The reply put the event "today at 18:00". It still echoed the title ("a trip reminder for Dallas tomorrow").
+- **The reply opened with "Nothing is scheduled for you this week."**, which is false and contradicted by the next sentence. The `Next 7 days: nothing dated.` line, which is the Mind's own reminders only, was read as the whole answer. Then came the usual December list and an offer.
+
+## E.CAL2c — PREREG: when the desktop calendar lists events, the reminder section is scoped
+
+**What is built:** in `upcoming_list`, when the calendar section lists at least one event (as when it could not be read, E.CAL1b):
+- the following section reads "My reminders, next N days:" in place of "Next N days:";
+- an empty one says " none." in place of " nothing dated.".
+
+A calendar with nothing on it, or no desktop at all, keeps today's wording.
+
+**Kill criteria:**
+- K1: with one desktop event and one undated open reminder, `upcoming` holds "On your calendar:", "My reminders, next 7 days: none." and NOT "Next 7 days: nothing dated".
+- K2: the scoping removed kills the test.
+- K3: both suites pass.
+- **Live (541):** "What do I have coming up this week?" must not open with "nothing is scheduled".
+
+**E.CAL2c — RESULT: PASS (Windows).** `beside_listed_events_the_reminders_are_scoped` passes. The mutant (scoping only when unread) kills it. Windows workspace (E.VOICE8 + E.CAL2c): 2591 passed, 0 failed, on the second run. The first run failed once in `fileset_tests::review::a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it`, which passes 3/3 alone. It is a pre-existing race: the test sets the process-global `YM_WEB_DIR` while others run in parallel. That code is untouched here; noted as a flake to fix.

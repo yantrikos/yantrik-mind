@@ -17682,7 +17682,15 @@ mod desktop_consent_and_stall_wiring {
 
     /// E.CAL1: an engine whose desktop answers `os_act` with `replies`, in order.
     async fn upcoming_with_desktop(replies: Vec<&str>) -> (String, usize) {
+        upcoming_with_desktop_and(replies, &[]).await
+    }
+
+    /// E.CAL2c: the same, with `open` undated reminders kept.
+    async fn upcoming_with_desktop_and(replies: Vec<&str>, open: &[&str]) -> (String, usize) {
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        for t in open {
+            mem.add_task(t, "medium", None).await.unwrap();
+        }
         let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
         let hub = Arc::new(mind_tools::McpHub::new());
         hub.add_scripted_tool(
@@ -17709,6 +17717,16 @@ mod desktop_consent_and_stall_wiring {
         let out = conv.run_agent_tool("upcoming", &serde_json::json!({})).await;
         let left = hub.scripted_responses_remaining("mcp.yantrik-os.os_act").unwrap_or(99);
         (out, left)
+    }
+
+    /// E.CAL2c (541: "Nothing is scheduled for you this week" beside a listed event): next to a
+    /// calendar that lists events, the reminder section is scoped as mine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn beside_listed_events_the_reminders_are_scoped() {
+        let event = r#"[{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false}]"#;
+        let (out, _) = upcoming_with_desktop_and(vec![event], &["Call Arun about the visa"]).await;
+        assert!(out.contains("On your calendar:") && out.contains("My reminders, next 7 days: none."), "{out}");
+        assert!(!out.contains("Next 7 days: nothing dated"), "{out}");
     }
 
     /// E.CAL1 (541: the desktop calendar's trip reminder missed 8 of 8): `upcoming` reads the
@@ -18024,6 +18042,12 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         assert!(r.prompts.iter().any(|p| p.contains(crate::COMPOSE_PLAIN_WORDS)), "compose was not told");
+        // E.VOICE8 (520: "One thing I didn't do: nothing else was asked…"): what was ASKED and not
+        // done is said; what was not asked is not.
+        let compose = r.prompts.iter().find(|p| p.contains(crate::COMPOSE_PLAIN_WORDS)).unwrap();
+        assert!(compose.contains("anything they asked for") && compose.contains("say nothing about things they did not ask for"), "{compose}");
+        assert!(compose.contains("if something they asked for was not done, say so plainly"), "{compose}");
+        assert!(!compose.contains("what you did and did not do") && !compose.contains("anything else, say plainly"), "{compose}");
     }
 
     /// E.CITE1: a model that plays tool steps, writes compose's answer, and answers the work-log check.

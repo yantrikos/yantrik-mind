@@ -138,13 +138,17 @@ Only the reminders I keep are below."
             let other = if desk.is_some() { "Nothing else" } else { "Nothing" };
             return format!("{today}{calendar}\n{other} in the next {days} days, and no open reminders.");
         }
-        let mut out = if unread {
+        // E.CAL2c (541: "Nothing is scheduled for you this week. The only event … is today at 18:00"):
+        // beside a calendar that lists events, this section is only the reminders I keep.
+        let listed = matches!(&desk, Some(Ok(lines)) if !lines.is_empty());
+        let scoped = unread || listed;
+        let mut out = if scoped {
             format!("{today}{calendar}\nMy reminders, next {days} days:")
         } else {
             format!("{today}{calendar}\nNext {days} days:")
         };
         if spine.is_empty() {
-            out.push_str(" nothing dated.");
+            out.push_str(if scoped { " none." } else { " nothing dated." });
         }
         for (_, line, _) in &spine {
             out.push_str(&format!("\n- {line}"));

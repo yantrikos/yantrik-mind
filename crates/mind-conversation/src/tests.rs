@@ -17432,6 +17432,60 @@ mod desktop_consent_and_stall_wiring {
         assert!(!prompts.last().unwrap().contains("handed over with this reply"), "{:?}", prompts.last());
     }
 
+    /// E.SPINE1: `upcoming` lists every item -- dated and undated reminders, seven of them when
+    /// there are seven -- and says so when there is nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upcoming_lists_everything_coming_up() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "YM");
+        let none = conv.run_agent_tool("upcoming", &serde_json::json!({})).await;
+        assert!(none.starts_with("Nothing in the next"), "{none}");
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let day = 86_400_000u64;
+        let errands = ["Call the bank", "Return the library books", "Book the car service", "Pay the water bill", "Collect the dry cleaning", "Renew the gym pass", "Order printer ink"];
+        for (i, e) in errands.iter().enumerate() {
+            memarc.add_task(e, "medium", Some(now + (i as u64 + 1) * (day / 2))).await.unwrap();
+        }
+        memarc.add_task("Sort out the passport photos", "medium", None).await.unwrap();
+        let all = conv.run_agent_tool("upcoming", &serde_json::json!({"days": 7})).await;
+        for e in errands {
+            assert!(all.contains(e), "{e} missing: {all}");
+        }
+        assert!(all.contains("Open reminders with no date") && all.contains("Sort out the passport photos"), "{all}");
+    }
+
+    /// E.SPINE1: the switch takes the ambient upcoming blocks out of the turn's prompt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_ambient_upcoming_blocks_follow_the_switch() {
+        async fn prompt_with(on: bool) -> String {
+            let seen = Arc::new(StdMutex::new(Vec::new()));
+            let script = Script { at: AtomicUsize::new(0), steps: vec![Step::Fail], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+            let model: Arc<dyn LLMBackend> = Arc::new(script);
+            let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+            let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+            let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+            memarc.add_task("Call the bank", "medium", None).await.unwrap();
+            let conv = ConversationEngine::new(memarc, pool, "YM").with_ambient_upcoming(on);
+            let _ = conv.agent_loop_for_eval("What's the weather like?", &TurnIdentity::primary()).await;
+            let prompts = seen.lock().unwrap().clone();
+            prompts.first().cloned().unwrap_or_default()
+        }
+        assert!(prompt_with(true).await.contains("Open reminders you're carrying"), "on: the block is there");
+        let off = prompt_with(false).await;
+        assert!(!off.contains("Open reminders you're carrying") && !off.contains("Next 7 days:"), "{off:.600}");
+    }
+
+    /// E.SPINE1: the native add_reminder description says what the prose says.
+    #[test]
+    fn the_native_add_reminder_description_is_asked_for() {
+        let s = tool_catalog::tool_schemas("", "");
+        let d = s.iter().find(|x| x["function"]["name"] == "add_reminder").unwrap()["function"]["description"].as_str().unwrap().to_string();
+        assert!(d.contains("asked for") && !d.contains("follow up"), "{d}");
+        assert!(s.iter().any(|x| x["function"]["name"] == "upcoming"), "upcoming has a native schema");
+    }
+
     async fn schemas_offered(stable: bool, asks: &[&str]) -> (Vec<Vec<String>>, Vec<String>, String) {
         let names = Arc::new(StdMutex::new(Vec::new()));
         let seen = Arc::new(StdMutex::new(Vec::new()));
@@ -20647,7 +20701,7 @@ async fn a_span_of_web_text_is_the_planners_to_write() {
 /// E.EGRESS5: tools that never reach the network (beyond inference) -- the only names that may stay
 /// out of `mind_governance::egress::OUTBOUND`.
 const LOCAL_TOOLS: &[&str] = &[
-    "now", "date", "datetime", "time", "getcurrentdatetime", "myself", "my_config", "my_setup", "self_config",
+    "now", "upcoming", "date", "datetime", "time", "getcurrentdatetime", "myself", "my_config", "my_setup", "self_config",
     "recall", "remember", "watches", "watchlist", "watching", "patterns", "insights", "family", "relationships",
     "about_person", "person", "self_report", "week_review", "life_horizon", "horizon", "anticipate",
     "festival_calendar", "festivals", "traditions", "tradition", "nightly_dream", "dream", "self_limits", "limits",

@@ -87,6 +87,8 @@ pub(crate) const CORE_RESTRICTED_TURN_CLASSES: &[(&str, RestrictedTurnClass)] = 
     ("drop_reminder", RestrictedTurnClass::Mutating),
     ("forget", RestrictedTurnClass::Mutating),
     ("now", RestrictedTurnClass::PrivateRead),
+    // E.SPINE1: reads the person's calendar, dates and reminders -- private, local.
+    ("upcoming", RestrictedTurnClass::PrivateRead),
     ("myself", RestrictedTurnClass::PrivateRead),
     ("discover_tools", RestrictedTurnClass::PrivateRead),
     ("run_skill", RestrictedTurnClass::Mutating),

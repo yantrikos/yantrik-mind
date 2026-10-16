@@ -19630,3 +19630,28 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - the native `add_reminder` description lacks "follow up" and carries "asked for".
 - K2, a mutant survives: the 5-cap reinstated in the tool; the switch ignored; the old description restored.
 - K3: both suites pass.
+
+## E.SPINE1 — RESULT (code)
+- **K1 held:**
+  - `upcoming` with nothing says "Nothing in the next…";
+  - with 7 dated errands and 1 undated reminder it lists all 8 under "Next 7 days" and "Open reminders with no date";
+  - the switch off removes both ambient blocks from the loop prompt, and on keeps them;
+  - the native add_reminder description carries "asked for" and no "follow up";
+  - `upcoming` has a native schema.
+- **K2: 3 mutants killed** (the 5-cap in the tool, after a missed anchor was re-run on the verbatim line; the switch ignored; the old description restored).
+- **K3:** Windows workspace 2572 passed, 0 failed, after the three guards it tripped were answered:
+  - `upcoming` is in LOCAL_TOOLS (no egress);
+  - its restricted-turn class is PrivateRead;
+  - the always-present schema ceiling goes 32 → 33, with the reason written beside it.
+
+## E.LOOP11 + E.HELD1 + E.SEC21 + E.VOICE7 — live (541, a654c1c, qwen3.5:27b, yantrik-os-dc, 16 Oct)
+
+- **(a) E.HELD1: PASS.** "thanks" called no `research` and made no ack. It ran recall ×2 and answered "…handed over above" (it is below). The findings followed under the heading. mind_notices: 5 queued.
+- **(c) E.SEC21/E.VOICE7: PASS.** The bike-lock refusal was the exact sentence.
+- **(b) E.LOOP11: FAIL on calls (no false save claimed).** With the write withdrawn, Qwen moved the loop to the next tools:
+  - remember → recall ×3 → compose: 5 calls in each of 3 turns;
+  - add_reminder → **drop_reminder** → recall → drop_reminder ×2 → compose: 6 calls.
+  - **Regressions on Qwen:**
+    - M1's REMEMBER confirmation carried a same-date tie-in and an offer ("same day as Ravi's wedding anniversary … let me know"), against E.REM1c/E.ANS3;
+    - M4 added an unasked tie-in and offer about Dev's surgery.
+- **DATA-LOSS RISK (two runs now):** Qwen calls `drop_reminder` on the reminder it set in the same turn. It failed only because the words did not match ("in 2 minutes" was not stored). A slightly different phrasing would close the person's reminder in the same turn and still report it as set.

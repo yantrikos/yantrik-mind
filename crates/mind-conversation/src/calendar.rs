@@ -108,6 +108,32 @@ impl super::ConversationEngine {
     /// event or a birthday is a fact about the world, not a commitment the mind is holding, so
     /// there is nothing to dismiss. A `None` row must render without a dismiss control rather
     /// than with one that fails.
+    /// E.SPINE1: the `upcoming` tool's answer -- every item in the next `days`, then the open
+    /// reminders that carry no date. No cap: a partial list reads as the whole.
+    pub(crate) async fn upcoming_list(&self, days: i64) -> String {
+        let spine = self.upcoming_spine(days).await;
+        let dated: std::collections::HashSet<String> = spine.iter().filter_map(|(_, _, id)| id.clone()).collect();
+        let (reminders, _) = self.split_tasks().await;
+        let undated: Vec<&Task> = reminders.iter().filter(|t| !dated.contains(&t.id) && t.due_ms.is_none()).collect();
+        if spine.is_empty() && undated.is_empty() {
+            return format!("Nothing in the next {days} days, and no open reminders.");
+        }
+        let mut out = format!("Next {days} days:");
+        if spine.is_empty() {
+            out.push_str(" nothing dated.");
+        }
+        for (_, line, _) in &spine {
+            out.push_str(&format!("\n- {line}"));
+        }
+        if !undated.is_empty() {
+            out.push_str("\nOpen reminders with no date:");
+            for t in undated {
+                out.push_str(&format!("\n- {}", t.description));
+            }
+        }
+        out
+    }
+
     pub(crate) async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String, Option<String>)> {
         let today = local_now();
         let now = today.timestamp_millis();

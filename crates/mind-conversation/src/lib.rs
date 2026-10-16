@@ -6131,6 +6131,10 @@ pub struct ConversationEngine {
     /// commands and the Mind's own pending questions straight to the agent loop, with no shortcut
     /// answering first and no pass rewriting after. Off by default; `YM_THIN_DESKTOP=1`.
     thin_desktop: bool,
+    /// E.SPINE1: whether every turn's grounding carries the ambient "Next 7 days" and "Open
+    /// reminders" blocks. On until the A/B decides; `YM_AMBIENT_UPCOMING=0` turns it off and the
+    /// `upcoming` tool answers on demand.
+    ambient_upcoming: bool,
     /// E.PACE2: the effort compose (the answer written from the work log) asks for when the person
     /// picked none -- `YM_COMPOSE_EFFORT`. None keeps the model's default, as E.PACE1b left it.
     compose_effort: Option<String>,
@@ -6341,6 +6345,12 @@ impl ConversationEngine {
         self.persona.read().map(|p| p.clone()).unwrap_or_default()
     }
 
+    /// E.SPINE1: the ambient upcoming blocks on or off (see the field).
+    pub fn with_ambient_upcoming(mut self, on: bool) -> Self {
+        self.ambient_upcoming = on;
+        self
+    }
+
     /// E.THIN1: turn the thin desktop path on (see the field).
     pub fn with_thin_desktop(mut self, on: bool) -> Self {
         self.thin_desktop = on;
@@ -6415,6 +6425,7 @@ impl ConversationEngine {
             persona: std::sync::RwLock::new(persona.into()),
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
+            ambient_upcoming: true,
             compose_effort: None,
             unprompted_delivery: std::sync::atomic::AtomicBool::new(false),
             prefix_last: std::sync::Mutex::new(None),
@@ -12542,6 +12553,11 @@ WINDOW: all-time, latest 200
             }
         }
         match tool {
+            // E.SPINE1: what's coming up, on demand and complete.
+            "upcoming" => {
+                let days = s("days").trim().parse::<i64>().unwrap_or(7).clamp(1, 60);
+                self.upcoming_list(days).await
+            }
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => match args.get("zone").and_then(|z| z.as_str()).map(str::trim).filter(|z| !z.is_empty()) {
                 // E.ARENA1-F37: the time somewhere else, beside the person's own.
                 Some(zone) => now_in(zone, chrono::Utc::now()),
@@ -13605,7 +13621,7 @@ WINDOW: all-time, latest 200
         // (a birthday answer should carry the gift plan + its deadline without being asked).
         // GATED (E.CTX2). Calendar entries and people's dates, by name. This sat after the policy
         // gate and was appended unconditionally — Codex found it reviewing E.CTX1.
-        let spine = if policy.admits(mind_types::Channel::UpcomingDates) {
+        let spine = if self.ambient_upcoming && policy.admits(mind_types::Channel::UpcomingDates) {
             self.upcoming_spine(7).await
         } else {
             Vec::new()
@@ -13626,7 +13642,7 @@ Next 7 days:",
                 );
             }
         }
-        if policy.admits(mind_types::Channel::OpenReminders) {
+        if self.ambient_upcoming && policy.admits(mind_types::Channel::OpenReminders) {
             let (rem, _) = self.split_tasks().await;
             if !rem.is_empty() {
                 grounding.push(

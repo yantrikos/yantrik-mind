@@ -640,6 +640,11 @@ pub fn compose_effort_from(get: &dyn Fn(&str) -> Option<String>) -> Option<Strin
     }
 }
 
+/// E.SPINE1: the ambient upcoming blocks -- on unless `YM_AMBIENT_UPCOMING=0`.
+pub fn ambient_upcoming_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get("YM_AMBIENT_UPCOMING").is_none_or(|v| v.trim() != "0")
+}
+
 /// E.PREFIX1b: one native schema block for every turn -- `YM_STABLE_SCHEMAS=1`; off otherwise.
 pub fn stable_schemas_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get("YM_STABLE_SCHEMAS").is_some_and(|v| v.trim() == "1")
@@ -783,6 +788,8 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_compose_effort(compose_effort_from(&|k| std::env::var(k).ok()))
         // E.PREFIX1b: one schema block for every turn, off until the A/B on 541 decides.
         .with_stable_schemas(stable_schemas_from(&|k| std::env::var(k).ok()))
+        // E.SPINE1: the ambient upcoming blocks, on until the A/B on 541 decides.
+        .with_ambient_upcoming(ambient_upcoming_from(&|k| std::env::var(k).ok()))
         // The cognitive flight recorder: every meaningful decision lands in a hash-chained
         // append-only log beside the DB (`YM_DECISION_LOG` overrides). Observes only; failure
         // is sticky-silent, never a turn-killer.

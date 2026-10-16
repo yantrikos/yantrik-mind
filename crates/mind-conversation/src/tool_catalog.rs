@@ -23,6 +23,7 @@ pub(crate) const CORE_HEAD: &str = "CORE TOOLS (always available; use ONE per st
 - drop_reminder {words}: when they say to drop/cancel/stop tracking something, CLOSE it for real — this clears matching reminders, threads, watches, and planned items everywhere. Never just SAY something is dropped: call this, then report what it closed\n\
 - forget {what}: when they ask you to FORGET or DELETE something they told you (a code, a password, a private fact), ERASE that exact text from everywhere in your memory — it asks them to confirm first. 'what' is the secret ITSELF (the code, the password, the exact words), never a sentence about it; recall first if you need it. Never say something is forgotten unless this tool erased it\n\
 - now {}: the current date and time\n\
+- upcoming {days}: what's coming up in the next N days (default 7) -- calendar entries, people's key dates and open reminders, the full list\n\
 - myself {}: your LIVE setup — providers, model lanes, keys present, mounted packs. ANY question about your own configuration is answered from THIS, never from memory: your memories about your own code are history, not state\n\
 MOST-RELEVANT TOOLS for this message (native — prefer these; do NOT build a skill for a task they cover):";
 
@@ -376,8 +377,15 @@ fn core_meta_schemas() -> Vec<Value> {
         arg_schema("remember", "store a durable fact about the user or the world", &[("text", true)]),
         arg_schema(
             "add_reminder",
-            "mark a date/commitment (birthday, deadline) so you follow up when it's due",
+            // E.SPINE1: E.REM1 changed the prose line and missed this one, the description a
+            // native tool-calling model reads.
+            "set a reminder the person asked for -- 'when' like tomorrow / in 3 days / December 3 / 2026-12-03",
             &[("text", true), ("when", true)],
+        ),
+        arg_schema(
+            "upcoming",
+            "what's coming up in the next N days (default 7): calendar entries, people's key dates and the open reminders -- the full list",
+            &[("days", false)],
         ),
         arg_schema(
             "draft_email",
@@ -1407,8 +1415,11 @@ mod tests {
             // price of that, and it is a bound on the always-present set rather than a licence for
             // the gate to leak.
             assert!(schemas.len() >= 7, "core+meta always present");
+            // 32 -> 33 (E.SPINE1): `upcoming` is always present so that "what's coming up" can be
+            // retrieved on demand instead of injected into every prompt. One permanent slot in
+            // exchange for an ambient block that changed every turn and invited tie-ins.
             assert!(
-                schemas.len() <= 32,
+                schemas.len() <= 33,
                 "schema set is gated, not the full catalog ({} tools)",
                 schemas.len()
             );

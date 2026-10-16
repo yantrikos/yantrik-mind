@@ -19288,3 +19288,26 @@ K1/K2 are restated against these: dedupe by key; an expired lease is resent; Del
 **K2: 6 of 7 mutants killed:** the per-scan key; the catch-up window removed; the ack check removed; the kind filter removed; the telegram gate removed; delivered re-leased. **One equivalent mutant:** removing Delivered from the chain's "nothing follows a terminal" check changes nothing, because the transition rules already admit no event after Delivered (as they do for Expired and Committed). It is kept as defence in depth and reported as equivalent, not as killed.
 
 **K3:** Windows workspace 2559 passed, 0 failed. Linux follows.
+
+**E.REM1c live (542, Claude Sonnet 5.5, yantrik-os-dc, 16 Oct) — the live kill is MET (extras in 2 of 4), both on recall:**
+- **2a, the remember replies, are clean:**
+  - "Got it: your cousin Arjun's flight lands on 3 December."
+  - "Got it: your dentist is Dr. Okafor on Elm Street."
+- **2b, the recall replies, add:**
+  - a list of what isn't known ("I don't have a landing time, airport or flight number");
+  - a same-day tie-in with speculation ("Leila's book launch is also on 3 December, so the two could clash");
+  - an offer ("If you tell me…, I can check"; "I can look up… or set a reminder").
+- **mind.db:** both are beliefs, with 0 tasks, triggers or notices.
+- **Reading:** E.REM1b/c fixed the remember path; the answer path adds its own extras. 542 stays on 272519a, which is better than 8802723 on remember. "From what you told me earlier today" is provenance and is not counted as an extra.
+
+## E.ANS2 — PREREG: an answer answers what was asked
+
+**What is built (agent rules, next to the remember clause):** "when you answer, answer what was asked -- the fact and where it came from; no list of what you don't know, and no offer of more help unless they asked for it; at most one short factual clause about something on the same date or for the same person, stated as a fact, not a worry or a suggestion".
+
+The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly relevant ... one short factual clause") and Pranab's Jarvis direction. Speculation ("could clash"), advice and offers are not allowed.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails: the rules carry "answer what was asked", "no list of what you don't know" and "no offer of more help unless they asked".
+- K2, a mutant survives: the clause removed.
+- K3: both suites pass.
+- **Live (dc, 542, Claude, a fresh conversation, two remember+recall pairs plus one same-date pair):** kills if a reply lists what isn't known, or offers help or a reminder, in 2 or more of the 6 replies, or if any reply speculates or advises about a same-date item. A same-date factual clause is allowed and counted as data.

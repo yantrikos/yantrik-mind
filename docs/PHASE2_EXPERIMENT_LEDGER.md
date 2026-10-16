@@ -20003,3 +20003,16 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 
 **E.NOTICE1 A3b — RESULT: PASS (Windows).** The sender test asserts no line for an unkept notice, and exactly one ending ": Reminder: Stretch)" once the notice is kept. Mutants killed (2/2): the append removed; the append made on every answer. Windows workspace: 2588 passed, 0 failed.
 - **Linux (staging, 987d8ab), A3b + PEOPLE1 + ANS4 + HELD1b:** mind-core 197 passed, mind-conversation 1275 passed. **Bundle:** yantrik-mind-987d8ab-linux-amd64.tar.zst, sha256 5d4233b3bcde8fc10cb57fdd1c00c170d421e6f85343a7aef2b319794583c5d8
+
+## E.PEOPLE1 + E.ANS4 — live (541, 987d8ab, qwen3.5:27b, yantrik-os-dc, 16 Oct)
+
+- **E.PEOPLE1: PASS on the criterion, mechanism NOT exercised.**
+  - "What do you know about Tomasz?" (turn 475) → "Role: plumber. Schedule: comes on Tuesdays."
+  - The model chose `recall` ×2, not `about_person`, so the new fallback did not run. That fallback is proven only by the unit test and its mutants.
+  - Extras on Qwen: a list of unknowns, an offer, and an unasked "you live in Bentonville". The remember reply (turn 473) also ended with an offer.
+- **E.ANS4: PASS.** "Add 'Spare socks' to my Weekend packing list note." (turn 477) → "Done — "Spare socks" is now on your Weekend packing list."
+  - This time the shortcut's args put the sentence in `url`, with `target` literally "text". The longest-string rule found it.
+  - The note edit took 6 steps: open_app notes, open_note, append, a repeated append (caught), then the answer.
+- **Latency was much worse than the morning on the same box and model:** 36 s for a one-step remember, 71 s for a recall, 124 s for the note edit. All of it in gateway calls, likely provider load. Watch it; not a bundle defect.
+- **A3b:** waits for #831's fixed build on 520.
+- **Open (Qwen, both arms):** offers, unknowns lists and unasked tie-ins persist despite the rules and the compose wrap. Not chased with a new rule per phrasing (ARCH9). It is a candidate for the Jev-graded A/B, if Pranab agrees.

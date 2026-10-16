@@ -576,6 +576,13 @@ Only the reminders I keep are below."
 /// run past the asked range. So only the text before the state line is read, one JSON value at a
 /// time from each `[`; with no array of titled events, an accepted act is an empty calendar.
 pub(crate) fn calendar_event_lines(obs: &str) -> std::result::Result<Vec<String>, ()> {
+    calendar_event_lines_on(obs, local_now().date_naive())
+}
+
+/// E.CAL2 (541: "Trip reminder -- Dallas tomorrow" at 18:00 TODAY was told as tomorrow, three times
+/// of three): each day relative to `today`, and the title in quotes, so the title's own date words
+/// are not read as the event's date.
+pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> std::result::Result<Vec<String>, ()> {
     let head = obs.split("state: {").next().unwrap_or(obs);
     let mut found: Option<Vec<serde_json::Value>> = None;
     let mut untitled = false;
@@ -606,23 +613,35 @@ pub(crate) fn calendar_event_lines(obs: &str) -> std::result::Result<Vec<String>
         let start = e.get("start").and_then(|t| t.as_str()).unwrap_or("");
         let all_day = e.get("is_all_day").and_then(|v| v.as_bool()).unwrap_or(false);
         let when = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
-            .map(|t| if all_day { t.format("%a %-d %b").to_string() } else { t.format("%a %-d %b %H:%M").to_string() })
+            .map(|t| {
+                let day = match (t.date() - today).num_days() {
+                    0 => "today".to_string(),
+                    1 => "tomorrow".to_string(),
+                    _ => t.format("%a %-d %b").to_string(),
+                };
+                if all_day { day } else { format!("{day} {}", t.format("%H:%M")) }
+            })
             .unwrap_or_else(|_| start.to_string());
-        out.push(format!("{when}: {title}"));
+        out.push(format!("{when}: \"{title}\""));
     }
     Ok(out)
 }
 
 #[cfg(test)]
 mod cal1_tests {
-    use super::calendar_event_lines;
+    use super::calendar_event_lines_on;
+
+    /// The absolute cases read from 1 Oct, so no event below is today or tomorrow.
+    fn calendar_event_lines(obs: &str) -> Result<Vec<String>, ()> {
+        calendar_event_lines_on(obs, chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap())
+    }
 
     #[test]
     fn list_events_json_becomes_lines_and_garbage_is_an_error() {
         let ok = r#"Done -- Calendar -- [{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false},{"id":"e2","title":"Holiday","start":"2026-10-19T00:00:00","is_all_day":true}]"#;
         assert_eq!(
             calendar_event_lines(ok).unwrap(),
-            vec!["Fri 16 Oct 18:00: Trip reminder -- Dallas tomorrow".to_string(), "Mon 19 Oct: Holiday".to_string()]
+            vec!["Fri 16 Oct 18:00: \"Trip reminder -- Dallas tomorrow\"".to_string(), "Mon 19 Oct: \"Holiday\"".to_string()]
         );
         assert_eq!(calendar_event_lines("[]").unwrap(), Vec::<String>::new());
         assert!(calendar_event_lines("calendar is closed (no socket)").is_err());
@@ -630,10 +649,22 @@ mod cal1_tests {
 
         // E.CAL1c: as `yos act calendar list_events` prints it (yantrik-os #833).
         let printed = "Done \u{2014} Calendar \u{2014} 1 event in [16 Oct \u{2013} 23 Oct]\naccepted: True, settled: True\nrevision: 7\n[\n  {\n    \"id\": \"e1\",\n    \"title\": \"Trip reminder - Dallas tomorrow\",\n    \"start\": \"2026-10-16T18:00:00\",\n    \"end\": \"2026-10-16T18:30:00\",\n    \"is_all_day\": false\n  }\n]\nstate: {\"events\":2,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
-        assert_eq!(calendar_event_lines(printed).unwrap(), vec!["Fri 16 Oct 18:00: Trip reminder - Dallas tomorrow".to_string()]);
+        assert_eq!(calendar_event_lines(printed).unwrap(), vec!["Fri 16 Oct 18:00: \"Trip reminder - Dallas tomorrow\"".to_string()]);
         // Nothing in range: yos prints no result, and the state's `upcoming` is not this week.
         let empty = "Done \u{2014} Calendar \u{2014} no events in range\naccepted: True, settled: True\nstate: {\"events\":1,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
         assert_eq!(calendar_event_lines(empty).unwrap(), Vec::<String>::new());
         assert!(calendar_event_lines("Done \u{2014} Calendar\naccepted: False, settled: True\n").is_err(), "a refused act is not an empty calendar");
+
+        // E.CAL2: on 16 Oct the 18:00 event is today's, whatever its title says.
+        let on_16 = chrono::NaiveDate::from_ymd_opt(2026, 10, 16).unwrap();
+        let three = r#"[{"title":"Trip reminder - Dallas tomorrow","start":"2026-10-16T18:00:00","is_all_day":false},{"title":"Dentist","start":"2026-10-17T09:00:00","is_all_day":false},{"title":"Holiday","start":"2026-10-19T00:00:00","is_all_day":true}]"#;
+        assert_eq!(
+            calendar_event_lines_on(three, on_16).unwrap(),
+            vec![
+                "today 18:00: \"Trip reminder - Dallas tomorrow\"".to_string(),
+                "tomorrow 09:00: \"Dentist\"".to_string(),
+                "Mon 19 Oct: \"Holiday\"".to_string(),
+            ]
+        );
     }
 }

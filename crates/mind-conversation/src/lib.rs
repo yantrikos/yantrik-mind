@@ -6373,6 +6373,8 @@ pub struct ConversationEngine {
     /// E.HELD1: results being handed over with THIS turn's reply -- in its prompt, so the model
     /// knows they are delivered and does not start the work again.
     held_this_turn: Mutex<Vec<String>>,
+    /// E.NOTICE1 A3c: cards the desktop showed since the last reply, for the next turn's prompt.
+    cards_shown: Mutex<Vec<String>>,
     /// Finished results that could not reach any chat — delivered on the next exchange, any channel.
     held_notes: Arc<Mutex<Vec<String>>>,
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
@@ -6569,6 +6571,7 @@ impl ConversationEngine {
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             delegated_queue: Arc::new(Mutex::new(Vec::new())),
             held_this_turn: Mutex::new(Vec::new()),
+            cards_shown: Mutex::new(Vec::new()),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
             last_sent_photo: Arc::new(Mutex::new(None)),
@@ -6894,7 +6897,30 @@ impl ConversationEngine {
             .map(|d| d.with_timezone(local_now().offset()).format("%H:%M").to_string())
             .unwrap_or_default();
         let first: String = text.trim().lines().next().unwrap_or("").chars().take(160).collect();
-        let _ = self.memory.append_message("assistant", &format!("(shown on their desktop as a card at {at}: {first})")).await;
+        // E.NOTICE1 A3c (520: the aside was in the prompt and "ok" still said "will ping you"): a
+        // fact, in the record and in the next turn's instructions.
+        let (record, fact) = match first.strip_prefix("Reminder:").map(str::trim) {
+            Some(what) => (
+                format!("(The reminder \"{what}\" fired at {at} and was shown on their desktop as a card; it is done, no longer pending.)"),
+                format!("the reminder \"{what}\" fired at {at} and was shown to them as a desktop card. It is done -- not pending; never say it is still set or will ping."),
+            ),
+            None => (
+                format!("(\"{first}\" was shown on their desktop as a card at {at}.)"),
+                format!("\"{first}\" was shown to them as a desktop card at {at}."),
+            ),
+        };
+        let _ = self.memory.append_message("assistant", &record).await;
+        self.cards_shown.lock().unwrap().push(fact);
+    }
+
+    /// E.NOTICE1 A3c: what the desktop showed since the last reply, as a line of the turn's
+    /// prompt -- taken, so it is said to the model once.
+    pub fn take_cards_section(&self) -> String {
+        let shown = std::mem::take(&mut *self.cards_shown.lock().unwrap());
+        if shown.is_empty() {
+            return String::new();
+        }
+        format!("Since your last reply: {}\n\n", shown.join(" "))
     }
 
     /// E.NOTICE1 A2: a delegated job's result, as the job sites push it.
@@ -13900,6 +13926,8 @@ Open reminders you're carrying for them:",
             .unwrap_or_default();
         // E.ACK1: an acknowledgement asks for nothing -- no tool runs, the model only replies.
         let ack_only = bare_ack(user_text) && !last_reply_asked(&recent);
+        // E.NOTICE1 A3c: cards shown since the last reply, once per turn.
+        let shown = self.take_cards_section();
         // MEASURED 2026-08-04 (`ym prompt_audit`): this block was 53.3% of every loop prompt —
         // 16,899 B, of which 15,650 was the mind's OWN long replies (14 assistant messages vs 6 user
         // messages totalling 735 B; the largest single reply 6,253 B). All of it was re-sent on each
@@ -14283,7 +14311,7 @@ Open reminders you're carrying for them:",
                 desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
-                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![

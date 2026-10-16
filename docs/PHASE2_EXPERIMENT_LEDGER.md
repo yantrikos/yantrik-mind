@@ -20059,3 +20059,51 @@ For a one-ask message (`one_ask`), such a read goes straight to the reply. An em
 
 **E.LOOP14 — RESULT: PASS (Windows).** `one_memory_read_that_found_it_answers_one_question` passes. Mutants killed (3/3): recall left out; the found-something condition removed; about_person left out. **Windows workspace (E.CAL1c + E.LOOP14):** 2589 passed, 0 failed.
 - **Linux (staging, 4d483ec), E.CAL1c + E.LOOP14:** mind-conversation 1276 passed, mind-core 197 passed. **Bundle:** yantrik-mind-4d483ec-linux-amd64.tar.zst, sha256 48993e96587fb3d2da2484a3ac81dbd05013101992dde7b1df3b3069bfaa616b
+
+## E.NOTICE1 A3b — live (520, 4d483ec on OS test/batch 8b8f7f66, yantrik-os-dc, 16 Oct): FAIL
+
+- The card was delivered at the due time ("notices: 1 delivered"), and the transcript line landed right before the "ok": `assistant: (shown on their desktop as a card at 10:00: Reminder: Stretch)`.
+- "ok" (turn 922, no tools, 3 s) → "Standing by — your stretch reminder is set and will ping you in 2 minutes." That is the same false "pending" claim.
+- **Diagnosis (local probe, the same transcript):** the line IS in the turn's prompt under "Recent conversation". The model discounts it. It reads as the Mind's own aside in assistant voice, beside the louder earlier claim "I'll ping you when it's due".
+
+## E.NOTICE1 A3c — PREREG: a fired card is a fact in the next turn's prompt
+
+**What is built:**
+1. When a card is delivered, the Mind holds a line for the NEXT turn's prompt, in the instruction area beside E.HELD1's handed-over results (taken once per turn): "Since your last reply: the reminder "Stretch" fired at 10:00 and was shown to them as a desktop card. It is done -- not pending; never say it is still set or will ping."
+2. The transcript record is reworded as a fact: "(The reminder "Stretch" fired at 10:00 and was shown on their desktop as a card; it is done, no longer pending.)". The role stays assistant, since other transcript readers map roles.
+3. A delegated result's line says it "was shown to them as a desktop card".
+
+**Kill criteria:**
+- K1: after a delivered reminder card, the next turn's prompt holds "fired at" and "not pending" with the reminder's text. The turn after that does not (taken once).
+- K2, a mutant survives: the prompt line not added; the line not taken (it repeats every turn).
+- K3: both suites pass.
+- **Live (520):** the A3b steps. "ok" after the card must not say the reminder is set, pending, or will ping.
+
+**E.NOTICE1 A3c — RESULT: PASS (Windows).** `a_fired_card_is_a_fact_in_the_next_turns_prompt` passes, and the sender test asserts the reworded record and a once-only prompt line. Mutants killed (2/2): the prompt line not added; the line not taken. Windows workspace: 2590 passed, 0 failed.
+
+## E.CAL1 + E.CAL1c + E.LOOP14 — live (541, 4d483ec on OS test/batch 8b8f7f66, yantrik-os-dc, 16 Oct): PASS
+
+- **C1, "What do I have coming up this week?":** 1 step, `upcoming {"days":7}`, 2 calls. The reply listed "Trip reminder — Dallas tomorrow" from the desktop calendar.
+- **C4, the same with calendar-service killed first:** the read started it on demand (OS #833's yos), 1 step, 2 calls.
+- **C2, "What's on my calendar on Monday?":** "Nothing is on your calendar for Monday, 19 October", correctly not "could not be read". It then added a stale December list and an offer.
+- **C3, "Who is Tomasz?":** 1 step, recall, then the reply. E.LOOP14 PASS.
+- yantrik-os #833 merged with this run.
+- **Defect, all three times:** the event is TODAY at 18:00, and the tool said "Fri 16 Oct 18:00: Trip reminder — Dallas tomorrow". The model took the title's word "tomorrow" as the date: "tomorrow (Saturday, 17 October)".
+
+## E.CAL2 — PREREG: desktop calendar lines say today/tomorrow, and titles are quoted
+
+**What is built:**
+- `calendar_event_lines` labels each event's day relative to today: "today 18:00", "tomorrow 09:00", otherwise "Mon 19 Oct 09:00". An all-day event gets the day only.
+- The title follows in double quotes: `today 18:00: "Trip reminder — Dallas tomorrow"`.
+- `upcoming_spine` (the Mind's own stores, also used by the ambient blocks and the one-row dedupe) is untouched.
+
+**Kill criteria:**
+- K1, a test fails, with today fixed at 16 Oct 2026:
+  - an event at 2026-10-16T18:00 → `today 18:00: "Trip reminder — Dallas tomorrow"`;
+  - 2026-10-17T09:00 → `tomorrow 09:00: "…"`;
+  - 2026-10-19 all-day → `Mon 19 Oct: "Holiday"`.
+- K2, a mutant survives: the relative labels removed; the quotes removed.
+- K3: both suites pass.
+- **Live (541):** "What do I have coming up this week?" must not call the 18:00 event tomorrow.
+
+**E.CAL2 — RESULT: PASS (Windows).** `list_events_json_becomes_lines_and_garbage_is_an_error` asserts `today 18:00`, `tomorrow 09:00`, `Mon 19 Oct` and quoted titles, with today fixed. Mutants killed (2/2): the relative labels removed; the quotes removed. **Windows workspace (A3c + E.CAL2):** 2590 passed, 0 failed.

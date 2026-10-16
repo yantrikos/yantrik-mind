@@ -17529,6 +17529,29 @@ mod desktop_consent_and_stall_wiring {
         assert!(!out.contains("Tuesdays"), "a member read the primary's memory: {out}");
     }
 
+    /// E.NOTICE1 A3c (520: "ok" said "will ping you in 2 minutes" after the card had fired): a card
+    /// the desktop showed is a fact in the next turn's prompt -- and only that turn's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fired_card_is_a_fact_in_the_next_turns_prompt() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps: vec![Step::Say("Okay."), Step::Say("Okay.")], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        conv.note_card_delivered("Reminder: Stretch", ConversationEngine::now_ms()).await;
+        let _ = conv.agent_loop_for_eval("ok", &TurnIdentity::primary()).await;
+        let first = seen.lock().unwrap().clone();
+        assert!(
+            first.iter().any(|p| p.contains("Since your last reply: the reminder \"Stretch\" fired at") && p.contains("not pending")),
+            "the fired card is not in the turn's prompt: {first:?}"
+        );
+        seen.lock().unwrap().clear();
+        let _ = conv.agent_loop_for_eval("thanks", &TurnIdentity::primary()).await;
+        let second = seen.lock().unwrap().clone();
+        assert!(!second.iter().any(|p| p.contains("Since your last reply:")), "said again on the turn after");
+    }
+
     /// E.ACK1: a model that plays its script whether or not it was offered tools.
     struct Insists {
         inner: SchemasSeen,
@@ -17695,7 +17718,7 @@ mod desktop_consent_and_stall_wiring {
     async fn upcoming_reads_the_desktop_calendar() {
         let event = r#"[{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false}]"#;
         let (out, left) = upcoming_with_desktop(vec![event]).await;
-        assert!(out.contains("On your calendar:") && out.contains("18:00: Trip reminder -- Dallas tomorrow"), "{out}");
+        assert!(out.contains("On your calendar:") && out.contains("18:00: \"Trip reminder -- Dallas tomorrow\""), "{out}");
         assert_eq!(left, 0);
         let (out, left) = upcoming_with_desktop(vec!["calendar is closed (no socket)", "{\"service\":\"calendar\",\"state\":\"started\"}", event]).await;
         assert!(out.contains("Trip reminder -- Dallas tomorrow"), "{out}");

@@ -264,7 +264,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|(r, t)| r == "assistant" && t.starts_with("(shown on their desktop as a card at"))
+                .filter(|(r, t)| r == "assistant" && t.contains("shown on their desktop as a card"))
                 .map(|(_, t)| t)
                 .collect::<Vec<_>>()
         };
@@ -279,7 +279,11 @@ mod tests {
         // E.NOTICE1 A3b: the kept card is in the conversation's record, once.
         let shown = said(mem.clone()).await;
         assert_eq!(shown.len(), 1, "{shown:?}");
-        assert!(shown[0].ends_with(": Reminder: Stretch)"), "{}", shown[0]);
+        assert!(shown[0].starts_with("(The reminder \"Stretch\" fired at") && shown[0].contains("no longer pending"), "{}", shown[0]);
+        // E.NOTICE1 A3c: and the next turn's prompt says so, once.
+        let line = conv.take_cards_section();
+        assert!(line.starts_with("Since your last reply: the reminder \"Stretch\" fired at") && line.contains("not pending"), "{line}");
+        assert!(conv.take_cards_section().is_empty(), "said to the model twice");
     }
 
     /// The loop step: it queues where no phone is reachable, and leaves a reachable phone's own

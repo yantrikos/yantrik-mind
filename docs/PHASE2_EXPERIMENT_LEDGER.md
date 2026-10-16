@@ -20205,3 +20205,18 @@ The two contradicts_facts misses are:
 - `unasked_offer` and `contradicts_facts` screen A/B replies. Their flags still get read.
 - tie_in, advice and answers_ask are not used for decisions.
 - Encoding the policy exceptions in those questions is the next step. It needs a NEW held-out set, since this one has now been read.
+
+## E.GRADE1c — PREREG: the grader's v2 questions, written before the next held-out set
+
+dc's next labels follow the policy as written: no fault for an allowed same-date clause, for tool-sourced "check back" text, for further-ahead items on "due soon", or for provenance. A new `false_absence` label is added.
+
+**The v2 questions (in `reply-grade`):**
+- `unasked_tie_in` names those four exceptions as not tie-ins;
+- `unasked_advice` says that "this desktop can't alert you; check back or ask" is not advice;
+- `contradicts_facts` adds "a claim that it has no information about something `facts` says it knew".
+
+**Mapping:** as in E.GRADE1b, plus `false_absence` → contradicts_facts.
+
+**Bar:** unchanged. Rule agreement ≥ 0.90; for each of unasked_offer, contradicts_facts and unasked_tie_in, recall ≥ 0.75 and precision ≥ 0.6; unasked_advice is reported against the same bar.
+
+**Data:** fresh replies, unread by me before scoring.

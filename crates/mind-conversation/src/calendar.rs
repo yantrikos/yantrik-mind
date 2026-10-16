@@ -115,10 +115,12 @@ impl super::ConversationEngine {
         let dated: std::collections::HashSet<String> = spine.iter().filter_map(|(_, _, id)| id.clone()).collect();
         let (reminders, _) = self.split_tasks().await;
         let undated: Vec<&Task> = reminders.iter().filter(|t| !dated.contains(&t.id) && t.due_ms.is_none()).collect();
+        // E.REM2: "tomorrow" needs today -- 541 called today's items tomorrow's.
+        let today = format!("Today is {}.", local_now().format("%a %-d %b"));
         if spine.is_empty() && undated.is_empty() {
-            return format!("Nothing in the next {days} days, and no open reminders.");
+            return format!("{today} Nothing in the next {days} days, and no open reminders.");
         }
-        let mut out = format!("Next {days} days:");
+        let mut out = format!("{today}\nNext {days} days:");
         if spine.is_empty() {
             out.push_str(" nothing dated.");
         }

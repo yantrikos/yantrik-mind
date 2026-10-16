@@ -19747,3 +19747,25 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - **Live (541, Qwen 27B):**
   - "remind me in 2 minutes to stretch" (same text as an old one), then after 3 minutes "ok": the second reply carries "⏰ Reminder: stretch…", and the task is completed in mind.db;
   - "What do I have coming up this week?" in at most 2 calls, with no past-due item called tomorrow.
+
+## E.REM2 + E.LOOP13 — RESULT (code)
+
+**K1 held:**
+- **A reminder due 1 h ago:** one held "Reminder: Stretch (due HH:MM)", the task completed, a 2-day-overdue task untouched, a second scan holding nothing new, and the same text a new task once closed.
+- **The backlog** (a notice queued earlier, the task still open): closed, not held again.
+- `upcoming` starts with "Today is ".
+- **"What do I have coming up this week?"** with upcoming ×2 scripted: one tool step. "…Thursday and what's the weather?" continues.
+
+**K2: 4 mutants killed:**
+- the completion removed;
+- the hold removed;
+- the read stop removed;
+- `one_ask` replaced by `single_request` (a question would never stop).
+
+**K3:** Windows workspace 2577 passed, 0 failed (mind-core gains mind-spec as a dev-dependency for the backlog test). Linux and the bundle follow.
+
+**Open from the 541 list, not in this build:**
+- bug 4: `upcoming` does not read the OS calendar (the trip reminder was missed 8 of 8);
+- bug 5: `about_person` misses a just-saved person;
+- bug 6: a note result printed as raw JSON;
+- the "handed over above" wording nit.

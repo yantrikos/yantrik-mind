@@ -102,6 +102,52 @@ mod tests {
         assert!(leased[0].text.contains("Stretch"), "{}", leased[0].text);
     }
 
+    /// E.REM2 (541: past-due reminders stayed open for hours): a reminder that came due is held for
+    /// the next reply once and closed; the backlog an earlier scan queued is closed without a second
+    /// hold; one two days overdue is left alone; and the same text can be set again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_that_came_due_is_said_and_closed() {
+        let (conv, mem) = engine();
+        let now = crate::telegram::now_ms();
+        let stretch = mem.add_task("Stretch", "medium", Some(now - HOUR)).await.unwrap();
+        let old = mem.add_task("Renew the passport form", "medium", Some(now - 48 * HOUR)).await.unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        let held = conv.take_held_notes();
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert!(held[0].contains("Reminder: Stretch") && held[0].contains("due"), "{}", held[0]);
+        let open: Vec<String> = mem.list_tasks(false).await.unwrap().into_iter().map(|t| t.id).collect();
+        assert!(!open.contains(&stretch.id), "the reminder that came due is still open");
+        assert!(open.contains(&old.id), "a two-day-overdue task was touched");
+        conv.queue_due_reminders_at(now + 60_000).await.unwrap();
+        assert!(conv.take_held_notes().is_empty(), "held twice");
+        // Closed, so the same text is a new reminder (add_task merges only into OPEN tasks).
+        let again = mem.add_task("Stretch", "medium", Some(now + 2 * 60_000)).await.unwrap();
+        assert_ne!(again.id, stretch.id, "the same text merged into the closed reminder");
+    }
+
+    /// E.REM2: a reminder an earlier build queued and left open is closed, and not said again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_backlog_reminder_is_closed_without_a_second_hold() {
+        let mem: Arc<dyn mind_types::MemoryFacade> = Arc::new(mind_memory::MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = mind_inference::InferencePool::new(
+            Arc::new(mind_inference::ScriptedLLM::new("unused")) as Arc<dyn yantrik_ml::LLMBackend>,
+            1,
+        );
+        let store = Arc::new(mind_recipes::RecipeStore::open(":memory:").unwrap());
+        let recipes = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoTools), "YM").with_store(store.clone());
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM").with_recipes(Arc::new(recipes));
+        let now = crate::telegram::now_ms();
+        let due = now - HOUR;
+        let t = mem.add_task("Check the oven", "medium", Some(due)).await.unwrap();
+        // What A1 (before E.REM2) left behind: the notice queued, the task still open.
+        store
+            .queue_notice("primary", mind_spec::NoticeKind::Reminder, "Reminder: Check the oven", &format!("reminder:{}:{due}", t.id), now - HOUR)
+            .unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        assert!(conv.take_held_notes().is_empty(), "the backlog was said again");
+        assert!(!mem.list_tasks(false).await.unwrap().iter().any(|x| x.id == t.id), "the backlog stayed open");
+    }
+
     /// Kept by the desktop: delivered, never sent again. Not kept: sent again once the lease ran out.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_kept_notice_is_not_resent_and_an_unkept_one_is() {

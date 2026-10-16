@@ -2242,6 +2242,7 @@ dependencies = [
  "mind-net",
  "mind-observability",
  "mind-recipes",
+ "mind-spec",
  "mind-tools",
  "mind-types",
  "rand_core 0.6.4",

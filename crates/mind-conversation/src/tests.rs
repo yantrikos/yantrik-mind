@@ -17434,6 +17434,26 @@ mod desktop_consent_and_stall_wiring {
         assert!(!crate::single_request("remember X then remind me"));
     }
 
+    /// E.LOOP13 (541: `upcoming` three times a turn): one ask, one successful read, the reply; an
+    /// ask that goes on keeps its loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_read_answers_one_question() {
+        let one = schemas_per_step(
+            vec![Step::Call("upcoming", serde_json::json!({})), Step::Call("upcoming", serde_json::json!({"days": 7})), Step::Fail],
+            "What do I have coming up this week?",
+        )
+        .await;
+        assert_eq!(one.len(), 1, "{one:?}");
+        let more = schemas_per_step(
+            vec![Step::Call("upcoming", serde_json::json!({})), Step::Fail],
+            "What's on Thursday and what's the weather?",
+        )
+        .await;
+        assert!(more.len() >= 2, "{more:?}");
+        assert!(crate::one_ask("What do I have coming up this week?"));
+        assert!(!crate::one_ask("remember X then tell me Y"));
+    }
+
     /// E.LOOP12 (541, twice: Qwen dropped the reminder it had just set): a reminder set this turn is
     /// not dropped this turn unless the person asked to stop it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17494,7 +17514,8 @@ mod desktop_consent_and_stall_wiring {
         let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
         let conv = ConversationEngine::new(memarc.clone(), pool, "YM");
         let none = conv.run_agent_tool("upcoming", &serde_json::json!({})).await;
-        assert!(none.starts_with("Nothing in the next"), "{none}");
+        // E.REM2: today first, so "tomorrow" has a reference.
+        assert!(none.starts_with("Today is ") && none.contains("Nothing in the next"), "{none}");
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let day = 86_400_000u64;
         let errands = ["Call the bank", "Return the library books", "Book the car service", "Pay the water bill", "Collect the dry cleaning", "Renew the gym pass", "Order printer ink"];

@@ -2048,6 +2048,13 @@ pub(crate) fn single_request(text: &str) -> bool {
     !t.contains('?') && ![" and ", " then ", " also ", " plus "].iter().any(|w| t.contains(w))
 }
 
+/// E.LOOP13: one ask, question or not -- no joining word. The read-side twin of `single_request`
+/// (a read answers a question, so a "?" does not make it two).
+pub(crate) fn one_ask(text: &str) -> bool {
+    let t = format!(" {} ", text.to_lowercase());
+    ![" and ", " then ", " also ", " plus "].iter().any(|w| t.contains(w))
+}
+
 pub(crate) const COMPOSE_PLAIN_WORDS: &str = "The work log is your own notes: the person has never seen it. Never mention a log, steps, \
 tools or tool names, refusals or approval cards by those names -- say in plain words what you did and did not do, and why when \
 it matters (for example: \"I needed your OK to run a command, and didn't get it in time -- want me to try again?\").";
@@ -7034,7 +7041,15 @@ impl ConversationEngine {
             )?;
             if q.fresh {
                 fresh += 1;
+                // E.REM2: said on the next reply too -- a delivery the desktop has today.
+                let at = chrono::DateTime::from_timestamp_millis(due as i64)
+                    .map(|d| d.with_timezone(local_now().offset()).format("%H:%M").to_string())
+                    .unwrap_or_default();
+                self.hold_for_next_turn(&format!("\u{23f0} Reminder: {} (due {at})", t.description.trim()));
             }
+            // E.REM2 (541: past-due reminders stayed open for hours, blocked a new one with the same
+            // text, and were read as tomorrow's): a reminder that came due has done its job.
+            let _ = self.memory.complete_task(&t.id).await;
         }
         Ok(fresh)
     }
@@ -15151,6 +15166,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 reminder_set_this_turn |= tool == "add_reminder";
                 // E.LOOP12: a one-request message is done once its write succeeded.
                 stop_after_write = single_request(user_text);
+            }
+            // E.LOOP13 (541: `upcoming` three times a turn): one ask, one successful read, the reply.
+            if sent && tool == "upcoming" && outcome == crate::tool_outcome::Outcome::Ok && one_ask(user_text) {
+                stop_after_write = true;
             }
             last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());
             if sent {

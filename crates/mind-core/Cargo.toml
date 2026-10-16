@@ -48,3 +48,5 @@ zeroize = "1"
 base64 = "0.22"
 sha2 = "0.10"
 tower = { version = "0.5", features = ["util"] }
+# E.REM2: a test plants a reminder notice an earlier build queued.
+mind-spec = { workspace = true }

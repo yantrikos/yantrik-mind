@@ -20360,3 +20360,4 @@ Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate del
 - Nothing extra was delivered: `mind_notices` 10 → 11 and desktop cards 66 → 67, the research result only. The reply was unchanged.
 - **Amendment 3, for the positive case:** `YM_STALL_MINUTES=<n>` overrides every kind's stall threshold. It is documented as a drive knob, read on each pass, and a value that is unset, zero or unparseable keeps the defaults. dc sets it to 1 on 541 and runs a research job. Expected: one candidate, the textless decision event, and nothing delivered.
 - **Amendment 3 — RESULT:** `the_stall_knob_overrides_only_when_it_is_usable` passes. Windows workspace: 2595 passed, 0 failed.
+- **Linux (staging, db75300):** mind-conversation 1282 passed, mind-core 197 passed. **Bundle:** yantrik-mind-db75300-linux-amd64.tar.zst, sha256 0be2854eb05bf5322e08aec179524b0d38b07e42132aa9a38b4266101563eeed. Staging disk: 93%, 2.9 GB free.

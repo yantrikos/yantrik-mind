@@ -19149,3 +19149,27 @@ Linux follows.
 - **K1 held:** the rules carry "ask once: Want a reminder?", "nothing about other facts or events" and "`add_reminder` is for when they ask to be reminded".
 - **K2:** the E.REM1 text restored and the offer dropped were both killed.
 - **K3:** Windows workspace 2550 passed (at the first wording), and mind-conversation 1258 passed at this one. Linux follows.
+
+**E.REM1b K3, Linux (staging, 113438c):** see the bundle line. The bundle is built but NOT shipped (superseded by E.REM1c below).
+
+## The proactive loop, revisited (16 Oct): an obligation channel, not a proactive agent
+
+Pranab asked for the proactive loop to be explored again with GPT-6 Astra (brainstorm, API mode, ~$0.15). The plan itself is kept in memory, not here. Two decisions followed (Pranab, AskUserQuestion):
+1. **"No offer until they work":** on the desktop a reminder never pings today (`reminder_loop` runs only under Telegram, a static finding that Stage 0 drive-tests). So "Want a reminder?" is withheld until reminders are delivered, and comes back automatically when they are. This supersedes the offer in E.REM1b.
+2. **"Go with Stage 0 now":**
+   - remove the broad proactive prompt text;
+   - ablate the grounding spine;
+   - turn background model calls off on the desktop;
+   - stop the 90-minute "ignored" grading of desktop sends;
+   - drive-test the three static claims (reminders, notify_queue, Event::Notice).
+   Each item is preregistered on its own.
+
+## E.REM1c — PREREG: confirm a told fact, no offer, while reminders cannot be delivered
+
+**What is built:** the agent-rules clause becomes "when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) -- nothing about other facts or events; `add_reminder` is for when they ask to be reminded". The offer returns with Stage 2, gated on a typed `reminders_deliverable` capability, not in this build.
+
+**Kill criteria (each one fails the build):**
+- K1: the rules carry "one sentence that confirms it" and "nothing about other facts or events", and do not carry "Want a reminder?".
+- K2: the E.REM1b text restored → killed.
+- K3: both suites pass.
+- **Live (dc, 542, Claude, a fresh conversation, two facts):** a reply with anything beyond the one-sentence confirmation (an offer, a narration, a tie-in) in 2 or more of the 4 kills it.

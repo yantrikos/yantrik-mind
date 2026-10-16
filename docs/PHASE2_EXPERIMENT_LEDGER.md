@@ -19809,3 +19809,26 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 **K2: 3 mutants killed** (the calendar call removed; the start-once retry removed; garbage read as empty).
 
 **K3:** Windows workspace 2579 passed, 0 failed. The first scripted run showed the test engine needed the harm-gated action runtime the desktop Mind has: `os_act` is write-class, and `run_agent_tool` refuses it without one. That was a test-setup gap, not a production one.
+
+## E.REM2 + E.LOOP13 — live (541, 40ac36d, qwen3.5:27b, yantrik-os-dc, 16 Oct)
+
+- **The backlog: PASS.** 75 s after the restart, stretch, water and oven were closed with nothing said; the six undated people-tasks were untouched; the first "ok" carried no held items.
+- **The reminder: delivery PASS, completion PASS.** "remind me in 2 minutes to stretch" took 1 step and 2 calls, with an honest reply. 190 s later, "ok" gave a reply ending "— finished while you were away —\n⏰ Reminder: Stretch (due 06:23)", and the task was completed.
+- **NEW, a silent write:** that "ok" turn's only step was `add_reminder {"text":"Stretch","when":"in 2 minutes"}`. The model read "ok" as re-confirming the last request, and a NEW Stretch task was set (06:26:58). The reply did not mention it, and instead listed unasked December items plus an offer. That is an action taken but not claimed, the mirror of the false-claim kill.
+- **"What do I have coming up this week?": PASS on calls** (1 step, 2 calls; "Today is Fri 16 Oct."). But the only "this week" item was the silent duplicate, and the Dallas trip was missed (E.CAL1 is not in this build).
+
+## E.ACK1 — PREREG: a bare acknowledgement runs no tools
+
+**What is built:**
+- `bare_ack(text)`: the message, lowercased with punctuation and emoji stripped, is empty, or is at most 3 words, all from {ok, okay, k, thanks, thank, you, ty, got, it, cool, great, nice, sure, alright, fine, perfect, awesome, yes, yep, 👍}.
+- On a bare acknowledgement the agent loop offers no native schemas, and any tool call it still makes is not sent ("(they only acknowledged -- there is nothing to do; reply briefly)"). The reply comes from the model alone, plus any held notes (E.HELD1).
+- It fails safe: "ok, remind me at 5" carries other words, so it is not bare and runs as today.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `bare_ack` is true for "ok", "Ok.", "thanks!", "got it", "👍" and "thank you";
+  - it is false for "ok remind me at 5", "thanks, what's the weather?" and "ok then set it again";
+  - a scripted "ok" turn that calls add_reminder: the reminder is not set (no task), and the backend saw no schemas.
+- K2, a mutant survives: the schemas left on for an ack; the not-sent guard removed; `bare_ack` always false.
+- K3: both suites pass.
+- **Live (541):** "remind me in 2 minutes to stretch", wait about 3 minutes, then "ok". The reply carries the held reminder, and mind.db holds NO new Stretch task.

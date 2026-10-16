@@ -19598,3 +19598,35 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
 **K3:** Windows workspace 2569 passed, 0 failed. Linux and the bundle follow, carrying E.SEC21, E.VOICE7, E.HELD1 and E.LOOP11.
 
 **E.SEC21 + E.VOICE7 + E.HELD1 + E.LOOP11, Linux (staging, a654c1c):** mind-types 106, mind-memory 114, mind-conversation passed (see the bundle output). Bundle `yantrik-mind-a654c1c` sha256 567862a63016c7d4e310b9aa19aa86e30c7e78fffccf22fe22ace0851c7f0557, for yantrik-os-dc's (a)(b)(c) run on 541.
+
+## E.SPINE1 — PREREG: "what's coming up" by a tool, not in every prompt (Stage 0 ablation)
+
+**Why:**
+- The thin path's grounding injects two ambient blocks on every turn: "Next 7 days" (first 5 items) and "Open reminders you're carrying" (first 3).
+- On 541 the reminders block put an unasked tie-in into a reminder reply: an overdue dentist reminder, with wrong arithmetic ("two days ago (Oct 15)" on 16 Oct).
+- E.CONNECT1 and E.ANS3 had to fight the same invitation in text.
+- The Astra plan: retrieve on demand rather than inject ambiently, ablated, not just deleted. A changing block in every prompt also defeats the prefix cache.
+- **No tool can list these today,** so removing the blocks would break "what's coming up?".
+- **A miss found while scoping:** E.REM1 changed the PROSE line for `add_reminder` but not its NATIVE schema description, which still says "mark a date/commitment (birthday, deadline) so you follow up when it's due" — what a native tool-calling model actually reads.
+
+**What is built:**
+1. **A core tool `upcoming {days}`** (default 7, clamped 1–60): the full `upcoming_spine(days)` (calendar entries, people's key dates, dated reminders), plus open reminders without a date. It lists every item, not the first 5, or says "Nothing in the next N days". It is in both the prose catalog and the native schemas.
+2. **`add_reminder`'s native description** becomes "set a reminder the person asked for -- 'when' like tomorrow / in 3 days / December 3 / 2026-12-03".
+3. **A switch `YM_AMBIENT_UPCOMING=0`** drops both ambient blocks from the grounding. The default stays on until the A/B decides.
+
+**The A/B (541, Qwen 27B via the gateway; A = ambient on, B = off, the tool present in both):**
+- E.CMP1's six standing asks;
+- plus four upcoming asks: "what do I have coming up this week?", "any reminders I'm carrying?", "anything due soon?", and a remember+recall pair;
+- plus two unrelated asks (a weather question, a note) to count unasked tie-ins.
+- **Adopt B** if B's standing passes ≥ A's − 1 AND B's upcoming answers are at least as correct and complete as A's AND B has fewer unasked tie-ins than A.
+- **Keep A** if B misses an item A listed on an upcoming ask.
+
+**Kill criteria for the build (each one fails it):**
+- K1, a test fails:
+  - `upcoming` with one dated reminder in 3 days and one undated reminder lists both;
+  - with 7 items, it lists all 7 (no cap of 5);
+  - with nothing, it says "Nothing in the next";
+  - the switch off removes both blocks from the loop prompt, and on keeps them;
+  - the native `add_reminder` description lacks "follow up" and carries "asked for".
+- K2, a mutant survives: the 5-cap reinstated in the tool; the switch ignored; the old description restored.
+- K3: both suites pass.

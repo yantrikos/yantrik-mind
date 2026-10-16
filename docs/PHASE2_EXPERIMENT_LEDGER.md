@@ -19198,3 +19198,40 @@ Second Astra pass (Jarvis framing, ~$0.18): **grounded initiative** on top of a 
 - **Background model calls stay off** until a paired latency test passes; until then detection is deterministic and the wording comes from templates.
 
 **E.REM1c K3, Linux (staging, 272519a):** mind-conversation 1258 passed. Bundle `yantrik-mind-272519a` sha256 899effff34d8dca7712fac9d08eec65a82b3e9af92913dd3cddb235fdf26a714, for the 2a/2b rerun on Claude on 542.
+
+## E.NOTICE1 — PREREG: Stage A, Mind half. A durable outbox; reminders and delegated results become notices
+
+**Why:** the plan Pranab chose (16 Oct) puts a reliable delivery channel under every proactive moment. Today, on the desktop:
+- `reminder_loop` runs only under Telegram, so a reminder never fires;
+- `notify_queue` (delegated-job results) is drained only by Telegram, so results are lost;
+- the OS's `Event::Notice {text}` is not stored when no turn is in flight (dc, verified at main).
+Drive-tests 1 and 2 (dc, on 541) record what actually happens today before any code changes it.
+
+**What is built (the Mind side; the OS inbox, ack and envelope are yantrik-os-dc's, contract proposed 16 Oct):**
+1. **`Outbox`** in the Mind's store: a durable table of notices with the proposed envelope:
+   - `notice_id` (stable: a hash of source kind + source id + occurrence);
+   - family, title, body (≤ 45 words), why, evidence refs, attention (interrupt | inbox), useful_until, supersedes, an optional action;
+   - created_ms; state (pending | stored | expired); attempts.
+   Enqueuing the same notice_id twice is a no-op.
+2. **The sender:** on the desktop-headless host, it sends pending notices over the harness and marks them `stored` only on the OS's `{stored: true, notice_id}`. Otherwise it backs off and retries. It expires a notice past useful_until. It survives a restart, because the state is in the store, not in memory. Gated on the attached OS advertising the notice capability; until then notices stay pending, not dropped.
+3. **Reminders off Telegram:** the due-reminder scan that `reminder_loop` does is hosted in the loop runner (desktop and headless). A due reminder becomes ONE notice per occurrence (family reminder; notice_id from task id + due). Telegram keeps its own path unchanged (family frozen; .90 untouched).
+4. **Delegated results:** `notify_queue` entries from delegated jobs become notices (family delegated). HA alerts are not routed (allowlist).
+5. **Feedback intake:** OS → Mind `{notice_id, kind, seen, opened}` items recorded per notice. never_family and inbox_only are stored per family and honoured by later enqueues.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - enqueueing the same notice twice gives one row;
+  - a send without an ack stays pending and is retried; with an ack it becomes stored and is not sent again;
+  - a restart with pending rows sends them; a notice past useful_until expires unsent;
+  - a due reminder gives exactly one notice even when the scan runs 3 times;
+  - a delegated result gives one notice; an HA alert gives none;
+  - never_family suppresses enqueue for that family; inbox_only forces attention to inbox;
+  - with no notice capability advertised, nothing is sent and nothing is dropped.
+- K2, a mutant survives:
+  - the dedupe removed;
+  - the ack check removed (marked stored on send);
+  - the expiry removed;
+  - the per-occurrence reminder id replaced by a per-scan id;
+  - the HA allowlist removed.
+- K3: both suites pass.
+- **Live (with dc's OS half):** on 541, a 2-minute reminder reaches the inbox once, survives a Mind restart while pending, and is not duplicated after reconnect.

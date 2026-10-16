@@ -2034,6 +2034,12 @@ fn mcp_ran_text(output: &str) -> String {
 
 /// E.VOICE5 (VM 541): the work log is the Mind's own notes; the person never saw it. Two disk turns
 /// answered "The log only shows that a shell action was refused after an approval timeout".
+/// E.LOOP10 (542: `remember` twice for one fact): a saved fact's observation says what to do next.
+pub(crate) const REMEMBERED: &str =
+    "(remembered — saved; don't save it again. Answer, or do the next part of the request.)";
+/// E.LOOP10 (541: `add_reminder` four times for one reminder).
+pub(crate) const REMINDER_SET_NEXT: &str = "Don't set it again; answer, or do the next part of the request.";
+
 pub(crate) const COMPOSE_PLAIN_WORDS: &str = "The work log is your own notes: the person has never seen it. Never mention a log, steps, \
 tools or tool names, refusals or approval cards by those names -- say in plain words what you did and did not do, and why when \
 it matters (for example: \"I needed your OK to run a command, and didn't get it in time -- want me to try again?\").";
@@ -12113,6 +12119,11 @@ WINDOW: all-time, latest 200
         {
             return true;
         }
+        // E.LOOP10 (541, check 2: `research` four times for two jobs): the research ack, like the
+        // coder's, is the reply -- re-processing it invites re-delegation.
+        if tool == "research" && obs.starts_with("On it — researching") {
+            return true;
+        }
         if matches!(tool, "publish_page" | "make_dashboard") && obs.contains("http") {
             return true;
         }
@@ -12604,7 +12615,7 @@ WINDOW: all-time, latest 200
                     None => t,
                 };
                 match self.memory.remember_as_belief_scoped(BeliefAssertion { statement: t, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: "told".into() }, id.write_scope()).await {
-                    Ok(_) => "(remembered)".to_string(),
+                    Ok(_) => REMEMBERED.to_string(),
                     // The memory boundary deliberately returns only a secret-free KIND on a
                     // write-gate refusal. Preserve that distinction without echoing the rejected
                     // value: the old `let _ = ...; (remembered)` turned a refusal into a false
@@ -13030,9 +13041,9 @@ WINDOW: all-time, latest 200
                 }
                 match added {
                     // E.REM1d: a ping is promised only where one will be delivered.
-                    Ok(_) if due.is_some() && self.unprompted_delivery() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
+                    Ok(_) if due.is_some() && self.unprompted_delivery() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due. {REMINDER_SET_NEXT}"),
                     Ok(_) if due.is_some() => format!(
-                        "Saved as a reminder: \"{text}\" — {when}. This desktop can't alert you when it's due yet -- check back, or ask me."
+                        "Saved as a reminder: \"{text}\" — {when}. This desktop can't alert you when it's due yet -- check back, or ask me. {REMINDER_SET_NEXT}"
                     ),
                     Ok(_) => format!("Noted as an open task: \"{text}\" (no date parsed from \"{when}\")."),
                     Err(e) if e.is_memory_write_gate_refusal() => {
@@ -14907,7 +14918,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 Some(note) => note,
                 None => self.run_agent_tool_as(&tool, &args, id).await,
             };
-            if sent && tool == "remember" && obs.trim() == "(remembered)" {
+            if sent && tool == "remember" && obs.trim() == REMEMBERED {
                 remembered_this_turn.push(tool_catalog::read_arg(&tool, &args, "text"));
             }
             if !sent {

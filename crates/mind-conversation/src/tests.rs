@@ -846,6 +846,22 @@ async fn an_unreadable_reminder_date_saves_nothing() {
     assert_eq!(memarc.list_tasks(false).await.unwrap().len(), 1);
 }
 
+/// E.LOOP10 (three driven turns, 16 Oct): a one-shot tool's success says what to do next, and the
+/// research ack ends the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_one_shot_success_says_it_is_done() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let r = conv.run_agent_tool("remember", &serde_json::json!({"text": "My gym locker code is 3318"})).await;
+    assert!(r.contains("don't save it again"), "{r}");
+    let set = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})).await;
+    assert!(set.contains("Don't set it again"), "{set}");
+    assert!(conv.terminal_delivery("research", "On it — researching \"ext4\" in the background. I'll put what I find in my next reply once it's done."));
+    assert!(!conv.terminal_delivery("research", "(research isn't configured)"));
+}
+
 /// E.REM1d (541, 16 Oct): the tool promises a ping only where one will be delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reminder_promises_a_ping_only_where_one_is_delivered() {
@@ -2162,7 +2178,7 @@ async fn a_refused_remember_reports_denial_and_a_clean_remember_still_succeeds()
             &TurnIdentity::primary(),
         )
         .await;
-    assert_eq!(remembered, "(remembered)");
+    assert_eq!(remembered, crate::REMEMBERED);
     let clean = mem
         .beliefs_matching(CLEAN, &mind_types::AccessContext::operator_audit())
         .await
@@ -21820,7 +21836,7 @@ async fn a_fact_is_reinforced_not_restated_and_a_new_date_is_new() {
         "User's sister Priya has a birthday on 4 November.",
         "Sister Priya's birthday: 4 November.",
     ] {
-        assert_eq!(conv.run_agent_tool_as("remember", &serde_json::json!({"text": t}), &id).await, "(remembered)");
+        assert_eq!(conv.run_agent_tool_as("remember", &serde_json::json!({"text": t}), &id).await, crate::REMEMBERED);
     }
     let audit = mind_types::AccessContext::operator_audit();
     let priya = mem.beliefs_matching("Priya", &audit).await.unwrap();

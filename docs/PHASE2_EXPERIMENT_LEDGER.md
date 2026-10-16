@@ -19474,3 +19474,14 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - the reminder sentence removed.
 - K3: both suites pass.
 - **Live (dc):** a remember turn takes at most 2 model calls in 3 of 3; a "remind me in N minutes" turn at most 2; a background research turn 1 (no compose). A reply that echoes "Don't set it again" or "don't save it again" in any turn kills it.
+
+**E.NOTICE1 A2 K3, Linux (staging, 3eb8459):** mind-core 188, mind-conversation 1260, both passed. That bundle is not shipped on its own: it goes out with E.LOOP10, which changes the same research turn.
+
+## E.LOOP10 — RESULT (code)
+- **K1 held:**
+  - remember returns `REMEMBERED` ("don't save it again");
+  - add_reminder's observation carries "Don't set it again";
+  - a research ack is terminal and "(research isn't configured)" is not;
+  - E.MEM1's remembered_this_turn compares against the const (its tests updated).
+- **K2: 3 mutants killed** (the research arm; the remember text reverted; the reminder sentence removed).
+- **K3:** Windows workspace 2565 passed, 0 failed. Linux follows, in a bundle with A2.

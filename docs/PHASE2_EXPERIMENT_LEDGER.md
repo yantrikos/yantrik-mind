@@ -20280,3 +20280,39 @@ A calendar with nothing on it, or no desktop at all, keeps today's wording.
 - **Screened by `reply-grade`** (unasked_offer and contradicts_facts, the rules that passed E.GRADE1b): both replies clean, with no rule at or above 0.5.
 
 **Test flake fixed (fileset web dir):** the three tests that write a file set now take one lock and their own `YM_WEB_DIR` scratch dir for the whole test (`fileset_tests::own_web_dir`). Two of them used to point the process-wide variable at a dir deleted when the test ended, and the third inherited whichever was left. After the fix, the mind-conversation suite passed 3/3 (1278 each). The failure had shown up once, so three clean runs do not prove it is gone; the fix rests on removing the race by construction.
+
+## E.INIT1 — PREREG: Stage B, the initiative shadow ledger and its first two detectors
+
+**Why:** Stage A (the obligation channel) is live: desktop inbox cards on 520 and 541 (A3/A3b/A3c, #831). Pranab's direction is meaningful proactive communication ("consider Jarvis"). He chose four families on by default with a one-tap off, and a budget of up to 2 a day. Stage B builds detectors that write CANDIDATES to a ledger and deliver nothing, so their value can be judged before anything goes live.
+
+**What is built (Mind only, no OS change):**
+1. **`initiative_candidates`**, an append-only table in the recipe store, one row per candidate with the contract fields:
+   - family, trigger, evidence_refs, observed_at;
+   - what_changed, why_it_matters, next_step;
+   - useful_until, dedupe_key, would_interrupt;
+   - text: the 20–45-word card the detector would have sent.
+
+   A dedupe_key is written once; a later candidate that changes the substance supersedes it. Nothing is leased, sent or shown.
+2. **Detector "calendar heads-up" (family `calendar`).** At most once per 10 min while idle, it reads the next 3 hours of the desktop calendar. A timed event starting in 30–90 minutes becomes a candidate: "<title> at HH:MM -- in N minutes", with the event's location if it has one.
+   - **Constraint:** the read must not taint the conversation's yos-mcp session, which would refuse the person's next browser action. So the detector reads through a separate `yos act calendar list_events` process, not the turn's MCP client. If that is not possible from the Mind's account, the detector is reported as blocked rather than built through the shared session.
+3. **Detector "delegated work stalled" (family `delegated`).** A research or coding job the person handed over that has run past its expected time with no result becomes a candidate: "Still working on <task> -- N minutes in." This uses the job registry only.
+
+No model call anywhere: deterministic detection plus templates, per the plan, until the paired latency tests pass.
+
+**Measured:**
+- The candidates per day per family, and the would-have-interrupted count against the 2-a-day budget.
+- Pranab's (or dc's, by relay) retrospective review of each candidate: "worth receiving in that form at that time?". That is the Stage C gate (plan: stop at ≤12/20, accept at ≥51/60 with family floors).
+
+**Kill criteria:**
+- K1, tests fail:
+  - an event 45 min out → one candidate, with exactly one row however many passes run;
+  - an event 3 h out → none;
+  - an all-day event → none;
+  - an unreadable calendar → none, and the reason is logged;
+  - a stalled job → one candidate;
+  - a finished job → none;
+  - nothing is ever leased, sent or queued as a notice;
+  - the turn's MCP session is not used by the detector.
+- K2, mutants killed: the dedupe removed; the 30–90 window removed; a candidate queued as a notice.
+- K3: both suites pass.
+- **Live (541, which has #831's inbox):** a calendar event placed 60 min out produces one candidate row, no card, no toast, and no refusal of a later browser action in the same session.

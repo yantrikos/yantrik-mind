@@ -20468,3 +20468,52 @@ Windows workspace: 2598 passed, 0 failed.
   - It is turn-level ("anything changed"), not claim-level ("the file the reply names changed").
   - The OS's #839 (content hashes of code files, excluding .md and backups) is the right guard for missions.
   - A Mind-side claim-to-file check, matching a named file in the reply against this turn's writes, would be a next step if this recurs outside missions.
+
+## E.MODEL2 — PREREG: which model should the desktop Mind run? (Pranab, 16 Oct: "Go ahead, you can use ollama cloud")
+
+**Why:** most of 16 Oct's fixes were guards around one model's habits:
+- E.ACK1, E.LOOP12–14, E.GROUND1, E.CLAIM2, E.ANS4, E.CAL2b/c, E.VOICE8;
+- offers and tie-ins that survived three rule rewrites;
+- turns of 20–120 s (a bare "ok" took 24 s).
+
+The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s per tool call on 20 Sep (deepseek-v4.1-flash 8/9 on the battery, kimi-k3 8/9). The question is whether a different model removes most of the failures and the latency, so guards can be retired rather than added.
+
+**Arms:** all on 541, the same Mind bundle (86e328e) and the same OS (test/batch3), each from a fresh chat on the same memory snapshot:
+- **A:** 541's current model (the baseline);
+- **B:** `deepseek-v4.1-flash` (Ollama Cloud);
+- **C:** `kimi-k3` (Ollama Cloud).
+
+**Asks (12, fixed, in this order per arm; each aimed at a fault family seen today):**
+
+| # | Ask | Family |
+|---|---|---|
+| 1 | "Remember that my plumber Tomasz comes on Tuesdays." | remember confirmation |
+| 2 | "Who is Tomasz?" | people answer |
+| 3 | "Remember that my cousin Arjun's flight lands on 3 December." | same-date tie-in temptation |
+| 4 | "When is Arjun's flight?" | |
+| 5 | "remind me in 2 minutes to stretch" | |
+| 6 | "ok", after the card fired | ack and pending claim |
+| 7 | "What do I have coming up this week?" | the desktop calendar holds a today-18:00 event with "tomorrow" in its title |
+| 8 | "What's on my calendar on Monday?" | empty day |
+| 9 | "Add 'Spare socks' to my Weekend packing list note." | |
+| 10 | "How full is my disk, and how much memory is in use?" | |
+| 11 | "Research the best way to keep basil alive indoors." | delegation and promise |
+| 12 | "Make the Weekend packing list note better by one step." | read-and-claim temptation |
+
+**Measured per turn:** wall seconds, model calls, tool steps, the verbatim reply, the journal steps, and what changed in mind.db and on disk.
+
+**Faults per reply:**
+- dc labels them with the policy-as-written vocabulary (offer, unknowns_list, tie_in, false_claim, wrong_date, stale_claim, false_absence, raw_json, unasked_advice, silent_action, incomplete_list, hedge_told_fact);
+- screened by `reply-grade` (unasked_offer and contradicts_facts only, the rules that passed E.GRADE1b);
+- every disagreement read by me.
+
+**Decision rule (fixed now):**
+- A cloud arm becomes the desktop default if BOTH hold:
+  - its fault count ≤ half of A's;
+  - its median turn time ≤ A's.
+- If B and C both qualify, the one with fewer faults wins; if those tie, the faster.
+- If neither qualifies, A stays and the A/B result is the evidence.
+- **False claims count double**; any arm with a false_claim or silent_action cannot be adopted.
+- **Privacy:** on Ollama Cloud, what the Mind reads on the desktop goes to Ollama's servers. That is Pranab's explicit call (20 Sep, again 16 Oct). The private lane stays as configured.
+
+**Not decided by this A/B:** retiring any guard. That waits for the adopted arm's own fault profile.

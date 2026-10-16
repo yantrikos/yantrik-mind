@@ -20016,3 +20016,45 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - **Latency was much worse than the morning on the same box and model:** 36 s for a one-step remember, 71 s for a recall, 124 s for the note edit. All of it in gateway calls, likely provider load. Watch it; not a bundle defect.
 - **A3b:** waits for #831's fixed build on 520.
 - **Open (Qwen, both arms):** offers, unknowns lists and unasked tie-ins persist despite the rules and the compose wrap. Not chased with a new rule per phrasing (ARCH9). It is a candidate for the Jev-graded A/B, if Pranab agrees.
+
+## E.CAL1c — PREREG: read `list_events` as `yos act` actually prints it (before #833's live test)
+
+**Why:** reviewing yantrik-os #833 (443f746b) showed how `yos act` prints an act:
+- the summary, then "accepted: …, settled: …" and "revision: …";
+- then the result as indented JSON, but only `if reply.get("result")`, so an EMPTY list prints nothing;
+- then `state: {…}` on one line. The calendar's state includes an `upcoming` array of titled events, which may run past the asked range.
+
+E.CAL1's parser sliced from the first `[` to the last `]`, which fails whenever the summary or the state line holds a bracket. It also reads an empty calendar as unreadable.
+
+**What is built:** `calendar_event_lines` parses only the text before the "state: " line.
+- At each `[`, it reads ONE JSON value (a streaming deserializer, trailing text ignored).
+- The first non-empty array whose elements are all objects with a string `title` is the events. A non-empty object array without titles means unreadable.
+- With no such array, an act that says "accepted: True" is an empty calendar. Anything else is unreadable.
+
+**Kill criteria:**
+- K1, `list_events_json_becomes_lines_and_garbage_is_an_error` fails on:
+  - a realistic `yos act` print (a bracketed summary, the indented result, a state line with an `upcoming` array) → exactly the result's events;
+  - an accepted act with no result and a state line with `upcoming` → empty, NOT the state's events;
+  - "calendar is closed (no socket)" → unreadable;
+  - an untitled object array → unreadable.
+- K2, a mutant survives: no cut at "state: "; the accepted-means-empty rule removed; the old first-to-last slice restored.
+- K3: both suites pass.
+
+**E.CAL1c — RESULT: PASS (Windows).** `list_events_json_becomes_lines_and_garbage_is_an_error` passes the realistic print, the empty-with-state case, and the refused act. Mutants killed (3/3): no cut at "state: "; the accepted-means-empty rule removed; the old slice restored.
+
+## E.LOOP14 — PREREG: one ask, one read that found something, the reply (recall, about_person)
+
+**Why:** 541, 987d8ab, "Who is Tomasz?" (dc). `recall {"query":"Tomasz plumber"}` found both beliefs, then the model repeated it twice ("repeated recall call — nudging it onward"): 3 steps for 1 distinct call, in 52 s. This is the same read loop E.LOOP13 stopped for `upcoming`.
+
+**What is built:** the E.LOOP13 stop also applies to:
+- `recall`, when it found something (not "(nothing relevant in memory)");
+- `about_person`/`person`, when it knows the person (not "I don't know anyone called …").
+
+For a one-ask message (`one_ask`), such a read goes straight to the reply. An empty read keeps the loop, so the model may try other words.
+
+**Kill criteria:**
+- K1, a test fails: "Who is Tomasz?" with Tomasz remembered, and the model calling recall three times, offers tools for exactly one step. The same ask with nothing remembered offers tools for ≥2 steps. "Who is Tomasz and what's on Thursday?" offers ≥2 steps.
+- K2, a mutant survives: recall left out of the stop; the "found something" condition removed.
+- K3: both suites pass.
+
+**E.LOOP14 — RESULT: PASS (Windows).** `one_memory_read_that_found_it_answers_one_question` passes. Mutants killed (3/3): recall left out; the found-something condition removed; about_person left out. **Windows workspace (E.CAL1c + E.LOOP14):** 2589 passed, 0 failed.

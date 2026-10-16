@@ -15311,7 +15311,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 stop_after_write = single_request(user_text);
             }
             // E.LOOP13 (541: `upcoming` three times a turn): one ask, one successful read, the reply.
-            if sent && tool == "upcoming" && outcome == crate::tool_outcome::Outcome::Ok && one_ask(user_text) {
+            // E.LOOP14 (541: "Who is Tomasz?" ran recall x3): a memory read that found something too.
+            let read_answered = match tool.as_str() {
+                "upcoming" => true,
+                "recall" => !obs.trim_start().starts_with("(nothing relevant in memory)"),
+                "about_person" | "person" => !obs.trim_start().starts_with("I don't know anyone called"),
+                _ => false,
+            };
+            if sent && read_answered && outcome == crate::tool_outcome::Outcome::Ok && one_ask(user_text) {
                 stop_after_write = true;
             }
             last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());

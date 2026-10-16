@@ -570,12 +570,36 @@ Only the reminders I keep are below."
 
 /// E.CAL1: the JSON array `calendar list_events` returns, as "Ddd D Mon HH:MM: title" lines (all-day
 /// events without a time). `Err` when no array of events can be read from the result.
+///
+/// E.CAL1c (yantrik-os #833's `yos act` print): the summary, "accepted: …", the result as indented
+/// JSON -- printed only when it is not empty -- then a `state: {…}` line whose `upcoming` array may
+/// run past the asked range. So only the text before the state line is read, one JSON value at a
+/// time from each `[`; with no array of titled events, an accepted act is an empty calendar.
 pub(crate) fn calendar_event_lines(obs: &str) -> std::result::Result<Vec<String>, ()> {
-    let (Some(a), Some(b)) = (obs.find('['), obs.rfind(']')) else { return Err(()) };
-    if b <= a {
-        return Err(());
+    let head = obs.split("state: {").next().unwrap_or(obs);
+    let mut found: Option<Vec<serde_json::Value>> = None;
+    let mut untitled = false;
+    for (i, _) in head.match_indices('[') {
+        let mut values = serde_json::Deserializer::from_str(&head[i..]).into_iter::<serde_json::Value>();
+        let Some(Ok(serde_json::Value::Array(items))) = values.next() else { continue };
+        if items.is_empty() {
+            found.get_or_insert_with(Vec::new);
+            continue;
+        }
+        if !items.iter().all(|e| e.is_object()) {
+            continue;
+        }
+        if items.iter().all(|e| e.get("title").and_then(|t| t.as_str()).is_some()) {
+            found = Some(items);
+            break;
+        }
+        untitled = true;
     }
-    let events: Vec<serde_json::Value> = serde_json::from_str(&obs[a..=b]).map_err(|_| ())?;
+    let events = match found {
+        Some(events) if !events.is_empty() || !untitled => events,
+        None if !untitled && head.contains("accepted: True") => Vec::new(),
+        _ => return Err(()),
+    };
     let mut out = Vec::new();
     for e in events {
         let Some(title) = e.get("title").and_then(|t| t.as_str()) else { return Err(()) };
@@ -603,5 +627,13 @@ mod cal1_tests {
         assert_eq!(calendar_event_lines("[]").unwrap(), Vec::<String>::new());
         assert!(calendar_event_lines("calendar is closed (no socket)").is_err());
         assert!(calendar_event_lines("[{\"no\": \"title\"}]").is_err());
+
+        // E.CAL1c: as `yos act calendar list_events` prints it (yantrik-os #833).
+        let printed = "Done \u{2014} Calendar \u{2014} 1 event in [16 Oct \u{2013} 23 Oct]\naccepted: True, settled: True\nrevision: 7\n[\n  {\n    \"id\": \"e1\",\n    \"title\": \"Trip reminder - Dallas tomorrow\",\n    \"start\": \"2026-10-16T18:00:00\",\n    \"end\": \"2026-10-16T18:30:00\",\n    \"is_all_day\": false\n  }\n]\nstate: {\"events\":2,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
+        assert_eq!(calendar_event_lines(printed).unwrap(), vec!["Fri 16 Oct 18:00: Trip reminder - Dallas tomorrow".to_string()]);
+        // Nothing in range: yos prints no result, and the state's `upcoming` is not this week.
+        let empty = "Done \u{2014} Calendar \u{2014} no events in range\naccepted: True, settled: True\nstate: {\"events\":1,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
+        assert_eq!(calendar_event_lines(empty).unwrap(), Vec::<String>::new());
+        assert!(calendar_event_lines("Done \u{2014} Calendar\naccepted: False, settled: True\n").is_err(), "a refused act is not an empty calendar");
     }
 }

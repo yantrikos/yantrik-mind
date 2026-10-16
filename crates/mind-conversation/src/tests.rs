@@ -17358,15 +17358,42 @@ mod desktop_consent_and_stall_wiring {
 
     /// E.LOOP11: the schemas each step offers, for a scripted turn of `steps`.
     async fn schemas_per_step(steps: Vec<Step>, ask: &str) -> Vec<Vec<String>> {
+        schemas_per_step_knowing(steps, ask, &[]).await
+    }
+
+    /// E.LOOP14: the same, with `known` remembered before the turn.
+    async fn schemas_per_step_knowing(steps: Vec<Step>, ask: &str, known: &[&str]) -> Vec<Vec<String>> {
         let names = Arc::new(StdMutex::new(Vec::new()));
         let inner = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
         let model: Arc<dyn LLMBackend> = Arc::new(SchemasSeen { inner, names: names.clone() });
         let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
         let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
         let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        for fact in known {
+            let saved = conv.run_agent_tool_as("remember", &serde_json::json!({ "text": fact }), &TurnIdentity::primary()).await;
+            assert!(!saved.contains("nothing to remember"), "{saved}");
+        }
+        names.lock().unwrap().clear();
         let _ = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await;
         let names = names.lock().unwrap().clone();
         names
+    }
+
+    /// E.LOOP14 (541: "Who is Tomasz?" ran recall x3): one ask, one memory read that found
+    /// something, the reply; a read that found nothing, or an ask that goes on, keeps the loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_memory_read_that_found_it_answers_one_question() {
+        let recall = || Step::Call("recall", serde_json::json!({"query": "Tomasz plumber"}));
+        let known = ["My plumber Tomasz comes on Tuesdays"];
+        let one = schemas_per_step_knowing(vec![recall(), recall(), recall(), Step::Fail], "Who is Tomasz?", &known).await;
+        assert_eq!(one.len(), 1, "{one:?}");
+        let nothing = schemas_per_step_knowing(vec![recall(), recall(), Step::Fail], "Who is Tomasz?", &[]).await;
+        assert!(nothing.len() >= 2, "a read that found nothing ended the loop: {nothing:?}");
+        let more = schemas_per_step_knowing(vec![recall(), Step::Fail], "Who is Tomasz and what's on Thursday?", &known).await;
+        assert!(more.len() >= 2, "{more:?}");
+        let person = || Step::Call("about_person", serde_json::json!({"name": "Tomasz"}));
+        let one = schemas_per_step_knowing(vec![person(), person(), Step::Fail], "Who is Tomasz?", &known).await;
+        assert_eq!(one.len(), 1, "{one:?}");
     }
 
     /// E.LOOP11 (541: remember x3 on Qwen 27B): a write that succeeded is not offered again this

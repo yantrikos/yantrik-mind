@@ -19434,3 +19434,14 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - the research promise ungated.
 
 **K3:** Windows workspace 2564 passed, 0 failed. Linux follows.
+
+**E.REM1d + E.ANS3 live (542, Claude Sonnet 5.5, 0a8f0a2, yantrik-os-dc, 16 Oct): PASSES all three kill rules (7 replies, about 15 s each):**
+- confirmations carry no other fact (A3, a same-date fact, did not leak);
+- told facts come back plainly ("Your gym locker code is 3318.");
+- no E.ANS2 extras;
+- the reminder reply promises no ping ("This desktop can't alert you when it comes due, so it won't ping you").
+
+**Observations, not kills:**
+1. **B3's same-date clause was a PARTIAL list:** Leila and Arjun named, Mira (told in an earlier conversation, also 3 Dec) missing. A partial list reads as complete. It goes to the Stage 0 spine/retrieval ablation: the clause either lists every same-date item held, from a tool that can, or names none.
+2. **A2 (a locker code) took 3 calls against 2,** possibly the sensitive-value path. Unexamined.
+3. **R1's wording flips** to a promise only when `unprompted_delivery` is true (A3 sets it on `notice_inbox_v1`).

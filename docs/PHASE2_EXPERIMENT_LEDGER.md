@@ -20455,3 +20455,16 @@ Windows workspace: 2598 passed, 0 failed.
 
 **The 561 case under this build:** its six `cat`/`ls`/`head` runs are reads, so nothing changed, and "FINISHED … wrote … ran the page check" is sent back once. If it repeats, it is corrected in the reply.
 - **Linux (staging, 86e328e), E.GROUND1 + E.CLAIM2:** mind-conversation 1285 passed, mind-core 197 passed. **Bundle:** yantrik-mind-86e328e-linux-amd64.tar.zst, sha256 9fd70ac3070b40e208bec48cffbe5304e092889afcdb97074266adb92fa41b3e. Staging disk: 93%, 2.9 GB free.
+
+## E.GROUND1 + E.CLAIM2 — live (561, 86e328e, the Director, yantrik-os-dc, 16 Oct): correct where exercised; the backstops did not fire
+
+- 561 had Mind 6f8a153 before (dc corrected "0a8f0a2"). **For #823:** restarting the Mind did not raise a command card. The shell's session rule `shell.agent_run` survives a Mind restart; only a shell restart or reboot needs a fresh Allow.
+- **Sortbars, 17:50:**
+  - Turn 1 was 8 steps of reads only, and the Mind said so itself: "No code was written … I never ran the page check." That was honest unprompted, so no backstop was needed.
+  - Turn 2 was 19 steps (15 agent_run). Its FINISHED claims checked out on disk (heapSort, shellSort, the select options, the idea ticked). The claim stood over a real change, the correct negative.
+  - **The backstop was not exercised:** there was no "sent back" line in either turn. E.CLAIM2's positive case is proven only by its tests so far.
+- **A limit of E.CLAIM2, seen in the old-Mind round (Labyrinth, 17:34).** By turn 3 the Mind had ticked IDEAS.md and written maze.js.bak, but maze.js itself was byte-identical, and the reply said FINISHED.
+  - E.CLAIM2 would NOT catch that: the turn did change something (a backup, a ticked list).
+  - It is turn-level ("anything changed"), not claim-level ("the file the reply names changed").
+  - The OS's #839 (content hashes of code files, excluding .md and backups) is the right guard for missions.
+  - A Mind-side claim-to-file check, matching a named file in the reply against this turn's writes, would be a next step if this recurs outside missions.

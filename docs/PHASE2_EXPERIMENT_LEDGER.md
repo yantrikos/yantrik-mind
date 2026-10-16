@@ -19979,3 +19979,26 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - **Open:** the "ok" turn took 24 s for one no-tool call, and compose took 17 s on K1, both slow on Qwen.
 - **Windows workspace (E.ANS4 + E.HELD1b):** 2588 passed, 0 failed.
 - **Linux (staging, b251b36), E.PEOPLE1 + E.ANS4 + E.HELD1b:** mind-conversation 1275 passed, mind-core 197 passed. The bundle is held until 520's A3 run is done (dc), so the A3 evidence comes from 7689851 alone.
+
+## E.NOTICE1 A3 — live (520, 7689851 on OS test/inbox f2acf508 = #831 + main, yantrik-os-dc, 16 Oct): PASS, 5/5
+
+1. **Attach:** "the desktop keeps notices…", and the reply promised "I'll ping you when it's due".
+2. **Due:** "notices: 1 delivered, 0 refused, 0 left". It was card 992 in describe's inbox:
+   - family reminder, granted interrupt, shown as a toast once;
+   - the harness was verified as yantrik-mind, uid 999;
+   - receipts went queued → leased → delivered.
+3. **"ok":** no tools, no repeat in chat, no new task.
+4. **"Not now":** `[notice] feedback: not_now on notice:c84af5a0…`, logged once. The feedback cursor is mind=1 and the queue is empty.
+5. **Reboot:** re-attached with the feature, nothing re-sent, receipts unchanged.
+- **NEW bug:** the "ok" reply said "your stretch reminder is still set for 2 minutes out, and I'll ping you when it's due", 3 minutes after the card was delivered. With the chat line dropped, the conversation held no trace of the delivery.
+
+## E.NOTICE1 A3b — PREREG: a delivered card is in the conversation's record
+
+**What is built:** when the desktop answers `stored` for a notice, the sender appends to the primary's transcript: "(shown on their desktop as a card at HH:MM: <first line of the notice>)". The next turn's recent history then shows the reminder already fired. Nothing is said to the person.
+
+**Kill criteria:**
+- K1: after a pass in which a notice is kept, the transcript holds that line with the reminder's text. After a pass in which it is NOT kept, it holds none.
+- K2, a mutant survives: the append removed; the append made on every answer, not only Kept.
+- K3: both suites pass.
+
+**E.NOTICE1 A3b — RESULT: PASS (Windows).** The sender test asserts no line for an unkept notice, and exactly one ending ": Reminder: Stretch)" once the notice is kept. Mutants killed (2/2): the append removed; the append made on every answer. Windows workspace: 2588 passed, 0 failed.

@@ -59,6 +59,7 @@ pub(crate) async fn send_obligations<S: NoticeSink>(
         match sink.store(&n).await {
             Ok(Stored::Kept) => {
                 conv.ack_notice_delivered(&n.notice_id, &n.lease_id, now_ms)?;
+                conv.note_card_delivered(&n.text, now_ms).await;
                 pass.delivered += 1;
             }
             Ok(Stored::Refused(why)) => {
@@ -257,6 +258,17 @@ mod tests {
 
         let silent = Desk { keeps: false, got: Mutex::new(Vec::new()) };
         assert_eq!(send(&conv, &silent, now).await, pass(0, 1));
+        // E.NOTICE1 A3b: what was not kept is not in the conversation's record.
+        let said = |mem: Arc<dyn mind_types::MemoryFacade>| async move {
+            mem.recent_messages(20, &mind_types::AccessContext::operator_audit())
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|(r, t)| r == "assistant" && t.starts_with("(shown on their desktop as a card at"))
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+        };
+        assert!(said(mem.clone()).await.is_empty(), "an unkept notice was recorded as shown");
         // Still under the first lease: nothing to send.
         assert_eq!(send(&conv, &silent, now + 1_000).await, pass(0, 0));
         let desk = Desk { keeps: true, got: Mutex::new(Vec::new()) };
@@ -264,6 +276,10 @@ mod tests {
         assert_eq!(send(&conv, &desk, now + NOTICE_LEASE_MS).await, pass(1, 0));
         assert_eq!(send(&conv, &desk, now + 10 * NOTICE_LEASE_MS).await, pass(0, 0));
         assert_eq!(desk.got.lock().unwrap().len(), 1);
+        // E.NOTICE1 A3b: the kept card is in the conversation's record, once.
+        let shown = said(mem.clone()).await;
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert!(shown[0].ends_with(": Reminder: Stretch)"), "{}", shown[0]);
     }
 
     /// The loop step: it queues where no phone is reachable, and leaves a reachable phone's own

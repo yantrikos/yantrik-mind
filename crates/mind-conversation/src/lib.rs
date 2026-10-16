@@ -6887,6 +6887,16 @@ impl ConversationEngine {
         ))
     }
 
+    /// E.NOTICE1 A3b (520: "ok" called a reminder still pending 3 minutes after its card was shown):
+    /// a notice the desktop stored is put in the conversation's record, so the next turn knows it fired.
+    pub async fn note_card_delivered(&self, text: &str, at_ms: u64) {
+        let at = chrono::DateTime::from_timestamp_millis(at_ms as i64)
+            .map(|d| d.with_timezone(local_now().offset()).format("%H:%M").to_string())
+            .unwrap_or_default();
+        let first: String = text.trim().lines().next().unwrap_or("").chars().take(160).collect();
+        let _ = self.memory.append_message("assistant", &format!("(shown on their desktop as a card at {at}: {first})")).await;
+    }
+
     /// E.NOTICE1 A2: a delegated job's result, as the job sites push it.
     pub fn push_delegated_result(&self, text: &str) {
         self.delegated_queue.lock().unwrap().push(text.to_string());

@@ -19341,3 +19341,12 @@ The same-date clause stays allowed. It is E.CONNECT1's measured rule ("directly 
 - **Live (541):** "remind me in 2 minutes to stretch" gives a reply that does not promise a ping.
 
 **E.ANS2 + E.NOTICE1 A1, Linux (staging, f89a419):** mind-recipes 105, mind-core 185, mind-conversation 1258, all passed. Bundle `yantrik-mind-f89a419` sha256 295d1aa4527d9a1b2dd2992b1b919c9281c4a78731f4aee811b2c952882060e3, for the E.ANS2 rerun on 542.
+
+## E.REM1d — RESULT (code)
+- **K1 held:**
+  - not deliverable: "Saved as a reminder: … This desktop can't alert you when it's due yet", with no "ping";
+  - deliverable: "I'll ping you";
+  - the Telegram host sets the flag where it spawns reminder_loop (a source test).
+  - E.REM1's merge test now expects "Saved as a reminder" on a host without delivery.
+- **K2:** the flag ignored (always pings) was killed.
+- **K3:** Windows workspace 2561 passed, 0 failed. Linux follows.

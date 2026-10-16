@@ -6128,6 +6128,10 @@ pub struct ConversationEngine {
     /// E.PACE2: the effort compose (the answer written from the work log) asks for when the person
     /// picked none -- `YM_COMPOSE_EFFORT`. None keeps the model's default, as E.PACE1b left it.
     compose_effort: Option<String>,
+    /// E.REM1d: whether a reminder set here will actually reach the person when it comes due -- a
+    /// reachable phone (Telegram's reminder loop), or the desktop's notice inbox once bound. False
+    /// until a host says so: on 541 the tool promised a ping nothing delivered.
+    reminders_deliverable: std::sync::atomic::AtomicBool,
     /// E.PREFIX1a: the previous agent step's prompt laid out, and the last report against it --
     /// how much a server's prompt cache could reuse (see `prefix_probe`).
     prefix_last: std::sync::Mutex<Option<(prefix_probe::Render, usize, &'static str)>>,
@@ -6330,6 +6334,14 @@ impl ConversationEngine {
         self
     }
 
+    /// E.REM1d: a host that will deliver due reminders says so (see the field).
+    pub fn set_reminders_deliverable(&self, yes: bool) {
+        self.reminders_deliverable.store(yes, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn reminders_deliverable(&self) -> bool {
+        self.reminders_deliverable.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// E.PREFIX1b: one schema block for every turn (see the field).
     pub fn with_stable_schemas(mut self, on: bool) -> Self {
         self.stable_schemas = on;
@@ -6391,6 +6403,7 @@ impl ConversationEngine {
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
             compose_effort: None,
+            reminders_deliverable: std::sync::atomic::AtomicBool::new(false),
             prefix_last: std::sync::Mutex::new(None),
             stable_schemas: false,
             recent_window: 20,
@@ -12975,7 +12988,11 @@ WINDOW: all-time, latest 200
                     return format!("Already an open reminder: \"{text}\" -- nothing new was added.");
                 }
                 match added {
-                    Ok(_) if due.is_some() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
+                    // E.REM1d: a ping is promised only where one will be delivered.
+                    Ok(_) if due.is_some() && self.reminders_deliverable() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
+                    Ok(_) if due.is_some() => format!(
+                        "Saved as a reminder: \"{text}\" — {when}. This desktop can't alert you when it's due yet -- check back, or ask me."
+                    ),
                     Ok(_) => format!("Noted as an open task: \"{text}\" (no date parsed from \"{when}\")."),
                     Err(e) if e.is_memory_write_gate_refusal() => {
                         REMINDER_WRITE_GATE_REFUSAL.to_string()

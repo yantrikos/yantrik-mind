@@ -839,10 +839,33 @@ async fn an_unreadable_reminder_date_saves_nothing() {
     assert!(memarc.list_tasks(false).await.unwrap().is_empty(), "a task was saved from an unreadable date");
     let args = serde_json::json!({"text": "Leila's book launch", "when": "2026-12-03"});
     let first = conv.run_agent_tool("add_reminder", &args).await;
-    assert!(first.starts_with("Reminder set"), "{first}");
+    // E.REM1d: no host here delivers reminders, so it is saved, not promised.
+    assert!(first.starts_with("Saved as a reminder"), "{first}");
     let again = conv.run_agent_tool("add_reminder", &args).await;
     assert!(again.contains("nothing new was added"), "the merge was reported as a new reminder: {again}");
     assert_eq!(memarc.list_tasks(false).await.unwrap().len(), 1);
+}
+
+/// E.REM1d (541, 16 Oct): the tool promises a ping only where one will be delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reminder_promises_a_ping_only_where_one_is_delivered() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc, pool, "YM");
+    let here = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})).await;
+    assert!(here.contains("can't alert you") && !here.contains("ping"), "{here}");
+    conv.set_reminders_deliverable(true);
+    let phone = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Call the bank", "when": "tomorrow"})).await;
+    assert!(phone.contains("I'll ping you"), "{phone}");
+}
+
+/// The Telegram host pings due reminders and says so.
+#[test]
+fn the_telegram_host_says_its_reminders_are_delivered() {
+    let src = include_str!("../../mind-core/src/telegram.rs");
+    let at = src.find("tokio::spawn(reminder_loop(").expect("the reminder loop spawn");
+    assert!(src[at..at + 300].contains("conv.set_reminders_deliverable(true)"));
 }
 
 /// E.REM1 (Pranab, 16 Oct: "Only when asked"): the agent rules no longer tell the model to set a

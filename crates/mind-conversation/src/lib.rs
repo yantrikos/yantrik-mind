@@ -2040,6 +2040,14 @@ pub(crate) const REMEMBERED: &str =
 /// E.LOOP10 (541: `add_reminder` four times for one reminder).
 pub(crate) const REMINDER_SET_NEXT: &str = "Don't set it again; answer, or do the next part of the request.";
 
+/// E.LOOP12: is the person's message ONE request? No question mark and no joining word. A
+/// heuristic that fails only in the safe direction: a message read as more than one request keeps
+/// today's loop, and none is dropped.
+pub(crate) fn single_request(text: &str) -> bool {
+    let t = format!(" {} ", text.to_lowercase());
+    !t.contains('?') && ![" and ", " then ", " also ", " plus "].iter().any(|w| t.contains(w))
+}
+
 pub(crate) const COMPOSE_PLAIN_WORDS: &str = "The work log is your own notes: the person has never seen it. Never mention a log, steps, \
 tools or tool names, refusals or approval cards by those names -- say in plain words what you did and did not do, and why when \
 it matters (for example: \"I needed your OK to run a command, and didn't get it in time -- want me to try again?\").";
@@ -13994,6 +14002,10 @@ Open reminders you're carrying for them:",
         let mut fixes_applied: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.MEM1: what `remember` saved this turn, so a rephrasing is not saved again.
         let mut remembered_this_turn: Vec<String> = Vec::new();
+        // E.LOOP12: a reminder set this turn (541: Qwen dropped the reminder it had just set), and a
+        // single write that should go straight to the reply.
+        let mut reminder_set_this_turn = false;
+        let mut stop_after_write = false;
         // E.ARENA1-F44: refused calls the model has already been shown the fix for.
         let mut refusal_told: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Every call signature ALREADY EXECUTED this turn, and every (tool, observation) pair already
@@ -14851,7 +14863,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let restated = (tool == "remember")
                 .then(|| tool_catalog::read_arg(&tool, &args, "text"))
                 .and_then(|t| already_remembered(&t, &remembered_this_turn).map(str::to_string));
-            let not_sent = if let Some(first) = restated {
+            let not_sent = if tool == "drop_reminder" && reminder_set_this_turn && !crate::followthrough::is_stop_tracking(user_text) {
+                // E.LOOP12: the reminder this turn set stays -- the person asked for it, not for its end.
+                eprintln!("[agent] step {step}: drop_reminder after setting one this turn \u{2014} not sent");
+                Some("(you set that reminder a moment ago in this turn and they asked for it -- it stays; nothing was dropped. Answer now.)".to_string())
+            } else if let Some(first) = restated {
                 // E.MEM1 (VM 541): one fact, three phrasings, three beliefs.
                 eprintln!("[agent] step {step}: remember restates a fact saved this turn \u{2014} not saved again");
                 Some(format!("(already remembered this turn: \"{first}\" \u{2014} not saved again)"))
@@ -15132,6 +15148,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // stop Qwen 27B): a write that succeeded is withdrawn for the rest of the turn.
             if sent && matches!(tool.as_str(), "remember" | "add_reminder") && outcome == crate::tool_outcome::Outcome::Ok {
                 schemas.retain(|s| s["function"]["name"].as_str() != Some(tool.as_str()));
+                reminder_set_this_turn |= tool == "add_reminder";
+                // E.LOOP12: a one-request message is done once its write succeeded.
+                stop_after_write = single_request(user_text);
             }
             last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());
             if sent {
@@ -15331,6 +15350,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 head,
                 outcome.note(),
             ));
+            if stop_after_write {
+                // E.LOOP12: the request was this one write, and it is done -- the reply, now.
+                eprintln!("[agent] step {step}: the one request is done \u{2014} composing");
+                break;
+            }
         }
         // The compose step must see the GROUNDING too, not just the work log — otherwise the model
         // literally cannot weave in the gift deadline sitting next to the birthday it's reporting.

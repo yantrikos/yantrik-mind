@@ -17379,7 +17379,9 @@ mod desktop_consent_and_stall_wiring {
                 Step::Call("remember", serde_json::json!({"text": "Ishaan graduates on 22 May"})),
                 Step::Fail,
             ],
-            "Remember that my cousin Ishaan's graduation is on 22 May",
+            // E.LOOP12: a single request now stops after its write; the withdrawal matters when
+            // the message goes on.
+            "Remember that my cousin Ishaan's graduation is on 22 May and tell me what else is coming up",
         )
         .await;
         assert!(ok.len() >= 2, "{ok:?}");
@@ -17400,11 +17402,62 @@ mod desktop_consent_and_stall_wiring {
 
         let set = schemas_per_step(
             vec![Step::Call("add_reminder", serde_json::json!({"text": "Drink water", "when": "in 2 minutes"})), Step::Fail],
-            "remind me in 2 minutes to drink water",
+            "remind me in 2 minutes to drink water and tell me the time",
         )
         .await;
         assert!(set.len() >= 2, "{set:?}");
         assert!(set[0].iter().any(|n| n == "add_reminder") && !set[1].iter().any(|n| n == "add_reminder"), "{set:?}");
+    }
+
+    /// E.LOOP12 (541: remember -> recall x3 on Qwen): one request, one write, then the reply; a
+    /// message that goes on keeps its loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_single_write_goes_straight_to_the_reply() {
+        let one = schemas_per_step(
+            vec![
+                Step::Call("remember", serde_json::json!({"text": "My plumber is Tomasz"})),
+                Step::Call("recall", serde_json::json!({"query": "plumber"})),
+                Step::Fail,
+            ],
+            "Remember that my plumber is Tomasz",
+        )
+        .await;
+        assert_eq!(one.len(), 1, "a tool step after the one write: {one:?}");
+        let more = schemas_per_step(
+            vec![Step::Call("remember", serde_json::json!({"text": "My flight is at 3"})), Step::Fail],
+            "Remember my flight is at 3 and what's the weather?",
+        )
+        .await;
+        assert!(more.len() >= 2, "a message that goes on stopped after its write: {more:?}");
+        assert!(crate::single_request("Remember that my plumber is Tomasz"));
+        assert!(!crate::single_request("When is Mira's recital?"));
+        assert!(!crate::single_request("remember X then remind me"));
+    }
+
+    /// E.LOOP12 (541, twice: Qwen dropped the reminder it had just set): a reminder set this turn is
+    /// not dropped this turn unless the person asked to stop it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_set_this_turn_is_not_dropped_this_turn() {
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![
+                Step::Call("add_reminder", serde_json::json!({"text": "Drink water", "when": "in 2 minutes"})),
+                Step::Call("drop_reminder", serde_json::json!({"words": "Drink water"})),
+                Step::Fail,
+            ],
+            seen: Arc::new(StdMutex::new(Vec::new())),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+        let conv = ConversationEngine::new(memarc.clone(), pool, "YM");
+        let _ = conv
+            .agent_loop_for_eval("remind me in 2 minutes to drink water and tell me the time", &TurnIdentity::primary())
+            .await;
+        let open = memarc.list_tasks(false).await.unwrap();
+        assert!(open.iter().any(|t| t.description.contains("Drink water")), "the reminder set this turn was dropped: {open:?}");
     }
 
     /// E.HELD1 (541: "thanks" researched the topic again): a result handed over on a turn is in that

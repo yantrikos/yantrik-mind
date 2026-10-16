@@ -19682,3 +19682,20 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
   - "remind me in 2 minutes to check the oven" at most 2 calls, with no drop_reminder sent;
   - one "remember X and tell me Y" turn answers both parts.
   - Kill if any reply claims an action that did not happen.
+
+## E.LOOP12 — RESULT (code)
+
+**K1 held:**
+- add_reminder then drop_reminder in a multi-part turn: the drop is not sent and "Drink water" stays open;
+- "Remember that my plumber is Tomasz" with remember then recall scripted: exactly one tool step;
+- "Remember my flight is at 3 and what's the weather?" continues past the write;
+- `single_request`: true for the plumber line, false for a question and for "then".
+
+E.LOOP11's test now uses multi-part asks (a single request stops after its write).
+
+**K2: 3 mutants killed:**
+- the guard removed — the drop then really closes the reminder, so the test exercises the guard;
+- the single stop removed;
+- the stop applied to multi-part too.
+
+**K3:** Windows workspace 2574 passed, 0 failed. Linux and a bundle carrying E.SPINE1 and E.LOOP12 follow.

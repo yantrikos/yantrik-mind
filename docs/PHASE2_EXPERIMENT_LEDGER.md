@@ -20316,3 +20316,13 @@ No model call anywhere: deterministic detection plus templates, per the plan, un
 - K2, mutants killed: the dedupe removed; the 30–90 window removed; a candidate queued as a notice.
 - K3: both suites pass.
 - **Live (541, which has #831's inbox):** a calendar event placed 60 min out produces one candidate row, no card, no toast, and no refusal of a later browser action in the same session.
+
+**E.INIT1 — amendment before any code (dc tested on 541, 16 Oct):**
+- **The calendar heads-up detector is BLOCKED.** yos-mcp taint is per process, so a separate `yos act` process would not taint the conversation (confirmed). But from the Mind's account every calendar act needs the agent token the harness hands per turn: without it, uid 999 is refused both the read and the on-demand start. When the desktop is locked, the shell refuses everything.
+  - **Decision:** the Mind does NOT reuse a turn's token for idle background reads. That would act with a turn's authority when no turn is running, and the token boundary is the OS's.
+  - A calendar initiative needs an OS-side design, for example:
+    - the OS raising calendar heads-ups itself as `family: calendar` notices;
+    - or a standing, person-granted read for the Mind.
+  - This is raised with dc and Pranab.
+- **dc's Stage C caveat, adopted now:** candidates that later feed a turn carry private data into a session that was never marked. A consuming turn must be treated as private, or candidates go only through `harness.notice`.
+- **The delegated detector's coverage gap:** the delegation ledger (`delegations`) holds only delegate.rs jobs. The research and coder jobs from capabilities.rs, the desktop's main delegated work, keep only an in-memory counter. Stage B therefore registers those jobs with a start time (in memory, kind, task, started_ms) so the stalled detector sees them. Without that, it would watch the wrong population.

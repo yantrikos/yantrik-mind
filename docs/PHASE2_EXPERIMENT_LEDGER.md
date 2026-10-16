@@ -19247,3 +19247,12 @@ Drive-tests 1 and 2 (dc, on 541) record what actually happens today before any c
 - **Producers:** due reminders become `queue_notice(Reminder, dedupe "reminder:<task>:<due>")`; delegated `notify_queue` entries become `queue_notice(Delegated, ...)`.
 
 K1/K2 are restated against these: dedupe by key; an expired lease is resent; Delivered stops resending; the per-occurrence reminder key. The OS transport binding (a harness method, the envelope) waits on yantrik-os-dc's answer and is tested with a fake sink until then.
+
+**E.NOTICE1 amendment 2 (before any producer code):**
+- **A due reminder is announced only if it came due within the last 24 h (a catch-up window).** An older overdue task is not "coming due"; announcing every one on the first scan would flood the inbox (520 holds unbidden tasks from E.PACE2).
+- **The desktop sender leases only obligation kinds (reminder, delegated).** The console-era kinds (verdict, pattern, horizon_tick, knock, digest, ask) stay where they are; they are not obligations under the chosen plan.
+- **Stage A on the Mind splits into:**
+  - **A1:** the store's delivered receipt and the kinds; due reminders as notices; the sender behind a sink trait, tested with a fake.
+  - **A2:** delegated results through a typed path. notify_queue is an untyped `Vec<String>` mixing book, watch, photo, code and delegate jobs, so the allowlist needs a source type.
+  - **A3:** the real harness transport, after yantrik-os-dc's spec.
+- **K1 adds:** a task overdue by 2 days gives no notice; one due 1 h ago gives one; a verdict notice is never leased by the desktop sender.

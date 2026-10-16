@@ -19118,3 +19118,5 @@ Linux follows.
 **K2 held, 5 mutants killed:** the ISO branch; the day-first reorder; the unparsed-when guard; the merge note; the old rule text.
 
 **K3:** Windows workspace 2550 passed, 0 failed. Linux follows.
+
+**E.REM1 K3, Linux (staging, 8802723):** mind-conversation 1258 passed. Bundle `yantrik-mind-8802723` sha256 e8ffca67456ae28f108ca5bf0c1cb0e729f514a0b2cbaee7a11fea19ab426054, handed to yantrik-os-dc for the 2a/2b rerun on Claude on 542 (OS-workspace relay counts, per Pranab).

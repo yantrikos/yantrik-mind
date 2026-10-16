@@ -20108,3 +20108,22 @@ For a one-ask message (`one_ask`), such a read goes straight to the reply. An em
 
 **E.CAL2 — RESULT: PASS (Windows).** `list_events_json_becomes_lines_and_garbage_is_an_error` asserts `today 18:00`, `tomorrow 09:00`, `Mon 19 Oct` and quoted titles, with today fixed. Mutants killed (2/2): the relative labels removed; the quotes removed. **Windows workspace (A3c + E.CAL2):** 2590 passed, 0 failed.
 - **Linux (staging, 536731e), A3c + E.CAL2:** mind-conversation 1277 passed, mind-core 197 passed. **Bundle:** yantrik-mind-536731e-linux-amd64.tar.zst, sha256 e01cbda3f5bfea2016e4b9ea017b69eb40fa82d298c43d2e0143a35406fc7fc0
+
+## E.GRADE1 — a Jev reply grader, calibrated (Pranab approved Jev for grading, 16 Oct)
+
+**The tool:** `F:/yantrik/bin/reply-grade`, outside the repo, beside `jev`/`report-check`. Given `{ask, reply, facts}`, Jev answers one typed probability per standing reply rule:
+- answers_ask;
+- unasked_offer, unknowns_list, unasked_tie_in, unasked_advice;
+- contradicts_facts;
+- not_plain.
+
+Two judgments are decided in code, not by a model score: a reply that parses as JSON is not_plain, and a bare acknowledgement has nothing to answer.
+
+**Calibration:** 10 replies from today's 541/520 runs, quoted verbatim by dc, labelled with the faults dc identified. The data is in `F:/yantrik/jev/reply-grade-calibration.jsonl`.
+- As first written: 67/70 rule judgments agree.
+- After three definitional fixes (the tie-in excludes facts about the subject asked about; acks; JSON in code): 69/70 on the SAME set. That is fitted, not held out.
+- **Remaining miss:** `unasked_tie_in` scores "He comes on Tuesdays" for "Who is Tomasz?" at 0.75.
+
+**Use:** a screen for the A/B arms, not a verdict.
+- Every tie-in flag, and every rule where the arms differ, is read before it counts.
+- The next runs' replies are held-out data: their agreement is reported before any decision rests on the grader.

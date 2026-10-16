@@ -19938,3 +19938,43 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - K3: both suites pass.
 
 **E.PEOPLE1 — RESULT: PASS (Windows).** `about_person_reads_what_was_remembered` passes. Mutants killed (3/3): the fallback removed; the whole-word check removed; an all-access context. Windows workspace: 2587 passed, 0 failed. Linux and a bundle follow with the next batch.
+
+## E.HELD1b — PREREG + RESULT: handed-over results are said to be below
+
+**Why:** in the 541 E.HELD1 run the reply said the findings were "handed over above", but they are appended BELOW the reply, under "— finished while you were away —". The prompt line never said where they go.
+
+**What is built:** the E.HELD1 prompt line now reads: "Finished while they were away and handed over with this reply -- it is shown BELOW your reply, under 'finished while you were away'; if you mention it, say it is below (don't start it again): …".
+
+**Kill:** `a_handed_over_result_is_in_the_turns_prompt` asserts the prompt says "BELOW your reply". The old wording fails it.
+
+## E.ANS4 — PREREG: an answer that is a JSON object is never delivered as one
+
+**Why:** 541 bug 6 (turn 448, c527663, "Add 'Spare socks' to my Weekend packing list note.", per dc's journal). At step 4 the model called `run_skill {"name":"answer","target":"{\"text\": \"Added 'Spare socks' to your Weekend packing list — it's now saved on disk.\"}"}`. The E.ANS1 shortcut took the longest string, `target`, verbatim, and the person got `{"text": "Added …"}`. The note edit itself was right: added once, with the repeat caught.
+
+**What is built:** `unwrapped_answer(s)`.
+- A string that is not a JSON object or array is returned as it is.
+- One that parses as JSON gives the longest string inside it, outside any "name" field, applied again if that is JSON too, and under the same "more than a bare word" rule.
+- JSON with no such string is no answer at all (None), and the turn goes on to compose.
+- It is applied in `answer_in_a_skill_call` and to the `answer` action's text.
+
+**Kill criteria:**
+- K1, a test fails:
+  - the turn-448 call gives "Added 'Spare socks' to your Weekend packing list — it's now saved on disk.";
+  - `{"tool":"answer","args":{"text":"{\"reply\":\"Your note is saved now.\"}"}}` gives the inner sentence;
+  - `{"a": 1}` as the target is no answer;
+  - plain prose is unchanged, including prose that merely contains braces ("Use {name} in the template");
+  - a scripted turn whose answer action carries the JSON delivers no reply that starts with "{".
+- K2, a mutant survives: the unwrap removed from the skill shortcut; from the `answer` path; JSON without a usable string accepted as the answer.
+- K3: both suites pass.
+
+**E.ANS4 — RESULT: PASS (Windows).** `an_answer_written_as_json_is_delivered_as_its_sentence` passes. It covers the turn-448 call, a native `answer` call, a hand-written `{"tool":"answer"}`, JSON with no sentence, and prose with braces.
+- Mutants killed (5/5): the unwrap removed from the skill shortcut, from the native answer path, and from the free-text path; JSON without a sentence accepted; and the E.HELD1b wording reverted (which kills E.HELD1b's own test).
+- Amendment: the native answer path (`{"answer": …}`, line ~14458) was found while testing, and gets the same unwrap.
+
+## E.ACK1 — live (541, 7689851, qwen3.5:27b, yantrik-os-dc, 16 Oct): PASS
+
+- **K1, turn 470, "remind me in 2 minutes to stretch":** 1 step, 2 calls. Honest no-ping reply, but it added unasked advice ("set a timer on your device as a backup").
+- **K2, turn 471, "ok":** 1 call, `no tools`. Reply: "Good — you're up. … — finished while you were away — ⏰ Reminder: Time to stretch (due 07:40)".
+- **mind.db:** the open tasks are the same as before. The reminder was delivered and closed, and no new Stretch task was made.
+- **Open:** the "ok" turn took 24 s for one no-tool call, and compose took 17 s on K1, both slow on Qwen.
+- **Windows workspace (E.ANS4 + E.HELD1b):** 2588 passed, 0 failed.

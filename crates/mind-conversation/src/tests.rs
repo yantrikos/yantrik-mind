@@ -17594,7 +17594,7 @@ mod desktop_consent_and_stall_wiring {
         let reply = conv.turn("thanks", TurnIdentity::primary()).await.unwrap();
         let prompts = seen.lock().unwrap().clone();
         assert!(
-            prompts.iter().any(|p| p.contains("handed over with this reply") && p.contains("Research — ext4 vs btrfs")),
+            prompts.iter().any(|p| p.contains("handed over with this reply") && p.contains("BELOW your reply") && p.contains("Research — ext4 vs btrfs")),
             "the turn did not know: {prompts:?}"
         );
         assert!(reply.contains("finished while you were away") && reply.contains("btrfs has snapshots"), "{reply}");
@@ -18052,6 +18052,40 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "weekly-report", "target": "x"}})), None);
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": "answer"}})), None);
         assert_eq!(crate::answer_in_a_skill_call("run_skill", &serde_json::json!({"args": {"name": " Answer ", "text": "hi there"}})).as_deref(), Some("hi there"));
+    }
+
+    /// E.ANS4 (541 turn 448: the reply was `{"text": "Added 'Spare socks' …"}`): an answer written
+    /// as JSON is delivered as its sentence; JSON with no sentence is no answer; prose is untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_written_as_json_is_delivered_as_its_sentence() {
+        let said = "Added 'Spare socks' to your Weekend packing list \u{2014} it's now saved on disk.";
+        let target = serde_json::json!({ "text": said }).to_string();
+        let r = run(vec![Step::Call("run_skill", serde_json::json!({"name": "answer", "target": target}))], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert_eq!(r.reply, said);
+        let r = run(
+            vec![Step::Call("answer", serde_json::json!({"text": "{\"reply\": \"Your note is saved now.\"}"}))],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        assert_eq!(r.reply, "Your note is saved now.");
+        // The same written out by hand, as a model without native tool calls does.
+        let r = run(
+            vec![Step::Say(r#"{"tool": "answer", "args": {"text": "{\"reply\": \"Your list is saved now.\"}"}}"#)],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        assert_eq!(r.reply, "Your list is saved now.");
+        let r = run(vec![Step::Call("answer", serde_json::json!({"text": "{\"a\": 1}"}))], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(!r.reply.trim_start().starts_with('{'), "a JSON object was the reply: {}", r.reply);
+
+        let call = |a: serde_json::Value| crate::answer_in_a_skill_call("run_skill", &serde_json::json!({ "args": a }));
+        assert_eq!(call(serde_json::json!({"name": "answer", "target": "{\"a\": 1}"})), None);
+        assert_eq!(crate::unwrapped_answer("Use {name} in the template, then save it.").as_deref(), Some("Use {name} in the template, then save it."));
+        assert_eq!(crate::unwrapped_answer("{not json, just a brace} and words").as_deref(), Some("{not json, just a brace} and words"));
+        assert_eq!(crate::unwrapped_answer("{\"text\": \"{\\\"text\\\": \\\"Nested and saved now.\\\"}\"}").as_deref(), Some("Nested and saved now."));
+        assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
     }
 
     /// E.ANS1b (E.THIN1-M full B): the answer's text wherever the model put it, never a field's name.

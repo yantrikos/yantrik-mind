@@ -4320,8 +4320,37 @@ pub(crate) fn answer_in_a_skill_call(tool: &str, v: &serde_json::Value) -> Optio
     let mut found = Vec::new();
     strings(args, &mut found);
     let best = found.into_iter().map(str::trim).max_by_key(|s| s.chars().count())?;
+    let best = unwrapped_answer(best)?;
     let words = best.split_whitespace().count();
-    (words > 1 || best.chars().count() >= 12).then(|| best.to_string())
+    (words > 1 || best.chars().count() >= 12).then_some(best)
+}
+
+/// E.ANS4 (541 turn 448: the reply was `{"text": "Added 'Spare socks' …"}`): an answer the model
+/// wrote as JSON is the longest string inside it, unwrapped again if that is JSON too; JSON with
+/// no sentence in it is no answer. Anything that does not parse as a JSON object or array -- prose,
+/// even prose with braces in it -- is the answer as it stands.
+pub(crate) fn unwrapped_answer(s: &str) -> Option<String> {
+    let t = s.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return Some(t.to_string());
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(t) else { return Some(t.to_string()) };
+    if !(v.is_object() || v.is_array()) {
+        return Some(t.to_string());
+    }
+    fn strings<'a>(v: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+        match v {
+            serde_json::Value::String(s) => out.push(s),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            serde_json::Value::Object(o) => o.iter().filter(|(k, _)| k.as_str() != "name").for_each(|(_, x)| strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    strings(&v, &mut found);
+    let inner = found.into_iter().map(str::trim).max_by_key(|s| s.chars().count())?;
+    let inner = unwrapped_answer(inner)?;
+    (inner.split_whitespace().count() > 1 || inner.chars().count() >= 12).then_some(inner)
 }
 
 fn args_text(v: &serde_json::Value) -> String {
@@ -6897,7 +6926,8 @@ impl ConversationEngine {
             .map(|n| n.lines().next().unwrap_or("").chars().take(160).collect())
             .collect();
         format!(
-            "Finished while they were away and handed over with this reply (don't start it again): {}\n\n",
+            // E.HELD1b (541: "handed over above" for findings printed below): say where they are.
+            "Finished while they were away and handed over with this reply -- it is shown BELOW your reply, under 'finished while you were away'; if you mention it, say it is below (don't start it again): {}\n\n",
             firsts.join("; ")
         )
     }
@@ -14425,7 +14455,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
             }
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
-                let mut a = ans.trim().to_string();
+                // E.ANS4: never the person's reply as a JSON object.
+                let mut a = unwrapped_answer(ans).unwrap_or_default();
                 if !a.is_empty() {
                     // A WHOLE DOCUMENT, not merely text containing markup. `looks_like_html` alone
                     // asks whether the reply CONTAINS `<div>`/`<table>`/`<body>`, which a reply ABOUT
@@ -14495,7 +14526,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // clock with an empty reply. Raising the iteration limit did not cause this bug; it
             // removed the thing that was hiding it.
             if tool == "answer" {
-                let mut ans = args_text(&v);
+                // E.ANS4: never the person's reply as a JSON object.
+                let mut ans = unwrapped_answer(&args_text(&v)).unwrap_or_default();
                 if !ans.trim().is_empty() {
                     apply_denied_write_correction(&mut ans, &denied_mutations);
                     desktop::apply_failed_commands(&mut ans, &failed_cmds);

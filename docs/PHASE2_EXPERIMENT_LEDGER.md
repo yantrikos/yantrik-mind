@@ -19053,3 +19053,46 @@ Linux follows.
 - With thinking on, it fits sampling to Anthropic's rule (no temperature ≠ 1, no top_p < 0.95, no top_k). This was the third 400 on the first battery (`top_p` under thinking).
 - Effort "easy" on AnthropicBudget is now thinking OFF (no field), as on Qwen. Before, it was a 1,024-token budget, so every E.PACE1b/E.PACE2b step on Claude paid for thinking it had asked not to do.
 - **First 542 battery (48b1bf9):** E.WIRE1 and the temperature drop worked, but all 6 asks failed on the top_p 400. A rerun at b51a849d is queued.
+
+## The Mind on Claude Sonnet 5.5 — first full battery (542, yantrik-os-dc, 16 Oct)
+
+- **Setup:** Mind 48b1bf9 through #825 at b51a849d. Every call returned 200, with `dropped: ["temperature","top_p"]`.
+- **Result:** all of E.REF1's asks right.
+
+| | Mind | Hermes (same machine) |
+|---|---|---|
+| Median per ask | 26.5 s | 16.5 s |
+| Calls | 22 (143 s total) | 36 |
+| Tokens | 227k in / 3.4k out | 529k in |
+| Cost | ~$0.73 | ~$1.64 |
+
+- Ask 4's forecast came from the weather tool with both weekend days; Hermes got Saturday only.
+- **Named, ask 2a** ("Remember that my neighbour Leila's book launch is on 3 December"): the fact was saved, then an unasked `add_reminder` followed. The tool failed to parse "December 3" and "2026-12-03", and a "Neighbour Leila's book launch" task was left behind. Ask 2b's recall was right, but it offered the reminder again.
+
+## E.REM1 — PREREG: a reminder only when asked; dates it can read; nothing saved from a date it cannot
+
+**Pranab (16 Oct, AskUserQuestion): "Only when asked".**
+
+**What is built:**
+1. **Agent rules:** "when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up" becomes "set a reminder (`add_reminder`) only when they ask to be reminded; a date they mention is remembered, not scheduled".
+   - The catalog line "add_reminder {text, when}: mark a date/commitment for the future (a birthday, a deadline) so you ping them when due" becomes "set a reminder the person asked for".
+   - Its `when` examples now include "December 3" and "2026-12-03".
+2. **`parse_due`** also reads:
+   - an ISO date `YYYY-MM-DD` (with an optional time after it), at local midday;
+   - "Month D" / "Mon Dth" through the existing `parse_text_date_ms` (next occurrence);
+   - "D Month" by reordering to "Month D".
+   Relative phrases are unchanged.
+3. **`add_reminder` with a non-blank `when` that does not parse** saves NOTHING. It says the date could not be read and names the forms that work. A blank `when` still saves an undated open task, as before.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - `parse_due` reads "2026-12-03", "December 3", "Dec 3rd", "3 December" and "3 Dec 2026" to 3 December (local); "tomorrow" and "in 3 days" are unchanged; "someday" gives None.
+  - `add_reminder` with `when: "the week after next Tuesday-ish"` adds no task; with `when: ""` it adds one.
+  - The agent rules no longer carry "add_reminder` so you follow up", and do carry "only when they ask to be reminded".
+- K2, a mutant survives:
+  - the ISO branch removed;
+  - the day-first reorder removed;
+  - the unparsed-when guard removed;
+  - the old rule text restored.
+- K3: both suites pass.
+- **Live check:** dc reruns ask 2a on Claude. The fact is remembered, no reminder or task is made, and nothing is offered twice.

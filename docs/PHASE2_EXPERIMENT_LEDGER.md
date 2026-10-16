@@ -19796,3 +19796,16 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - K2, a mutant survives: the calendar call removed; the start-once retry removed; a garbage reply treated as empty.
 - K3: both suites pass.
 - **Live (541):** "What do I have coming up this week?" lists the Dallas trip reminder in at most 2 model calls, with calendar-service stopped beforehand (the start-once path).
+
+## E.CAL1 — RESULT (code)
+
+**K1 held** (a scripted desktop `os_act` behind the harm-gated runtime, as the desktop Mind runs it):
+- one list_events event gives "On your calendar:" with "Fri 16 Oct 18:00: Trip reminder…";
+- "no socket", then started, then the event: 3 replies used (start_service once, list_events again), and the event is listed;
+- a garbage reply gives "(the desktop calendar could not be read)";
+- `calendar_event_lines`: two events (timed and all-day), "[]" empty, "no socket" and a titleless event are errors;
+- with no desktop, the existing `upcoming` test has no calendar section ("Nothing in the next…").
+
+**K2: 3 mutants killed** (the calendar call removed; the start-once retry removed; garbage read as empty).
+
+**K3:** Windows workspace 2579 passed, 0 failed. The first scripted run showed the test engine needed the harm-gated action runtime the desktop Mind has: `os_act` is write-class, and `run_agent_tool` refuses it without one. That was a test-setup gap, not a production one.

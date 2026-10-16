@@ -17530,6 +17530,53 @@ mod desktop_consent_and_stall_wiring {
         assert!(all.contains("Open reminders with no date") && all.contains("Sort out the passport photos"), "{all}");
     }
 
+    /// E.CAL1: an engine whose desktop answers `os_act` with `replies`, in order.
+    async fn upcoming_with_desktop(replies: Vec<&str>) -> (String, usize) {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let hub = Arc::new(mind_tools::McpHub::new());
+        hub.add_scripted_tool(
+            mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: "os_act".into(),
+                description: format!("act on a desktop app {}", mind_tools::ON_THIS_COMPUTER),
+                read_only: false,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            replies.into_iter().map(|r| Ok(r.to_string())).collect(),
+        )
+        .unwrap();
+        // The desktop Mind runs os_act through its harm-gated runtime, as here.
+        let executor = Arc::new(mind_tools::ToolActionExecutor::new().with_mcp_hub(hub.clone()));
+        let runtime: Arc<dyn ActionRuntime> = Arc::new(mind_governance::GovernedActionRuntime::new(
+            Arc::new(mind_governance::RealHarmGate::new()),
+            executor,
+            vec![Capability::LocalControl],
+        ));
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_mcp(hub.clone()).with_runtime(runtime);
+        let out = conv.run_agent_tool("upcoming", &serde_json::json!({})).await;
+        let left = hub.scripted_responses_remaining("mcp.yantrik-os.os_act").unwrap_or(99);
+        (out, left)
+    }
+
+    /// E.CAL1 (541: the desktop calendar's trip reminder missed 8 of 8): `upcoming` reads the
+    /// desktop calendar, starts calendar-service once when it has no socket, and says so when the
+    /// calendar cannot be read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upcoming_reads_the_desktop_calendar() {
+        let event = r#"[{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false}]"#;
+        let (out, left) = upcoming_with_desktop(vec![event]).await;
+        assert!(out.contains("On your calendar:") && out.contains("18:00: Trip reminder -- Dallas tomorrow"), "{out}");
+        assert_eq!(left, 0);
+        let (out, left) = upcoming_with_desktop(vec!["calendar is closed (no socket)", "{\"service\":\"calendar\",\"state\":\"started\"}", event]).await;
+        assert!(out.contains("Trip reminder -- Dallas tomorrow"), "{out}");
+        assert_eq!(left, 0, "start_service once, then list_events again");
+        let (out, _) = upcoming_with_desktop(vec!["something unexpected"]).await;
+        assert!(out.contains("(the desktop calendar could not be read)"), "{out}");
+    }
+
     /// E.SPINE1: the switch takes the ambient upcoming blocks out of the turn's prompt.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_ambient_upcoming_blocks_follow_the_switch() {

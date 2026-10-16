@@ -111,16 +111,26 @@ impl super::ConversationEngine {
     /// E.SPINE1: the `upcoming` tool's answer -- every item in the next `days`, then the open
     /// reminders that carry no date. No cap: a partial list reads as the whole.
     pub(crate) async fn upcoming_list(&self, days: i64) -> String {
+        // E.CAL1 (541: the desktop calendar's trip reminder missed 8 of 8): the calendar the person
+        // keeps on this desktop belongs to calendar-service -- read it, never copy it.
+        let desk = if self.desktop_attached() { Some(self.desktop_calendar_lines(days).await) } else { None };
         let spine = self.upcoming_spine(days).await;
         let dated: std::collections::HashSet<String> = spine.iter().filter_map(|(_, _, id)| id.clone()).collect();
         let (reminders, _) = self.split_tasks().await;
         let undated: Vec<&Task> = reminders.iter().filter(|t| !dated.contains(&t.id) && t.due_ms.is_none()).collect();
         // E.REM2: "tomorrow" needs today -- 541 called today's items tomorrow's.
         let today = format!("Today is {}.", local_now().format("%a %-d %b"));
+        let calendar = match &desk {
+            Some(Ok(lines)) if !lines.is_empty() => format!("\nOn your calendar:{}", lines.iter().map(|l| format!("\n- {l}")).collect::<String>()),
+            Some(Ok(_)) => "\nOn your calendar: nothing.".to_string(),
+            Some(Err(())) => "\n(the desktop calendar could not be read)".to_string(),
+            None => String::new(),
+        };
         if spine.is_empty() && undated.is_empty() {
-            return format!("{today} Nothing in the next {days} days, and no open reminders.");
+            let other = if desk.is_some() { "Nothing else" } else { "Nothing" };
+            return format!("{today}{calendar}\n{other} in the next {days} days, and no open reminders.");
         }
-        let mut out = format!("{today}\nNext {days} days:");
+        let mut out = format!("{today}{calendar}\nNext {days} days:");
         if spine.is_empty() {
             out.push_str(" nothing dated.");
         }
@@ -134,6 +144,25 @@ impl super::ConversationEngine {
             }
         }
         out
+    }
+
+    /// E.CAL1: the desktop calendar's events in the next `days`, as lines -- `Err` when it cannot be
+    /// read. calendar-service starts on demand: on "no socket" it is started ONCE, then asked again.
+    async fn desktop_calendar_lines(&self, days: i64) -> std::result::Result<Vec<String>, ()> {
+        let today = local_now().date_naive();
+        let end = today + chrono::Duration::days(days);
+        let ask = serde_json::json!({
+            "app": "calendar",
+            "action": "list_events",
+            "args": {"start_date": today.format("%Y-%m-%d").to_string(), "end_date": end.format("%Y-%m-%d").to_string()},
+        });
+        let mut obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &ask)).await;
+        if obs.to_lowercase().contains("no socket") {
+            let start = serde_json::json!({"app": "shell", "action": "start_service", "args": {"name": "calendar"}});
+            let _ = Box::pin(self.run_agent_tool(crate::desktop::ACT, &start)).await;
+            obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &ask)).await;
+        }
+        calendar_event_lines(&obs)
     }
 
     pub(crate) async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String, Option<String>)> {
@@ -524,5 +553,43 @@ impl super::ConversationEngine {
             .trim()
             .to_string();
         Some(format!("🎗 {title} — in {in_min} min.\n\n{body}"))
+    }
+}
+
+/// E.CAL1: the JSON array `calendar list_events` returns, as "Ddd D Mon HH:MM: title" lines (all-day
+/// events without a time). `Err` when no array of events can be read from the result.
+pub(crate) fn calendar_event_lines(obs: &str) -> std::result::Result<Vec<String>, ()> {
+    let (Some(a), Some(b)) = (obs.find('['), obs.rfind(']')) else { return Err(()) };
+    if b <= a {
+        return Err(());
+    }
+    let events: Vec<serde_json::Value> = serde_json::from_str(&obs[a..=b]).map_err(|_| ())?;
+    let mut out = Vec::new();
+    for e in events {
+        let Some(title) = e.get("title").and_then(|t| t.as_str()) else { return Err(()) };
+        let start = e.get("start").and_then(|t| t.as_str()).unwrap_or("");
+        let all_day = e.get("is_all_day").and_then(|v| v.as_bool()).unwrap_or(false);
+        let when = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
+            .map(|t| if all_day { t.format("%a %-d %b").to_string() } else { t.format("%a %-d %b %H:%M").to_string() })
+            .unwrap_or_else(|_| start.to_string());
+        out.push(format!("{when}: {title}"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod cal1_tests {
+    use super::calendar_event_lines;
+
+    #[test]
+    fn list_events_json_becomes_lines_and_garbage_is_an_error() {
+        let ok = r#"Done -- Calendar -- [{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false},{"id":"e2","title":"Holiday","start":"2026-10-19T00:00:00","is_all_day":true}]"#;
+        assert_eq!(
+            calendar_event_lines(ok).unwrap(),
+            vec!["Fri 16 Oct 18:00: Trip reminder -- Dallas tomorrow".to_string(), "Mon 19 Oct: Holiday".to_string()]
+        );
+        assert_eq!(calendar_event_lines("[]").unwrap(), Vec::<String>::new());
+        assert!(calendar_event_lines("calendar is closed (no socket)").is_err());
+        assert!(calendar_event_lines("[{\"no\": \"title\"}]").is_err());
     }
 }

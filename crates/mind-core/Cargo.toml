@@ -16,6 +16,7 @@ mind-tools = { workspace = true }
 mind-governance = { workspace = true }
 mind-observability = { workspace = true }
 mind-recipes = { workspace = true }
+mind-spec = { workspace = true }
 mind-agents = { workspace = true }
 yantrik-ml = { workspace = true, default-features = false, features = ["claude-cli", "api-llm"] }
 tokio = { workspace = true }
@@ -49,4 +50,3 @@ base64 = "0.22"
 sha2 = "0.10"
 tower = { version = "0.5", features = ["util"] }
 # E.REM2: a test plants a reminder notice an earlier build queued.
-mind-spec = { workspace = true }

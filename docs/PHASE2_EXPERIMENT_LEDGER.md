@@ -19832,3 +19832,84 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 - K2, a mutant survives: the schemas left on for an ack; the not-sent guard removed; `bare_ack` always false.
 - K3: both suites pass.
 - **Live (541):** "remind me in 2 minutes to stretch", wait about 3 minutes, then "ok". The reply carries the held reminder, and mind.db holds NO new Stretch task.
+
+## E.NOTICE1 A3 — PREREG: obligation notices go to the desktop inbox (`harness.notice`, yantrik-os #831)
+
+**What is built:**
+- **Attach.** When `harness.attach` answers `features` containing `notice_inbox_v1`, `unprompted_delivery` is set. A ping is promised only then. It is never cleared, because the outbox is durable and a notice waits for the desktop to come back.
+- **The send pass.** While no turn is running, at most every 15 s, the Mind leases the obligation notices (reminder, delegated) that were queued within the last 24 h and sends each as `harness.notice {session, notice}`.
+  - `notice_id`: the outbox's own id.
+  - `family`: reminder or delegated.
+  - `title`: the first line, with "Reminder: " stripped, at most 80 characters. `body`: the rest of the text.
+  - `why`: "You asked me to remind you." or "You handed this to me."
+  - `attention`: interrupt for a reminder, inbox for a delegated result.
+- **Answers.** `stored` (a duplicate too) → the terminal `delivered` receipt. `retry_after_secs` → nothing more is sent until then. `refused` → that id is not sent again this session (logged). An error or no answer → the lease runs out and the next pass retries.
+- **Older notices.** A notice queued more than 24 h before the pass is never leased, so 541's pre-E.REM2 backlog does not flood the inbox.
+- **No double delivery.** A reminder that came due is held for the next reply only where there is no unprompted delivery: the card replaces the chat line. A delegated result is still held in full for the next reply, since the card's body is clamped to 45 words.
+- **Feedback.** A poll answer's `notice_feedback` is journalled, and the next poll sends `feedback_ack` = the highest `seq` seen. Acting on feedback is Stage B.
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - attach parsing: features with `notice_inbox_v1` → true; none, or another feature → false;
+  - the payload for a reminder and for a delegated result (family, title, why, attention, id);
+  - answer mapping: stored → Kept; duplicate → Kept; retry_after 3600 → Later(3600); refused → Refused; malformed → Later(None);
+  - `send_obligations`:
+    - Kept is delivered and never re-sent;
+    - Later stops the pass and leaves the notice queued;
+    - Refused is skipped on the next pass, while a fresh notice still goes out;
+    - a notice queued 25 h earlier is not leased;
+  - a reminder that comes due with unprompted delivery is not held for the next reply, and is held without it;
+  - feedback: the highest seq is acked.
+- K2, a mutant survives:
+  - the 24 h filter removed;
+  - Refused treated as Later;
+  - the hold not gated on unprompted delivery;
+  - the feature check always true.
+- K3: both suites pass.
+- **Live (520, dc, on a #831 build):**
+  - the Mind sends a reminder with no turn running;
+  - the card shows in the Lens and in describe, with exactly one toast;
+  - "Not now" reaches the Mind's poll and is acked;
+  - everything survives a reboot;
+  - mind.db's receipt for the notice is `delivered`.
+
+## E.CAL1 — live (541, e05ecc7, yantrik-os-dc, 16 Oct): FAIL, cause on the OS side
+
+- With calendar-service stopped, "What do I have coming up this week?" took 2 calls. `upcoming` said "(the desktop calendar could not be read)", and the service did start (pid 6623). Asked again with the service up: the same.
+- **Cause:** the Mind runs as `yantrik-mind`, and the person's runtime dir is 0700. The minds' door (`/run/yantrik-minds`) carries only `harness` and `app-*` sockets, so `calendar.sock` is unreachable from a mind. dc's earlier check ran as the person.
+- **The OS fix (dc, in review):** calendar-service on the minds' door with only its graded surface (`app.describe`/`app.act`), and the raw data methods refused to a mind.
+- **Mind-side defect (E.CAL1b):** the reply opened with "Nothing is scheduled for this week" before saying the calendar went unread.
+
+## E.CAL1b — PREREG + RESULT: what could not be read comes first
+
+**What is built:** when the desktop calendar can't be read, the line after "Today is …" reads: "The desktop calendar could not be read, so what is on it is unknown -- say that first. Only the reminders I keep are below." The sections below it are scoped too ("My reminders, next N days:" / "No reminders of mine in the next N days, and none open."). Nothing in the tool's text may call the week empty.
+
+**Result:** PASS. The `upcoming_reads_the_desktop_calendar` failure case asserts the second line and that no "Nothing" appears. Mutants killed (2/2): the empty-branch scoping removed; the old wording restored.
+
+## E.ACK1 — amendment (before any code ran) and RESULT
+
+**Amendment:**
+- "yes", "yep", "sure" and "fine" are removed from the word list: they answer a question, and blocking them would block a confirmed action.
+- An acknowledgement that answers a question counts as an answer: if the Mind's last reply ended in "?", "ok" runs as before.
+- An empty message is not an acknowledgement. An emoji-only one is.
+
+**Result:** PASS.
+- `an_acknowledgement_runs_no_tools`:
+  - "ok" after a reminder reply → no task, and no schemas offered;
+  - "ok, remind me in 2 minutes to stretch" → 1 task;
+  - "ok" after "Want me to remind you…?" → 1 task;
+  - a model that calls `add_reminder` though it was offered no tools → not run;
+  - the word lists hold as preregistered (amended).
+- Mutants killed (4/4): the schemas left on; the not-sent guard removed; `bare_ack` always false; the question exception removed.
+- The first run of the guard mutant SURVIVED: the scripted model plays calls only when offered tools. An "insisting" backend was added, and the mutant is killed since.
+
+## E.NOTICE1 A3 — RESULT (Windows)
+
+**PASS.**
+- New tests: 6 in mind-core `notice_sender` (15 there in all).
+- Mutants killed (4/4): the 24 h filter removed; refused treated as later; the hold not gated; the feature check always true.
+- **Store change:** `lease_notices_matching` sees each candidate's id, kind and created time. `lease_notices_where` now delegates to it, with behaviour unchanged.
+- **mind-core:** `mind-spec` moved from dev-dependencies to dependencies (the payload names the notice kind).
+- The harness wiring (attach, `feedback_ack` on poll, the send pass while idle) is `cfg(unix)`: it first compiles on staging.
+
+**Windows suite (A3 + E.ACK1 + E.CAL1b):** 2586 passed, 0 failed.

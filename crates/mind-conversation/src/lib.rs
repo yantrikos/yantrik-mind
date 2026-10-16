@@ -2048,6 +2048,31 @@ pub(crate) fn single_request(text: &str) -> bool {
     !t.contains('?') && ![" and ", " then ", " also ", " plus "].iter().any(|w| t.contains(w))
 }
 
+/// E.ACK1 (541: "ok" set the last reminder again, and the reply did not say so): a message that
+/// only acknowledges -- at most three words, every one of them an acknowledgement. "yes" and "sure"
+/// answer something and are not here; "ok, remind me at 5" has other words and is not bare.
+pub(crate) fn bare_ack(text: &str) -> bool {
+    const ACK: [&str; 15] =
+        ["ok", "okay", "k", "thanks", "thank", "you", "ty", "got", "it", "cool", "great", "nice", "alright", "perfect", "awesome"];
+    let t = text.to_lowercase();
+    let words: Vec<&str> = t
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let only_marks = t.chars().all(|c| !c.is_alphanumeric());
+    if only_marks {
+        // "👍", "!" -- nothing asked; an empty message is not an acknowledgement.
+        return t.trim().chars().any(|c| !c.is_ascii());
+    }
+    words.len() <= 3 && words.iter().all(|w| ACK.contains(w))
+}
+
+/// E.ACK1: did the Mind's last reply ask the person something? Then "ok" answers it.
+pub(crate) fn last_reply_asked(recent: &[(String, String)]) -> bool {
+    recent.iter().rev().find(|(r, _)| r == "assistant").is_some_and(|(_, t)| t.trim_end().ends_with('?'))
+}
+
 /// E.LOOP13: one ask, question or not -- no joining word. The read-side twin of `single_request`
 /// (a read answers a question, so a "?" does not make it two).
 pub(crate) fn one_ask(text: &str) -> bool {
@@ -7041,11 +7066,14 @@ impl ConversationEngine {
             )?;
             if q.fresh {
                 fresh += 1;
-                // E.REM2: said on the next reply too -- a delivery the desktop has today.
-                let at = chrono::DateTime::from_timestamp_millis(due as i64)
-                    .map(|d| d.with_timezone(local_now().offset()).format("%H:%M").to_string())
-                    .unwrap_or_default();
-                self.hold_for_next_turn(&format!("\u{23f0} Reminder: {} (due {at})", t.description.trim()));
+                // E.REM2: said on the next reply too -- a delivery the desktop has today. E.NOTICE1
+                // A3: not where the notice itself reaches the person, or it is said twice.
+                if !self.unprompted_delivery() {
+                    let at = chrono::DateTime::from_timestamp_millis(due as i64)
+                        .map(|d| d.with_timezone(local_now().offset()).format("%H:%M").to_string())
+                        .unwrap_or_default();
+                    self.hold_for_next_turn(&format!("\u{23f0} Reminder: {} (due {at})", t.description.trim()));
+                }
             }
             // E.REM2 (541: past-due reminders stayed open for hours, blocked a new one with the same
             // text, and were read as tomorrow's): a reminder that came due has done its job.
@@ -7061,12 +7089,27 @@ impl ConversationEngine {
         lease_ms: u64,
         limit: usize,
     ) -> anyhow::Result<Vec<mind_recipes::LeasedNotice>> {
-        self.notice_engine()?.lease_notices_of_kinds(
+        self.lease_obligation_notices_except(now_ms, lease_ms, limit, &Default::default())
+    }
+
+    /// E.NOTICE1 A3: the obligation notices queued within the catch-up window, except those the
+    /// desktop refused. One queued longer ago is never sent: 541's backlog would arrive as a flood
+    /// of cards for things long past.
+    pub fn lease_obligation_notices_except(
+        &self,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+        refused: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<Vec<mind_recipes::LeasedNotice>> {
+        self.notice_engine()?.lease_fresh_notices_of_kinds(
             Self::NOTICE_OPERATOR,
             now_ms,
             lease_ms,
             limit,
             &Self::OBLIGATION_KINDS,
+            now_ms.saturating_sub(Self::REMINDER_CATCH_UP_MS),
+            refused,
         )
     }
 
@@ -13766,6 +13809,8 @@ Open reminders you're carrying for them:",
             .recent_messages(self.recent_window, &ctx)
             .await
             .unwrap_or_default();
+        // E.ACK1: an acknowledgement asks for nothing -- no tool runs, the model only replies.
+        let ack_only = bare_ack(user_text) && !last_reply_asked(&recent);
         // MEASURED 2026-08-04 (`ym prompt_audit`): this block was 53.3% of every loop prompt —
         // 16,899 B, of which 15,650 was the mind's OWN long replies (14 assistant messages vs 6 user
         // messages totalling 735 B; the largest single reply 6,253 B). All of it was re-sent on each
@@ -13889,6 +13934,9 @@ Open reminders you're carrying for them:",
         } else {
             schemas
         };
+        if ack_only {
+            schemas.clear();
+        }
         // WHAT THE MODEL ACTUALLY SEES. Set YM_DUMP_TOOLS=/path to write this turn's rendered tool
         // surface there. Built after chasing "the mind says it has no market-data tool" through four
         // wrong theories — enriched wording, pinning, a poisoned sibling plugin, the wrong endpoint —
@@ -14878,7 +14926,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let restated = (tool == "remember")
                 .then(|| tool_catalog::read_arg(&tool, &args, "text"))
                 .and_then(|t| already_remembered(&t, &remembered_this_turn).map(str::to_string));
-            let not_sent = if tool == "drop_reminder" && reminder_set_this_turn && !crate::followthrough::is_stop_tracking(user_text) {
+            let not_sent = if ack_only {
+                // E.ACK1: they only acknowledged; nothing they said asks for this.
+                eprintln!("[agent] step {step}: {tool} on an acknowledgement \u{2014} not sent");
+                Some("(they only acknowledged -- there is nothing to do; reply briefly)".to_string())
+            } else if tool == "drop_reminder" && reminder_set_this_turn && !crate::followthrough::is_stop_tracking(user_text) {
                 // E.LOOP12: the reminder this turn set stays -- the person asked for it, not for its end.
                 eprintln!("[agent] step {step}: drop_reminder after setting one this turn \u{2014} not sent");
                 Some("(you set that reminder a moment ago in this turn and they asked for it -- it stays; nothing was dropped. Answer now.)".to_string())

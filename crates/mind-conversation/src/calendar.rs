@@ -123,14 +123,26 @@ impl super::ConversationEngine {
         let calendar = match &desk {
             Some(Ok(lines)) if !lines.is_empty() => format!("\nOn your calendar:{}", lines.iter().map(|l| format!("\n- {l}")).collect::<String>()),
             Some(Ok(_)) => "\nOn your calendar: nothing.".to_string(),
-            Some(Err(())) => "\n(the desktop calendar could not be read)".to_string(),
+            // E.CAL1b (541: "Nothing is scheduled for this week", then the calendar went unread):
+            // what could not be read comes first, and nothing below may be called the whole week.
+            Some(Err(())) => "\nThe desktop calendar could not be read, so what is on it is unknown -- say that first. \
+Only the reminders I keep are below."
+                .to_string(),
             None => String::new(),
         };
+        let unread = matches!(desk, Some(Err(())));
         if spine.is_empty() && undated.is_empty() {
+            if unread {
+                return format!("{today}{calendar}\nNo reminders of mine in the next {days} days, and none open.");
+            }
             let other = if desk.is_some() { "Nothing else" } else { "Nothing" };
             return format!("{today}{calendar}\n{other} in the next {days} days, and no open reminders.");
         }
-        let mut out = format!("{today}{calendar}\nNext {days} days:");
+        let mut out = if unread {
+            format!("{today}{calendar}\nMy reminders, next {days} days:")
+        } else {
+            format!("{today}{calendar}\nNext {days} days:")
+        };
         if spine.is_empty() {
             out.push_str(" nothing dated.");
         }

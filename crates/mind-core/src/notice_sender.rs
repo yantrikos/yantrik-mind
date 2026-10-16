@@ -13,35 +13,126 @@ pub(crate) const NOTICE_LEASE_MS: u64 = 60_000;
 /// How many notices one pass sends at most.
 pub(crate) const NOTICE_BATCH: usize = 10;
 
+/// What the desktop said to one notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Stored {
+    /// On its disk (a duplicate id too: it already was).
+    Kept,
+    /// Not now: send nothing more for this many seconds, or retry on the next pass.
+    Later(Option<u64>),
+    /// Never: this notice is not sent again.
+    Refused(String),
+}
+
 /// Where an obligation notice is stored for the person: the desktop's inbox.
 pub(crate) trait NoticeSink {
-    /// Store one notice durably. `Ok(true)` only once the desktop said it stored this notice id;
-    /// anything else leaves it to be sent again.
+    /// Store one notice durably. `Kept` only once the desktop said it stored this notice id; an
+    /// error leaves it to be sent again.
     fn store(
         &self,
         notice: &mind_recipes::LeasedNotice,
-    ) -> impl std::future::Future<Output = anyhow::Result<bool>> + Send;
+    ) -> impl std::future::Future<Output = anyhow::Result<Stored>> + Send;
 }
 
-/// One send pass at `now_ms`: lease the obligation notices, store each, and close the ones the
-/// desktop kept. Returns (delivered, left for a retry).
+/// What one send pass did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Pass {
+    pub(crate) delivered: usize,
+    /// Left for a retry once its lease runs out.
+    pub(crate) retry: usize,
+    pub(crate) refused: usize,
+    /// The desktop asked for nothing more for this many seconds.
+    pub(crate) wait_secs: Option<u64>,
+}
+
+/// One send pass at `now_ms`: lease the obligation notices (none the desktop refused, none too
+/// old), store each, and close the ones the desktop kept. A "not now" ends the pass.
 pub(crate) async fn send_obligations<S: NoticeSink>(
     conv: &ConversationEngine,
     sink: &S,
     now_ms: u64,
-) -> anyhow::Result<(usize, usize)> {
-    let leased = conv.lease_obligation_notices(now_ms, NOTICE_LEASE_MS, NOTICE_BATCH)?;
-    let (mut delivered, mut retry) = (0, 0);
+    refused: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Pass> {
+    let leased = conv.lease_obligation_notices_except(now_ms, NOTICE_LEASE_MS, NOTICE_BATCH, refused)?;
+    let mut pass = Pass::default();
     for n in leased {
         match sink.store(&n).await {
-            Ok(true) => {
+            Ok(Stored::Kept) => {
                 conv.ack_notice_delivered(&n.notice_id, &n.lease_id, now_ms)?;
-                delivered += 1;
+                pass.delivered += 1;
             }
-            Ok(false) | Err(_) => retry += 1,
+            Ok(Stored::Refused(why)) => {
+                eprintln!("[notice] the desktop refused {}: {why}", n.notice_id);
+                refused.insert(n.notice_id.clone());
+                pass.refused += 1;
+            }
+            Ok(Stored::Later(wait)) => {
+                pass.retry += 1;
+                if wait.is_some() {
+                    pass.wait_secs = wait;
+                    break;
+                }
+            }
+            Err(_) => pass.retry += 1,
         }
     }
-    Ok((delivered, retry))
+    Ok(pass)
+}
+
+/// E.NOTICE1 A3: the feature an attach answer names when its desktop keeps notices.
+pub(crate) const NOTICE_INBOX: &str = "notice_inbox_v1";
+
+/// Whether a `harness.attach` answer says this desktop keeps notices.
+pub(crate) fn takes_notices(attach: &serde_json::Value) -> bool {
+    attach["features"].as_array().is_some_and(|f| f.iter().any(|x| x.as_str() == Some(NOTICE_INBOX)))
+}
+
+/// A leased obligation notice as `harness.notice` carries it (yantrik-os docs/harness.md).
+pub(crate) fn notice_payload(n: &mind_recipes::LeasedNotice) -> serde_json::Value {
+    let reminder = n.kind == mind_spec::NoticeKind::Reminder;
+    let text = n.text.trim();
+    let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
+    let first = first.trim();
+    let first = if reminder { first.strip_prefix("Reminder:").map(str::trim).unwrap_or(first) } else { first };
+    let title: String = first.chars().take(80).collect();
+    serde_json::json!({
+        "notice_id": n.notice_id,
+        "family": if reminder { "reminder" } else { "delegated" },
+        "title": title,
+        "body": rest.trim(),
+        "why": if reminder { "You asked me to remind you." } else { "You handed this to me." },
+        "attention": if reminder { "interrupt" } else { "inbox" },
+    })
+}
+
+/// The desktop's answer to `harness.notice`. Anything it did not say plainly is "not now".
+pub(crate) fn read_answer(answer: &serde_json::Value) -> Stored {
+    if answer["stored"].as_bool() == Some(true) {
+        return Stored::Kept;
+    }
+    if let Some(why) = answer.get("refused").filter(|r| !r.is_null()) {
+        let why = why.as_str().map(str::to_string).unwrap_or_else(|| why.to_string());
+        return Stored::Refused(why);
+    }
+    Stored::Later(answer["retry_after_secs"].as_u64())
+}
+
+/// The highest feedback `seq` a poll answer carries, to ack on the next poll; each entry is
+/// journalled (acting on it is Stage B).
+pub(crate) fn feedback_seen(poll: &serde_json::Value) -> Option<u64> {
+    let entries = poll["notice_feedback"].as_array()?;
+    let mut top = None;
+    for e in entries {
+        eprintln!(
+            "[notice] feedback: {} on {}",
+            e["kind"].as_str().unwrap_or("?"),
+            e["notice_id"].as_str().unwrap_or("?")
+        );
+        if let Some(seq) = e["seq"].as_u64() {
+            top = top.max(Some(seq));
+        }
+    }
+    top
 }
 
 #[cfg(test)]
@@ -75,10 +166,18 @@ mod tests {
         got: Mutex<Vec<String>>,
     }
     impl NoticeSink for Desk {
-        async fn store(&self, n: &mind_recipes::LeasedNotice) -> anyhow::Result<bool> {
+        async fn store(&self, n: &mind_recipes::LeasedNotice) -> anyhow::Result<Stored> {
             self.got.lock().unwrap().push(n.text.clone());
-            Ok(self.keeps)
+            Ok(if self.keeps { Stored::Kept } else { Stored::Later(None) })
         }
+    }
+
+    fn pass(delivered: usize, retry: usize) -> Pass {
+        Pass { delivered, retry, ..Default::default() }
+    }
+
+    async fn send(conv: &ConversationEngine, desk: &Desk, now: u64) -> Pass {
+        send_obligations(conv, desk, now, &mut Default::default()).await.unwrap()
     }
 
     const HOUR: u64 = 3_600_000;
@@ -157,13 +256,13 @@ mod tests {
         conv.queue_due_reminders_at(now).await.unwrap();
 
         let silent = Desk { keeps: false, got: Mutex::new(Vec::new()) };
-        assert_eq!(send_obligations(&conv, &silent, now).await.unwrap(), (0, 1));
+        assert_eq!(send(&conv, &silent, now).await, pass(0, 1));
         // Still under the first lease: nothing to send.
-        assert_eq!(send_obligations(&conv, &silent, now + 1_000).await.unwrap(), (0, 0));
+        assert_eq!(send(&conv, &silent, now + 1_000).await, pass(0, 0));
         let desk = Desk { keeps: true, got: Mutex::new(Vec::new()) };
         // After the lease runs out it is sent again, and this time kept.
-        assert_eq!(send_obligations(&conv, &desk, now + NOTICE_LEASE_MS).await.unwrap(), (1, 0));
-        assert_eq!(send_obligations(&conv, &desk, now + 10 * NOTICE_LEASE_MS).await.unwrap(), (0, 0));
+        assert_eq!(send(&conv, &desk, now + NOTICE_LEASE_MS).await, pass(1, 0));
+        assert_eq!(send(&conv, &desk, now + 10 * NOTICE_LEASE_MS).await, pass(0, 0));
         assert_eq!(desk.got.lock().unwrap().len(), 1);
     }
 
@@ -251,7 +350,138 @@ mod tests {
         let (conv, _mem) = engine();
         conv.queue_notice(mind_observability::DeliveryKind::Verdict, "A prediction resolved").unwrap();
         let desk = Desk { keeps: true, got: Mutex::new(Vec::new()) };
-        assert_eq!(send_obligations(&conv, &desk, crate::telegram::now_ms()).await.unwrap(), (0, 0));
+        assert_eq!(send(&conv, &desk, crate::telegram::now_ms()).await, pass(0, 0));
         assert!(desk.got.lock().unwrap().is_empty());
+    }
+
+    /// A desktop that answers each send from a script, recording what it was sent.
+    struct Scripted {
+        answers: Mutex<Vec<Stored>>,
+        got: Mutex<Vec<serde_json::Value>>,
+    }
+    impl NoticeSink for Scripted {
+        async fn store(&self, n: &mind_recipes::LeasedNotice) -> anyhow::Result<Stored> {
+            self.got.lock().unwrap().push(notice_payload(n));
+            let mut a = self.answers.lock().unwrap();
+            Ok(if a.is_empty() { Stored::Kept } else { a.remove(0) })
+        }
+    }
+
+    /// E.NOTICE1 A3: the attach answer is read for the one feature, and nothing else turns it on.
+    #[test]
+    fn the_inbox_is_used_only_where_the_desktop_says_it_keeps_notices() {
+        assert!(takes_notices(&serde_json::json!({"session": "s1", "features": ["notice_inbox_v1"]})));
+        assert!(takes_notices(&serde_json::json!({"features": ["x", "notice_inbox_v1"]})));
+        assert!(!takes_notices(&serde_json::json!({"session": "s1"})));
+        assert!(!takes_notices(&serde_json::json!({"features": ["notice_inbox_v2"]})));
+        assert!(!takes_notices(&serde_json::json!({"features": "notice_inbox_v1"})));
+    }
+
+    /// E.NOTICE1 A3: what the desktop is sent for a reminder and for a delegated result.
+    #[test]
+    fn a_notice_is_sent_as_the_desktop_reads_it() {
+        let leased = |kind, text: &str| mind_recipes::LeasedNotice {
+            notice_id: "notice:abc".into(),
+            lease_id: "l".into(),
+            lease_until_ms: 0,
+            kind,
+            text: text.into(),
+            created_ms: 0,
+        };
+        let r = notice_payload(&leased(mind_spec::NoticeKind::Reminder, "Reminder: Stretch"));
+        assert_eq!(
+            r,
+            serde_json::json!({"notice_id": "notice:abc", "family": "reminder", "title": "Stretch", "body": "",
+                               "why": "You asked me to remind you.", "attention": "interrupt"})
+        );
+        let long = format!("Research done: {}\nbtrfs has snapshots; ext4 is simpler.", "x".repeat(100));
+        let d = notice_payload(&leased(mind_spec::NoticeKind::Delegated, &long));
+        assert_eq!(d["family"], "delegated");
+        assert_eq!(d["attention"], "inbox");
+        assert_eq!(d["why"], "You handed this to me.");
+        assert_eq!(d["title"].as_str().unwrap().chars().count(), 80);
+        assert_eq!(d["body"], "btrfs has snapshots; ext4 is simpler.");
+    }
+
+    /// E.NOTICE1 A3: the desktop's answers, as the sender acts on them.
+    #[test]
+    fn the_desktops_answers_are_read_as_kept_later_or_refused() {
+        use serde_json::json;
+        assert_eq!(read_answer(&json!({"stored": true, "notice_id": "n"})), Stored::Kept);
+        assert_eq!(read_answer(&json!({"stored": true, "duplicate": true})), Stored::Kept);
+        assert_eq!(read_answer(&json!({"stored": false, "retry_after_secs": 3600, "why": "20 an hour"})), Stored::Later(Some(3600)));
+        assert_eq!(read_answer(&json!({"stored": false, "refused": "unknown family"})), Stored::Refused("unknown family".into()));
+        assert_eq!(read_answer(&json!({"error": "huh"})), Stored::Later(None));
+    }
+
+    /// E.NOTICE1 A3: kept is delivered once; refused is never sent again while a fresh notice still
+    /// goes; "not now" ends the pass and leaves the notice queued; one queued over a day ago is not sent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_sender_acts_on_each_answer() {
+        let (conv, mem) = engine();
+        let now = 10_000 * HOUR;
+        mem.add_task("Stretch", "medium", Some(now - HOUR)).await.unwrap();
+        mem.add_task("Water the plants", "medium", Some(now - 2 * HOUR)).await.unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        let mut refused = std::collections::HashSet::new();
+
+        // One refused, one put off: the pass ends at the "not now".
+        let desk = Scripted { answers: Mutex::new(vec![Stored::Refused("no".into()), Stored::Later(Some(600))]), got: Mutex::new(Vec::new()) };
+        let p = send_obligations(&conv, &desk, now, &mut refused).await.unwrap();
+        assert_eq!(p, Pass { delivered: 0, retry: 1, refused: 1, wait_secs: Some(600) });
+        let first = desk.got.lock().unwrap()[0]["notice_id"].as_str().unwrap().to_string();
+        assert!(refused.contains(&first));
+
+        // Later: the refused one is skipped, the other is kept and closed.
+        let p = send_obligations(&conv, &desk, now + NOTICE_LEASE_MS, &mut refused).await.unwrap();
+        assert_eq!(p, pass(1, 0));
+        assert_eq!(desk.got.lock().unwrap().len(), 3);
+        assert_ne!(desk.got.lock().unwrap()[2]["notice_id"].as_str().unwrap(), first, "the refused notice was sent again");
+        let p = send_obligations(&conv, &desk, now + 2 * NOTICE_LEASE_MS, &mut refused).await.unwrap();
+        assert_eq!(p, pass(0, 0), "a kept notice was sent again");
+
+        // A notice queued over a day before the pass is never sent.
+        let (conv, mem) = engine();
+        mem.add_task("Check the oven", "medium", Some(now - HOUR)).await.unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        let desk = Scripted { answers: Mutex::new(Vec::new()), got: Mutex::new(Vec::new()) };
+        let late = now + conv_catch_up() + 3_600_000;
+        assert_eq!(send_obligations(&conv, &desk, late, &mut Default::default()).await.unwrap(), pass(0, 0));
+        assert!(desk.got.lock().unwrap().is_empty(), "a day-old notice was sent");
+        assert_eq!(send_obligations(&conv, &desk, now + 1, &mut Default::default()).await.unwrap(), pass(1, 0), "control");
+    }
+
+    fn conv_catch_up() -> u64 {
+        ConversationEngine::REMINDER_CATCH_UP_MS
+    }
+
+    /// E.NOTICE1 A3: where the reminder reaches the person as a card, it is not said again in the
+    /// next reply; where it cannot, it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_with_a_card_is_not_also_said_in_the_reply() {
+        let (conv, mem) = engine();
+        let now = crate::telegram::now_ms();
+        conv.set_unprompted_delivery(true);
+        mem.add_task("Stretch", "medium", Some(now - 60_000)).await.unwrap();
+        assert_eq!(conv.queue_due_reminders_at(now).await.unwrap(), 1);
+        assert!(conv.take_held_notes().is_empty(), "said twice");
+        assert_eq!(conv.lease_obligation_notices(now, NOTICE_LEASE_MS, 10).unwrap().len(), 1, "no card either");
+        let (conv, mem) = engine();
+        mem.add_task("Stretch", "medium", Some(now - 60_000)).await.unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        assert_eq!(conv.take_held_notes().len(), 1, "control: no card, so the reply says it");
+    }
+
+    /// E.NOTICE1 A3: the feedback is acked up to the highest seq a poll carried.
+    #[test]
+    fn feedback_is_acked_to_its_highest_seq() {
+        let poll = serde_json::json!({"notice_feedback": [
+            {"seq": 7, "notice_id": "notice:a", "kind": "not_now"},
+            {"seq": 9, "notice_id": "notice:b", "kind": "useful"},
+            {"seq": 8, "notice_id": "notice:c", "kind": "dismissed"}
+        ]});
+        assert_eq!(feedback_seen(&poll), Some(9));
+        assert_eq!(feedback_seen(&serde_json::json!({"turn_id": 3})), None);
+        assert_eq!(feedback_seen(&serde_json::json!({"notice_feedback": []})), None);
     }
 }

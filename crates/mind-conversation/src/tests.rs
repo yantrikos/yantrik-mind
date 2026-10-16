@@ -17480,6 +17480,84 @@ mod desktop_consent_and_stall_wiring {
         assert!(open.iter().any(|t| t.description.contains("Drink water")), "the reminder set this turn was dropped: {open:?}");
     }
 
+    /// E.ACK1: a model that plays its script whether or not it was offered tools.
+    struct Insists {
+        inner: SchemasSeen,
+    }
+    impl LLMBackend for Insists {
+        fn chat(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let any = [serde_json::json!({"type": "function", "function": {"name": "anything"}})];
+            self.inner.chat(m, c, Some(t.filter(|t| !t.is_empty()).unwrap_or(&any)))
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "insists"
+        }
+    }
+
+    /// E.ACK1: an "ok" turn whose model calls `add_reminder` anyway: (tasks set, schemas offered).
+    async fn ack_turn(ask: &str, last_reply: Option<&str>) -> (usize, Vec<Vec<String>>) {
+        let names = Arc::new(StdMutex::new(Vec::new()));
+        let steps = vec![
+            Step::Call("add_reminder", serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})),
+            Step::Say("Okay."),
+        ];
+        let inner = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(SchemasSeen { inner, names: names.clone() });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        if let Some(said) = last_reply {
+            mem.append_message("user", "remind me in 2 minutes to stretch").await.unwrap();
+            mem.append_message("assistant", said).await.unwrap();
+        }
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let _ = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await;
+        let set = mem.list_tasks(false).await.unwrap().len();
+        let names = names.lock().unwrap().clone();
+        (set, names)
+    }
+
+    /// E.ACK1 (541: "ok" set the last reminder again and the reply did not say so): an
+    /// acknowledgement runs no tool and is offered none; one with a request in it, or one answering
+    /// the Mind's question, runs as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_acknowledgement_runs_no_tools() {
+        let (set, offered) = ack_turn("ok", Some("Reminder set: \"Stretch\" \u{2014} in 2 minutes.")).await;
+        assert_eq!(set, 0, "an \"ok\" set a reminder");
+        assert!(offered.is_empty(), "an \"ok\" was offered tools: {offered:?}");
+        let (set, offered) = ack_turn("ok, remind me in 2 minutes to stretch", None).await;
+        assert_eq!(set, 1, "a request after \"ok\" was not run");
+        assert!(!offered.is_empty());
+        let (set, _) = ack_turn("ok", Some("Want me to remind you in 2 minutes to stretch?")).await;
+        assert_eq!(set, 1, "an \"ok\" answering the Mind's question was not run");
+
+        // A model that calls the tool though it was offered none (written in its text, say) is not obeyed.
+        let names = Arc::new(StdMutex::new(Vec::new()));
+        let steps = vec![
+            Step::Call("add_reminder", serde_json::json!({"text": "Stretch", "when": "in 2 minutes"})),
+            Step::Say("Okay."),
+        ];
+        let inner = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(Insists { inner: SchemasSeen { inner, names } });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let _ = conv.agent_loop_for_eval("ok", &TurnIdentity::primary()).await;
+        assert_eq!(mem.list_tasks(false).await.unwrap().len(), 0, "a call on an \"ok\" was run");
+
+        for t in ["ok", "Ok.", "thanks!", "got it", "\u{1f44d}", "thank you", "Cool, thanks", "okay!!"] {
+            assert!(crate::bare_ack(t), "{t}");
+        }
+        for t in ["ok remind me at 5", "thanks, what's the weather?", "ok then set it again", "yes", "sure", "", "?", "ok ok ok ok"] {
+            assert!(!crate::bare_ack(t), "{t}");
+        }
+    }
+
     /// E.HELD1 (541: "thanks" researched the topic again): a result handed over on a turn is in that
     /// turn's prompt, and the reply still carries it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17574,7 +17652,10 @@ mod desktop_consent_and_stall_wiring {
         assert!(out.contains("Trip reminder -- Dallas tomorrow"), "{out}");
         assert_eq!(left, 0, "start_service once, then list_events again");
         let (out, _) = upcoming_with_desktop(vec!["something unexpected"]).await;
-        assert!(out.contains("(the desktop calendar could not be read)"), "{out}");
+        // E.CAL1b: what could not be read comes first, and nothing below is called the whole week.
+        let after_today = out.lines().nth(1).unwrap_or("");
+        assert!(after_today.starts_with("The desktop calendar could not be read") && after_today.contains("say that first"), "{out}");
+        assert!(out.contains("No reminders of mine in the next") && !out.contains("Nothing"), "{out}");
     }
 
     /// E.SPINE1: the switch takes the ambient upcoming blocks out of the turn's prompt.

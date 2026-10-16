@@ -62,6 +62,12 @@ const COMPLETE: &str = "harness.complete";
 const EVENT: &str = "harness.event";
 #[cfg_attr(not(unix), allow(dead_code))]
 const FAIL: &str = "harness.fail";
+/// E.NOTICE1 A3 (yantrik-os #831): a card for the person, outside any turn.
+#[cfg(unix)]
+const NOTICE: &str = "harness.notice";
+/// E.NOTICE1 A3: how often, while no turn runs, waiting obligation notices are sent.
+#[cfg(unix)]
+const NOTICE_PERIOD: Duration = Duration::from_secs(15);
 
 /// How long to wait after an empty poll. The OS's `poll` answers at once either way, so this is
 /// the client's own pacing, and it is the interval the protocol documents.
@@ -533,8 +539,11 @@ async fn run(mem: MemoryHandle, conv: Arc<ConversationEngine>, detail: String) {
             timeout,
         )
         .await;
-        let session = match attached {
-            Ok(reply) => reply["session"].as_str().unwrap_or_default().to_string(),
+        let (session, inbox) = match attached {
+            Ok(reply) => (
+                reply["session"].as_str().unwrap_or_default().to_string(),
+                crate::notice_sender::takes_notices(&reply),
+            ),
             Err(e) => {
                 say(format!("could not attach at {address}: {e}"));
                 tokio::time::sleep(retry_after(&e)).await;
@@ -544,11 +553,35 @@ async fn run(mem: MemoryHandle, conv: Arc<ConversationEngine>, detail: String) {
         say(format!(
             "attached to the desktop as `{ID}` (session {session}) — choose `{NAME}` in the mind picker"
         ));
+        // E.NOTICE1 A3: this desktop keeps notices, so a reminder or a finished job can reach the
+        // person between turns -- and a ping may be promised. Never cleared: the outbox is durable,
+        // and what waits is sent when a desktop that keeps notices is back.
+        if inbox {
+            conv.set_unprompted_delivery(true);
+            eprintln!("[harness] the desktop keeps notices: reminders and finished jobs go to its inbox");
+        }
 
         // ── Answer, until the desktop goes away ──
-        let why = serve(&mem, &conv, &address, &session, timeout).await;
+        let why = serve(&mem, &conv, &address, &session, timeout, inbox).await;
         say("lost the desktop; re-attaching".to_string());
         tokio::time::sleep(retry_after(&why)).await;
+    }
+}
+
+/// E.NOTICE1 A3: the desktop's inbox, reached by `harness.notice` on this session.
+#[cfg(unix)]
+struct HarnessSink<'a> {
+    address: &'a str,
+    session: &'a str,
+    timeout: Duration,
+}
+
+#[cfg(unix)]
+impl crate::notice_sender::NoticeSink for HarnessSink<'_> {
+    async fn store(&self, n: &mind_recipes::LeasedNotice) -> anyhow::Result<crate::notice_sender::Stored> {
+        let params = serde_json::json!({ "session": self.session, "notice": crate::notice_sender::notice_payload(n) });
+        let reply = call(self.address.to_string(), NOTICE, params, self.timeout).await.map_err(|e| anyhow::anyhow!(e))?;
+        Ok(crate::notice_sender::read_answer(&reply))
     }
 }
 
@@ -560,7 +593,13 @@ async fn serve(
     address: &str,
     session: &str,
     timeout: Duration,
+    inbox: bool,
 ) -> String {
+    // E.NOTICE1 A3: the feedback seen and not yet acked, the notices this desktop refused, and
+    // when the next send pass may run.
+    let mut feedback_ack: Option<u64> = None;
+    let mut refused = std::collections::HashSet::new();
+    let mut next_send = std::time::Instant::now();
     // One setup conversation per session: attaching again starts it over, which is what a person
     // would expect after the desktop restarted.
     let first_run = NEEDS_SETUP.load(std::sync::atomic::Ordering::Relaxed).then(|| {
@@ -577,7 +616,13 @@ async fn serve(
     loop {
         let polled = match held.pop_front() {
             Some(t) => Ok(t),
-            None => call(address.to_string(), POLL, serde_json::json!({ "session": session }), timeout).await,
+            None => {
+                let mut params = serde_json::json!({ "session": session });
+                if let Some(seq) = feedback_ack {
+                    params["feedback_ack"] = serde_json::json!(seq);
+                }
+                call(address.to_string(), POLL, params, timeout).await
+            }
         };
         let turn = match polled
         {
@@ -592,7 +637,27 @@ async fn serve(
             }
         };
 
+        if let Some(seq) = crate::notice_sender::feedback_seen(&turn) {
+            feedback_ack = feedback_ack.max(Some(seq));
+        }
         let Some(turn_id) = turn["turn_id"].as_u64() else {
+            // E.NOTICE1 A3: between turns, what is owed the person goes to the desktop's inbox.
+            if inbox && std::time::Instant::now() >= next_send {
+                let sink = HarnessSink { address, session, timeout };
+                let wait = match crate::notice_sender::send_obligations(conv, &sink, crate::telegram::now_ms(), &mut refused).await {
+                    Ok(pass) => {
+                        if pass.delivered + pass.refused > 0 {
+                            eprintln!("[harness] notices: {} delivered, {} refused, {} left", pass.delivered, pass.refused, pass.retry);
+                        }
+                        pass.wait_secs.map(Duration::from_secs).unwrap_or(NOTICE_PERIOD).max(NOTICE_PERIOD)
+                    }
+                    Err(e) => {
+                        eprintln!("[harness] notices: {e:#}");
+                        NOTICE_PERIOD
+                    }
+                };
+                next_send = std::time::Instant::now() + wait;
+            }
             tokio::time::sleep(IDLE).await;
             continue;
         };

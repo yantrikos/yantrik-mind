@@ -17,7 +17,7 @@ pub mod store;
 use mind_spec::ReplanAcquisition;
 use store::HorizonFailureReason;
 pub use store::{
-    ActiveHorizonRecord, LeasedNotice, NoticeAck, NoticeHistoryEntry, QueuedNotice, RecipeStore,
+    ActiveHorizonRecord, LeasedNotice, NoticeAck, NoticeCandidate, NoticeHistoryEntry, QueuedNotice, RecipeStore,
     RunRecord, ShownEngagement,
 };
 
@@ -1019,6 +1019,22 @@ impl RecipeEngine {
     ) -> anyhow::Result<Vec<LeasedNotice>> {
         self.notice_store()?
             .lease_notices_where(operator_id, now_ms, lease_ms, limit, &|k| kinds.contains(&k))
+    }
+    /// E.NOTICE1 A3: lease the given kinds queued at or after `since_ms`, except the ids in `skip`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lease_fresh_notices_of_kinds(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+        kinds: &[mind_spec::NoticeKind],
+        since_ms: u64,
+        skip: &std::collections::HashSet<String>,
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
+        self.notice_store()?.lease_notices_matching(operator_id, now_ms, lease_ms, limit, &|n| {
+            kinds.contains(&n.kind) && n.created_ms >= since_ms && !skip.contains(n.notice_id)
+        })
     }
     /// E.NOTICE1: the desktop stored a leased notice.
     pub fn ack_notice_delivered(&self, notice_id: &str, lease_id: &str, now_ms: u64) -> anyhow::Result<bool> {

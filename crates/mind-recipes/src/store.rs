@@ -207,6 +207,14 @@ pub struct LeasedNotice {
     pub created_ms: u64,
 }
 
+/// E.NOTICE1 A3: what a lease filter sees of a verified notice before it is leased.
+#[derive(Debug, Clone, Copy)]
+pub struct NoticeCandidate<'a> {
+    pub notice_id: &'a str,
+    pub kind: NoticeKind,
+    pub created_ms: u64,
+}
+
 /// L3b: one notice with its verified receipt chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoticeHistoryEntry {
@@ -3029,6 +3037,19 @@ impl RecipeStore {
         limit: usize,
         keep: &dyn Fn(NoticeKind) -> bool,
     ) -> anyhow::Result<Vec<LeasedNotice>> {
+        self.lease_notices_matching(operator_id, now_ms, lease_ms, limit, &|n| keep(n.kind))
+    }
+
+    /// E.NOTICE1 A3: lease only notices `keep` admits, seeing each one's kind, id and when it was
+    /// queued -- the desktop sender skips what it was refused and what is too old to send.
+    pub fn lease_notices_matching(
+        &self,
+        operator_id: &str,
+        now_ms: u64,
+        lease_ms: u64,
+        limit: usize,
+        keep: &dyn Fn(&NoticeCandidate<'_>) -> bool,
+    ) -> anyhow::Result<Vec<LeasedNotice>> {
         if lease_ms == 0 {
             anyhow::bail!("a notice lease needs a positive duration");
         }
@@ -3045,7 +3066,7 @@ impl RecipeStore {
             // The row and its chain are verified whole before anything is read from them; a
             // forged `shown` row cannot hide a notice, and a mutated text cannot be rendered.
             let verified = verify_notice_row(&row, operator_id)?;
-            if !keep(verified.kind) {
+            if !keep(&NoticeCandidate { notice_id: &row.notice_id, kind: verified.kind, created_ms: verified.created_ms }) {
                 continue;
             }
             let receipts = Self::load_notice_chain(&tx, &row.notice_id, operator_id)?;

@@ -17480,6 +17480,28 @@ mod desktop_consent_and_stall_wiring {
         assert!(open.iter().any(|t| t.description.contains("Drink water")), "the reminder set this turn was dropped: {open:?}");
     }
 
+    /// E.PEOPLE1 (541: about_person x3 missed a person saved minutes before): a person known only
+    /// from `remember` is answered from those memories -- for whoever may see them, and no one else.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn about_person_reads_what_was_remembered() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let me = TurnIdentity::primary();
+        let saved = conv.run_agent_tool_as("remember", &serde_json::json!({"text": "My plumber Tomasz comes on Tuesdays"}), &me).await;
+        assert!(!saved.contains("nothing to remember"), "{saved}");
+        let out = conv.run_agent_tool_as("about_person", &serde_json::json!({"name": "Tomasz"}), &me).await;
+        assert!(out.contains("Tomasz comes on Tuesdays"), "{out}");
+        assert!(!out.contains("I don't know anyone"), "{out}");
+        // A name inside another word is not this person.
+        let out = conv.run_agent_tool_as("about_person", &serde_json::json!({"name": "Tom"}), &me).await;
+        assert!(out.contains("I don't know anyone called \"Tom\""), "{out}");
+        // Another member of the household does not read the primary's own memories through it.
+        let member = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
+        let out = conv.run_agent_tool_as("about_person", &serde_json::json!({"name": "Tomasz"}), &member).await;
+        assert!(!out.contains("Tuesdays"), "a member read the primary's memory: {out}");
+    }
+
     /// E.ACK1: a model that plays its script whether or not it was offered tools.
     struct Insists {
         inner: SchemasSeen,

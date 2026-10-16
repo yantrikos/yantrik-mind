@@ -19922,3 +19922,19 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
   - the two wiring mutants (the send pass off; `feedback_ack` not sent) both fail the test;
   - mind-recipes: 105 passed, and mind-conversation: 1273 passed (both at f813fc8, unchanged since).
 - **Bundle:** yantrik-mind-7689851-linux-amd64.tar.zst, sha256 bc878bf34bcfbecc6fc16858c6c81c296a844d247438a7ba1b1d963978aa47b6
+
+## E.PEOPLE1 — PREREG: `about_person` answers from what was remembered
+
+**Why:** 541 bug 5. `about_person` was called 3 times for a person saved minutes before and said "I don't know anyone called …", while `recall` found them. `about_person` reads only the people profiles, and `remember` writes memories, never a profile.
+
+**What is built:** when no profile matches the name, `about_person` lists the speaker's beliefs and memories that contain the name as a word of its own, at most 8: "👤 <name> -- no profile yet; what you've told me: …". These are read with the same access context as `recall`. When nothing names them, the old "I don't know anyone called …" stands. A profile, when there is one, is shown as before.
+
+**Kill criteria:**
+- K1, `about_person_reads_what_was_remembered` fails:
+  - after `remember "My plumber Tomasz comes on Tuesdays"`, `about_person Tomasz` carries the fact;
+  - `about_person Tom` still says it doesn't know Tom;
+  - a household member asking about Tomasz gets no "Tuesdays".
+- K2, a mutant survives: the fallback removed; the whole-word check removed; the context swapped for an all-access audit context.
+- K3: both suites pass.
+
+**E.PEOPLE1 — RESULT: PASS (Windows).** `about_person_reads_what_was_remembered` passes. Mutants killed (3/3): the fallback removed; the whole-word check removed; an all-access context. Windows workspace: 2587 passed, 0 failed. Linux and a bundle follow with the next batch.

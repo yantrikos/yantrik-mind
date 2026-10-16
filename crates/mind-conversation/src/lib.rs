@@ -6821,6 +6821,43 @@ impl ConversationEngine {
         Ok((held, queued))
     }
 
+    /// E.PEOPLE1: what this speaker's memories say about `name`, when no profile names them --
+    /// beliefs and memories that hold the name as a word of their own, at most eight.
+    pub(crate) async fn person_from_memories(&self, name: &str, ctx: &mind_types::AccessContext) -> Option<String> {
+        let name = name.trim();
+        let key = name.to_lowercase();
+        if key.chars().filter(|c| c.is_alphanumeric()).count() < 2 {
+            return None;
+        }
+        let names_it = |text: &str| {
+            let t = text.to_lowercase();
+            t.match_indices(key.as_str()).any(|(i, _)| {
+                let before = t[..i].chars().next_back();
+                let after = t[i + key.len()..].chars().next();
+                !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+            })
+        };
+        let mut facts: Vec<String> = Vec::new();
+        if let Ok(bs) = self.memory.beliefs_matching(name, ctx).await {
+            facts.extend(bs.into_iter().map(|b| b.statement).filter(|s| names_it(s)));
+        }
+        if let Ok(rs) = self.memory.recall_typed(mind_types::RecallQuery { text: name.to_string(), top_k: 40, kind: None }, ctx).await {
+            for r in rs {
+                if names_it(&r.item.text) && !facts.contains(&r.item.text) {
+                    facts.push(r.item.text);
+                }
+            }
+        }
+        if facts.is_empty() {
+            return None;
+        }
+        facts.truncate(8);
+        Some(format!(
+            "\u{1f464} {name} -- no profile yet; what you've told me:\n{}",
+            facts.iter().map(|f| format!("  \u{2022} {f}")).collect::<Vec<_>>().join("\n")
+        ))
+    }
+
     /// E.NOTICE1 A2: a delegated job's result, as the job sites push it.
     pub fn push_delegated_result(&self, text: &str) {
         self.delegated_queue.lock().unwrap().push(text.to_string());
@@ -12769,7 +12806,19 @@ WINDOW: all-time, latest 200
             "family" | "relationships" => self.family_view().await,
             "about_person" | "person" => {
                 let n = s("name");
-                if n.is_empty() { self.family_view().await } else { self.person_about(&n).await }
+                if n.is_empty() {
+                    self.family_view().await
+                } else {
+                    let card = self.person_about(&n).await;
+                    // E.PEOPLE1 (541: about_person x3 missed a person saved minutes before, whom recall
+                    // found): `remember` keeps a person as memories, not a profile -- read those too.
+                    if card.starts_with("I don't know anyone called") {
+                        let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
+                        self.person_from_memories(&n, &ctx).await.unwrap_or(card)
+                    } else {
+                        card
+                    }
+                }
             }
             // news/headlines/track_news tools dispatch via the capability registry above.
             "see_page" | "screenshot_page" | "look_at_page" => self.see_page(&s("url"), &s("question")).await,

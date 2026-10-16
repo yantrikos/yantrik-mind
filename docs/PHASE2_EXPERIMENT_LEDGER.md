@@ -19196,3 +19196,5 @@ Second Astra pass (Jarvis framing, ~$0.18): **grounded initiative** on top of a 
   - **C:** live — delegated and machine first, then calendar and the start-of-day card, then one discovery lane.
 - **Required at the first live delivery:** a global quiet switch, per-family off, and "why you got this".
 - **Background model calls stay off** until a paired latency test passes; until then detection is deterministic and the wording comes from templates.
+
+**E.REM1c K3, Linux (staging, 272519a):** mind-conversation 1258 passed. Bundle `yantrik-mind-272519a` sha256 899effff34d8dca7712fac9d08eec65a82b3e9af92913dd3cddb235fdf26a714, for the 2a/2b rerun on Claude on 542.

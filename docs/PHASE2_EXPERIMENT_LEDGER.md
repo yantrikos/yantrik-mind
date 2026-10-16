@@ -19487,3 +19487,28 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
 - **K3:** Windows workspace 2565 passed, 0 failed. Linux follows, in a bundle with A2.
 
 **E.NOTICE1 A2 + E.LOOP10, Linux (staging, 63fe0ed):** mind-conversation passed. Bundle `yantrik-mind-63fe0ed` sha256 09376cc024dbaade1d3b44dbe99b10936c7942bbe4c59a0444bb468690dfec0a, for yantrik-os-dc's check-2 recheck and the E.LOOP10 live run on 541.
+
+## E.NOTICE1 A2 + E.LOOP10 — live results (541, 63fe0ed, qwen3.5:27b via the gateway, yantrik-os-dc, 16 Oct)
+
+**The check-2 recheck: A2 PASSES.**
+- **The ack:** 1 step, 21 s, verbatim, no compose — "On it — researching … I'll put what I find in my next reply once it's done."
+- **The job:** one gateway call (33 s, 594 out).
+- **"thanks" (~+2 min):** the reply carries the findings under "— finished while you were away —" (2,398 characters).
+- **mind_notices:** 3 rows, all queued (none delivered, as expected without A3):
+  - check 1's overdue 02:55 reminder, caught up by A1;
+  - the delegated findings, cut at 2,000 characters;
+  - one junk notice (below).
+
+**New defect (E.HELD1 below):** the "thanks" turn ran `recall` ×2 and then `research` again; egress built the query from "thanks". The reply opened with a false ack ("On it — researching "thanks"…") before the held findings, and the junk result became a Delegated notice. The model cannot see the results being handed over, because they are appended AFTER the answer.
+
+**E.LOOP10 live check: FAILS on Qwen 27B** (the research-ack half passes). No reply echoed the new sentences, but the repeats remain:
+- **L1 (remember):** 3 steps (4 calls), remember ×3 with reworded text, ended by the barren limit.
+- **L3 (remember):** 3 steps (4 calls).
+- **L4 (remind in 2 minutes):** 7 steps (8 calls):
+  - add_reminder ×5 (the guards caught the repeats), `now`, and a `drop_reminder` of the reminder it had just set;
+  - the reply was honest about alerts, then added an unasked tie-in about an overdue dentist reminder, with wrong arithmetic ("two days ago (Oct 15)" on 16 Oct). The 7-day spine's "Open reminders" put it there.
+- **Conclusion:** an instruction inside a tool result does not change this model's behaviour; only the guards stopped it. (On Claude these turns took 2 calls even before E.LOOP10.) The E.LOOP10 sentences stay — harmless, and they help a model that reads them — but they are recorded as NOT effective on Qwen 27B. The structural fix is E.LOOP11.
+
+**Other defects found:**
+- **L2 ("Remember that my bike lock code is 7741"):** the memory write-gate refused it, and the raw tool string "(refused by memory write-gate: memory was not changed)" was the WHOLE reply. A refusal needs the person's words (E.VOICE6's `person_denial` does not map it).
+- **Inconsistent with 542,** which accepted "gym locker code 3318". Either the detector differs on "lock code" against "locker code", or it is a policy question for Pranab. Investigate before asking.

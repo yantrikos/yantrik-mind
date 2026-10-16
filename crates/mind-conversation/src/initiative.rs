@@ -58,6 +58,18 @@ impl Drop for JobGuard {
     }
 }
 
+/// A task as a card names it: at most 120 characters, cut at a word with an ellipsis (541 showed
+/// "… ep": a silent mid-word cut reads as wrong data).
+pub(crate) fn short_task(task: &str) -> String {
+    let task = task.trim();
+    if task.chars().count() <= 120 {
+        return task.to_string();
+    }
+    let head: String = task.chars().take(119).collect();
+    let cut = head.rfind(' ').filter(|i| *i > 60).unwrap_or(head.len());
+    format!("{}\u{2026}", head[..cut].trim_end())
+}
+
 /// How long a delegation of this kind may run before it counts as stalled. `YM_STALL_MINUTES`
 /// overrides every kind (a drive knob, so a live check need not wait for a naturally slow job);
 /// unset, zero or unparseable keeps the defaults.
@@ -83,7 +95,7 @@ impl ConversationEngine {
         self.running_jobs.lock().unwrap_or_else(|e| e.into_inner()).push(RunningJob {
             id: id.clone(),
             kind,
-            task: task.chars().take(120).collect(),
+            task: short_task(task),
             started_ms,
         });
         JobGuard { registry: self.running_jobs.clone(), id }
@@ -137,7 +149,7 @@ impl ConversationEngine {
         for row in self.job_rows().await.into_iter().filter(|r| r.status == "running") {
             let task = if row.task.is_empty() { row.name.clone() } else { row.task.clone() };
             let kind = if row.kind.is_empty() { "delegation".to_string() } else { row.kind.clone() };
-            running.push((row.id, kind, task.chars().take(120).collect(), row.started_ms.max(0) as u64));
+            running.push((row.id, kind, short_task(&task), row.started_ms.max(0) as u64));
         }
         let mut fresh = 0;
         for (id, kind, task, started) in running {
@@ -146,19 +158,20 @@ impl ConversationEngine {
                 continue;
             }
             let minutes = ran / 60_000;
+            let spent = if minutes == 1 { "1 minute".to_string() } else { format!("{minutes} minutes") };
             let c = Candidate {
                 family: "delegated".into(),
                 trigger: format!("{kind} job running {minutes} min"),
                 evidence_refs: vec![format!("job:{id}")],
                 observed_at_ms: now_ms,
-                what_changed: format!("the {kind} job has run {minutes} minutes"),
+                what_changed: format!("the {kind} job has run {spent}"),
                 why_it_matters: "longer than this usually takes".into(),
                 next_step: "none needed; the result comes when it is done".into(),
                 useful_until_ms: now_ms + 60 * 60_000,
                 dedupe_key: format!("delegated-stalled:{id}"),
                 would_interrupt: false,
                 text: format!(
-                    "Still working on \"{task}\": {minutes} minutes in, longer than this usually takes. Nothing needs you; I'll bring the result when it's done."
+                    "Still working on \"{task}\": {spent} in, longer than this usually takes. Nothing needs you; I'll bring the result when it's done."
                 ),
             };
             if self.record_candidate(c).await {
@@ -237,6 +250,18 @@ mod init1_tests {
         for bad in ["0", "", "soon", "-3"] {
             assert_eq!(stall_ms_with("research", Some(bad)), 15 * MIN, "{bad:?}");
         }
+    }
+
+    /// 541 (db75300): "1 minutes in", and the task cut mid-word with no sign of the cut.
+    #[test]
+    fn the_card_reads_cleanly() {
+        let long = "Compare every major approach to long-term memory for language-model agents published since 2023, with the trade-offs of each one";
+        let short = short_task(long);
+        assert!(short.chars().count() <= 120 && short.ends_with('\u{2026}'), "{short}");
+        assert!(short.starts_with("Compare every major approach") && !short.ends_with(" \u{2026}"), "{short}");
+        assert_eq!(short_task("a todo app"), "a todo app");
+        let src = include_str!("initiative.rs");
+        assert!(src.contains("if minutes == 1 { \"1 minute\".to_string() }"));
     }
 
     /// A job that panics is still taken out of the registry.

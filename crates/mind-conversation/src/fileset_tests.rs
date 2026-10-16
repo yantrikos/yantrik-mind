@@ -7,6 +7,18 @@ use crate::fileset::{
     MAX_DEPTH, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES,
 };
 
+/// Tests that write a file set point `YM_WEB_DIR` at their own scratch dir. The variable is
+/// process-wide and each dir is deleted when its test ends, so two such tests interleaving wrote
+/// into a deleted dir (a_cut_generation_..., failed once in 2591): they take turns, and each one
+/// holds the lock and its dir for the whole test.
+pub(crate) fn own_web_dir(tag: &str) -> (std::sync::MutexGuard<'static, ()>, mind_types::scratch::Scratch) {
+    static WEB_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let turn = WEB_DIR.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = mind_types::scratch::dir(tag);
+    std::env::set_var("YM_WEB_DIR", dir.path());
+    (turn, dir)
+}
+
 fn e(path: &str, content: &str) -> FileEntry {
     FileEntry {
         path: path.to_string(),
@@ -792,8 +804,7 @@ mod review {
     /// The set is empty in both cases; the difference is whether there is anything to recover.
     #[test]
     fn an_all_cut_generation_is_recoverable_but_prose_still_fails() {
-        let dir = mind_types::scratch::dir("fset_allcut");
-        std::env::set_var("YM_WEB_DIR", dir.path());
+        let (_turn, _dir) = crate::fileset_tests::own_web_dir("fset_allcut");
 
         // ONE file, cut. Nothing can be written, but the brief is still buildable.
         let cut = "=== FILE: server.py
@@ -1143,8 +1154,7 @@ print('this file was cut off mid";
 
     #[test]
     fn a_cut_generation_drops_the_partial_file_and_a_complete_one_keeps_it() {
-        let dir = mind_types::scratch::dir("fset_trunc");
-        std::env::set_var("YM_WEB_DIR", dir.path());
+        let (_turn, _dir) = crate::fileset_tests::own_web_dir("fset_trunc");
         // Two files: the first is terminated by the second's marker and is therefore complete; the
         // second has no terminator, which is exactly the ambiguous case.
         let stream = "=== FILE: a.py

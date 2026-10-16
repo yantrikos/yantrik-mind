@@ -15520,6 +15520,7 @@ async fn foresight_closes_a_prediction_when_the_judge_itself_keeps_erroring() {
 /// the real publisher to prove the message it actually emits still carries it.
 #[test]
 fn the_truncation_marker_ties_the_publisher_to_the_recipe() {
+    let (_turn, _dir) = crate::fileset_tests::own_web_dir("fset_marker");
     // A file set whose LAST file is cut off mid-way, with the API reporting a length stop.
     let stream = "=== FILE: index.html\n<!doctype html>\n<p>ok</p>\n\
                      === FILE: app.js\nfunction half(";

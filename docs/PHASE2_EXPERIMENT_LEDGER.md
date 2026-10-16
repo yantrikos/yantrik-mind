@@ -20278,3 +20278,5 @@ A calendar with nothing on it, or no desktop at all, keeps today's wording.
   - The journal cuts the tool result, so the "My reminders" header was not seen directly; the pass rests on the behaviour.
 - **E.VOICE8**, "remind me in 2 minutes to stretch" (2 calls) → "Done — I'll ping you in two minutes to stretch." No non-action narration. The ping promise is valid: this OS keeps notices.
 - **Screened by `reply-grade`** (unasked_offer and contradicts_facts, the rules that passed E.GRADE1b): both replies clean, with no rule at or above 0.5.
+
+**Test flake fixed (fileset web dir):** the three tests that write a file set now take one lock and their own `YM_WEB_DIR` scratch dir for the whole test (`fileset_tests::own_web_dir`). Two of them used to point the process-wide variable at a dir deleted when the test ended, and the third inherited whichever was left. After the fix, the mind-conversation suite passed 3/3 (1278 each). The failure had shown up once, so three clean runs do not prove it is gone; the fix rests on removing the race by construction.

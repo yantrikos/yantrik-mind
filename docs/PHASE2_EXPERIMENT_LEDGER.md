@@ -20127,3 +20127,23 @@ Two judgments are decided in code, not by a model score: a reply that parses as 
 **Use:** a screen for the A/B arms, not a verdict.
 - Every tie-in flag, and every rule where the arms differ, is read before it counts.
 - The next runs' replies are held-out data: their agreement is reported before any decision rests on the grader.
+
+## E.NOTICE1 A3c + E.CAL2 — live (536731e, yantrik-os-dc, 16 Oct)
+
+- **A3c (520, OS test/batch 8b8f7f66): PASS.** After the card was delivered, "ok" (turn 925, no tools) got "Noted — nothing pending on my side. Anything you want me to pick up next?". There is no claim that the reminder is set, pending or will ping. The trailing offer is the usual Qwen extra. Transcript row 1513 is the reworded fact.
+- **E.CAL2 (541): FAIL.** The tool line was exactly as designed: `today 18:00: "Trip reminder — Dallas tomorrow"`. Qwen still answered "a trip reminder for Dallas tomorrow (Saturday, 17 Oct) at 18:00". The relative label and the quotes are not enough when the title itself carries a date word.
+
+## E.CAL2b — PREREG: a title whose date word disagrees with the event gets a note
+
+**What is built:** in `calendar_event_lines_on`, when the title contains a relative date word as a whole word (today, tonight, tomorrow, yesterday) that does not match the event's real day relative to today, the line ends with: ` -- its title says "tomorrow", but the event itself is today`. A title whose word matches its day gets no note.
+
+**Kill criteria:**
+- K1, a test fails, with today fixed at 16 Oct:
+  - "Trip reminder — Dallas tomorrow" on 16 Oct 18:00 → the line carries `its title says "tomorrow", but the event itself is today`;
+  - "Dentist tomorrow" on 17 Oct → no note;
+  - "Holiday" → no note.
+- K2, a mutant survives: the note removed; the note added even when the word matches the day.
+- K3: both suites pass.
+- **Live (541):** "What do I have coming up this week?" must not call the 18:00 event tomorrow. Graded by eye and by `reply-grade` (`contradicts_facts`).
+
+**E.CAL2b — RESULT: PASS (Windows).** Mutants killed (2/2): the note removed; the note added even when the word matches. Amendment: an absolute day reads "is on Fri 16 Oct". Windows workspace: 2590 passed, 0 failed.

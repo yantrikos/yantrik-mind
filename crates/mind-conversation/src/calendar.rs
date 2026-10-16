@@ -612,19 +612,39 @@ pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> st
         let Some(title) = e.get("title").and_then(|t| t.as_str()) else { return Err(()) };
         let start = e.get("start").and_then(|t| t.as_str()).unwrap_or("");
         let all_day = e.get("is_all_day").and_then(|v| v.as_bool()).unwrap_or(false);
-        let when = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S")
-            .map(|t| {
-                let day = match (t.date() - today).num_days() {
-                    0 => "today".to_string(),
-                    1 => "tomorrow".to_string(),
-                    _ => t.format("%a %-d %b").to_string(),
-                };
-                if all_day { day } else { format!("{day} {}", t.format("%H:%M")) }
+        let parsed = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%dT%H:%M:%S").ok();
+        let day = parsed.map(|t| match (t.date() - today).num_days() {
+            -1 => "yesterday".to_string(),
+            0 => "today".to_string(),
+            1 => "tomorrow".to_string(),
+            _ => t.format("%a %-d %b").to_string(),
+        });
+        let when = match (parsed, &day) {
+            (Some(t), Some(day)) if !all_day => format!("{day} {}", t.format("%H:%M")),
+            (_, Some(day)) => day.clone(),
+            _ => start.to_string(),
+        };
+        // E.CAL2b (541: `today 18:00: "Trip reminder -- Dallas tomorrow"` was still told as
+        // tomorrow): a title whose own date word is not the event's day says so.
+        let note = day
+            .as_deref()
+            .and_then(|day| title_day_word(title).filter(|w| *w != day && !(*w == "tonight" && day == "today")))
+            .map(|w| {
+                let day = day.as_deref().unwrap_or("");
+                let on = if ["yesterday", "today", "tomorrow"].contains(&day) { "" } else { "on " };
+                format!(" -- its title says \"{w}\", but the event itself is {on}{day}")
             })
-            .unwrap_or_else(|_| start.to_string());
-        out.push(format!("{when}: \"{title}\""));
+            .unwrap_or_default();
+        out.push(format!("{when}: \"{title}\"{note}"));
     }
     Ok(out)
+}
+
+/// E.CAL2b: the relative day word a title carries as a whole word, if any.
+fn title_day_word(title: &str) -> Option<&'static str> {
+    let lower = title.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).collect();
+    ["today", "tonight", "tomorrow", "yesterday"].into_iter().find(|w| words.contains(w))
 }
 
 #[cfg(test)]
@@ -641,7 +661,7 @@ mod cal1_tests {
         let ok = r#"Done -- Calendar -- [{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false},{"id":"e2","title":"Holiday","start":"2026-10-19T00:00:00","is_all_day":true}]"#;
         assert_eq!(
             calendar_event_lines(ok).unwrap(),
-            vec!["Fri 16 Oct 18:00: \"Trip reminder -- Dallas tomorrow\"".to_string(), "Mon 19 Oct: \"Holiday\"".to_string()]
+            vec!["Fri 16 Oct 18:00: \"Trip reminder -- Dallas tomorrow\" -- its title says \"tomorrow\", but the event itself is on Fri 16 Oct".to_string(), "Mon 19 Oct: \"Holiday\"".to_string()]
         );
         assert_eq!(calendar_event_lines("[]").unwrap(), Vec::<String>::new());
         assert!(calendar_event_lines("calendar is closed (no socket)").is_err());
@@ -649,7 +669,7 @@ mod cal1_tests {
 
         // E.CAL1c: as `yos act calendar list_events` prints it (yantrik-os #833).
         let printed = "Done \u{2014} Calendar \u{2014} 1 event in [16 Oct \u{2013} 23 Oct]\naccepted: True, settled: True\nrevision: 7\n[\n  {\n    \"id\": \"e1\",\n    \"title\": \"Trip reminder - Dallas tomorrow\",\n    \"start\": \"2026-10-16T18:00:00\",\n    \"end\": \"2026-10-16T18:30:00\",\n    \"is_all_day\": false\n  }\n]\nstate: {\"events\":2,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
-        assert_eq!(calendar_event_lines(printed).unwrap(), vec!["Fri 16 Oct 18:00: \"Trip reminder - Dallas tomorrow\"".to_string()]);
+        assert_eq!(calendar_event_lines(printed).unwrap(), vec!["Fri 16 Oct 18:00: \"Trip reminder - Dallas tomorrow\" -- its title says \"tomorrow\", but the event itself is on Fri 16 Oct".to_string()]);
         // Nothing in range: yos prints no result, and the state's `upcoming` is not this week.
         let empty = "Done \u{2014} Calendar \u{2014} no events in range\naccepted: True, settled: True\nstate: {\"events\":1,\"upcoming\":[{\"id\":\"e9\",\"title\":\"Dentist\",\"start\":\"2026-11-30T09:00:00\"}]}\n";
         assert_eq!(calendar_event_lines(empty).unwrap(), Vec::<String>::new());
@@ -661,10 +681,16 @@ mod cal1_tests {
         assert_eq!(
             calendar_event_lines_on(three, on_16).unwrap(),
             vec![
-                "today 18:00: \"Trip reminder - Dallas tomorrow\"".to_string(),
+                "today 18:00: \"Trip reminder - Dallas tomorrow\" -- its title says \"tomorrow\", but the event itself is today".to_string(),
                 "tomorrow 09:00: \"Dentist\"".to_string(),
                 "Mon 19 Oct: \"Holiday\"".to_string(),
             ]
+        );
+        // E.CAL2b: a title whose word is its day needs no note.
+        let agree = r#"[{"title":"Dentist tomorrow","start":"2026-10-17T09:00:00","is_all_day":false},{"title":"Dinner tonight","start":"2026-10-16T19:00:00","is_all_day":false}]"#;
+        assert_eq!(
+            calendar_event_lines_on(agree, on_16).unwrap(),
+            vec!["tomorrow 09:00: \"Dentist tomorrow\"".to_string(), "today 19:00: \"Dinner tonight\"".to_string()]
         );
     }
 }

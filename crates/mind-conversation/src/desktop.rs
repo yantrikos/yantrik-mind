@@ -1655,6 +1655,47 @@ pub(crate) fn duplicate_page_note(path: &str, text: &str, saved: &[(String, Stri
     ))
 }
 
+/// E.CLAIM2 (561: `cat IDEAS.md` six times counted as acting, and the reply's "wrote the code"
+/// went unchecked): a command that only reads -- every segment of it starts with a reading
+/// program, and nothing is redirected into a file.
+pub(crate) fn read_only_command(cmd: &str) -> bool {
+    const READERS: [&str; 18] = [
+        "cat", "ls", "head", "tail", "grep", "rg", "find", "wc", "stat", "file", "pwd", "du", "df", "tree", "which",
+        "sort", "diff", "less",
+    ];
+    const GIT_READS: [&str; 5] = ["status", "log", "diff", "show", "branch"];
+    if cmd.contains('>') || cmd.trim().is_empty() {
+        return false;
+    }
+    cmd.split(|c| c == ';' || c == '|' || c == '&')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .all(|segment| {
+            let mut words = segment.split_whitespace();
+            match words.next() {
+                Some("git") => words.next().is_some_and(|w| GIT_READS.contains(&w)),
+                Some(first) => READERS.contains(&first),
+                None => true,
+            }
+        })
+}
+
+/// E.CLAIM2: did this desktop call read rather than change -- a desktop read, a pure browser
+/// read, a read act, a wait on a job, or a command that only reads?
+pub(crate) fn desktop_read(tool: &str, args: &serde_json::Value) -> bool {
+    if DESKTOP_READS.contains(&tool) || PURE_WEB_READS.contains(&tool) || is_read_act(tool, args) {
+        return true;
+    }
+    match act_target(tool, args) {
+        Some((app, action)) if app == TWIN_HOST && action == "agent_job" => true,
+        Some((app, action)) if app == TWIN_HOST && action == "agent_run" => args
+            .pointer("/args/command")
+            .and_then(|c| c.as_str())
+            .is_some_and(read_only_command),
+        _ => false,
+    }
+}
+
 /// E.ARENA1-F48: is this call `shell.agent_run` -- a new command, not a wait on one?
 pub(crate) fn is_agent_run(tool: &str, args: &serde_json::Value) -> bool {
     act_target(tool, args).is_some_and(|(app, action)| app == TWIN_HOST && action == "agent_run")

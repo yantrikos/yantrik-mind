@@ -2074,6 +2074,40 @@ pub(crate) fn last_reply_asked(recent: &[(String, String)]) -> bool {
     recent.iter().rev().find(|(r, _)| r == "assistant").is_some_and(|(_, t)| t.trim_end().ends_with('?'))
 }
 
+/// E.CLAIM2: the native tools that only read. Anything not named here counts as a change, which
+/// errs toward saying nothing.
+const NATIVE_READS: [&str; 14] = [
+    "recall", "upcoming", "about_person", "person", "family", "myself", "now", "web_fetch", "web_search", "search",
+    "discover_tools", "see_page", "weather", "answer",
+];
+
+/// E.CLAIM2: did this sent, successful call change anything?
+pub(crate) fn changed_something(tool: &str, args: &serde_json::Value) -> bool {
+    if tool.starts_with("mcp.yantrik-os.") {
+        return !desktop::desktop_read(tool, args);
+    }
+    !NATIVE_READS.contains(&tool)
+}
+
+/// E.CLAIM2 (561: "FINISHED … wrote the save/load code into beatgrid.js and ran the page check",
+/// after nothing but reads): does the reply say something was written, run or changed?
+pub(crate) fn claims_a_change(text: &str) -> bool {
+    const CLAIMS: [&str; 22] = [
+        "i wrote", "i've written", "wrote the", "written to", "i saved", "i've saved", "saved it", "i added",
+        "i've added", "i created", "i've created", "i updated", "i've updated", "i edited", "i changed", "i've changed",
+        "i ran ", "ran the", "i've run", "i fixed", "i've fixed", "wrote it",
+    ];
+    let t = text.to_lowercase().replace('\u{2019}', "'");
+    // "FINISHED" as a completion token, in capitals: "your research finished" is not a claim.
+    CLAIMS.iter().any(|c| t.contains(c)) || text.contains("FINISHED")
+}
+
+/// E.CLAIM2: what a reply that claims a change, in a turn that changed nothing, is told once.
+pub(crate) const CHANGE_UNBACKED: &str = "(the reply says something was written, run or changed, but no tool call this turn changed anything -- do it now with a tool, or say plainly that it was not done)";
+
+/// E.CLAIM2: the system-voiced correction when the claim stands.
+pub(crate) const CHANGE_CORRECTION: &str = "⚠️ To be clear (from the system, not the model): nothing was written, run or changed in this turn, regardless of anything above.";
+
 /// E.GROUND1: what a turn that refused on approval grounds without trying anything is told.
 pub(crate) const APPROVAL_UNTRIED: &str =
     "(nothing was tried this turn -- approvals and permissions change; try the action, and the desktop will ask the person if it must)";
@@ -14166,6 +14200,10 @@ Open reminders you're carrying for them:",
         // already sent back once.
         let mut any_sent = false;
         let mut approval_nudged = false;
+        // E.CLAIM2: whether any call this turn changed something, and whether an unbacked claim of
+        // a change was already sent back once.
+        let mut changed_this_turn = false;
+        let mut claim_nudged = false;
         // E.ARENA1-F21: the one reminder that the path the request asked for is still missing.
         // E.ARENA1-F54: how many times this turn was told its goal is still missing.
         let mut goal_nudges: usize = 0;
@@ -14525,6 +14563,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
                     continue;
                 }
+                // E.CLAIM2: and the same claim check.
+                if !changed_this_turn && claims_a_change(&a) {
+                    if !claim_nudged {
+                        claim_nudged = true;
+                        eprintln!("[agent] step {step}: the reply claims a change and nothing changed this turn \u{2014} sent back once");
+                        scratch.push_str(&format!("\n[{step}] {CHANGE_UNBACKED}"));
+                        continue;
+                    }
+                    a = format!("{a}\n\n{CHANGE_CORRECTION}");
+                }
                 if !a.is_empty() {
                     // A WHOLE DOCUMENT, not merely text containing markup. `looks_like_html` alone
                     // asks whether the reply CONTAINS `<div>`/`<table>`/`<body>`, which a reply ABOUT
@@ -14704,6 +14752,16 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     eprintln!("[agent] step {step}: an approval refusal with nothing tried this turn \u{2014} sent back once");
                     scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
                     continue;
+                }
+                // E.CLAIM2 (561: "FINISHED … wrote the code … ran the page check" over reads only).
+                if !changed_this_turn && claims_a_change(&a) {
+                    if !claim_nudged {
+                        claim_nudged = true;
+                        eprintln!("[agent] step {step}: the reply claims a change and nothing changed this turn \u{2014} sent back once");
+                        scratch.push_str(&format!("\n[{step}] {CHANGE_UNBACKED}"));
+                        continue;
+                    }
+                    a = format!("{a}\n\n{CHANGE_CORRECTION}");
                 }
                 // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
                 if unsaved_doc {
@@ -15369,6 +15427,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.ARENA1-F22: "nothing was run" is not a success, however the classifier scored it.
             let ran = outcome == crate::tool_outcome::Outcome::Ok && !desktop::nothing_was_run(&obs);
             any_sent |= sent;
+            changed_this_turn |= sent && ran && changed_something(&tool, &args);
             // E.LOOP11 (541: remember x3, add_reminder x5 -- an instruction in the result did not
             // stop Qwen 27B): a write that succeeded is withdrawn for the rest of the turn.
             if sent && matches!(tool.as_str(), "remember" | "add_reminder") && outcome == crate::tool_outcome::Outcome::Ok {
@@ -15718,6 +15777,12 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // only from the idle drive (loops.rs), which waits for the person to be quiet.
         apply_denied_write_correction(&mut ans, &denied_mutations);
         desktop::apply_failed_commands(&mut ans, &failed_cmds);
+        // E.CLAIM2: compose cannot be sent back; a claimed change over a turn that changed nothing
+        // is corrected in the reply itself.
+        if !changed_this_turn && claims_a_change(&ans) {
+            eprintln!("[agent] compose claims a change and nothing changed this turn \u{2014} corrected");
+            ans = format!("{ans}\n\n{CHANGE_CORRECTION}");
+        }
         // E.ARENA1-F12: a turn that ended with its document unsaved says so, whatever compose wrote.
         if unsaved_doc {
             ans = format!("{ans}\n\n{}", desktop::UNSAVED_NOTE);

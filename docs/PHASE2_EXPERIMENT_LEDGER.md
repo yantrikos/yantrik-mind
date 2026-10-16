@@ -20404,3 +20404,53 @@ Mutants killed (4/4): the dedupe removed; the threshold removed; a candidate del
 Mutants killed (3/3): the backstop removed at both sites together; the "no tool sent" condition removed; the rule text removed. A mutant removing only the answer-action site was not run on its own; the answer-action case is in the test.
 
 Test amendment: what follows a send-back is the loop's existing goal check (E.ARENA's `unattempted_side_effect`), so the test asserts E.GROUND1's own observation, not the final reply. Windows workspace: 2597 passed, 0 failed.
+
+## E.CLAIM2 — PREREG: a reply that says it wrote, ran or changed something needs a change this turn
+
+**Why:** 561, turn 178 (dc, 16 Oct, a fresh chat, "Please make Beatgrid better by one step"), on a 0a8f0a2-era build.
+- The turn took 11 steps, and every one after step 2 was a read (`cat IDEAS.md` ×6, `ls`, `head`, `cat beatgrid.js`, all through `shell.agent_run`).
+- The reply said: "FINISHED … wrote the save/load code into beatgrid.js and ran the page check — it came [back clean]".
+- In fact beatgrid.js was unchanged, the idea was still unticked, and there was no write and no page-check call.
+
+This is a false claim of action, the most serious family. The existing `unattempted_side_effect` missed it twice over:
+- it counts any `os_act` as an action, so a shell `cat` counted;
+- it keys on the request's imperative verbs ("make … better" is not one), not on what the reply claims.
+
+**What is built:**
+1. **`changed_something(tool, args)`.** Every sent and successful call counts as a change EXCEPT the known reads:
+   - the desktop reads: `os_describe`, `os_apps`, `os_screen`, `os_perception`;
+   - the pure browser reads, and `os_act` read acts (`read_screen`, `read_mind_view`);
+   - `shell.agent_job` (a wait);
+   - `shell.agent_run` whose command is read-only: every segment split on `&&`, `||`, `;` or `|` starts with cat, ls, head, tail, grep, rg, find, wc, stat, file, pwd, du, df, tree, which, sort, diff, or `git status|log|diff|show|branch`, and the command has no `>`;
+   - the native reads: recall, upcoming, about_person, person, family, myself, now, web_fetch, web_search, search, discover_tools, see_page, weather.
+
+   An unknown tool counts as a change, which errs toward silence.
+2. **`claims_a_change(reply)`.** The reply contains one of: "i wrote", "i've written", "wrote the", "written to", "i saved", "i've saved", "saved it", "i added", "i've added", "i created", "i've created", "i updated", "i've updated", "i edited", "i changed", "i've changed", "i ran ", "ran the", "i've run", "i fixed", "i've fixed", "finished".
+3. **The exits.** At the text exit and the answer-action exit: when nothing changed this turn and the reply claims a change, it is sent back ONCE with "(the reply says something was written, run or changed, but no tool call this turn changed anything -- do it now with a tool, or say plainly that it was not done)". If it is claimed again, and at the compose exit, the reply gets the system-voiced correction "⚠️ To be clear (from the system, not the model): nothing was written, run or changed in this turn, regardless of anything above."
+
+**Kill criteria:**
+- K1, tests fail:
+  - a turn of only `agent_run cat` and `ls`, answering "FINISHED: I wrote the save/load code into beatgrid.js and ran the page check" → sent back, and corrected if it repeats;
+  - the same claim after an `agent_run` of `printf … > beatgrid.js` → taken as it stands;
+  - after an `os_act editor save` → taken;
+  - "Here is what IDEAS.md says: …" after reads → taken (no claim);
+  - `read_only_command` cases: cat, `ls && head`, `git status` → read; `printf x > f`, `npm test`, `cat a | tee b` → not a read;
+  - compose's exit appends the correction.
+- K2, a mutant survives: the claim check removed; `read_only_command` always false (so cat counts as a change); the compose correction removed.
+- K3: both suites pass.
+- **Live (561 or 541):** a request that the Mind only reads around and answers as done gets either a real write, or a reply that does not claim one.
+
+**E.CLAIM2 — RESULT: PASS (Windows).** `a_claimed_change_needs_a_change_this_turn` covers:
+- reads only, then the claim twice → sent back, then corrected;
+- a real change (`remember`) → the claim stands and nothing is sent back;
+- no claim → untouched;
+- compose's claim over reads only → corrected;
+- the `read_only_command`, `changed_something` and `claims_a_change` cases.
+
+Mutants killed (3/3): the claim check removed at the loop exits; `read_only_command` always false; the compose correction removed.
+
+**Amendment (before the tests ran):** "finished" is matched only as the capitalised completion token "FINISHED", since "your research finished" is not a claim, and "wrote it" is added.
+
+Windows workspace: 2598 passed, 0 failed.
+
+**The 561 case under this build:** its six `cat`/`ls`/`head` runs are reads, so nothing changed, and "FINISHED … wrote … ran the page check" is sent back once. If it repeats, it is corrected in the reply.

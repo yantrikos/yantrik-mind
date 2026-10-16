@@ -18163,6 +18163,77 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
     }
 
+    /// E.CLAIM2: a model that plays tool steps and, at compose, claims a change.
+    struct ComposesClaim {
+        steps: StdMutex<Vec<Step>>,
+    }
+    impl LLMBackend for ComposesClaim {
+        fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, tools: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let offered = tools.is_some_and(|t| !t.is_empty());
+            let (text, tool_calls) = if offered {
+                let mut steps = self.steps.lock().unwrap();
+                match (!steps.is_empty()).then(|| steps.remove(0)) {
+                    Some(Step::Call(n, a)) => (String::new(), vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a }]),
+                    _ => anyhow::bail!("the endpoint stopped answering"),
+                }
+            } else {
+                ("FINISHED: I wrote the save/load code into beatgrid.js and ran the page check.".to_string(), vec![])
+            };
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text, prompt_tokens: 0, completion_tokens: 0, tool_calls, api_tool_calls: vec![], stop_reason: "stop".into() })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "composes-claim"
+        }
+    }
+
+    /// E.CLAIM2 (561, turn 178: "FINISHED … wrote the save/load code … ran the page check" after
+    /// nothing but reads): a claimed change needs a change this turn -- sent back once, then
+    /// corrected; compose's claim is corrected; a real change lets the claim stand.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_claimed_change_needs_a_change_this_turn() {
+        let claim = "FINISHED: I wrote the save/load code into beatgrid.js and ran the page check -- it came back clean.";
+        let ask = "Please make Beatgrid better by one step";
+        let read = || Step::Call("recall", serde_json::json!({"query": "beatgrid ideas"}));
+        let r = run_with(ask, vec![read(), Step::Say(claim), Step::Say(claim)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(r.prompts.iter().any(|p| p.contains(crate::CHANGE_UNBACKED)), "not sent back");
+        assert!(r.reply.contains(crate::CHANGE_CORRECTION), "the repeated claim stood uncorrected: {}", r.reply);
+        // A real change this turn: the claim stands, and nothing is sent back.
+        let wrote = Step::Call("remember", serde_json::json!({"text": "Beatgrid's next idea is saving patterns"}));
+        let r = run_with(ask, vec![wrote, Step::Say(claim)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(!r.prompts.iter().any(|p| p.contains(crate::CHANGE_UNBACKED)), "sent back after a real change");
+        assert!(!r.reply.contains(crate::CHANGE_CORRECTION), "{}", r.reply);
+        // No claim: untouched.
+        let r = run_with(ask, vec![read(), Step::Say("IDEAS.md lists three ideas; the first is saving patterns.")], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(!r.prompts.iter().any(|p| p.contains(crate::CHANGE_UNBACKED)) && !r.reply.contains(crate::CHANGE_CORRECTION));
+        // Compose's claim over reads only is corrected.
+        let model: Arc<dyn LLMBackend> = Arc::new(ComposesClaim { steps: StdMutex::new(vec![read(), Step::Fail]) });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let conv = ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM");
+        let reply = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await.unwrap();
+        assert!(reply.contains(crate::CHANGE_CORRECTION), "compose's claim stood: {reply}");
+
+        // The classifiers.
+        for cmd in ["cat IDEAS.md", "ls && head -5 beatgrid.js", "git status", "grep -n save beatgrid.js | wc -l"] {
+            assert!(crate::desktop::read_only_command(cmd), "{cmd}");
+        }
+        for cmd in ["printf 'x' > beatgrid.js", "npm test", "cat a | tee b", "git commit -m x", "sed -i s/a/b/ f"] {
+            assert!(!crate::desktop::read_only_command(cmd), "{cmd}");
+        }
+        let run = |cmd: &str| serde_json::json!({"app": "shell", "action": "agent_run", "args": {"command": cmd}});
+        assert!(!crate::changed_something("mcp.yantrik-os.os_act", &run("cat IDEAS.md")));
+        assert!(crate::changed_something("mcp.yantrik-os.os_act", &run("printf x > f")));
+        assert!(crate::changed_something("mcp.yantrik-os.os_act", &serde_json::json!({"app": "editor", "action": "save"})));
+        assert!(!crate::changed_something("recall", &serde_json::json!({})));
+        assert!(crate::claims_a_change(claim) && crate::claims_a_change("I've added the button."));
+        assert!(!crate::claims_a_change("Your research finished; here is what it found."));
+    }
+
     /// E.GROUND1 (561: nine turns of "it needs your approval" from lapsed cards, with nothing tried):
     /// an approval refusal with no tool sent this turn goes back once; after a try, or the second
     /// time, it stands.

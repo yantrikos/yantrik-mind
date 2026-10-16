@@ -19701,3 +19701,22 @@ E.LOOP11's test now uses multi-part asks (a single request stops after its write
 **K3:** Windows workspace 2574 passed, 0 failed. Linux and a bundle carrying E.SPINE1 and E.LOOP12 follow.
 
 **E.SPINE1 + E.LOOP12, Linux (staging, c527663):** mind-core and mind-conversation passed (see the bundle output). Bundle `yantrik-mind-c527663` sha256 4040bbd3a4f4547a4b56ea73a2ec59930a15d2bacf189efbf0cb4745cf2bdd55, for the (b') and (d) runs on 541.
+
+## E.LOOP12 + E.SPINE1 — live (541, c527663, qwen3.5:27b, yantrik-os-dc, 16 Oct)
+
+**(b') E.LOOP12: PASSES the calls rule.**
+- N1–N3 remember: 2 calls each, 3 of 3. Clean confirmations, each verified in mind.db.
+- N4 "remind me in 2 minutes to check the oven": 2 calls, one step, no drop_reminder. But add_reminder answered "Already an open reminder … nothing new was added", because an earlier, PAST-DUE "Check the oven" was still open (bug 1). The reply said so honestly, so the person gets no reminder.
+- N5 "Remember … Biscuit and tell me what's on Thursday": 7 calls. It saved and answered, but also called an add_reminder("…", "now") that did not parse, called `upcoming` ×3, and added an unasked Arun/Priya mention.
+- No claimed action was false.
+
+**(d) E.SPINE1 A/B: KEEP A** (the ambient blocks stay on by default). By the prereg: B is within 1 on standing (A 5/6, B 4/6, or 3/6 if raw JSON counts as a fail), but its upcoming answers are not as good (U3: "Nothing is due…", and past-due items called "undated"), and it has 1 tie-in in the non-upcoming asks against A's 0. B's tie-in came through recall, so the ambient blocks are not the only source.
+- **Shared standing failures:** ask 1 (both arms) said "Tomorrow, Friday, October 16" on Fri 16 and listed past-due reminders. B also failed 2b (`about_person` ×3 missed a person saved minutes before) and gave a raw-JSON reply on 3.
+
+**Bugs shared by both arms (dc):**
+1. **Past-due reminders never close.** stretch, water and oven are still Pending hours after their due time. They block a new reminder with the same text, are read as "tomorrow" or "undated", and stay on every open list.
+2. **"Tomorrow" is today:** `upcoming` labels past-due items with today's date, and the model counts days from them.
+3. **`upcoming` is called 3 times per turn** (repeat nudges), the read-tool loop.
+4. **Nothing consults the OS calendar** for "this week" or "tomorrow": "Trip reminder — Dallas tomorrow" at 18:00 today was missed 8 of 8. `upcoming` reads only the Mind's own stores.
+5. **`about_person` misses a just-saved person** whom recall finds.
+6. **A note-tool result printed as raw JSON** for the answer.

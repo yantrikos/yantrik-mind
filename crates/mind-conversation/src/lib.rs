@@ -4495,6 +4495,42 @@ fn parse_due(s: &str) -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    parse_due_at(s, now, &local_now())
+}
+
+/// E.REM1 (VM 542, 16 Oct: "December 3" and "2026-12-03" both failed): a calendar date as well as
+/// a relative one. ISO first (with an optional time), then "December 3" / "Dec 3rd" through
+/// `parse_text_date_ms`, then "3 December" reordered to that.
+fn parse_absolute_due(l: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<u64> {
+    let at = |d: chrono::NaiveDate, h: u32, m: u32| -> Option<u64> {
+        let ts = d.and_hms_opt(h, m, 0)?.and_local_timezone(*today.offset()).single()?;
+        u64::try_from(ts.timestamp_millis()).ok()
+    };
+    if let Some(d) = l.get(..10).and_then(|p| chrono::NaiveDate::parse_from_str(p, "%Y-%m-%d").ok()) {
+        let rest = l[10..].trim_start_matches(['t', ' ']);
+        let hm = rest.get(..5).and_then(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").ok());
+        use chrono::Timelike;
+        return match hm {
+            Some(t) => at(d, t.hour(), t.minute()),
+            None => at(d, 12, 0),
+        };
+    }
+    if let Some(ms) = parse_text_date_ms(l, today) {
+        return u64::try_from(ms).ok();
+    }
+    let words: Vec<&str> = l.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
+    for pair in words.windows(2) {
+        let day = pair[0].trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        if !day.is_empty() && day.len() <= 2 && day.chars().all(|c| c.is_ascii_digit()) && pair[0][day.len()..].len() <= 2 {
+            if let Some(ms) = parse_text_date_ms(&format!("{} {day}", pair[1]), today) {
+                return u64::try_from(ms).ok();
+            }
+        }
+    }
+    None
+}
+
+fn parse_due_at(s: &str, now: u64, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<u64> {
     let (hour, day) = (3_600_000u64, 86_400_000u64);
     let l = s.trim().to_lowercase();
     match l.as_str() {
@@ -4524,7 +4560,7 @@ fn parse_due(s: &str) -> Option<u64> {
             }
         }
     }
-    None
+    parse_absolute_due(&l, today)
 }
 
 /// "now" in the user's LOCAL timezone. DST-aware: when YM_TZ is an IANA name (e.g. America/Chicago) it
@@ -12866,7 +12902,23 @@ WINDOW: all-time, latest 200
                 }
                 let when = s("when");
                 let due = parse_due(&when);
-                match self.memory.add_task(&text, "medium", due).await {
+                // E.REM1: a date that was given and cannot be read saves nothing -- an undated task
+                // per try was what VM 542 was left with.
+                if due.is_none() && !matches!(when.trim().to_lowercase().as_str(), "" | "null" | "none") {
+                    return format!(
+                        "(couldn't read the date \"{when}\" -- nothing was saved. Give it as 2026-12-03, December 3, \
+                         3 December, tomorrow, next week or in 3 days.)"
+                    );
+                }
+                // E.REM1: an open task this merges into is not a second one, and the model is told so
+                // -- on 542 it reported a duplicate that the merge had never made.
+                let open_before = self.memory.list_tasks(false).await.map(|t| t.len()).ok();
+                let added = self.memory.add_task(&text, "medium", due).await;
+                let open_after = self.memory.list_tasks(false).await.map(|t| t.len()).ok();
+                if added.is_ok() && open_before.is_some() && open_before == open_after {
+                    return format!("Already an open reminder: \"{text}\" -- nothing new was added.");
+                }
+                match added {
                     Ok(_) if due.is_some() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due."),
                     Ok(_) => format!("Noted as an open task: \"{text}\" (no date parsed from \"{when}\")."),
                     Err(e) if e.is_memory_write_gate_refusal() => {
@@ -13912,7 +13964,7 @@ Open reminders you're carrying for them:",
                 if names_nothing {
                     ChatMessage::system("You have been asked not to reveal private facts. Private memory, external data, configuration, clock, discovery, and mutating tools are withheld. You may use only the explicitly listed pure-local tools, with arguments copied from the current request; do not attempt any lookup or recall. Otherwise answer at the level of SHAPE and KIND from what is already in front of you, name no people, projects, accounts, purchases, places or dates, and say plainly that you cannot cite private specifics here. A short honest answer is correct; guessing to fill the gap is not.")
                 } else {
-                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they mention a date or commitment (a birthday, a deadline), `add_reminder` so you follow up; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
+                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; set a reminder (`add_reminder`) only when they ask to be reminded -- a date they mention is remembered, not scheduled; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
                 },
                 ChatMessage::user(&prompt),
             ];

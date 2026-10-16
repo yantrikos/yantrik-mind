@@ -801,6 +801,60 @@ fn parse_due_handles_common_expressions() {
     assert!(parse_due("next week").unwrap() > parse_due("tomorrow").unwrap());
 }
 
+/// E.REM1 (VM 542, 16 Oct): calendar dates parse, in the forms a model writes them.
+#[test]
+fn parse_due_reads_calendar_dates() {
+    let today = chrono::DateTime::parse_from_rfc3339("2026-10-16T09:00:00-05:00").unwrap();
+    let now = today.timestamp_millis() as u64;
+    let day_of = |ms: u64| {
+        chrono::DateTime::from_timestamp_millis(ms as i64).unwrap().with_timezone(today.offset()).date_naive().to_string()
+    };
+    for s in ["2026-12-03", "2026-12-03T15:00", "December 3", "Dec 3rd", "3 December", "3 Dec 2026", "3rd of December"] {
+        let got = parse_due_at(&s.to_lowercase(), now, &today);
+        if s == "3rd of December" {
+            // "of" sits between: not a form this reads, and it says so rather than guessing.
+            assert!(got.is_none(), "{s}");
+            continue;
+        }
+        assert_eq!(got.map(day_of).as_deref(), Some("2026-12-03"), "{s}");
+    }
+    let at3 = parse_due_at("2026-12-03t15:00", now, &today).unwrap();
+    assert_eq!(chrono::DateTime::from_timestamp_millis(at3 as i64).unwrap().with_timezone(today.offset()).format("%H:%M").to_string(), "15:00");
+    assert_eq!(parse_due_at("tomorrow", now, &today), Some(now + 86_400_000));
+    assert_eq!(parse_due_at("in 3 days", now, &today), Some(now + 3 * 86_400_000));
+    assert_eq!(parse_due_at("someday", now, &today), None);
+    assert_eq!(parse_due_at("maybe 5", now, &today), None);
+}
+
+/// E.REM1: a date that was given and cannot be read saves nothing; a reminder with no date is an
+/// open task, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_reminder_date_saves_nothing() {
+    let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+    let memarc: Arc<dyn MemoryFacade> = Arc::new(mem);
+    let pool = mind_inference::InferencePool::new(Arc::new(ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+    let conv = ConversationEngine::new(memarc.clone(), pool, "YM");
+    let out = conv.run_agent_tool("add_reminder", &serde_json::json!({"text": "Leila's book launch", "when": "the week after next Tuesday-ish"})).await;
+    assert!(out.contains("nothing was saved"), "{out}");
+    assert!(memarc.list_tasks(false).await.unwrap().is_empty(), "a task was saved from an unreadable date");
+    let args = serde_json::json!({"text": "Leila's book launch", "when": "2026-12-03"});
+    let first = conv.run_agent_tool("add_reminder", &args).await;
+    assert!(first.starts_with("Reminder set"), "{first}");
+    let again = conv.run_agent_tool("add_reminder", &args).await;
+    assert!(again.contains("nothing new was added"), "the merge was reported as a new reminder: {again}");
+    assert_eq!(memarc.list_tasks(false).await.unwrap().len(), 1);
+}
+
+/// E.REM1 (Pranab, 16 Oct: "Only when asked"): the agent rules no longer tell the model to set a
+/// reminder for every date it hears.
+#[test]
+fn reminders_are_set_only_when_asked() {
+    let src = include_str!("lib.rs");
+    assert!(!src.contains("`add_reminder` so you follow up"));
+    assert!(src.contains("only when they ask to be reminded"));
+    assert!(!tool_catalog::CORE_HEAD.contains("so you ping them when due"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consolidation_distills_beliefs_and_commitments() {
     let mem = MemoryHandle::spawn(":memory:", 8).unwrap();

@@ -19096,3 +19096,25 @@ Linux follows.
   - the old rule text restored.
 - K3: both suites pass.
 - **Live check:** dc reruns ask 2a on Claude. The fact is remembered, no reminder or task is made, and nothing is offered twice.
+
+**E.REM1 amendment (before any run; yantrik-os-dc read 542's mind.db read-only):**
+- **There was no duplicate:** one belief and one task mention Leila. add_task's merge folded the second undated try into the first.
+- **The reply's "left a duplicate task … clear the duplicates" was a false report of a side effect.** Its cause is the tool's observation: on a merge it still said "Noted as an open task", so the model counted two.
+- **Added as item 4:** when `add_task` creates nothing new (the open-task count is unchanged), `add_reminder` says it is already an open reminder and that nothing new was added.
+- **K1 changes:** the "blank when adds a task" case goes, since the argument contract (P.2d) already refuses an empty `when`. In its place: the same reminder twice with a readable date leaves one task, and the second reply says nothing new was added.
+- **K2 adds a mutant:** the merge note removed.
+
+## E.REM1 — RESULT (code): reminders only when asked; calendar dates read; nothing saved from an unreadable date; a merge said as one; 5 mutants killed
+
+**K1 held:**
+- **`parse_due_at`:**
+  - "2026-12-03", "2026-12-03T15:00" (15:00 kept), "December 3", "Dec 3rd", "3 December" and "3 Dec 2026" all give 3 December;
+  - "3rd of December" gives None, said rather than guessed;
+  - tomorrow and in 3 days are unchanged;
+  - "someday" and "maybe 5" give None.
+- **`add_reminder`:** an unreadable `when` saves nothing and says so. The same reminder twice gives one task, and the second reply says "nothing new was added".
+- **The rules** carry "only when they ask to be reminded" and no longer "so you follow up". The catalog line no longer says "so you ping them when due".
+
+**K2 held, 5 mutants killed:** the ISO branch; the day-first reorder; the unparsed-when guard; the merge note; the old rule text.
+
+**K3:** Windows workspace 2550 passed, 0 failed. Linux follows.

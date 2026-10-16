@@ -19596,3 +19596,5 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
 **K2: 3 mutants killed** (the withdrawal removed; the prompt section removed; the held notes not set for this turn).
 
 **K3:** Windows workspace 2569 passed, 0 failed. Linux and the bundle follow, carrying E.SEC21, E.VOICE7, E.HELD1 and E.LOOP11.
+
+**E.SEC21 + E.VOICE7 + E.HELD1 + E.LOOP11, Linux (staging, a654c1c):** mind-types 106, mind-memory 114, mind-conversation passed (see the bundle output). Bundle `yantrik-mind-a654c1c` sha256 567862a63016c7d4e310b9aa19aa86e30c7e78fffccf22fe22ace0851c7f0557, for yantrik-os-dc's (a)(b)(c) run on 541.

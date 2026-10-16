@@ -6297,6 +6297,9 @@ pub struct ConversationEngine {
     /// E.NOTICE1 A2: results of work the person delegated (research, code, delegate jobs) -- the
     /// typed half of the notify queue, the only results that become obligation notices.
     delegated_queue: Arc<Mutex<Vec<String>>>,
+    /// E.HELD1: results being handed over with THIS turn's reply -- in its prompt, so the model
+    /// knows they are delivered and does not start the work again.
+    held_this_turn: Mutex<Vec<String>>,
     /// Finished results that could not reach any chat — delivered on the next exchange, any channel.
     held_notes: Arc<Mutex<Vec<String>>>,
     /// Images queued for the home channel (photo-retrieval answers, studio compositions). The poll
@@ -6485,6 +6488,7 @@ impl ConversationEngine {
             turn_packs: Mutex::new(Vec::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
             delegated_queue: Arc::new(Mutex::new(Vec::new())),
+            held_this_turn: Mutex::new(Vec::new()),
             held_notes: Arc::new(Mutex::new(Vec::new())),
             photo_queue: Arc::new(Mutex::new(Vec::new())),
             last_sent_photo: Arc::new(Mutex::new(None)),
@@ -6787,6 +6791,27 @@ impl ConversationEngine {
     /// Take everything held for the next exchange. Called by the turn entry point.
     pub fn take_held_notes(&self) -> Vec<String> {
         std::mem::take(&mut *self.held_notes.lock().unwrap())
+    }
+
+    /// E.HELD1: what this turn hands over (set before the loop, cleared after).
+    pub(crate) fn set_held_this_turn(&self, held: Vec<String>) {
+        *self.held_this_turn.lock().unwrap() = held;
+    }
+
+    /// E.HELD1: the prompt's line about results handed over with this reply, or nothing.
+    pub(crate) fn handed_section(&self) -> String {
+        let held = self.held_this_turn.lock().unwrap();
+        if held.is_empty() {
+            return String::new();
+        }
+        let firsts: Vec<String> = held
+            .iter()
+            .map(|n| n.lines().next().unwrap_or("").chars().take(160).collect())
+            .collect();
+        format!(
+            "Finished while they were away and handed over with this reply (don't start it again): {}\n\n",
+            firsts.join("; ")
+        )
     }
 
     /// Queue a message for the user's chat from outside the poll loop (event listeners, webhook
@@ -13810,7 +13835,7 @@ Open reminders you're carrying for them:",
         // This is an allowlist by declared capability class, not a denylist of remembered-dangerous
         // names. Unknown tools and every class other than PureLocal therefore remain absent without
         // requiring another hand-maintained list.
-        let schemas = if names_nothing {
+        let mut schemas = if names_nothing {
             let registry = self.plugins.lock().unwrap();
             schemas
                 .into_iter()
@@ -14067,6 +14092,8 @@ Open reminders you're carrying for them:",
             };
             // E.ARENA1-F28: what the person said to another mind before switching here.
             let handover = handover_section();
+            // E.HELD1: results handed over with this reply.
+            let handed = self.handed_section();
             // E.OPT1: the files the person attached to this message, as content.
             let attached = attachments::attachments_section();
             let place = format!(
@@ -14076,7 +14103,7 @@ Open reminders you're carrying for them:",
                 desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
-                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
@@ -15085,6 +15112,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // world has changed (the loop's ordinary repeat nudge still meets an immediate retry).
             // E.ARENA1-F22: "nothing was run" is not a success, however the classifier scored it.
             let ran = outcome == crate::tool_outcome::Outcome::Ok && !desktop::nothing_was_run(&obs);
+            // E.LOOP11 (541: remember x3, add_reminder x5 -- an instruction in the result did not
+            // stop Qwen 27B): a write that succeeded is withdrawn for the rest of the turn.
+            if sent && matches!(tool.as_str(), "remember" | "add_reminder") && outcome == crate::tool_outcome::Outcome::Ok {
+                schemas.retain(|s| s["function"]["name"].as_str() != Some(tool.as_str()));
+            }
             last_refusal = (sent && tool == desktop::ACT && desktop::nothing_was_run(&obs)).then(|| obs.clone());
             if sent {
                 desktop::note_command_result(&mut failed_cmds, &tool, &args, &obs);

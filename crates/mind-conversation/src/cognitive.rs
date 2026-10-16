@@ -944,7 +944,13 @@ impl ConversationEngine {
             self.grade_previous_turn(user_text).await;
         }
         crate::stage("handle turn");
+        // E.HELD1: what finished while they were away is taken BEFORE the turn, so this turn's
+        // prompt knows it is being handed over (541: "thanks" researched the topic again).
+        let primary = matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY);
+        let held = if primary { self.take_held_notes() } else { Vec::new() };
+        self.set_held_this_turn(held.clone());
         let answer = self.handle_turn_as(user_text, id.clone()).await;
+        self.set_held_this_turn(Vec::new());
         if let Ok(a) = &answer {
             if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
                 self.note_turn_answer(a).await;
@@ -954,8 +960,7 @@ impl ConversationEngine {
         // reachable is delivered on the very next exchange, appended after the answer — "also,
         // the thing you asked for is done." Primary-viewer only: a held result was produced for
         // the household's owner lane, and another member's next turn must not receive it.
-        if matches!(&id.viewer(), mind_types::Scope::Private(v) if v == mind_types::PRIMARY) {
-            let held = self.take_held_notes();
+        if primary {
             if !held.is_empty() {
                 let mut a = answer?;
                 a.push_str("\n\n— finished while you were away —\n");

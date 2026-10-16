@@ -17356,6 +17356,82 @@ mod desktop_consent_and_stall_wiring {
         }
     }
 
+    /// E.LOOP11: the schemas each step offers, for a scripted turn of `steps`.
+    async fn schemas_per_step(steps: Vec<Step>, ask: &str) -> Vec<Vec<String>> {
+        let names = Arc::new(StdMutex::new(Vec::new()));
+        let inner = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(SchemasSeen { inner, names: names.clone() });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let _ = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await;
+        let names = names.lock().unwrap().clone();
+        names
+    }
+
+    /// E.LOOP11 (541: remember x3 on Qwen 27B): a write that succeeded is not offered again this
+    /// turn; one that was refused still is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_write_that_succeeded_is_withdrawn_for_the_turn() {
+        let ok = schemas_per_step(
+            vec![
+                Step::Call("remember", serde_json::json!({"text": "Ishaan's graduation is on 22 May"})),
+                Step::Call("remember", serde_json::json!({"text": "Ishaan graduates on 22 May"})),
+                Step::Fail,
+            ],
+            "Remember that my cousin Ishaan's graduation is on 22 May",
+        )
+        .await;
+        assert!(ok.len() >= 2, "{ok:?}");
+        assert!(ok[0].iter().any(|n| n == "remember"), "{:?}", ok[0]);
+        assert!(!ok[1].iter().any(|n| n == "remember"), "a saved fact's tool was offered again: {:?}", ok[1]);
+
+        let refused = schemas_per_step(
+            vec![
+                Step::Call("remember", serde_json::json!({"text": "my password is hunter22-XYZ-9981"})),
+                Step::Fail,
+            ],
+            "Remember my password",
+        )
+        .await;
+        // A refused write already ends the turn (`terminal_delivery`), so there is no later step for
+        // a withdrawal to touch: the refusal is the reply after one step.
+        assert_eq!(refused.len(), 1, "{refused:?}");
+
+        let set = schemas_per_step(
+            vec![Step::Call("add_reminder", serde_json::json!({"text": "Drink water", "when": "in 2 minutes"})), Step::Fail],
+            "remind me in 2 minutes to drink water",
+        )
+        .await;
+        assert!(set.len() >= 2, "{set:?}");
+        assert!(set[0].iter().any(|n| n == "add_reminder") && !set[1].iter().any(|n| n == "add_reminder"), "{set:?}");
+    }
+
+    /// E.HELD1 (541: "thanks" researched the topic again): a result handed over on a turn is in that
+    /// turn's prompt, and the reply still carries it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_handed_over_result_is_in_the_turns_prompt() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps: vec![Step::Say("You're welcome.")], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let conv = Arc::new(ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_thin_desktop(true));
+        conv.hold_for_next_turn("Research — ext4 vs btrfs: btrfs has snapshots; ext4 is simpler.");
+        let reply = conv.turn("thanks", TurnIdentity::primary()).await.unwrap();
+        let prompts = seen.lock().unwrap().clone();
+        assert!(
+            prompts.iter().any(|p| p.contains("handed over with this reply") && p.contains("Research — ext4 vs btrfs")),
+            "the turn did not know: {prompts:?}"
+        );
+        assert!(reply.contains("finished while you were away") && reply.contains("btrfs has snapshots"), "{reply}");
+
+        // The next turn hands over nothing, and says nothing about it.
+        let _ = conv.turn("ok", TurnIdentity::primary()).await;
+        let prompts = seen.lock().unwrap().clone();
+        assert!(!prompts.last().unwrap().contains("handed over with this reply"), "{:?}", prompts.last());
+    }
+
     async fn schemas_offered(stable: bool, asks: &[&str]) -> (Vec<Vec<String>>, Vec<String>, String) {
         let names = Arc::new(StdMutex::new(Vec::new()));
         let seen = Arc::new(StdMutex::new(Vec::new()));

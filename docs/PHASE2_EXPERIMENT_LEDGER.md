@@ -19577,3 +19577,22 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
 - K2, a mutant survives: the withdrawal removed; withdrawing on a refusal too.
 - K3: both suites pass.
 - **Live (541, Qwen 27B):** three remember turns at most 2 model calls each in 3 of 3, and one "remind me in 2 minutes" turn at most 3. Any reply that claims a save that did not happen kills it.
+
+**E.LOOP11 amendment (before any run):** K1's "a refused remember does not withdraw it" and K2's "withdrawing on a refusal too" cannot be observed. A refused write is already terminal (`terminal_delivery` on Denied, E.MEM), so the turn ends after one step and no later schema exists to inspect. Both are replaced by "a refused write ends the turn in one step", the rule that makes a withdrawal moot there.
+
+## E.HELD1 + E.LOOP11 — RESULT (code)
+
+**E.HELD1:** the cognitive turn takes the held notes BEFORE the loop (`set_held_this_turn`). The loop prompt carries `handed_section()` ("Finished while they were away and handed over with this reply (don't start it again): <first lines>"), and the reply still appends them.
+
+**E.LOOP11:** after a sent, Ok `remember` or `add_reminder`, its schema is withdrawn for the rest of the turn.
+
+**K1 held:**
+- remember then remember: step 1 lacks `remember`;
+- add_reminder likewise;
+- a refused write ends in one step (the amended check);
+- a thin "thanks" turn with one held research result: the prompt carries it under the heading, and the reply carries "finished while you were away" and the text;
+- the next turn's prompt has no heading.
+
+**K2: 3 mutants killed** (the withdrawal removed; the prompt section removed; the held notes not set for this turn).
+
+**K3:** Windows workspace 2569 passed, 0 failed. Linux and the bundle follow, carrying E.SEC21, E.VOICE7, E.HELD1 and E.LOOP11.

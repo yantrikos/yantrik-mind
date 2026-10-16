@@ -19512,3 +19512,22 @@ The dedupe guards absorbed every repeat, but each costs a model call (5–15 s o
 **Other defects found:**
 - **L2 ("Remember that my bike lock code is 7741"):** the memory write-gate refused it, and the raw tool string "(refused by memory write-gate: memory was not changed)" was the WHOLE reply. A refusal needs the person's words (E.VOICE6's `person_denial` does not map it).
 - **Inconsistent with 542,** which accepted "gym locker code 3318". Either the detector differs on "lock code" against "locker code", or it is a policy question for Pranab. Investigate before asking.
+
+## E.SEC21 + E.VOICE7 — PREREG: a locker code is a physical credential; a write-gate refusal is said in words
+
+**Why:**
+- **Detector gap.** On 541, "my bike lock code is 7741" was refused by the memory write-gate. That is right, under E.SEC5's policy (8 Sep, the safe-code incident): physical access codes are credentials. On 542, "my gym locker code is 3318" was saved, because "locker code" does not contain "lock code".
+- **Raw refusal.** The refusal reached the person as the raw string "(refused by memory write-gate: memory was not changed)", because `person_denial` maps only the egress gate's "(I can't run …" form.
+
+**What is built:**
+- `PHYSICAL_CREDENTIAL_PHRASES` gains "locker code" and "locker combination". This applies the existing policy; it is not a new one.
+- `person_denial` also maps `MEMORY_WRITE_GATE_REFUSAL` and `REMINDER_WRITE_GATE_REFUSAL` to: "I didn't save that: it looks like a password, PIN or a code that opens something, and I don't keep those."
+
+**Kill criteria (each one fails the build):**
+- K1, a test fails:
+  - "my gym locker code is 3318" is refused by `gate_write`;
+  - "my locker is number 12" is not;
+  - both gate refusals map to the sentence, which carries no "(" and no "gate";
+  - E.VOICE6's existing cases are unchanged.
+- K2, a mutant survives: the phrase removed; the mapping removed.
+- K3: both suites pass.

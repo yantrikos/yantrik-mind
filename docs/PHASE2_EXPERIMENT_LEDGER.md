@@ -20608,3 +20608,4 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - Mutants killed (5/5): each removed line restored ("and the next action", "offer depth", "End with a clear next move", "surface it unprompted", "Be proactive WITHOUT being asked").
 - Windows workspace: 2599 passed, 0 failed.
 - **Adoption waits for the live re-run of arm A (dc, 541):** success ≤ 3 faults, partial 4–5, revert ≥ 6.
+- **Linux (staging, eb4dc86), E.PROMPT1:** mind-conversation 1285 passed, mind-core 197 passed, mind-types 107 passed. **Bundle:** yantrik-mind-eb4dc86-linux-amd64.tar.zst, sha256 7759db869bc1e23e2647b3367170e95e291318251c8d1744b14770ee8e9dacfc. Staging disk: 93%, 2.8 GB free.

@@ -20885,3 +20885,8 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 **Result:** `whether_a_command_would_ask_is_read_off_the_mode` gains three cases: in force in auto → no ask; suspended → ask; in ask mode → ask. Mutants killed (3/3): standing ignored; suspension not honoured; standing applied in ask.
 - **Windows workspace:** 2605 passed, 0 failed.
 - **Linux (staging, c0231f9), E.STAND1:** mind-conversation 1292 passed, mind-core 197 passed. **Bundle:** yantrik-mind-c0231f9-linux-amd64.tar.zst, sha256 d24cac7d150a1c1682f62c4c73e76aa6ef84d2c4254b228e1bff81ae297fc4a4. Staging disk: 94%, 2.5 GB free.
+
+**E.HOLDOUT2 — run note (dc, 17 Oct):**
+- **OLD's first run is VOID (contaminated).** The restore unpacked the snapshot's notes over the folder without removing files created later, so the Groceries note NEW made in its ask 9 was present when OLD started. OLD also wrote an out-of-scope `/home/tester/Groceries.md`. It is kept as `holdout2-OLD-contaminated.jsonl` and not scored.
+- **The fix:** the restore archives post-snapshot notes and calendar files (moved aside, never deleted) before unpacking. OLD is re-run.
+- **Added to the run's requirements before scoring:** NEW started under the same flawed restore, so both arms must show byte-identical starting note and calendar state, by a listing or hash of each arm's starting folder. Otherwise NEW is re-run too.

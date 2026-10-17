@@ -20835,3 +20835,18 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Mutants killed (4/4):** the inverse check removed; the repeat note reverted; the past drop removed; the told label removed.
 - **Windows workspace:** 2605 passed, 0 failed.
 - **Linux (staging, b3598f2), E.SPINE2 + E.CLAIM3 + E.CAL3b + E.HEDGE1:** mind-conversation 1292 passed, mind-core 197 passed. **Bundle:** yantrik-mind-b3598f2-linux-amd64.tar.zst, sha256 6f7fae7db2ee5ce4847bf1bb932bda3dbc62bcc77872997145352cc084f9d553. Staging disk: 94%, 2.6 GB free.
+
+## E.SPINE2 + E.CLAIM3 + E.CAL3b + E.HEDGE1 — live (541, b3598f2, arm A AIG qwen3.5:27b, asked 23:50–00:15 CT, yantrik-os-dc, 17 Oct): 2 faults
+
+- **2 faults, both tie_in.** No false_claim or silent_action, offers 0, median 23 s.
+- **The series on these 12 asks:** run 2 7 → E.PROMPT1 6 → E.OFFER1 5 → E.OFFER1b 6 (weighted) → **2**.
+- **What worked:**
+  - **E.CLAIM3 (A9):** "Done — 'Spare socks' is now on your Weekend packing list". The append was real.
+  - **E.CAL3b (A8):** no past 18:00.
+  - **E.HEDGE1 (A4):** "Arjun's flight lands on 3 December 2026.", plain.
+- **E.SPINE2 shows where the December items really come from.** A7's list (Rohan, Dev, Ishaan) and A8's "next dated events in early December" persist with the reminders block removed, so they come from memory recall.
+- **A11, not labelled, a quality note:** with failed sources it withheld content ("Which would you prefer?") rather than giving general advice with a caveat. This research path differs from run 2's background job.
+
+**Caveat, the reason this is not adoption:** every fix since run 2 targeted a fault seen in these same 12 asks. 2 is the tuned score; whether it generalises is unknown.
+
+**Next:** a held-out run of 12 new asks, written by dc and unseen by me until scoring, on both 86e328e (pre-afternoon) and the current build (same arm, same labels). It is preregistered before the asks exist.

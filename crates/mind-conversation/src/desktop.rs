@@ -285,7 +285,7 @@ pub(crate) fn look_first_nudge(step: usize, clause: &str) -> String {
         "\n[{step}] (you have not yet {clause}, and you have not looked at what this computer can do \
          this turn. What you said in EARLIER turns is not evidence of that — the desktop's apps are. \
          Call mcp.yantrik-os.os_describe on the app that would do it — `shell` for files and folders, \
-         `editor` for a file's text — and then do it with mcp.yantrik-os.os_act. Only if that app \
+         `editor` for a file's text, `notes` for a note or list — and then do it with mcp.yantrik-os.os_act. Only if that app \
          lists no action for it may you say you cannot.)"
     )
 }

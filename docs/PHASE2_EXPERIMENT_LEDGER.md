@@ -20685,3 +20685,61 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Windows workspace:** 2601 passed, 0 failed.
 - **Adoption of E.OFFER1 waits for the live re-run** (541, arm A, the 12 asks): offers 3–4 → 0, with no lost content.
 - **Linux (staging, 0db6883), E.OFFER1 + E.CAL3:** mind-conversation 1288 passed, mind-core 197 passed. **Bundle:** yantrik-mind-0db6883-linux-amd64.tar.zst, sha256 9bceeb8c6961f032f60beb9349452505454f882f2abe13be7d94c45942866326. Staging disk: 93%, 2.8 GB free.
+
+## E.OFFER1 + E.CAL3 — live (541, 0db6883, arm A AIG qwen3.5:27b, asked 22:06–22:3x CT, yantrik-os-dc, 17 Oct)
+
+- **Faults: 5** (run 2: 7; E.PROMPT1: 6). No false_claim or silent_action. Median 23 s; ask 12 took 82 s and raised no card. AIG was also serving a UI sweep.
+- **E.CAL3: PASS.**
+  - A8: "Monday the 19th of October is clear", with no past 18:00 "next".
+  - A7 drops the past event rather than labelling it, which is fine for a this-week answer.
+- **E.OFFER1: target missed (3 offers survive, not 0). No wrong cuts:** dc read every reply in full, and A11's retry offer was rightly kept. The misses show the shape of the gap:
+  - phrase coverage: A3 "let me know **and** I can help…" and A6 "I'll be here when you're ready";
+  - a two-sentence offer escaping the last-sentence rule: A12 "Want me to create it fresh? If so, tell me what the weekend is for…".
+- **New fault, A12 `false_absence`:** "the file `Weekend packing list.md` doesn't exist anywhere on your system", after eleven steps searching Documents and Files. It never looked in Notes, which it had used in A9 of the same conversation.
+  - That is grounding, not a prompt fault: a note is a Notes surface object, not a file.
+  - Queued as **E.NOTE1**.
+- **Still present:** A7's December items (`tie_in`). A4 is now clean.
+- **Arm A on the same 12 asks:** run 2 7 → E.PROMPT1 6 → E.OFFER1 + E.CAL3 5.
+
+## E.OFFER1b — PREREG: the offer trim covers the family, and a two-sentence offer
+
+**What changes in `trim_trailing_offer`:**
+1. **More phrases**, all first-person future help:
+   - "let me know and", "let me know when";
+   - "i'll be here", "i'll be around";
+   - "i can help you", "happy to", "i'd be glad to";
+   - "say the word", "feel free to".
+
+   "let me know which/what…" stays out: that is a clarifying request.
+2. **A conditional continuation joins the offer before it.** When the last sentence opens with "if so", "if you'd like", "if you want", "if yes" or "if that works", it is judged together with the sentence before it. If either holds an offer phrase, both go. If neither does, both stay.
+3. **Unchanged:** the retry exception, at most two removals, never down to empty, judged only at the end of the reply.
+
+**Kill criteria:**
+- K1, tests fail on dc's three live misses:
+  - A3's "…same day as Dev's surgery. If you're planning to be at the airport, let me know and I can help you think through the timing." → the second sentence goes, and the clause stays;
+  - A6's "Good — you're all caught up. I'll be here when you're ready." → "Good — you're all caught up.";
+  - A12's "I couldn't find that note. Want me to create it fresh? If so, tell me what the weekend is for." → "I couldn't find that note.";
+  - "Let me know which file you mean." → unchanged;
+  - "If so, the build passes." after a non-offer → unchanged;
+  - every E.OFFER1 case is unchanged.
+- K2, a mutant survives: the new phrases removed; the continuation join removed.
+- K3: both suites pass.
+- **Live (541, arm A, the 12 asks):** 0 offers, no wrong cut.
+
+**E.OFFER1b — RESULT: PASS (Windows, unit).** Every live miss and every keep case in `a_trailing_unasked_offer_is_trimmed` behaves as preregistered, including "Let me know which file you mean." and "I'm happy to report the build passed.", both kept. Mutants killed (2/2): the new phrases removed; the continuation join removed.
+
+## E.NOTE1 — PREREG: a named note is looked for in Notes before it is called missing
+
+**Why:** 541 A12 (0db6883). The Mind searched Documents and Files in eleven steps for "Weekend packing list.md" and answered "doesn't exist anywhere on your system". The note is a Notes object; the Mind had appended to it in A9 of the same conversation.
+
+**What is built:**
+- The grounding rules gain: "A note or list the person names (a packing list, a shopping list) lives in the Notes app: look there first (os_describe notes), and never say it doesn't exist without having looked there this turn."
+- The look-first nudge names `notes` for a note or list, beside `shell` for files and folders and `editor` for a file's text.
+
+**Kill criteria:**
+- K1: the loop prompt holds the rule, and `look_first_nudge` names `notes`.
+- K2: removing either kills the test.
+- K3: both suites pass.
+- **Live (541, ask 12):** no false absence of the Weekend packing list.
+
+**E.NOTE1 — RESULT: PASS (Windows, unit).** The rule and the nudge are asserted. Mutants killed (2/2): the rule removed; `notes` removed from the nudge. **Windows workspace (E.OFFER1b + E.NOTE1):** 2601 passed, 0 failed.

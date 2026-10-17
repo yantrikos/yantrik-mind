@@ -2107,24 +2107,46 @@ pub(crate) fn claims_a_change(text: &str) -> bool {
 /// ("want me to try again?") stays, a clarifying question matches nothing, and a reply is never
 /// trimmed to nothing.
 pub(crate) fn trim_trailing_offer(reply: &str) -> String {
-    const OFFERS: [&str; 13] = [
-        "want me to", "would you like me to", "would you like", "anything else", "let me know if", "if you'd like, i",
-        "if you want, i", "if you want me to", "i'm here if", "i'm here when", "happy to help", "need anything else",
-        "are we done",
+    // E.OFFER1b (541: "let me know and I can…", "I'll be here when…" slipped through): the family of
+    // first-person future help. "let me know which/what…" is a clarifying request and stays out.
+    const OFFERS: [&str; 22] = [
+        "want me to", "would you like me to", "would you like", "anything else", "let me know if", "let me know and",
+        "let me know when", "if you'd like, i", "if you want, i", "if you want me to", "i'm here if", "i'm here when",
+        "i'll be here", "i'll be around", "happy to help", "i'd be happy to", "i'd be glad to", "i can help you",
+        "need anything else", "are we done", "say the word", "feel free to",
     ];
+    // E.OFFER1b (541: "Want me to create it fresh? If so, tell me…"): a sentence that only continues
+    // the one before it is judged with it.
+    const CONTINUES: [&str; 5] = ["if so", "if you'd like", "if you want", "if yes", "if that works"];
+    fn norm(s: &str) -> String {
+        s.trim().to_lowercase().replace('\u{2019}', "'")
+    }
+    fn offers(s: &str) -> bool {
+        let l = norm(s);
+        OFFERS.iter().any(|o| l.contains(o)) && !l.contains("try again") && !l.contains("retry")
+    }
+    // Where the last sentence starts: after the last terminator that is not the final character,
+    // cut at a char boundary (a reply may end in "—" or an emoji).
+    fn last_start(body: &str) -> usize {
+        let head = &body[..body.char_indices().last().map(|(i, _)| i).unwrap_or(0)];
+        head.rfind(|c| matches!(c, '.' | '!' | '?' | '\n')).map(|i| i + 1).unwrap_or(0)
+    }
     let mut out = reply.trim_end().to_string();
     for _ in 0..2 {
-        // The last sentence: after the last terminator that is not the final character.
         let body = out.trim_end();
-        // Without its final character, cut at a char boundary (a reply may end in "—" or an emoji).
-        let head = &body[..body.char_indices().last().map(|(i, _)| i).unwrap_or(0)];
-        let cut = head
-            .rfind(|c| matches!(c, '.' | '!' | '?' | '\n'))
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let last = body[cut..].trim();
-        let lower = last.to_lowercase().replace('\u{2019}', "'");
-        let is_offer = OFFERS.iter().any(|o| lower.contains(o)) && !lower.contains("try again") && !lower.contains("retry");
+        let mut cut = last_start(body);
+        let last = &body[cut..];
+        let mut is_offer = offers(last);
+        if !is_offer && CONTINUES.iter().any(|c| norm(last).starts_with(c)) {
+            let before = body[..cut].trim_end();
+            if !before.is_empty() {
+                let prev = last_start(before);
+                if offers(&before[prev..]) {
+                    cut = prev;
+                    is_offer = true;
+                }
+            }
+        }
         let rest = body[..cut].trim_end();
         if !is_offer || rest.is_empty() {
             break;
@@ -14417,7 +14439,7 @@ Open reminders you're carrying for them:",
                 if names_nothing {
                     ChatMessage::system("You have been asked not to reveal private facts. Private memory, external data, configuration, clock, discovery, and mutating tools are withheld. You may use only the explicitly listed pure-local tools, with arguments copied from the current request; do not attempt any lookup or recall. Otherwise answer at the level of SHAPE and KIND from what is already in front of you, name no people, projects, accounts, purchases, places or dates, and say plainly that you cannot cite private specifics here. A short honest answer is correct; guessing to fill the gap is not.")
                 } else {
-                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) -- nothing about other facts or events (even one on the same date); `add_reminder` is for when they ask to be reminded; when you answer a question, answer what was asked: a fact the person told you is stated as they told it, with no doubt about it -- say you're unsure only about what you inferred or where sources disagree; no list of what you don't know, and no offer of more help unless they asked for it; at most one short factual clause about something on the same date or for the same person, stated as a fact, not a worry or a suggestion; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Whether an action was allowed, needed approval or failed earlier in this conversation is history too: approvals and permissions change. When they ask for an action, try it this turn -- the desktop asks the person if it must -- and never answer that it can't run, needs approval or will time out without a tool result THIS turn that says so. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
+                    ChatMessage::system("You are an agent, not a chatbot — you ACT, you don't just talk. Think, use ONE tool, observe, repeat, then answer. Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it; when they ask you to remember something, `remember` it, then reply in one sentence that confirms it (what, and when if there is a date) -- nothing about other facts or events (even one on the same date); `add_reminder` is for when they ask to be reminded; when you answer a question, answer what was asked: a fact the person told you is stated as they told it, with no doubt about it -- say you're unsure only about what you inferred or where sources disagree; no list of what you don't know, and no offer of more help unless they asked for it; at most one short factual clause about something on the same date or for the same person, stated as a fact, not a worry or a suggestion; when they tell you to DROP/cancel/stop tracking something, `drop_reminder` — never just say it's dropped, close it for real and report what closed; for real/current info, `web_fetch` or `research` instead of guessing. GROUND EVERYTHING — do not hallucinate. State a fact about the user's world (repos, names, dates, usernames, order/PR status, OR something you supposedly did last time) ONLY if it came from a tool result or a recall THIS turn, or from the memory block above. A fact about YOUR OWN setup OR CAPABILITIES — providers, models, lanes, mounted packs, keys, and what you can or cannot do (restart yourself, trade, learn tools, choose packs, edit your config) — ONLY from the `myself` tool THIS turn: your memories about your own code and config are history, not state, and reciting them as current is how you invent backends and powers you don't have. The `myself` tool states your HARD BOUNDARIES; never contradict them. If you haven't verified it, either CHECK with a tool (recall / now / web_fetch / github_repo_items) or say plainly you're not sure / ask — NEVER assert a confident guess. The state of a file, a report or a task's progress (does it exist, how long is it, what is done) ONLY from a tool result THIS turn: memories carry a date and are history, not state. Whether an action was allowed, needed approval or failed earlier in this conversation is history too: approvals and permissions change. When they ask for an action, try it this turn -- the desktop asks the person if it must -- and never answer that it can't run, needs approval or will time out without a tool result THIS turn that says so. A note or list the person names (a packing list, a shopping list) lives in the Notes app: look there first (os_describe notes), and never say it doesn't exist without having looked there this turn. Briefly cite the source ('from memory', 'per the repo', 'as of <date>'). Use tool outputs as given; don't embellish them. If unsure, 'I don't know, let me check' beats a wrong answer. CAPABILITIES: for SHOPPING/DEALS use the native `deals` tool; for PRICE TRACKING use `watch_price`; for learning about a person from a link use `learn_about`; for the user's family/people use `family`/`about_person`. Do NOT build a skill for those — the native tools exist. For anything else the core tools don't cover, FIRST `discover_tools` to search your skill library, then `run_skill`; if nothing fits, `build_capability` and run it. Never just refuse — use a native tool, discover, or build.")
                 },
                 ChatMessage::user(&prompt),
             ];

@@ -18183,6 +18183,18 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(t("Stretch break done 👍"), "Stretch break done 👍");
         assert_eq!(t("All set — your list is saved. 👍"), "All set — your list is saved. 👍");
         assert_eq!(t("Shall I add it to Monday or Tuesday?"), "Shall I add it to Monday or Tuesday?");
+
+        // E.OFFER1b: dc's three live misses on 541 (0db6883).
+        assert_eq!(
+            t("Arjun's flight lands on 3 December, the same day as Dev's surgery. If you're planning to be at the airport, let me know and I can help you think through the timing."),
+            "Arjun's flight lands on 3 December, the same day as Dev's surgery."
+        );
+        assert_eq!(t("Good — you're all caught up. I'll be here when you're ready."), "Good — you're all caught up.");
+        assert_eq!(t("I couldn't find that note. Want me to create it fresh? If so, tell me what the weekend is for."), "I couldn't find that note.");
+        // A clarifying request, and a conditional that follows no offer, stay.
+        assert_eq!(t("I found two lists. Let me know which file you mean."), "I found two lists. Let me know which file you mean.");
+        assert_eq!(t("The tests ran. If so, the build passes."), "The tests ran. If so, the build passes.");
+        assert_eq!(t("I'm happy to report the build passed."), "I'm happy to report the build passed.");
     }
 
     /// E.OFFER1: at the reply exit, the trim runs before a system note is appended, and the stored
@@ -18302,6 +18314,9 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(r.prompts.last().unwrap().matches(crate::APPROVAL_UNTRIED).count(), 1, "the answer action was not sent back once");
         // And the turn is told the rule.
         assert!(r.prompts[0].contains("Whether an action was allowed, needed approval or failed earlier in this conversation is history too"));
+        // E.NOTE1 (541 A12: a named note searched for as a file and called missing).
+        assert!(r.prompts[0].contains("A note or list the person names (a packing list, a shopping list) lives in the Notes app"));
+        assert!(crate::desktop::look_first_nudge(3, "improved the note").contains("`notes` for a note or list"));
         assert!(crate::refuses_for_approval("That command needs your approval, and the card timed out."));
         assert!(!crate::refuses_for_approval("I can't find a build script in that folder."));
         assert!(!crate::refuses_for_approval("Approved items: 3."));

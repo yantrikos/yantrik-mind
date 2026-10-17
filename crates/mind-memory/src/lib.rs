@@ -5010,29 +5010,49 @@ impl MemoryHandle {
                                     }
                                 })
                                 .collect();
+                            // E.RECALL1 (541 A4: a fact told one turn earlier was cut from 20 storage-order
+                            // matches on "when" and "Priya"): common words do not count, and the matches
+                            // are RANKED -- by how many of the asked words they hold, then what the person
+                            // told before the Mind's own inferences, then newest -- before the limit.
+                            const COMMON: [&str; 31] = [
+                                "when", "what", "where", "which", "with", "that", "this", "have", "from", "they",
+                                "their", "them", "then", "than", "there", "about", "your", "user", "after", "before",
+                                "were", "will", "would", "could", "should", "into", "does", "done", "been", "being",
+                                "away",
+                            ];
+                            let words: Vec<(String, bool)> =
+                                words.into_iter().filter(|(w, _)| !COMMON.contains(&w.as_str())).collect();
                             let hits: Vec<Belief> = if words.is_empty() {
                                 Vec::new()
                             } else {
-                                all_beliefs(&db)
+                                let mut scored: Vec<(usize, Belief)> = all_beliefs(&db)
                                     .iter()
                                     .map(to_belief_dto)
-                                    .filter(|b| {
+                                    .filter_map(|b| {
                                         let t = b.statement.to_lowercase();
                                         let toks: Vec<&str> =
                                             t.split(|c: char| !c.is_alphanumeric()).collect();
-                                        words.iter().any(|(w, whole)| {
-                                            if *whole || w.len() <= 4 {
-                                                // short words whole-word: "rath" must not hit "RATHer"
-                                                toks.contains(&w.as_str())
-                                            } else {
-                                                // longer words match at word START: "adopt"->"adoption",
-                                                // but never mid-word accidents.
-                                                toks.iter().any(|x| x.starts_with(w.as_str()))
-                                            }
-                                        })
+                                        let score = words
+                                            .iter()
+                                            .filter(|(w, whole)| {
+                                                if *whole || w.len() <= 4 {
+                                                    // short words whole-word: "rath" must not hit "RATHer"
+                                                    toks.contains(&w.as_str())
+                                                } else {
+                                                    // longer words match at word START: "adopt"->"adoption",
+                                                    // but never mid-word accidents.
+                                                    toks.iter().any(|x| x.starts_with(w.as_str()))
+                                                }
+                                            })
+                                            .count();
+                                        (score > 0).then_some((score, b))
                                     })
-                                    .take(limit.max(1))
-                                    .collect()
+                                    .collect();
+                                let told = |b: &Belief| b.provenance.to_lowercase().starts_with("told");
+                                scored.sort_by(|(sa, a), (sb, b)| {
+                                    sb.cmp(sa).then(told(b).cmp(&told(a))).then(b.updated_ms.cmp(&a.updated_ms))
+                                });
+                                scored.into_iter().map(|(_, b)| b).take(limit.max(1)).collect()
                             };
                             let _ = reply.send(Ok(hits));
                         }

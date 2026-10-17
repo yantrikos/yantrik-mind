@@ -20930,3 +20930,45 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 **The new finding, the most important one:** **A4 `false_absence` in BOTH builds.** "Who looks after my plants when I'm away?" was answered "I don't know", one turn after A3 saved "My neighbour Priya waters my plants when I'm travelling". Both A4 turns called `recall` and missed or ignored it. This is a memory-recall gap that none of 17 Oct's reply fixes touch, and it is the next E-item (E.RECALL1).
 
 **E.OFFER1b gap:** NEW A4's "If you'd like me to remember who it is for next time, just tell me…" passed the trim, because "if you'd like me to" is not in the phrase family.
+
+## E.RECALL1 — PREREG: exact-match beliefs are ranked, not taken in storage order
+
+**Why:** E.HOLDOUT2 A4, in both builds. "Who looks after my plants?" got "I don't know" one turn after `remember` saved "User's neighbour Priya waters their plants when the user is travelling". dc's evidence:
+- NEW's `recall` query was "neighbour Priya waters plants when travelling", nearly the stored text;
+- the result led with an unrelated self-authored "(hypothesis)" about a November cluster.
+
+The cause is in the code, not the model. `Cmd::BeliefsMatching`:
+- counts a belief as matching if it contains ANY query word of 4 or more characters ("when" included);
+- walks `all_beliefs` in storage order;
+- keeps the FIRST 20 matches.
+
+Old beliefs holding "when" or "Priya" fill the 20 slots, and the newest (the fact just told) is cut. The `recall` tool then prepends each of its first 8 with `insert(0)`, which reverses them. No write or index lag is involved: `remember` writes the belief synchronously, and `all_beliefs` reads the store directly.
+
+**What is built:**
+1. **In `BeliefsMatching`:**
+   - common words are dropped from the needle (when, what, where, which, with, that, this, have, from, they, their, them, then, than, there, about, your, user, after, before, were, will, would, could, should, into, does, done, been, being);
+   - each belief is scored by how many distinct remaining words it matches (the same whole-word / word-start rules as now);
+   - beliefs are ordered by score descending, then told provenance before others, then `updated_ms` newest first;
+   - THEN the limit is taken.
+2. **In the `recall` tool:** belief lines lead in that rank order (best first), not reversed.
+
+**Kill criteria:**
+- K1, a test fails. With 25 older beliefs each holding "when" or "Priya" (hypotheses, provenance inferred) and then `remember` of the Priya plant fact:
+  - `recall "neighbour Priya waters plants when travelling"` → its FIRST line is the plant fact;
+  - `recall "who looks after my plants when I'm away"` → the plant fact is among the belief lines;
+  - with the ranking removed, neither holds.
+- K2, a mutant survives: the score removed (storage order); the stopwords removed; the recall tool's order reversed again.
+- K3: both suites pass.
+- **Live:** a held-out-style pair on 541 ("My neighbour X does Y" then "Who does Y?") answers with X. dc to run, with fresh wording.
+
+**E.RECALL1 — RESULT: PASS (Windows, unit).** `a_fact_just_told_leads_recall_over_older_noise` passes. With 25 older inferred beliefs (half naming Priya and "when", half sharing "away", "after", "when"):
+- the fact just told is the FIRST line of `recall "neighbour Priya waters plants when travelling"`;
+- it is present for `recall "who looks after my plants when I'm away"`.
+
+Mutants killed (3/3): the ranking removed (storage order); the stopwords removed; the recall tool's order reversed again.
+- **The stopword mutant SURVIVED the first test:** ranking alone lifted the fact over noise sharing one common word. The noise was made realistic (three shared common words) and the mutant is killed since.
+- **Amendment:** "away" is added to the common-word list, beyond the preregistered list.
+
+**E.OFFER1b, extended:** "if you'd like me to" joins the offer family (E.HOLDOUT2 NEW A4). Its case is in `a_trailing_unasked_offer_is_trimmed`, and removing the phrase kills it.
+
+**Windows workspace:** 2606 passed, 0 failed.

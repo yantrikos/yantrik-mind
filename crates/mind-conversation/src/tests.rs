@@ -18178,6 +18178,39 @@ mod desktop_consent_and_stall_wiring {
         assert!(!crate::claims_no_change("Added 'Spare socks' to your list."));
     }
 
+    /// E.RECALL1 (E.HOLDOUT2 A4, both builds: "I don't know who looks after your plants" one turn after
+    /// it was told): a fact just told leads `recall` over older beliefs sharing a common word or a
+    /// name, and is found by a question that shares only its content words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fact_just_told_leads_recall_over_older_noise() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let facade: Arc<dyn MemoryFacade> = Arc::new(mem);
+        for i in 0..25 {
+            let noise = if i % 2 == 0 {
+                format!("Hypothesis {i}: Priya's birthday and Arun's housewarming land in the same month when the calendar is busy")
+            } else {
+                // Shares three common words with the second question ("away", "after", "when"), so
+                // only the stopwords keep it from outranking the fact.
+                format!("Hypothesis {i}: the user is away after work when the week is quiet")
+            };
+            facade
+                .remember_as_belief_scoped(
+                    BeliefAssertion { statement: noise, polarity: 1.0, weight: 0.8, source_event: None, provenance: "inferred".into() },
+                    mind_types::Scope::primary(),
+                )
+                .await
+                .unwrap();
+        }
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(facade.clone(), pool, "YM");
+        let me = TurnIdentity::primary();
+        conv.run_agent_tool_as("remember", &serde_json::json!({"text": "User's neighbour Priya waters their plants when the user is travelling"}), &me).await;
+        let out = conv.run_agent_tool_as("recall", &serde_json::json!({"query": "neighbour Priya waters plants when travelling"}), &me).await;
+        assert!(out.lines().next().unwrap_or("").contains("waters their plants"), "the fact just told does not lead:\n{out}");
+        let out = conv.run_agent_tool_as("recall", &serde_json::json!({"query": "who looks after my plants when I'm away"}), &me).await;
+        assert!(out.contains("waters their plants"), "a question sharing only its content words misses it:\n{out}");
+    }
+
     /// E.HEDGE1 (541 A4: "marking that date as uncertain … only one note on it"): a fact the person
     /// told is recalled as told, not as a 0.50 posterior.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -18270,6 +18303,8 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(t("I found two lists. Let me know which file you mean."), "I found two lists. Let me know which file you mean.");
         assert_eq!(t("The tests ran. If so, the build passes."), "The tests ran. If so, the build passes.");
         assert_eq!(t("I'm happy to report the build passed."), "I'm happy to report the build passed.");
+        // E.HOLDOUT2 NEW A4: "If you'd like me to remember who it is…, just tell me…" got through.
+        assert_eq!(t("I don't have that yet. If you'd like me to remember who it is for next time, just tell me the name."), "I don't have that yet.");
     }
 
     /// E.OFFER1: at the reply exit, the trim runs before a system note is appended, and the stored

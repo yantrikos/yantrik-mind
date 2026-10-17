@@ -2126,8 +2126,8 @@ pub(crate) fn claims_a_change(text: &str) -> bool {
 pub(crate) fn trim_trailing_offer(reply: &str) -> String {
     // E.OFFER1b (541: "let me know and I can…", "I'll be here when…" slipped through): the family of
     // first-person future help. "let me know which/what…" is a clarifying request and stays out.
-    const OFFERS: [&str; 22] = [
-        "want me to", "would you like me to", "would you like", "anything else", "let me know if", "let me know and",
+    const OFFERS: [&str; 23] = [
+        "if you'd like me to", "want me to", "would you like me to", "would you like", "anything else", "let me know if", "let me know and",
         "let me know when", "if you'd like, i", "if you want, i", "if you want me to", "i'm here if", "i'm here when",
         "i'll be here", "i'll be around", "happy to help", "i'd be happy to", "i'd be glad to", "i can help you",
         "need anything else", "are we done", "say the word", "feel free to",
@@ -12923,6 +12923,9 @@ WINDOW: all-time, latest 200
                 // EXACT-MATCH belief pass: deterministic enumeration (no embedding lottery) —
                 // any belief that literally says a query word leads the output.
                 if let Ok(bs) = self.memory.beliefs_matching(&q, &ctx).await {
+                    // E.RECALL1: they arrive ranked, best first, and lead in that order (each one used
+                    // to be inserted at the front, which reversed them).
+                    let mut front: Vec<String> = Vec::new();
                     for b in bs.iter().take(8) {
                         // E.HEDGE1 (541 A4: "marking that date as uncertain … only one note on it"): what
                         // the person said is shown as said, not as a 0.50 posterior.
@@ -12932,10 +12935,11 @@ WINDOW: all-time, latest 200
                         } else {
                             format!("- {} (belief {:.2})", b.statement, b.confidence)
                         };
-                        if !lines.contains(&l) {
-                            lines.insert(0, l);
+                        if !lines.contains(&l) && !front.contains(&l) {
+                            front.push(l);
                         }
                     }
+                    lines.splice(0..0, front);
                 }
                 if lines.is_empty() {
                     "(nothing relevant in memory)".to_string()

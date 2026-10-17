@@ -20540,3 +20540,33 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Labelling notes:**
   - 541's baseline memory holds December family facts. "Arjun 3 Dec ↔ Dev's surgery" is the allowed same-date clause. B7 listing December items as "next dated items" for "this week" is a further-ahead item: by policy not a fault for "due soon" asks, and borderline for "this week".
   - Ask 12's whole-note rewrite (`notes.set_content`) raises a card in ask mode in every arm. The card is not pressed (Pranab's), so the arms stay comparable.
+
+## E.MODEL2 — RESULT (run 2, 541, Mind 86e328e, yantrik-os-dc labels, 16 Oct): NO change of default by the preregistered rule
+
+- **Integrity:**
+  - every preflight passed;
+  - every Mind call went to the intended account and model, with no fallback and no void turn;
+  - the snapshot was restored per arm, and ask 6 came after each arm's own card;
+  - 541 was restored afterwards: AIG primary, the Ollama entry and key removed.
+- **Faults (dc), plus my reading after the grader screen:**
+
+  | Arm | Model | dc | After my flips | Median | Without ask 12 | Calls |
+  |---|---|---|---|---|---|---|
+  | A | AIG qwen3.5:27b | 7 | **7** | 23.5 s | 23 s | 39 |
+  | B | deepseek-v4.1-flash | 6 | **7** | 12 s | 12 s | 37 |
+  | C | kimi-k3 | 5 | **6** | 17.5 s | 13 s | 32 |
+
+  No false_claim or silent_action in any arm.
+- **The grader screen** (unasked_offer + contradicts_facts): 63/72 agreement with dc. I read each of the 9 disagreements:
+  - The retry offers after an approval timeout or unopened sources (A12/B12/C12, B11/C11) are clean. The policy's own example is "want me to try again?", and the grader's question does not encode it.
+  - B6 "I'm here if you need anything" and C6 "I'm here when you need me" are **flipped to offer**, consistent with A6.
+  - A3's grader offer (0.52) and A6's contradicts_facts (0.83) do not hold up on reading.
+- **Rule check:** an arm needs faults ≤ half of A's (3.5), and both cloud arms fail that. Median ≤ A holds for both.
+
+**What the result means:**
+1. **The fault families are model-independent.** All three models produce the same families (offers, tie-ins, unasked advice, an occasional date slip) at 6–7 per 12 asks. Changing the model does not remove them.
+   - **Hypothesis to test next:** the prompt induces them. The loop's system text opens "Be proactive WITHOUT being asked", and `COMPOSE_PLAIN_WORDS`' example ends "want me to try again?". Both pull against "no offer of more help unless they asked".
+2. **Latency is model-dependent.** Simple turns: A 23.5 s against B 12 s. Tool turns: A 59–69 s against 12–22 s on the cloud arms.
+3. **n = 12 per arm.** 6 against 7 is noise; no quality ranking of B against C is supported.
+
+**Open for Pranab:** the rule asked for fewer faults and a speed gain together. Quality being equal, a speed-only switch is a separate decision: cloud means desktop reads go to Ollama, and it costs per call.

@@ -20895,3 +20895,38 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
   - It also holds three files, all created after NEW began at 01:05:58: NEW's own A9 Groceries note (01:20:19) and the void OLD run's A9 note and `~/Groceries.md`.
   - No run deletes notes or calendar files, and the earlier runs only appended. So NEW started from exactly the snapshot, and **NEW stands**.
   - OLD's rerun starts from empty folders by construction; its starting listing comes with the results.
+
+## E.HOLDOUT2 — RESULT (541, arm A AIG qwen3.5:27b, dc's labels as given, 17 Oct): "PARTLY" by the rule, which in substance means the gains did not generalise
+
+- **Integrity:**
+  - The asks file's sha256 matches the sealed `af95484b…` (recomputed by me before scoring).
+  - NEW's start-state parity was verified; OLD was re-run from empty folders after a contaminated first run (void).
+  - Both arms' A3 called `remember`.
+- **Scoring:** dc's labels kept **as given**. Flipping a label after seeing which arm it favours would bias the comparison. I disagree mildly with one (NEW A3's "sister Priya" as tie_in) and left it.
+
+| | NEW (b3598f2) | OLD (86e328e) |
+|---|---|---|
+| Raw faults | 7 | 7 |
+| **Weighted** (false_claim ×2, as preregistered via E.MODEL2's rule) | **7** | **8** |
+| false_claim / silent_action | 0 | 1 (A6: "I didn't actually save Priya's plant-care role … let me fix that now". A3 had saved it, and the turn calls no tool) |
+| Median turn | 22 s | 28.5 s |
+
+- **NEW's faults:** A2 hedge_told_fact; A3 tie_in + offer; A4 false_absence + offer; A6 tie_in; A7 tie_in (Rohan 9 Dec).
+- **OLD's faults:** A2 hedge_told_fact + withheld_content; A4 false_absence + offer; A6 false_claim; A10 offer; A12 false_absence (searched Documents, not Notes).
+
+**Verdict (preregistered):** NEW = OLD − 1 weighted, so **"partly"**. Raw is level, and the one-point difference is a single false claim in OLD. **So 17 Oct's 7 → 2 on the tuning asks was mostly fitted to them.**
+
+**What did carry over to unseen asks:**
+- no false claim in NEW;
+- offers 3 → 2;
+- note lookup (E.NOTE1: NEW A12 found the note in Notes; OLD A12 called it absent);
+- E.CAL3/SPINE2 behaved;
+- a faster median.
+
+**What did not:**
+- **tie-ins went 0 → 3.** A7's December item came via memory recall again, A6's "thanks" recited the dentist, and A3 brought in another Priya.
+- told-fact hedging persisted when an older conflicting memory existed (A2: an earlier 15 Oct dentist entry in the snapshot).
+
+**The new finding, the most important one:** **A4 `false_absence` in BOTH builds.** "Who looks after my plants when I'm away?" was answered "I don't know", one turn after A3 saved "My neighbour Priya waters my plants when I'm travelling". Both A4 turns called `recall` and missed or ignored it. This is a memory-recall gap that none of 17 Oct's reply fixes touch, and it is the next E-item (E.RECALL1).
+
+**E.OFFER1b gap:** NEW A4's "If you'd like me to remember who it is for next time, just tell me…" passed the trim, because "if you'd like me to" is not in the phrase family.

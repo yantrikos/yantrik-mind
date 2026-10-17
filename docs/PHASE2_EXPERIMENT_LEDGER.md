@@ -20633,3 +20633,54 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 
     Both are worth fixing on their own.
   - **Offers survive** across three models and two prompts. Instructions have not removed them, whoever wrote them.
+
+## E.OFFER1 + E.CAL3 — PREREG
+
+### E.OFFER1: a trailing unasked offer is trimmed (Pranab, 17 Oct: "Yes, trim trailing offers")
+
+**Why:** offers survive three models (E.MODEL2) and two prompts (E.PROMPT1, reverted). They are the most frequent fault: 16 of 73 in the held-out set, and in every arm. Instructions have not removed them.
+
+**What is built:** `trim_trailing_offer(reply)`. While the reply's LAST sentence is an unasked offer, drop it, at most twice, and never down to an empty reply.
+- **Offer phrases** (lowercased, at the start of the last sentence or anywhere in it):
+  - "want me to", "would you like me to", "would you like";
+  - "anything else", "let me know if", "if you'd like, i", "if you want, i", "if you want me to";
+  - "i'm here if", "i'm here when", "happy to help", "need anything else", "are we done".
+- **Kept:**
+  - a sentence with "try again" or "retry" (the policy's retry-after-failure);
+  - clarifying questions ("Which file do you mean?", "Monday or Tuesday?"), which match no phrase;
+  - "shall I" / "should I", deliberately NOT in the list, because they open real clarifications.
+- **Where:** at the four reply exits (text, answer action, native answer, compose), before the system-voiced notes (E.CLAIM2's correction, denied writes, failed commands, unsaved, held notes) are appended. The transcript stores the trimmed reply, so later turns do not learn the habit from their own history.
+
+**Kill criteria:**
+- K1, tests fail on these replies:
+  - "Done — saved. Want me to set a reminder too?" → "Done — saved.";
+  - "It's 72% full. Anything else?" → "It's 72% full.";
+  - "Got it. I'm here if you need anything." → "Got it.";
+  - "I needed your OK and didn't get it — want me to try again?" → unchanged;
+  - "Which file do you mean?" → unchanged;
+  - "Want me to?" alone → unchanged (never empty);
+  - a scripted turn whose answer ends with an offer → the reply and the stored transcript have no offer;
+  - an appended ⚠️ correction survives the trim.
+- K2, a mutant survives: the trim removed from an exit; the retry exception removed; the never-empty guard removed.
+- K3: both suites pass.
+- **Live (541, arm A, E.MODEL2's 12 asks, the same labels):** offers in the 12 replies go from 3–4 to 0, with no lost content (dc reads each trimmed reply).
+
+### E.CAL3: today's past event is not "next" (E.PROMPT1 A8)
+
+**Why:** at about 20:50, "What's on my calendar on Monday?" answered "Your next scheduled item is today at 18:00": `upcoming` labelled a past event "today 18:00".
+
+**What is built:** `calendar_event_lines` takes the current time. A timed event earlier today reads `earlier today 18:00 (already past)`; an all-day event today stays `today`.
+
+**Kill criteria:**
+- K1: with now = 16 Oct 20:50, the 18:00 event reads `earlier today 18:00 (already past)`, a 21:30 event reads `today 21:30`, and tomorrow's reads `tomorrow …`.
+- K2: the past check removed kills the test.
+- K3: both suites pass.
+
+**E.OFFER1 + E.CAL3 — RESULT: PASS (Windows, the unit criteria).**
+- **E.OFFER1:** `a_trailing_unasked_offer_is_trimmed` and `the_reply_and_its_record_carry_no_trailing_offer` pass. They cover the reply, the stored transcript, and an appended ⚠️ correction surviving the trim. Mutants killed (3/3): the trim removed from the text exit; the retry exception removed; the never-empty guard removed.
+  - **The first run of the retry mutant SURVIVED:** the retry case was a lone sentence, so the never-empty guard kept it either way. The case was fixed to follow other content, and the mutant is killed since.
+  - **Found while testing:** slicing at `len-1` would have panicked on a reply ending in "—" or an emoji. It now cuts at a char boundary, and cases ending in 👍 are in the test.
+  - **One older test updated by policy:** `the_reply_is_compose_minus_what_the_log_does_not_support` (E.CITE1) expected its reply to keep "Want me to open System Monitor?". It now expects that offer trimmed.
+- **E.CAL3:** `an_event_earlier_today_says_it_is_past` passes, and the past-check mutant kills it. `upcoming_reads_the_desktop_calendar` no longer depends on the clock: on 16 Oct after 18:00 its fixture event reads "earlier today 18:00".
+- **Windows workspace:** 2601 passed, 0 failed.
+- **Adoption of E.OFFER1 waits for the live re-run** (541, arm A, the 12 asks): offers 3–4 → 0, with no lost content.

@@ -2102,6 +2102,38 @@ pub(crate) fn claims_a_change(text: &str) -> bool {
     CLAIMS.iter().any(|c| t.contains(c)) || text.contains("FINISHED")
 }
 
+/// E.OFFER1 (Pranab, 17 Oct: offers survived three models and two prompts): the reply without a
+/// trailing unasked offer. Only the LAST sentence is judged, at most twice; a retry after a failure
+/// ("want me to try again?") stays, a clarifying question matches nothing, and a reply is never
+/// trimmed to nothing.
+pub(crate) fn trim_trailing_offer(reply: &str) -> String {
+    const OFFERS: [&str; 13] = [
+        "want me to", "would you like me to", "would you like", "anything else", "let me know if", "if you'd like, i",
+        "if you want, i", "if you want me to", "i'm here if", "i'm here when", "happy to help", "need anything else",
+        "are we done",
+    ];
+    let mut out = reply.trim_end().to_string();
+    for _ in 0..2 {
+        // The last sentence: after the last terminator that is not the final character.
+        let body = out.trim_end();
+        // Without its final character, cut at a char boundary (a reply may end in "—" or an emoji).
+        let head = &body[..body.char_indices().last().map(|(i, _)| i).unwrap_or(0)];
+        let cut = head
+            .rfind(|c| matches!(c, '.' | '!' | '?' | '\n'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let last = body[cut..].trim();
+        let lower = last.to_lowercase().replace('\u{2019}', "'");
+        let is_offer = OFFERS.iter().any(|o| lower.contains(o)) && !lower.contains("try again") && !lower.contains("retry");
+        let rest = body[..cut].trim_end();
+        if !is_offer || rest.is_empty() {
+            break;
+        }
+        out = rest.to_string();
+    }
+    out
+}
+
 /// E.CLAIM2: what a reply that claims a change, in a turn that changed nothing, is told once.
 pub(crate) const CHANGE_UNBACKED: &str = "(the reply says something was written, run or changed, but no tool call this turn changed anything -- do it now with a tool, or say plainly that it was not done)";
 
@@ -14555,7 +14587,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
             if let Some(ans) = v.get("answer").and_then(|x| x.as_str()) {
                 // E.ANS4: never the person's reply as a JSON object.
-                let mut a = unwrapped_answer(ans).unwrap_or_default();
+                let mut a = trim_trailing_offer(&unwrapped_answer(ans).unwrap_or_default());
                 // E.GROUND1: the same backstop on the answer action.
                 if !any_sent && !approval_nudged && !ack_only && refuses_for_approval(&a) {
                     approval_nudged = true;
@@ -14643,7 +14675,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // removed the thing that was hiding it.
             if tool == "answer" {
                 // E.ANS4: never the person's reply as a JSON object.
-                let mut ans = unwrapped_answer(&args_text(&v)).unwrap_or_default();
+                let mut ans = trim_trailing_offer(&unwrapped_answer(&args_text(&v)).unwrap_or_default());
                 if !ans.trim().is_empty() {
                     apply_denied_write_correction(&mut ans, &denied_mutations);
                     desktop::apply_failed_commands(&mut ans, &failed_cmds);
@@ -14739,7 +14771,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     "Sorry — I had trouble putting that together. Mind asking once more?"
                         .to_string()
                 } else {
-                    raw.to_string()
+                    // E.OFFER1: no trailing unasked offer.
+                    trim_trailing_offer(raw)
                 };
                 // This exit used to be the only one with no journal line, so a turn ending here was
                 // indistinguishable from one still running — 17 minutes of "is it wedged?" on
@@ -15775,6 +15808,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         // "Even if I ask a question or asked to do something … it asks for my personal details.
         // That should be in an idle time, not when something [is] ongoing." Those questions come
         // only from the idle drive (loops.rs), which waits for the person to be quiet.
+        // E.OFFER1: no trailing unasked offer, before any system note is appended.
+        ans = trim_trailing_offer(&ans);
         apply_denied_write_correction(&mut ans, &denied_mutations);
         desktop::apply_failed_commands(&mut ans, &failed_cmds);
         // E.CLAIM2: compose cannot be sent back; a claimed change over a turn that changed nothing

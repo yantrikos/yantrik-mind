@@ -580,13 +580,20 @@ Only the reminders I keep are below."
 /// run past the asked range. So only the text before the state line is read, one JSON value at a
 /// time from each `[`; with no array of titled events, an accepted act is an empty calendar.
 pub(crate) fn calendar_event_lines(obs: &str) -> std::result::Result<Vec<String>, ()> {
-    calendar_event_lines_on(obs, local_now().date_naive())
+    calendar_event_lines_at(obs, local_now().naive_local())
 }
 
 /// E.CAL2 (541: "Trip reminder -- Dallas tomorrow" at 18:00 TODAY was told as tomorrow, three times
 /// of three): each day relative to `today`, and the title in quotes, so the title's own date words
-/// are not read as the event's date.
+/// are not read as the event's date. Read as of the start of `today`.
 pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> std::result::Result<Vec<String>, ()> {
+    calendar_event_lines_at(obs, today.and_hms_opt(0, 0, 0).unwrap_or_default())
+}
+
+/// E.CAL3 (541: at 20:50, "your next scheduled item is today at 18:00"): as of `now`, so a timed
+/// event earlier today says it is already past.
+pub(crate) fn calendar_event_lines_at(obs: &str, now: chrono::NaiveDateTime) -> std::result::Result<Vec<String>, ()> {
+    let today = now.date();
     let head = obs.split("state: {").next().unwrap_or(obs);
     let mut found: Option<Vec<serde_json::Value>> = None;
     let mut untitled = false;
@@ -624,6 +631,7 @@ pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> st
             _ => t.format("%a %-d %b").to_string(),
         });
         let when = match (parsed, &day) {
+            (Some(t), Some(_)) if !all_day && t.date() == today && t < now => format!("earlier today {} (already past)", t.format("%H:%M")),
             (Some(t), Some(day)) if !all_day => format!("{day} {}", t.format("%H:%M")),
             (_, Some(day)) => day.clone(),
             _ => start.to_string(),
@@ -653,7 +661,23 @@ fn title_day_word(title: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod cal1_tests {
-    use super::calendar_event_lines_on;
+    use super::{calendar_event_lines_at, calendar_event_lines_on};
+
+    /// E.CAL3 (541: "next scheduled item is today at 18:00", asked at 20:50).
+    #[test]
+    fn an_event_earlier_today_says_it_is_past() {
+        let at_2050 = chrono::NaiveDate::from_ymd_opt(2026, 10, 16).unwrap().and_hms_opt(20, 50, 0).unwrap();
+        let events = r#"[{"title":"Trip reminder - Dallas","start":"2026-10-16T18:00:00","is_all_day":false},{"title":"Call home","start":"2026-10-16T21:30:00","is_all_day":false},{"title":"Holiday","start":"2026-10-16T00:00:00","is_all_day":true},{"title":"Dentist","start":"2026-10-17T09:00:00","is_all_day":false}]"#;
+        assert_eq!(
+            calendar_event_lines_at(events, at_2050).unwrap(),
+            vec![
+                "earlier today 18:00 (already past): \"Trip reminder - Dallas\"".to_string(),
+                "today 21:30: \"Call home\"".to_string(),
+                "today: \"Holiday\"".to_string(),
+                "tomorrow 09:00: \"Dentist\"".to_string(),
+            ]
+        );
+    }
 
     /// The absolute cases read from 1 Oct, so no event below is today or tomorrow.
     fn calendar_event_lines(obs: &str) -> Result<Vec<String>, ()> {

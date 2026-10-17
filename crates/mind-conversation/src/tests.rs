@@ -17737,7 +17737,8 @@ mod desktop_consent_and_stall_wiring {
     async fn upcoming_reads_the_desktop_calendar() {
         let event = r#"[{"id":"e1","title":"Trip reminder -- Dallas tomorrow","start":"2026-10-16T18:00:00","end":"2026-10-16T18:30:00","is_all_day":false}]"#;
         let (out, left) = upcoming_with_desktop(vec![event]).await;
-        assert!(out.contains("On your calendar:") && out.contains("18:00: \"Trip reminder -- Dallas tomorrow\""), "{out}");
+        // (Whether it reads "18:00" or "earlier today 18:00 (already past)" depends on the clock: E.CAL3.)
+        assert!(out.contains("On your calendar:") && out.contains("18:00") && out.contains("\"Trip reminder -- Dallas tomorrow\""), "{out}");
         assert_eq!(left, 0);
         let (out, left) = upcoming_with_desktop(vec!["calendar is closed (no socket)", "{\"service\":\"calendar\",\"state\":\"started\"}", event]).await;
         assert!(out.contains("Trip reminder -- Dallas tomorrow"), "{out}");
@@ -18108,7 +18109,8 @@ mod desktop_consent_and_stall_wiring {
         let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM").with_recipes(recipes);
         let reply = conv.agent_loop_for_eval("How full is my disk?", &TurnIdentity::primary()).await.unwrap_or_default();
         assert_eq!(*checks.lock().unwrap(), 1, "the work-log check did not run once: {reply}");
-        assert!(reply.starts_with("Your disk is 72% full. Want me to open System Monitor?"), "{reply}");
+        // E.OFFER1: the trailing unasked offer ("Want me to open System Monitor?") is trimmed.
+        assert!(reply.starts_with("Your disk is 72% full.") && !reply.contains("Want me to open"), "{reply}");
         assert!(!reply.contains("Firefox") && !reply.to_lowercase().contains("source"), "{reply}");
     }
 
@@ -18161,6 +18163,46 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::unwrapped_answer("{not json, just a brace} and words").as_deref(), Some("{not json, just a brace} and words"));
         assert_eq!(crate::unwrapped_answer("{\"text\": \"{\\\"text\\\": \\\"Nested and saved now.\\\"}\"}").as_deref(), Some("Nested and saved now."));
         assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
+    }
+
+    /// E.OFFER1 (Pranab, 17 Oct): a trailing unasked offer is trimmed; a retry after a failure, a
+    /// clarifying question and a lone offer stay; a reply ending in a multi-byte character is safe.
+    #[test]
+    fn a_trailing_unasked_offer_is_trimmed() {
+        let t = crate::trim_trailing_offer;
+        assert_eq!(t("Done — saved. Want me to set a reminder too?"), "Done — saved.");
+        assert_eq!(t("It's 72% full. Anything else?"), "It's 72% full.");
+        assert_eq!(t("Got it. I'm here if you need anything."), "Got it.");
+        assert_eq!(t("Good. Anything else on your mind tonight, or are we done for the day?"), "Good.");
+        assert_eq!(t("Done.\n\nWould you like me to add more? Let me know if so."), "Done.", "two trailing offers");
+        // (After other content, so the never-empty guard cannot be what keeps it.)
+        let retry = "The approval card timed out, so nothing ran. Want me to try again?";
+        assert_eq!(t(retry), retry);
+        assert_eq!(t("Which file do you mean?"), "Which file do you mean?");
+        assert_eq!(t("Want me to?"), "Want me to?", "never trimmed to nothing");
+        assert_eq!(t("Stretch break done 👍"), "Stretch break done 👍");
+        assert_eq!(t("All set — your list is saved. 👍"), "All set — your list is saved. 👍");
+        assert_eq!(t("Shall I add it to Monday or Tuesday?"), "Shall I add it to Monday or Tuesday?");
+    }
+
+    /// E.OFFER1: at the reply exit, the trim runs before a system note is appended, and the stored
+    /// transcript has no offer either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reply_and_its_record_carry_no_trailing_offer() {
+        let said = "Your disk is 72% full. Want me to clean up the cache?";
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let script = Script { at: AtomicUsize::new(0), steps: vec![Step::Say(said)], seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let reply = conv.agent_loop_for_eval("How full is my disk?", &TurnIdentity::primary()).await.unwrap();
+        assert_eq!(reply, "Your disk is 72% full.");
+        let stored = mem.recent_messages(5, &mind_types::AccessContext::operator_audit()).await.unwrap();
+        assert!(stored.iter().any(|(r, t)| r == "assistant" && t == "Your disk is 72% full."), "{stored:?}");
+        // A system note appended after the trim survives it.
+        let claim = "I wrote the cleanup script. Want me to run it?";
+        let r = run_with("Clean up my cache", vec![Step::Say(claim), Step::Say(claim)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(r.reply.contains(crate::CHANGE_CORRECTION) && !r.reply.contains("Want me to run it"), "{}", r.reply);
     }
 
     /// E.CLAIM2: a model that plays tool steps and, at compose, claims a change.

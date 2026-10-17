@@ -20890,3 +20890,8 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **OLD's first run is VOID (contaminated).** The restore unpacked the snapshot's notes over the folder without removing files created later, so the Groceries note NEW made in its ask 9 was present when OLD started. OLD also wrote an out-of-scope `/home/tester/Groceries.md`. It is kept as `holdout2-OLD-contaminated.jsonl` and not scored.
 - **The fix:** the restore archives post-snapshot notes and calendar files (moved aside, never deleted) before unpacking. OLD is re-run.
 - **Added to the run's requirements before scoring:** NEW started under the same flawed restore, so both arms must show byte-identical starting note and calendar state, by a listing or hash of each arm's starting folder. Otherwise NEW is re-run too.
+- **NEW's start-state parity: VERIFIED (dc, 541).**
+  - The archive moved aside before the OLD rerun (`/root/model2-archive/person.1792219901`) holds the snapshot's four files with the snapshot's four sha256s and pre-run mtimes.
+  - It also holds three files, all created after NEW began at 01:05:58: NEW's own A9 Groceries note (01:20:19) and the void OLD run's A9 note and `~/Groceries.md`.
+  - No run deletes notes or calendar files, and the earlier runs only appended. So NEW started from exactly the snapshot, and **NEW stands**.
+  - OLD's rerun starts from empty folders by construction; its starting listing comes with the results.

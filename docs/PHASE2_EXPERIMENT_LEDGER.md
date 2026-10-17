@@ -20769,3 +20769,68 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
     - `parse_due_at` (E.REM1) now reads "3rd of December". Its test had pinned that as unreadable, a recorded limitation, and was updated.
 - Mutants killed (2/2): the horizon filter removed; the day-first reading removed.
 - Windows workspace: 2602 passed, 0 failed.
+
+## E.OFFER1b + E.NOTE1 — live (541, 4c47f04, arm A AIG qwen3.5:27b, asked 23:05–23:25 CT, yantrik-os-dc, 17 Oct): BOTH TARGETS MET; one new false claim
+
+- **E.OFFER1b: PASS.** 0 offers in 12 replies, and no wrong cut (dc read every reply in full). A6 is "Good."; A3's airport offer is gone; A12 kept its allowed retry offer.
+- **E.NOTE1: PASS.** A12 went to Notes, tried `set_content`, and honestly reported the timed-out card. No false absence.
+- **Faults:** 5 raw, 6 weighted (a false_claim counts double). History: run 2 7 → E.PROMPT1 6 → E.OFFER1 5 → this run 6 weighted.
+  - **A9 `false_claim`, new.**
+    - Step 3: `notes.append "- Spare socks"` → accepted, and the note did change.
+    - Step 4: an identical append, met by the repeated-call note "(that action already ran; its result is above…)".
+    - The reply: "'Spare socks' is already on your Weekend packing list note — … Nothing left to add."
+    - That presents the turn's own write as pre-existing, the inverse of E.CLAIM2.
+  - **A4 `hedge_told_fact` + `tie_in`:** "marking that date as uncertain … only one note on it", one turn after being told, plus Tanvi's 6 Dec recital.
+  - **A7 `tie_in`:** the December list (E.SPINE2 is not in this build). It now correctly says the Dallas reminder passed.
+  - **A8 `stale_claim`:** "The only upcoming calendar item I see is … scheduled for today", at 23:1x. The tool's "(already past)" label was not enough.
+- Median 23 s.
+
+**E.SPINE2 — Linux (staging, c25647a):** mind-conversation 1289 passed, mind-core 197 passed. **Bundle:** yantrik-mind-c25647a-linux-amd64.tar.zst, sha256 0f2fd787be9cd4f83269a7d04015e767f1c2bd4e794f9d2a04f2ad407afa21ee. Not sent to dc on its own; it rides with E.CLAIM3, E.CAL3b and E.HEDGE1.
+
+## E.CLAIM3 + E.CAL3b + E.HEDGE1 — PREREG (from the 4c47f04 run)
+
+### E.CLAIM3: the turn's own change is not called pre-existing (541 A9)
+
+**What is built:**
+1. **The repeated-action note.** "(that action already ran; its result is above…)" becomes "(you already did this earlier in THIS turn and it succeeded -- that change is yours, so say you did it. Do not repeat it. Take the NEXT step the request still needs, or answer.)".
+2. **The inverse of E.CLAIM2.** When something changed this turn and the reply claims nothing was needed, it is sent back ONCE with "(a tool call this turn made that change -- say you did it, not that it was already there)". A second such reply is taken.
+   - The claim phrases: "already on your", "already in your", "already there", "already had", "nothing to add", "nothing left to add", "no change needed", "no changes needed", "nothing needed".
+
+**Kill criteria:**
+- K1, tests fail:
+  - a `remember` that succeeded, then "That's already in your notes — nothing to add." → sent back;
+  - the same reply with nothing changed this turn → taken;
+  - the repeated-action note holds "that change is yours".
+- K2, a mutant survives: the inverse check removed; the note reverted.
+
+### E.CAL3b: a past event is not offered as upcoming (541 A8)
+
+**What is built:** `upcoming` leaves out timed events earlier today. The tool is "upcoming", and labelling the event "(already past)" did not stop the model calling it "upcoming".
+
+**Kill criteria:**
+- K1: at 20:50, the 18:00 event is absent from `upcoming_list`'s calendar section, and the 21:30 event is present.
+- K2: the drop removed kills the test.
+
+### E.HEDGE1: a fact the person told is shown as told (541 A4; B2 in E.MODEL2)
+
+**What is built:** the `recall` tool prints a belief whose provenance is "told" as "(you told me)", not "(belief 0.50)". A low posterior on a single mention read as doubt about what the person said. Beliefs with other provenances keep their number.
+
+**Kill criteria:**
+- K1: after `remember "Arjun's flight lands on 3 December"`, the recall output for "Arjun flight" holds "(you told me)" and no "(belief 0." on that line.
+- K2: the label removed kills the test.
+
+**All three:** both suites pass (K3).
+- **Live (541, arm A, the 12 asks, with E.SPINE2 in the same bundle):**
+  - A9 does not call its own append pre-existing;
+  - A8 does not offer the past event as upcoming;
+  - A4 states the date plainly;
+  - A7 has no December list.
+
+**E.CLAIM3 + E.CAL3b + E.HEDGE1 — RESULT: PASS (Windows, unit).**
+- **E.CLAIM3:** `the_turns_own_change_is_not_called_pre_existing` passes: after a `remember`, the disowning reply is sent back; after only a read, it is not. `a_repeated_act_that_ran_still_meets_the_already_ran_note` (F12) now asserts the reworded note.
+- **E.CAL3b:** `a_past_event_is_not_offered_as_upcoming` passes. An event at 00:00:01 today is absent; one at 23:59:30 is present.
+- **E.HEDGE1:** `a_told_fact_is_recalled_as_told` passes.
+  - **Found by the test:** the store reads provenance back as its enum's Debug name, "Told", so a lowercase comparison never matched.
+  - The label now uses the existing `epistemic_class`, which lowercases and also counts said, stated and user.
+- **Mutants killed (4/4):** the inverse check removed; the repeat note reverted; the past drop removed; the told label removed.
+- **Windows workspace:** 2605 passed, 0 failed.

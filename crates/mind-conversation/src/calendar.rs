@@ -114,6 +114,9 @@ impl super::ConversationEngine {
         // E.CAL1 (541: the desktop calendar's trip reminder missed 8 of 8): the calendar the person
         // keeps on this desktop belongs to calendar-service -- read it, never copy it.
         let desk = if self.desktop_attached() { Some(self.desktop_calendar_lines(days).await) } else { None };
+        // E.CAL3b (541 A8: "the only upcoming calendar item … scheduled for today", at 23:1x, past its
+        // "(already past)" label): what is past is not upcoming, so it is not offered.
+        let desk = desk.map(|read| read.map(|lines| lines.into_iter().filter(|l| !l.starts_with("earlier today ")).collect::<Vec<_>>()));
         let spine = self.upcoming_spine(days).await;
         let dated: std::collections::HashSet<String> = spine.iter().filter_map(|(_, _, id)| id.clone()).collect();
         let (reminders, _) = self.split_tasks().await;

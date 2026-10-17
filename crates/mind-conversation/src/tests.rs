@@ -18161,6 +18161,50 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
     }
 
+    /// E.CLAIM3 (541 A9: its own append called "already on your list -- nothing left to add"): a reply
+    /// that disowns this turn's own change goes back once; with nothing changed it stands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_turns_own_change_is_not_called_pre_existing() {
+        let disown = "That's already in your notes — nothing to add.";
+        // (A request that goes on, so E.LOOP12 does not stop at the write.)
+        let ask = "Remember that the plumber comes on Tuesday and tell me what else is on";
+        let wrote = Step::Call("remember", serde_json::json!({"text": "The plumber comes on Tuesday"}));
+        let r = run_with(ask, vec![wrote, Step::Say(disown), Step::Fail], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(r.prompts.iter().any(|p| p.contains(crate::CHANGE_DISOWNED)), "the disowning reply was not sent back");
+        let read = Step::Call("recall", serde_json::json!({"query": "plumber"}));
+        let r = run_with(ask, vec![read, Step::Say(disown), Step::Fail], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(!r.prompts.iter().any(|p| p.contains(crate::CHANGE_DISOWNED)), "sent back with nothing changed");
+        assert!(crate::claims_no_change("'Spare socks' is already on your Weekend packing list. Nothing left to add."));
+        assert!(!crate::claims_no_change("Added 'Spare socks' to your list."));
+    }
+
+    /// E.HEDGE1 (541 A4: "marking that date as uncertain … only one note on it"): a fact the person
+    /// told is recalled as told, not as a 0.50 posterior.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_told_fact_is_recalled_as_told() {
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "YM");
+        let me = TurnIdentity::primary();
+        conv.run_agent_tool_as("remember", &serde_json::json!({"text": "Arjun's flight lands on 3 December"}), &me).await;
+        let out = conv.run_agent_tool_as("recall", &serde_json::json!({"query": "Arjun flight"}), &me).await;
+        let line = out.lines().find(|l| l.contains("Arjun's flight lands on 3 December")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("(you told me)") && !line.contains("(belief 0."), "{line}");
+    }
+
+    /// E.CAL3b (541 A8: "the only upcoming calendar item … scheduled for today", past its label): a
+    /// timed event earlier today is not in `upcoming`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_past_event_is_not_offered_as_upcoming() {
+        let day = local_now().format("%Y-%m-%d").to_string();
+        let events = format!(
+            r#"[{{"title":"Breakfast meeting","start":"{day}T00:00:01","is_all_day":false}},{{"title":"Late call","start":"{day}T23:59:30","is_all_day":false}}]"#
+        );
+        let (out, _) = upcoming_with_desktop(vec![events.as_str()]).await;
+        assert!(!out.contains("Breakfast meeting"), "a past event was offered: {out}");
+        assert!(out.contains("Late call"), "{out}");
+    }
+
     /// E.SPINE2 (E.MODEL2, every arm: December items in a this-week answer): every turn carries the
     /// undated reminders and those due within 7 days, not one dated weeks away.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -18528,7 +18572,8 @@ mod desktop_consent_and_stall_wiring {
             vec!["Done \u{2014} notes.new_note: accepted, settled."],
         )
         .await;
-        assert!(r.prompts.iter().any(|p| p.contains("that action already ran")), "F12's note is gone for acts that ran");
+        // E.CLAIM3 reworded the note: the change is the turn's own.
+        assert!(r.prompts.iter().any(|p| p.contains("you already did this earlier in THIS turn and it succeeded -- that change is yours")), "F12's note is gone for acts that ran");
         assert!(!r.prompts.iter().any(|p| p.contains("REFUSED and nothing ran")), "an act that ran was called refused");
     }
 

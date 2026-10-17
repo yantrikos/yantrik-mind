@@ -2173,6 +2173,20 @@ pub(crate) fn trim_trailing_offer(reply: &str) -> String {
     out
 }
 
+/// E.CLAIM3 (541 A9: its own append called "already on your list -- nothing left to add"): does the
+/// reply say nothing was needed?
+pub(crate) fn claims_no_change(text: &str) -> bool {
+    const CLAIMS: [&str; 9] = [
+        "already on your", "already in your", "already there", "already had", "nothing to add", "nothing left to add",
+        "no change needed", "no changes needed", "nothing needed",
+    ];
+    let t = text.to_lowercase().replace('\u{2019}', "'");
+    CLAIMS.iter().any(|c| t.contains(c))
+}
+
+/// E.CLAIM3: what a reply that calls the turn's own change pre-existing is told once.
+pub(crate) const CHANGE_DISOWNED: &str = "(a tool call this turn made that change -- say you did it, not that it was already there)";
+
 /// E.CLAIM2: what a reply that claims a change, in a turn that changed nothing, is told once.
 pub(crate) const CHANGE_UNBACKED: &str = "(the reply says something was written, run or changed, but no tool call this turn changed anything -- do it now with a tool, or say plainly that it was not done)";
 
@@ -12910,7 +12924,14 @@ WINDOW: all-time, latest 200
                 // any belief that literally says a query word leads the output.
                 if let Ok(bs) = self.memory.beliefs_matching(&q, &ctx).await {
                     for b in bs.iter().take(8) {
-                        let l = format!("- {} (belief {:.2})", b.statement, b.confidence);
+                        // E.HEDGE1 (541 A4: "marking that date as uncertain … only one note on it"): what
+                        // the person said is shown as said, not as a 0.50 posterior.
+                        // (The store reads provenance back as its enum's name, "Told": one classifier.)
+                        let l = if Self::epistemic_class(&b.provenance) == "told" {
+                            format!("- {} (you told me)", b.statement)
+                        } else {
+                            format!("- {} (belief {:.2})", b.statement, b.confidence)
+                        };
                         if !lines.contains(&l) {
                             lines.insert(0, l);
                         }
@@ -14286,6 +14307,8 @@ Open reminders you're carrying for them:",
         // a change was already sent back once.
         let mut changed_this_turn = false;
         let mut claim_nudged = false;
+        // E.CLAIM3: whether a reply that disowned the turn's own change was already sent back once.
+        let mut disowned_nudged = false;
         // E.ARENA1-F21: the one reminder that the path the request asked for is still missing.
         // E.ARENA1-F54: how many times this turn was told its goal is still missing.
         let mut goal_nudges: usize = 0;
@@ -14645,6 +14668,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
                     continue;
                 }
+                // E.CLAIM3: and the inverse.
+                if changed_this_turn && !disowned_nudged && claims_no_change(&a) {
+                    disowned_nudged = true;
+                    eprintln!("[agent] step {step}: the reply calls this turn's own change pre-existing \u{2014} sent back once");
+                    scratch.push_str(&format!("\n[{step}] {CHANGE_DISOWNED}"));
+                    continue;
+                }
                 // E.CLAIM2: and the same claim check.
                 if !changed_this_turn && claims_a_change(&a) {
                     if !claim_nudged {
@@ -14834,6 +14864,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     approval_nudged = true;
                     eprintln!("[agent] step {step}: an approval refusal with nothing tried this turn \u{2014} sent back once");
                     scratch.push_str(&format!("\n[{step}] {APPROVAL_UNTRIED}"));
+                    continue;
+                }
+                // E.CLAIM3 (541 A9: its own append called "already on your list").
+                if changed_this_turn && !disowned_nudged && claims_no_change(&a) {
+                    disowned_nudged = true;
+                    eprintln!("[agent] step {step}: the reply calls this turn's own change pre-existing \u{2014} sent back once");
+                    scratch.push_str(&format!("\n[{step}] {CHANGE_DISOWNED}"));
                     continue;
                 }
                 // E.CLAIM2 (561: "FINISHED … wrote the code … ran the page check" over reads only).

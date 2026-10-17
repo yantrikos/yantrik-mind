@@ -1109,8 +1109,10 @@ pub(crate) fn repeated_action_note(
     }
     if !unsaved {
         return Some(
-            "(that action already ran; its result is above. Do not repeat it. Take the NEXT step the \
-             request still needs, or say plainly what is left undone.)"
+            // E.CLAIM3 (541 A9: "already ran" became "'Spare socks' is already on your list"): the
+            // change is the turn's own.
+            "(you already did this earlier in THIS turn and it succeeded -- that change is yours, so say \
+             you did it. Do not repeat it. Take the NEXT step the request still needs, or answer.)"
                 .to_string(),
         );
     }

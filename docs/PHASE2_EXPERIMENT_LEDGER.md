@@ -20875,3 +20875,12 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
   - NEW ≤ OLD − 2, with no new false_claim or silent_action → the afternoon's fixes generalise;
   - 1 lower → partly;
   - NEW ≥ OLD → not shown, and the 7 → 2 stays recorded as fitted.
+
+## E.STAND1 — PREREG + RESULT: the Mind's command pre-check counts the administrator's standing rules (yantrik-os #823, merged cf1fe931)
+
+**Why:** `desktop::commands_would_ask` withholds an `agent_run` that would raise a card, reading `mind_mode` off describe. It counted only `session_rules`. On a machine in `auto` whose only cover is #823's standing rule, the Mind would refuse its own commands while the bridge ran them. That fails closed, and 561 is held in bypass until this ships.
+
+**What is built:** an in-force, unsuspended `standing_rules` entry for `shell.agent_run` counts as covered in `auto`, matching #823's table. In `ask` or `plan` it answers nothing, and `bypass` asks nothing anyway.
+
+**Result:** `whether_a_command_would_ask_is_read_off_the_mode` gains three cases: in force in auto → no ask; suspended → ask; in ask mode → ask. Mutants killed (3/3): standing ignored; suspension not honoured; standing applied in ask.
+- **Windows workspace:** 2605 passed, 0 failed.

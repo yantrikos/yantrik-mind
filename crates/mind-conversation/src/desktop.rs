@@ -1714,11 +1714,23 @@ pub(crate) fn commands_would_ask(describe: &str) -> Option<bool> {
         let json = l.trim().strip_prefix("\"mind_mode\":")?.trim().trim_end_matches(',');
         serde_json::from_str::<serde_json::Value>(json).ok().filter(|v| v.is_object())
     })?;
-    let ruled = v.get("session_rules").and_then(|r| r.as_array()).is_some_and(|rules| {
-        rules.iter().any(|r| r.get("app").and_then(|a| a.as_str()) == Some(TWIN_HOST) && r.get("action").and_then(|a| a.as_str()) == Some("agent_run"))
+    let covers = |r: &serde_json::Value| {
+        r.get("app").and_then(|a| a.as_str()) == Some(TWIN_HOST) && r.get("action").and_then(|a| a.as_str()) == Some("agent_run")
+    };
+    let ruled = v.get("session_rules").and_then(|r| r.as_array()).is_some_and(|rules| rules.iter().any(covers));
+    // E.STAND1 (yantrik-os #823): the machine administrator's standing rule answers as a session
+    // rule does -- in auto (and bypass, which asks nothing anyway), never in ask or plan; a rule
+    // the person suspended, or one not in force, answers nothing.
+    let standing = v.get("standing_rules").and_then(|r| r.as_array()).is_some_and(|rules| {
+        rules.iter().any(|r| {
+            covers(r)
+                && !r.get("suspended").and_then(|s| s.as_bool()).unwrap_or(false)
+                && r.get("in_force").and_then(|s| s.as_bool()).unwrap_or(true)
+        })
     });
     match v.get("mode")?.as_str()? {
-        "ask" | "auto" => Some(!ruled),
+        "auto" => Some(!(ruled || standing)),
+        "ask" => Some(!ruled),
         "bypass" | "plan" => Some(false),
         _ => None,
     }
@@ -3583,6 +3595,14 @@ mod tests {
         assert_eq!(commands_would_ask(&ruled), Some(false), "the session's rule covers it");
         let other = with("\"session_rules\": []", "\"session_rules\": [{\"app\": \"editor\", \"action\": \"save_as\"}]");
         assert_eq!(commands_would_ask(&other), Some(true), "a rule for something else does not");
+        // E.STAND1 (yantrik-os #823): the administrator's standing rule covers it in auto, and not
+        // when suspended, nor in ask.
+        let standing = |rule: &str| with("\"session_rules\": []", &format!("\"session_rules\": [], \"standing_rules\": [{rule}]"));
+        let in_force = standing("{\"app\": \"shell\", \"action\": \"agent_run\", \"in_force\": true}");
+        assert_eq!(commands_would_ask(&in_force), Some(false), "a standing rule in force covers it in auto");
+        let suspended = standing("{\"app\": \"shell\", \"action\": \"agent_run\", \"suspended\": true}");
+        assert_eq!(commands_would_ask(&suspended), Some(true), "a suspended standing rule covers nothing");
+        assert_eq!(commands_would_ask(&in_force.replace("\"mode\": \"auto\"", "\"mode\": \"ask\"")), Some(true), "in ask a standing rule answers nothing");
         assert_eq!(commands_would_ask("Yantrik -- desktop screen"), None);
         assert_eq!(commands_would_ask("  \"mind_mode\": {\"mode\": \"auto\", \"sess"), None, "half a line");
         // Through the condensing every description gets on its way to the loop: the mode sorts

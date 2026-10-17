@@ -20570,3 +20570,41 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 3. **n = 12 per arm.** 6 against 7 is noise; no quality ranking of B against C is supported.
 
 **Open for Pranab:** the rule asked for fewer faults and a speed gain together. Quality being equal, a speed-only switch is a separate decision: cloud means desktop reads go to Ollama, and it costs per call.
+
+## E.PROMPT1 — PREREG: the persona stops ordering what the rules forbid (Pranab, 16 Oct: "Stay local, fix the prompt")
+
+**Why:** E.MODEL2 found the same fault families on all three models (6–7 per 12 asks). Every turn's prompt contradicts itself:
+- **The persona** (`mind_types::persona`, used by every Mind):
+  - "Be concrete: specific names, numbers, **and the next action**";
+  - "make it scannable… **and offer depth instead of forcing it**";
+  - "**End with a clear next move** when there is one";
+  - "CONNECT… weave in what you hold about them that matters NOW — an upcoming date, the plan you two discussed, an open thread. **When a deadline or event is near, surface it unprompted.**"
+- **The loop's system text:** "**Be proactive WITHOUT being asked**: when the user shares a durable fact, `remember` it".
+- **Against those, the per-turn rules and compose wrap (E.ANS, E.CONNECT1):** no offers unless asked, no advice, at most one short same-date or same-person factual clause.
+
+**What changes (wording only):**
+- "Be concrete: specific names and numbers — never vague summaries."
+- "Short by default; when the answer is long, make it scannable (a line per point)."
+- The "End with a clear next move" line is removed.
+- CONNECT becomes: "CONNECT, sparingly: when something you hold bears directly on this answer — the same person, date or thing — add it as one short factual clause. Nothing else unasked: no other dates or events, no plans, no advice."
+- The loop's "Be proactive WITHOUT being asked: when the user shares a durable fact, `remember` it" becomes "When the user shares a durable fact, `remember` it, even unasked".
+- EXECUTION HONESTY is kept, with its "offer the nearest thing you CAN do" when no tool exists. That is an offer bound to a refusal, which the policy allows, as is compose's retry example.
+
+**Scope:** `mind_types::persona` serves every Mind, the family's on .90 included. .90 changes only on Pranab's word (it runs pinned 172af33), and the change aligns the persona with E.CONNECT1, already adopted.
+
+**Kill criteria:**
+- K1, tests fail:
+  - the persona holds the new CONNECT line, and none of "and the next action", "offer depth", "End with a clear next move", "surface it unprompted";
+  - the loop prompt does not hold "Be proactive WITHOUT being asked" and does hold "even unasked".
+- K2: restoring any one removed line kills a test.
+- K3: both suites pass.
+- **Live, decides adoption:** dc re-runs E.MODEL2's 12 asks on arm A only (AIG qwen3.5:27b, 541, the same snapshot and the same labelling rules) with the new build.
+  - **Success:** faults ≤ 3 (half of run 2's 7), and no false_claim or silent_action.
+  - **Partial (4–5):** kept and iterated.
+  - **≥ 6:** the hypothesis is wrong and the change is reverted.
+
+**E.PROMPT1 — RESULT: PASS (Windows, the unit criteria).**
+- `the_persona_does_not_order_offers_advice_or_unasked_tie_ins` passes, and the loop-prompt asserts in `an_approval_refusal_needs_an_attempt_this_turn` pass.
+- Mutants killed (5/5): each removed line restored ("and the next action", "offer depth", "End with a clear next move", "surface it unprompted", "Be proactive WITHOUT being asked").
+- Windows workspace: 2599 passed, 0 failed.
+- **Adoption waits for the live re-run of arm A (dc, 541):** success ≤ 3 faults, partial 4–5, revert ≥ 6.

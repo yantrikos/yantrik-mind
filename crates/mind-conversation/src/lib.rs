@@ -1297,7 +1297,7 @@ fn field_matches(field: &str, q: &str, mode: MatchMode) -> bool {
 /// Parse the first "July 17" / "Jul 17th"-style date in text to its next occurrence (midday local).
 /// Powers deadline follow-through on reminders whose due date lives only in the description text.
 /// Word-boundary guarded so "maybe 5" never parses as May 5.
-fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
+pub(crate) fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>) -> Option<i64> {
     use chrono::Datelike;
     const MONTHS: [(&str, u32); 12] = [
         ("january", 1),
@@ -1321,17 +1321,34 @@ fn parse_text_date_ms(text: &str, today: &chrono::DateTime<chrono::FixedOffset>)
                 let at = start + pos;
                 let end = at + pat.len();
                 let before_ok = at == 0 || !low.as_bytes()[at - 1].is_ascii_alphabetic();
+                // E.SPINE2: a month name may end the text ("… on 6 December").
                 let after_ok = low[end..]
                     .chars()
                     .next()
                     .map(|c| !c.is_ascii_alphabetic())
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 if before_ok && after_ok {
-                    let digits: String = low[end..]
+                    let mut digits: String = low[end..]
                         .trim_start()
                         .chars()
                         .take_while(|c| c.is_ascii_digit())
                         .collect();
+                    // E.SPINE2 (541's people-tasks: "Dev's surgery on 3 December"): the day may come
+                    // first -- "6 December", "6th December", "the 3rd of December".
+                    if digits.is_empty() {
+                        let before = low[..at].trim_end();
+                        let before = before.strip_suffix(" of").unwrap_or(before).trim_end();
+                        let before = ["st", "nd", "rd", "th"]
+                            .iter()
+                            .find_map(|s| before.strip_suffix(s).filter(|b| b.ends_with(|c: char| c.is_ascii_digit())))
+                            .unwrap_or(before);
+                        let tail: String = before.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+                        let starts_word = before.len() == tail.len()
+                            || !before.as_bytes()[before.len() - tail.len() - 1].is_ascii_alphanumeric();
+                        if (1..=2).contains(&tail.len()) && starts_word {
+                            digits = tail.chars().rev().collect();
+                        }
+                    }
                     if let Ok(d) = digits.parse::<u32>() {
                         if (1..=31).contains(&d) {
                             let year = today.year();
@@ -13932,6 +13949,17 @@ Next 7 days:",
         }
         if self.ambient_upcoming && policy.admits(mind_types::Channel::OpenReminders) {
             let (rem, _) = self.split_tasks().await;
+            // E.SPINE2 (E.MODEL2, every arm: December items in a this-week answer): a reminder dated
+            // beyond the spine's 7 days is not carried into every turn -- dated ones sort first, so
+            // they used to lead this block as if they were current.
+            let today = local_now();
+            let horizon = today.timestamp_millis() + 7 * 86_400_000;
+            let rem: Vec<_> = rem
+                .into_iter()
+                .filter(|t| {
+                    t.due_ms.map(|m| m as i64).or_else(|| parse_text_date_ms(&t.description, &today)).is_none_or(|d| d <= horizon)
+                })
+                .collect();
             if !rem.is_empty() {
                 grounding.push(
                     mind_types::Channel::OpenReminders,

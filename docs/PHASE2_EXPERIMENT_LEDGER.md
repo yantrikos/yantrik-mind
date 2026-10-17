@@ -20744,3 +20744,28 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 
 **E.NOTE1 — RESULT: PASS (Windows, unit).** The rule and the nudge are asserted. Mutants killed (2/2): the rule removed; `notes` removed from the nudge. **Windows workspace (E.OFFER1b + E.NOTE1):** 2601 passed, 0 failed.
 - **Linux (staging, 4c47f04), E.OFFER1b + E.NOTE1:** mind-conversation 1288 passed, mind-core 197 passed. **Bundle:** yantrik-mind-4c47f04-linux-amd64.tar.zst, sha256 abfdecb6799bf2d8b05e55da2ce062619c5f9146005a6e84bc8eab27044b0762. Staging disk: 93%, 2.7 GB free.
+
+## E.SPINE2 — PREREG: every turn carries only the reminders that are due soon or undated
+
+**Why:** December items reached this-week answers in every arm of E.MODEL2, and in E.PROMPT1 and E.OFFER1 (A7/B7/C7). The turn grounding's "Open reminders you're carrying for them:" block lists the first 3 open reminders. `split_tasks` sorts **dated reminders first**, with no horizon. So reminders dated in December, by `due_ms` or by a date in their text, lead that block in every turn's prompt, as if they were current.
+
+**What is built:** the ambient open-reminders block leaves out any reminder whose date, by `due_ms` or else `parse_text_date_ms(description)`, falls beyond the 7-day spine horizon. Undated reminders and those due within 7 days stay. The "Next 7 days" spine is unchanged. Nothing is deleted; only what every turn is shown changes.
+
+**Kill criteria:**
+- K1: with three open reminders, the turn's prompt "Open reminders you're carrying" holds the undated one and the 3-days-out one, and NOT the far one:
+  - "Ask about Dev's surgery on 3 December" (text date about 50 days out);
+  - "Call the plumber" (undated);
+  - one due in 3 days.
+- K2: the horizon filter removed kills the test.
+- K3: both suites pass.
+- **Live (541, ask 7):** no December list in the this-week answer, with the other faults counted as usual. If the December items still appear, they come from memory recall, not this block, and that is recorded.
+
+**E.SPINE2 — RESULT: PASS (Windows, unit).** `every_turn_carries_only_reminders_due_soon_or_undated` passes: the undated reminder is carried; one dated 50 days out in its text, and one due in 40 days, are not.
+- **Amendment, found by the test:** the shared date reader `parse_text_date_ms` read only "December 3", and never matched a month name ending the text. So "Dev's surgery on 3 December" had no date and was carried as undated.
+  - It now reads "3 December", "9th of December" and "19 Dec", and a month at the end of the text.
+  - It rejects "room 1203 December" and "as soon as you may".
+  - Its wider effects:
+    - the 7-day spine now sees day-first dates;
+    - `parse_due_at` (E.REM1) now reads "3rd of December". Its test had pinned that as unreadable, a recorded limitation, and was updated.
+- Mutants killed (2/2): the horizon filter removed; the day-first reading removed.
+- Windows workspace: 2602 passed, 0 failed.

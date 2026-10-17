@@ -809,13 +809,9 @@ fn parse_due_reads_calendar_dates() {
     let day_of = |ms: u64| {
         chrono::DateTime::from_timestamp_millis(ms as i64).unwrap().with_timezone(today.offset()).date_naive().to_string()
     };
+    // E.SPINE2 taught the shared date reader the day-first forms, "3rd of December" among them.
     for s in ["2026-12-03", "2026-12-03T15:00", "December 3", "Dec 3rd", "3 December", "3 Dec 2026", "3rd of December"] {
         let got = parse_due_at(&s.to_lowercase(), now, &today);
-        if s == "3rd of December" {
-            // "of" sits between: not a form this reads, and it says so rather than guessing.
-            assert!(got.is_none(), "{s}");
-            continue;
-        }
         assert_eq!(got.map(day_of).as_deref(), Some("2026-12-03"), "{s}");
     }
     let at3 = parse_due_at("2026-12-03t15:00", now, &today).unwrap();
@@ -18163,6 +18159,41 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(crate::unwrapped_answer("{not json, just a brace} and words").as_deref(), Some("{not json, just a brace} and words"));
         assert_eq!(crate::unwrapped_answer("{\"text\": \"{\\\"text\\\": \\\"Nested and saved now.\\\"}\"}").as_deref(), Some("Nested and saved now."));
         assert_eq!(crate::unwrapped_answer("[1, 2]"), None);
+    }
+
+    /// E.SPINE2 (E.MODEL2, every arm: December items in a this-week answer): every turn carries the
+    /// undated reminders and those due within 7 days, not one dated weeks away.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_turn_carries_only_reminders_due_soon_or_undated() {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script { at: AtomicUsize::new(0), steps: vec![Step::Say("Okay.")], seen: seen.clone(), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let now = ConversationEngine::now_ms();
+        let far = (local_now() + chrono::Duration::days(50)).format("%-d %B").to_string();
+        mem.add_task(&format!("Ask about Dev's surgery on {far}"), "medium", None).await.unwrap();
+        mem.add_task("Call the plumber about the leak", "medium", None).await.unwrap();
+        mem.add_task("Renew the car insurance", "medium", Some(now + 3 * 86_400_000)).await.unwrap();
+        mem.add_task("Book the venue for the reunion", "medium", Some(now + 40 * 86_400_000)).await.unwrap();
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let _ = conv.agent_loop_for_eval("What do I have coming up this week?", &TurnIdentity::primary()).await;
+        let prompt = seen.lock().unwrap().first().cloned().unwrap_or_default();
+        let block = prompt.split("Open reminders you're carrying for them:").nth(1).map(|b| b.split("\n\n").next().unwrap_or("")).unwrap_or("");
+        assert!(block.contains("Call the plumber"), "the undated reminder is not carried: {block:?}");
+        assert!(!block.contains("Dev's surgery"), "a reminder dated in its text 50 days out is carried: {block:?}");
+        assert!(!block.contains("Book the venue"), "a reminder due in 40 days is carried: {block:?}");
+
+        // The date reader takes the day-first forms, and the month at the end of the text.
+        let today = chrono::DateTime::parse_from_rfc3339("2026-10-16T12:00:00-05:00").unwrap();
+        let day = |s: &str| crate::parse_text_date_ms(s, &today).map(|ms| chrono::DateTime::from_timestamp_millis(ms).unwrap().with_timezone(today.offset()).format("%m-%d").to_string());
+        assert_eq!(day("Dev's surgery on 3 December").as_deref(), Some("12-03"));
+        assert_eq!(day("Rohan's exam on the 9th of December").as_deref(), Some("12-09"));
+        assert_eq!(day("wedding 19 Dec").as_deref(), Some("12-19"));
+        assert_eq!(day("Renew passport by December 3, please").as_deref(), Some("12-03"), "month-first still works");
+        assert_eq!(day("Call the plumber"), None);
+        assert_eq!(day("as soon as you may"), None);
+        assert_eq!(day("room 1203 December"), None, "a long number is not a day");
     }
 
     /// E.OFFER1 (Pranab, 17 Oct): a trailing unasked offer is trimmed; a retry after a failure, a

@@ -20743,3 +20743,4 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Live (541, ask 12):** no false absence of the Weekend packing list.
 
 **E.NOTE1 — RESULT: PASS (Windows, unit).** The rule and the nudge are asserted. Mutants killed (2/2): the rule removed; `notes` removed from the nudge. **Windows workspace (E.OFFER1b + E.NOTE1):** 2601 passed, 0 failed.
+- **Linux (staging, 4c47f04), E.OFFER1b + E.NOTE1:** mind-conversation 1288 passed, mind-core 197 passed. **Bundle:** yantrik-mind-4c47f04-linux-amd64.tar.zst, sha256 abfdecb6799bf2d8b05e55da2ce062619c5f9146005a6e84bc8eab27044b0762. Staging disk: 93%, 2.7 GB free.

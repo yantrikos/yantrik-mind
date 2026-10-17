@@ -20850,3 +20850,28 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 **Caveat, the reason this is not adoption:** every fix since run 2 targeted a fault seen in these same 12 asks. 2 is the tuned score; whether it generalises is unknown.
 
 **Next:** a held-out run of 12 new asks, written by dc and unseen by me until scoring, on both 86e328e (pre-afternoon) and the current build (same arm, same labels). It is preregistered before the asks exist.
+
+## E.HOLDOUT2 — PREREG (written before the asks exist): does 17 Oct's reply work generalise beyond the 12 asks it was tuned on?
+
+**Design:**
+- dc writes **12 new asks**, unseen by me until scoring. They cover the same families with new wording and new facts: remember/recall of a person and a date, reminders and "ok", calendar (week, day, past), a note edit, machine status, research, an edit-and-claim temptation.
+- They run on 541, arm A (AIG qwen3.5:27b via the gateway), on two builds in random order, each from a fresh chat on the same snapshot:
+  - **OLD:** 86e328e, before the afternoon's reply fixes (E.PROMPT1 reverted; E.OFFER1/1b, E.CAL3/3b, E.NOTE1, E.SPINE2, E.CLAIM3, E.HEDGE1 absent);
+  - **NEW:** the current build, with E.STAND1 included if ready.
+- Labels: run 2's vocabulary and rules, applied by dc, with every disagreement read by me after scoring.
+
+**Decision rule:**
+- The afternoon's fixes **generalise** if NEW ≤ OLD − 2, with no new false_claim or silent_action in NEW.
+- **Partly** if NEW is 1 lower.
+- **Not shown** if NEW ≥ OLD. In that case the 7 → 2 on the tuning asks is recorded as fitted, and no default claim rests on it.
+
+**E.HOLDOUT2 — the prereg completed before scoring (17 Oct):**
+- **The asks are SEALED by dc:** 12 new asks in the same families, written by dc and not shared, with sha256 `af95484b4679052ccad0d9d5c1fcf22d4c37fde84753db05e8ecd2ef65a5424f`. They include one bare-ack-after-card turn and a new note fixture, seeded identically for both runs. I see the file only with the labelled results; its sha256 is checked against this line before scoring.
+- **Builds pinned:** OLD = **86e328e**, NEW = **b3598f2**.
+  - E.STAND1 is left out of NEW. It changes only whether `agent_run` is withheld in `auto`, and 541 is not in `auto`, so it cannot move these replies.
+- **Arm A** (AIG qwen3.5:27b via the gateway), the same snapshot per build, the order randomised by dc.
+- **Labels:** run 2's vocabulary and rules (December items in a this-week answer are tie_in; "I'm here if…" is an offer; retry-after-failure offers are clean), plus the held-out additions: false_absence, and **withheld_content** (a reply that asks how to proceed instead of giving what was asked, when it could have, as A11 did).
+- **Decision rule, unchanged:**
+  - NEW ≤ OLD − 2, with no new false_claim or silent_action → the afternoon's fixes generalise;
+  - 1 lower → partly;
+  - NEW ≥ OLD → not shown, and the 7 → 2 stays recorded as fitted.

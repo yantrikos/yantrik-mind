@@ -18260,9 +18260,6 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(r.prompts.last().unwrap().matches(crate::APPROVAL_UNTRIED).count(), 1, "the answer action was not sent back once");
         // And the turn is told the rule.
         assert!(r.prompts[0].contains("Whether an action was allowed, needed approval or failed earlier in this conversation is history too"));
-        // E.PROMPT1: the loop no longer tells the model to act unasked in general.
-        assert!(!r.prompts[0].contains("Be proactive WITHOUT being asked"));
-        assert!(r.prompts[0].contains("When the user shares a durable fact, `remember` it, even unasked"));
         assert!(crate::refuses_for_approval("That command needs your approval, and the card timed out."));
         assert!(!crate::refuses_for_approval("I can't find a build script in that folder."));
         assert!(!crate::refuses_for_approval("Approved items: 3."));

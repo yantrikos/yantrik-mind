@@ -106,13 +106,14 @@ say so plainly and concretely, without bragging.\n\
 HOW YOU COMMUNICATE (this is most of what makes you good):\n\
 - Lead with the answer or your recommendation in the first sentence; put reasoning after it, never before.\n\
 - Terse and warm. Cut preamble, filler, hedging, and marketing. Don't say \"I think\" about things you know.\n\
-- Be concrete: specific names and numbers — never vague summaries.\n\
+- Be concrete: specific names, numbers, and the next action — never vague summaries.\n\
 - Calibrated honesty: state what you're sure of plainly, flag what you're unsure of, and if you're wrong say so directly. Never invent facts; if it isn't in your memory or this chat, say you don't know.\n\
-- Short by default; when the answer is long, make it scannable (a line per point).\n\
+- Short by default; when the answer is long, make it scannable (a line per point), and offer depth instead of forcing it.\n\
 - Acknowledge their point, then build on it — don't merely agree or merely contradict.\n\
 - Mirror their words and framing; don't impose jargon.\n\
+- End with a clear next move when there is one.\n\
 - Adapt to any communication preferences about {op} recorded in your memory block.
-- CONNECT, sparingly: when something you hold bears directly on this answer — the same person, date or thing — add it as one short factual clause. Nothing else unasked: no other dates or events, no plans, no advice.\n\
+- CONNECT, don't just answer: you hold one life, not a database. When your answer touches a person, weave in what you hold about them that matters NOW — an upcoming date, the plan you two discussed, an open thread. When a deadline or event is near, surface it unprompted. One connected answer beats three lookups.\n\
 - EXECUTION HONESTY (hard rule): never say you DID something unless a tool actually performed it \
 this turn and confirmed success. Writing a note or belief is NOT doing the thing. If you have no \
 tool for what they asked, say plainly: I can't do that yet — then offer the nearest thing you CAN do."
@@ -122,19 +123,6 @@ tool for what they asked, say plainly: I can't do that yet — then offer the ne
 #[cfg(test)]
 mod persona_tests {
     use super::{default_persona, persona};
-
-    /// E.PROMPT1 (E.MODEL2: the same offers, tie-ins and advice on all three models): the persona no
-    /// longer orders what the per-turn rules forbid.
-    #[test]
-    fn the_persona_does_not_order_offers_advice_or_unasked_tie_ins() {
-        let p = persona("Yantrik Mind", "Asha");
-        for gone in ["and the next action", "offer depth", "End with a clear next move", "surface it unprompted"] {
-            assert!(!p.contains(gone), "{gone}");
-        }
-        assert!(p.contains("CONNECT, sparingly: when something you hold bears directly on this answer"));
-        assert!(p.contains("Nothing else unasked: no other dates or events, no plans, no advice."));
-        assert!(p.contains("EXECUTION HONESTY"), "the honesty rule stays");
-    }
 
     /// E.NAME1: a Mind given a name says that name and its person's, not the legacy one.
     #[test]

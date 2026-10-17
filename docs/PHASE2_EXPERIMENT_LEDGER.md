@@ -20609,3 +20609,27 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - Windows workspace: 2599 passed, 0 failed.
 - **Adoption waits for the live re-run of arm A (dc, 541):** success ≤ 3 faults, partial 4–5, revert ≥ 6.
 - **Linux (staging, eb4dc86), E.PROMPT1:** mind-conversation 1285 passed, mind-core 197 passed, mind-types 107 passed. **Bundle:** yantrik-mind-eb4dc86-linux-amd64.tar.zst, sha256 7759db869bc1e23e2647b3367170e95e291318251c8d1744b14770ee8e9dacfc. Staging disk: 93%, 2.8 GB free.
+
+## E.PROMPT1 — RESULT (541, eb4dc86, arm A AIG qwen3.5:27b, yantrik-os-dc labels, 17 Oct): REVERTED by the preregistered rule
+
+- **Run integrity:** clean preflight, ask 6 came after its own card (81), and there was no false_claim or silent_action.
+- **Speed:** median 23 s (ask 12 alone 162 s), 38 calls.
+- **Faults:** dc counted 7. I count **6** after reading: A9's terse "added Spare socks to Weekend packing list" is not JSON. The faults that stand:
+
+  | Turn | Fault | What it said |
+  |---|---|---|
+  | A4 | wrong_date | invents "same morning"; also prints the sentence twice |
+  | A6 | offer | "Anything else on your mind tonight…?" |
+  | A7 | tie_in + offer | 5 December items, and an offer to fix the Dallas title |
+  | A8 | stale_claim | "next scheduled item is today at 18:00", asked at about 20:50 |
+  | A10 | unasked_advice | |
+
+- **Verdict:** 6 is at least 6, so **the change is reverted.** The code is restored to eb4dc86~1, which is the persona's four lines and the loop's "Be proactive WITHOUT being asked". The ledger keeps the record. Windows workspace after the revert: 2598 passed, 0 failed.
+- **Reading:**
+  - **The hypothesis is not supported at the level it was tested on.** The fault count did not move (7 → 7, or 6). The mix shifted: unknowns and advice went down, and date, stale and format slips went up. At n = 12 that cannot be told apart from run-to-run variance. I do not call it "partly supported": that would read signal into noise.
+  - **Two faults are tool-side and independent of the prompt:**
+    - A8: `upcoming` lists today's already-past event without saying it is past;
+    - A7's December list, the out-of-window items, reached a this-week answer.
+
+    Both are worth fixing on their own.
+  - **Offers survive** across three models and two prompts. Instructions have not removed them, whoever wrote them.

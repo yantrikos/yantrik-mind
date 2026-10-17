@@ -20684,3 +20684,4 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **E.CAL3:** `an_event_earlier_today_says_it_is_past` passes, and the past-check mutant kills it. `upcoming_reads_the_desktop_calendar` no longer depends on the clock: on 16 Oct after 18:00 its fixture event reads "earlier today 18:00".
 - **Windows workspace:** 2601 passed, 0 failed.
 - **Adoption of E.OFFER1 waits for the live re-run** (541, arm A, the 12 asks): offers 3–4 → 0, with no lost content.
+- **Linux (staging, 0db6883), E.OFFER1 + E.CAL3:** mind-conversation 1288 passed, mind-core 197 passed. **Bundle:** yantrik-mind-0db6883-linux-amd64.tar.zst, sha256 9bceeb8c6961f032f60beb9349452505454f882f2abe13be7d94c45942866326. Staging disk: 93%, 2.8 GB free.

@@ -20834,3 +20834,4 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
   - The label now uses the existing `epistemic_class`, which lowercases and also counts said, stated and user.
 - **Mutants killed (4/4):** the inverse check removed; the repeat note reverted; the past drop removed; the told label removed.
 - **Windows workspace:** 2605 passed, 0 failed.
+- **Linux (staging, b3598f2), E.SPINE2 + E.CLAIM3 + E.CAL3b + E.HEDGE1:** mind-conversation 1292 passed, mind-core 197 passed. **Bundle:** yantrik-mind-b3598f2-linux-amd64.tar.zst, sha256 6f7fae7db2ee5ce4847bf1bb932bda3dbc62bcc77872997145352cc084f9d553. Staging disk: 94%, 2.6 GB free.

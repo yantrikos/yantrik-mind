@@ -20525,3 +20525,18 @@ The same asks were clean on Claude (E.ANS2/3). Ollama Cloud measured 1.3–4 s p
 - **Caps:** none on 541. Pranab's key is used directly, written to a 0600 file without being printed, and removed after the run.
 - **Preflight:** an ungraded turn per arm confirms the model served, a tool round-trip and a reply. A failed preflight stops that arm.
 - **Void rule:** any turn served through a fallback, such as the leftover Anthropic entry, is void.
+
+**E.MODEL2 — run 1 VOID (harness defects, dc's runner; 16 Oct):**
+- **What broke:**
+  - arm A crashed at ask 12 on a Windows encoding error;
+  - arm C crashed at ask 6 printing an emoji;
+  - in every arm, ask 6 was invalid: the "after the card fires" wait matched an older Stretch card (id 65), so "ok" went out before the arm's own reminder fired.
+- **The preflights passed in all three arms:** the gateway served the intended model, with no fallback. They could not catch defects in the grading steps themselves; they checked only the model path. The lesson stands: a preflight must exercise the full ask script, including the waits, not only one turn.
+- **Fixed for run 2:** UTF-8 throughout, and the wait requires a stretch card newer than any card that existed before ask 5. Order C, B, A. The partial files are kept (`model2-*-partial1/run1.jsonl`), not graded.
+- **Rough speeds from run 1 (indicative only):**
+  - A: 11–73 s;
+  - B: 11–15 s, with B12 at 125 s waiting on a `set_content` card in ask mode;
+  - C: 11–12 s.
+- **Labelling notes:**
+  - 541's baseline memory holds December family facts. "Arjun 3 Dec ↔ Dev's surgery" is the allowed same-date clause. B7 listing December items as "next dated items" for "this week" is a further-ahead item: by policy not a fault for "due soon" asks, and borderline for "this week".
+  - Ask 12's whole-note rewrite (`notes.set_content`) raises a card in ask mode in every arm. The card is not pressed (Pranab's), so the arms stay comparable.

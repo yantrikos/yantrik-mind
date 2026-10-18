@@ -21431,3 +21431,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - Two existing tests asserted the exact old cut and were updated to expect the marker: `a_desktop_action_result_is_read_before_its_state` and `the_app_catalogue_reaches_the_model_whole`.
 - **Mutant killed (1/1):** the marker removed.
 - **Windows workspace:** 2624 passed, 0 failed.
+- **Linux (staging, e06edee), E.OBS1 + E.SPINE3:** mind-conversation 1307 passed (mind-core 198 passed at 2563fc8; E.OBS1 touches only mind-conversation). **Bundle:** yantrik-mind-e06edee-linux-amd64.tar.zst, sha256 2ddb2d9d27a6d5db773579eec6d147790d3110a41c56a37c12fa9eaa85a41d2e (verified locally). Staging disk: 91%, 3.5 GB free.

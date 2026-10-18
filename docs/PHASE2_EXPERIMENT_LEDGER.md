@@ -21448,3 +21448,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **What:** next to E.PREFIX1a's per-step total, each agent step now logs `prompt blocks --` system, grounding, recent, tool catalog, work log, user and schemas bytes, plus the tool count.
 - **Read:** the journal of a 561 mission turn on this bundle. No grading, no kill criteria. It decides which block a later prereg trims.
 - **Windows workspace:** 2624 passed, 0 failed.
+- **Linux (staging, ad2e552), E.PROMPT2:** mind-conversation 1307 passed. **Bundle:** yantrik-mind-ad2e552-linux-amd64.tar.zst, sha256 27c8c5d848fa5648178904ebac1c9cf7ddeea567627cfebf3d299d3c1bf8ab0a (verified locally). Staging disk: 91%, 3.5 GB free.

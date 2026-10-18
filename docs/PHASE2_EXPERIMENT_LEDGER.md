@@ -21598,3 +21598,11 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - E.PROMPT3b is kept and the prefix numbers stay under watch. If a cached-backend reading shows misses costing more than the bytes saved, the supersede moves to append-only.
 - **Next lever, no code needed:** `YM_MAX_WALL_SECS` (config_panel `agent_budget`) already sets a turn's wall budget. Proposed to dc for 561 as a measured env change. The Director's own per-turn timeout must be checked first.
 - **Not doing:** a rule against the two-look habit (dc's (c)). Each look now costs one entry, and a rule per habit is the layer-adding the thin path forbids.
+
+**561 turn budget (dc, OS env): `YM_MAX_WALL_SECS=300` goes in at the next mission gap, as drop-in zz-wall-budget.conf.**
+- Checked first:
+  - the Director's per-turn wait is TURN_LIMIT_SECS = 20 min;
+  - the OS host has no turn cutoff below that (PRESENCE_TIMEOUT_SECS = 90 is the heartbeat, not a turn limit);
+  - the stream is fine with turns up to 5 min.
+- Side effect: a mission's 3 h limit now binds before its 40 turns.
+- **Read:** the first two finished turns, marked COMPLETED or FAILED CLOSED, with the per-step table, the Director's outcome, and whether ~/Projects/tumble changed.

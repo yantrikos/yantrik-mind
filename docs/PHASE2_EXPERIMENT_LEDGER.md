@@ -21659,3 +21659,14 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - Credit goes to the budget only if the minimize came after 14:14. Otherwise the progress is recorded as confounded.
 - The 375/120 env (with da6ddd9) is re-armed for the next gap, with the Editor kept minimized.
 - **Confound resolved (dc):** the Editor was minimized at 14:14 CDT, after all three changes (the main.js write at 14:02:15, then the step 4 and step 5 ticks, all visible in the 14:14 screendump's scrollback). The progress is credited to the 300 s turn budget plus the E.PROMPT3b/E.PROMPT4 trims, with the Editor still covering the terminal.
+
+**561 — Tumble FINISHED (Director, 20:17:35Z): `{"event":"finished","turns":24,"page_checked":true,"minutes":79,"contract":"c-1","state":"delivered"}`, PLAN.md 8/8.**
+- All under the 300 s budget + 4f4240c. Contract c-1 awaits a person's accept.
+- Earlier today the same mission had ~140 turns stuck at step 4.
+
+**E.STEP1 — LIVE (561, da6ddd9 + 375/120, dc): PASS.**
+- Next mission (polish): turn 1001 COMPLETED (4 steps, 56 s); turn 1002 COMPLETED (11 steps, 298 s). 4 turns in the window, 0 failed closed.
+- Turn 1002's last-answer step 9 got a 122 s cap (remainder + reserve) where the loop alone would have given ~67. main.js changed again (10,353 → 11,326 B).
+- **Remaining exposure (dc):** the step before the last lives on the loop's shrinking remainder (step 8: 63.4 s of a 67 s cap).
+  - A mid-turn failure past step 0 now composes from the work log with the 120 s reserve, so it degrades to an answer, not a fail-closed turn.
+  - Decision: measure more before adding a lever.

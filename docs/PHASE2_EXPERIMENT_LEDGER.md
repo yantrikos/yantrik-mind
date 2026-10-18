@@ -21542,3 +21542,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - (a) no dedicated local lane (agent steps go to the default brain, counted as escalations) — my recommendation for 561 only;
   - (b) a faster local model;
   - (c) keep it and rely on prompt trims.
+- **Revised recommendation (dc's context: 561's local lane is deliberately an owned-hardware showcase, and Pranab wants the Mind to run without a GPU or external LLM):** (b)+(c). Keep the local lane and make the prompt fit it. Next cuts, each measured on 561: stale looks (E.PROMPT3b, ≈ −8 KB/step); older replies in "recent" when the lane is local (≈ −6 to −8 KB); names-only prose on a route measured native, with dc's fallback trigger (≈ −9 KB). Target: step-4 prompts ≈ 50 KB, down from 75. (a) stays the quick fix if he wants the stream working today.

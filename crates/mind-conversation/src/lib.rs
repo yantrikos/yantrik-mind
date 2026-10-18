@@ -331,6 +331,12 @@ pub struct TurnIdentity {
     pub trace: Option<String>,
 }
 
+/// E.TRACE1a: a task's object trace. Task ids already read `task:17`; one that does not is
+/// prefixed (541: `task:task:17`).
+pub(crate) fn task_trace(id: &str) -> String {
+    if id.starts_with("task:") { id.to_string() } else { format!("task:{id}") }
+}
+
 /// E.TRACE1a: a fresh turn trace, `run-<ms>-<seq>` -- the counter keeps two turns in one
 /// millisecond apart. Opaque: nothing parses it.
 pub fn mint_turn_trace() -> String {
@@ -7340,7 +7346,7 @@ impl ConversationEngine {
                 now_ms,
             )?;
             // E.TRACE1a: the notice is the reminder's own trace, parented on the turn that set it.
-            let trace = format!("task:{}", t.id);
+            let trace = task_trace(&t.id);
             let engine = self.notice_engine()?;
             let parent = engine.trace_parent(&trace).ok().flatten();
             let _ = engine.set_notice_trace(&q.notice_id, Some(&trace), parent.as_deref());
@@ -13451,7 +13457,7 @@ WINDOW: all-time, latest 200
                 }
                 // E.TRACE1a: the reminder names the turn that set it, for when it fires.
                 if let (Ok(t), Some(turn), Ok(engine)) = (&added, id.trace.as_deref(), self.notice_engine()) {
-                    let _ = engine.link_trace(&format!("task:{}", t.id), turn, Self::now_ms());
+                    let _ = engine.link_trace(&task_trace(&t.id), turn, Self::now_ms());
                 }
                 match added {
                     // E.REM1d: a ping is promised only where one will be delivered.
@@ -17076,17 +17082,17 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
                 Ok(t) => {
                     // E.TRACE1a: a commitment caught from the words names its turn, as a tool's does.
                     if let (Some(turn), Ok(engine)) = (id.trace.as_deref(), self.notice_engine()) {
-                        let _ = engine.link_trace(&format!("task:{}", t.id), turn, Self::now_ms());
+                        let _ = engine.link_trace(&task_trace(&t.id), turn, Self::now_ms());
                     }
                     self.recorder.record({
                         // The task's own id is the object trace: reminder_loop nudges, follow-through
                         // and completion can later parent onto it (`ym why task:<id>`).
                         let mut e = mind_observability::DecisionEvent::span(
-                            format!("task:{}", t.id),
+                            task_trace(&t.id),
                             None,
                             "commitment_captured",
                         );
-                        e.object_id = Some(format!("task:{}", t.id));
+                        e.object_id = Some(task_trace(&t.id));
                         e.goal = Some(desc);
                         e.trigger = Some("spoken commitment pattern in user turn".into());
                         e.verdict = Some("captured".into());

@@ -21224,3 +21224,13 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Windows workspace:** 2616 passed, 0 failed.
 - **Linux (staging, 2c50cc4): mind-core did not compile.** The harness turn loop is `cfg(unix)`, so Windows never builds it, and `trace` was bound inside the answer block while both COMPLETE calls sit after it. The binding was hoisted above the block (checked with `cargo check --tests` on staging before committing). mind-recipes 106 and mind-conversation 1299 passed on Linux.
 - **Linux (staging, c804050), E.TRACE1a:** mind-core 198 passed, mind-conversation 1299 passed (mind-recipes 106 passed at 2c50cc4; unchanged since). **Bundle:** yantrik-mind-c804050-linux-amd64.tar.zst, sha256 ad51a4069531170d1d89e4067111e26f4fae6b143cc1133534be8ed31a6c8ca3 (verified locally). Staging disk: 90%, 3.8 GB free.
+
+**E.TRACE1a — LIVE (541, Mind c804050 + OS 919b8e14, dc): the parent link PASSES on Mind-side evidence; one format bug fixed.**
+- `mind_notice_traces` holds the notice with parent `run-1792311106526-1`. `mind_trace_parents` links the task to the same run.
+- The decision log has the setting turn's events (pack_route_shadow with goal "remind me in 2 minut…", grounding_assembled, tool_predicted) under that same `run-…`.
+- **Bug:** the trace was `task:task:17`. Task ids already read `task:17`, and slice a prefixed them again.
+  - Fixed with `task_trace()`, which adds the prefix only when it is missing. It is used at all five sites: the notice, both links, and the commitment span's trace and object id.
+  - The test now asserts the trace equals the task id and never starts with `task:task:`. The always-prefix mutant is killed.
+  - A reminder linked under c804050 and fired after the fix finds no parent; that is 541 test data only.
+- **Not yet checkable:** COMPLETE's trace_id as the OS received it. The OS does not log harness.complete or harness.notice params. dc will record both ids on the OS notice receipt in contracts week 2 and re-check the wire byte for byte then.
+- **Windows workspace:** 2616 passed, 0 failed.

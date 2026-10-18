@@ -17585,7 +17585,10 @@ mod desktop_consent_and_stall_wiring {
         conv.queue_due_reminders_at(due + 60_000).await.unwrap();
         let leased = conv.lease_obligation_notices(due + 60_000, 30_000, 10).unwrap();
         assert_eq!(leased.len(), 1, "{leased:?}");
-        assert_eq!(leased[0].trace_id.as_deref(), Some(format!("task:{}", task.id).as_str()));
+        assert_eq!(leased[0].trace_id.as_deref(), Some(task.id.as_str()));
+        // 541: the id already reads `task:17`, and the trace was `task:task:17`.
+        assert!(task.id.starts_with("task:") && !leased[0].trace_id.as_deref().unwrap().starts_with("task:task:"), "{:?}", leased[0].trace_id);
+        assert_eq!(crate::task_trace("17"), "task:17");
         assert_eq!(leased[0].parent_trace_id.as_deref(), Some("run-1792305935283-7"), "the turn's own trace, not one minted inside");
     }
 
@@ -17601,7 +17604,7 @@ mod desktop_consent_and_stall_wiring {
         let tasks = mem.list_tasks(false).await.unwrap();
         let task = tasks.iter().find(|t| t.description.to_lowercase().contains("stretch")).expect("no reminder set");
         let engine = conv.notice_engine().unwrap();
-        assert_eq!(engine.trace_parent(&format!("task:{}", task.id)).unwrap().as_deref(), Some("run-42-0"), "{tasks:?}");
+        assert_eq!(engine.trace_parent(&task.id).unwrap().as_deref(), Some("run-42-0"), "{tasks:?}");
     }
 
     /// E.TRACE1a: a commitment caught from the words alone (no tool call) names its turn too.
@@ -17614,7 +17617,7 @@ mod desktop_consent_and_stall_wiring {
         let tasks = mem.list_tasks(false).await.unwrap();
         let task = tasks.iter().find(|t| t.description.to_lowercase().contains("stretch")).expect("the commitment was not caught");
         let engine = conv.notice_engine().unwrap();
-        assert_eq!(engine.trace_parent(&format!("task:{}", task.id)).unwrap().as_deref(), Some("run-43-0"), "{tasks:?}");
+        assert_eq!(engine.trace_parent(&task.id).unwrap().as_deref(), Some("run-43-0"), "{tasks:?}");
     }
 
     /// E.TRACE1a: a reminder no traced turn set (an older build's, or one written straight to the
@@ -17627,7 +17630,7 @@ mod desktop_consent_and_stall_wiring {
         conv.queue_due_reminders_at(now).await.unwrap();
         let leased = conv.lease_obligation_notices(now, 30_000, 10).unwrap();
         assert_eq!(leased.len(), 1);
-        assert_eq!(leased[0].trace_id.as_deref(), Some(format!("task:{}", t.id).as_str()));
+        assert_eq!(leased[0].trace_id.as_deref(), Some(t.id.as_str()));
         assert_eq!(leased[0].parent_trace_id, None);
     }
 

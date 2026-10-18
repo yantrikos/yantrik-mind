@@ -21287,3 +21287,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (6/6):** for_job ignores TURN_TRACE; the route drops the trace; never scopes; replaces a set trace; a turn path bypasses counted; push drops the trace.
 - **Defect found by the suite:** the extra future layer overflowed `cli_dispatch_routes_plugins_and_chat`'s stack (debug, Windows). The inner turn future is now `Box::pin`ned.
 - **Windows workspace:** 2618 passed, 0 failed.
+- **Linux (staging, 761fe51), E.TRACE1b:** mind-conversation 1301 passed, mind-core 198 passed. **Bundle:** yantrik-mind-761fe51-linux-amd64.tar.zst, sha256 a0c0eba3d512d401291082e1f4c95400639e926ca733e42bbbb3adb03a75035c (verified locally). Staging disk: 91%, 3.7 GB free.

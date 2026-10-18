@@ -21653,3 +21653,8 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Windows workspace:** 2627 passed, 0 failed.
 - **Linux (staging, da6ddd9), E.STEP1:** mind-conversation 1310 passed. **Bundle:** yantrik-mind-da6ddd9-linux-amd64.tar.zst, sha256 fa2415006feef2835fe453b61f72918f9c41ea7aceb0776a02b7badec912b37a (verified locally). Staging disk: 92%, 3.2 GB free.
 - **Env correction (mine, sent to dc before applying):** the loop's share is `max_wall − reserve`. Raising the reserve to 120 at max_wall 300 would shrink the loop to 180 s and cap turn 976's productive 200 s write at ~130 s. The values are therefore `YM_MAX_WALL_SECS=375` with `YM_COMPOSE_RESERVE_SECS=120`, which keeps the loop at 255 s.
+
+**561 progress (dc):** Tumble steps 4 and 5 ticked between 14:00 and 14:14 under the 300 s budget, after ~140 turns at step 4.
+- **Possible confound:** dc minimized a stale Editor that had covered the agent terminal in Mind View since 00:01 (filed as OS #868). Its time is asked.
+- Credit goes to the budget only if the minimize came after 14:14. Otherwise the progress is recorded as confounded.
+- The 375/120 env (with da6ddd9) is re-armed for the next gap, with the Editor kept minimized.

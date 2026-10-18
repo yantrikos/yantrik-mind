@@ -20974,3 +20974,17 @@ Mutants killed (3/3): the ranking removed (storage order); the stopwords removed
 **Windows workspace:** 2606 passed, 0 failed.
 - **Linux (staging, 8ff12aa), E.RECALL1:** mind-conversation 1293 passed, mind-core 197 passed. **mind-memory did NOT run:** `No space left on device` while building its debug tests (yantrikdb, tokenizers). It passed on Windows in the workspace suite; the Linux run is owed once space is freed. The staging service stayed healthy (active, one process, ctl 200, no disk errors in its journal). **Bundle** (built after target/debug was removed): yantrik-mind-8ff12aa-linux-amd64.tar.zst, sha256 2f9f62b03fdc8f416c47deba20a55fd9005c861fd4333ec31e315f7e9dcedbd4. Staging disk: 94%, 2.4 GB free; 37 bundles (2.1 GB); release target 5.3 GB.
 - **mind-memory Linux (staging, 8ff12aa), the owed run:** 114 passed, 0 failed, after pruning staging to 9 bundles (Pranab's OK, "keep the last 6" plus the protected rollback and test builds; 28 deleted, 4.1 GB free).
+
+## E.RECALL1 — live (541, OLD b3598f2 vs NEW 8ff12aa, arm A, the hypothesis-heavy snapshot restored per arm, yantrik-os-dc, 17 Oct): PASS
+
+- **My pair (Tomasz drives me on Fridays): passed on BOTH builds.** The model's queries avoided the trigger words, so it did not exercise the bug.
+- **dc's targeted pair: OLD FAILED, NEW PASSED.** The pair was "Priya's daughter Asha starts school on 3 November." then "When does Priya's daughter start school?". "Priya" appears in many old hypotheses.
+  - **OLD:** `recall "Priya's daughter Asha starts school"` returned only Priya-birthday beliefs, with the new fact crowded out. Reply: "I don't know. I have no record of Priya having a daughter…"
+  - **NEW:** `recall "Asha Priya daughter school start date"` led with "Priya's daughter Asha starts school on 3 November 2026 (you told me)". Reply: "Asha starts school on 3 November 2026."
+- **Caveat (dc):** the two arms' model wrote different recall queries.
+  - The deterministic same-query comparison is the unit test: `a_fact_just_told_leads_recall_over_older_noise` runs one query over one store, and its "ranking removed" mutant (the old storage-order behaviour) fails it.
+  - The live result agrees with that.
+- **Side notes:**
+  - OLD A1 asked "What's your name?" after a told fact; NEW did not.
+  - Both builds run a `recall` inside a desktop-state ("apps open right now") turn, which is wasted work. Noted, not chased.
+- 541 stays on 8ff12aa.

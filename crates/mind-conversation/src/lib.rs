@@ -326,6 +326,17 @@ pub struct TurnIdentity {
     /// every turn in generalities and look broken rather than careful. So it is a required
     /// parameter of [`TurnIdentity::new`] and every surface states its own (E.SEC8).
     pub output_scope: mind_types::OutputScope,
+    /// E.TRACE1a: this turn's trace, minted ONCE by whoever started the turn (the harness sends it
+    /// to the desktop on COMPLETE). `None`: the turn mints its own.
+    pub trace: Option<String>,
+}
+
+/// E.TRACE1a: a fresh turn trace, `run-<ms>-<seq>` -- the counter keeps two turns in one
+/// millisecond apart. Opaque: nothing parses it.
+pub fn mint_turn_trace() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("run-{}-{n}", mind_observability::now_ms())
 }
 
 impl TurnIdentity {
@@ -339,6 +350,7 @@ impl TurnIdentity {
             rich: false,
             voice: false,
             output_scope: mind_types::OutputScope::OperatorPrivate,
+            trace: None,
         }
     }
 
@@ -365,6 +377,7 @@ impl TurnIdentity {
             rich: false,
             voice: false,
             output_scope,
+            trace: None,
         }
     }
 
@@ -379,6 +392,24 @@ impl TurnIdentity {
     pub fn rendering_rich(mut self, rich: bool) -> Self {
         self.rich = rich;
         self
+    }
+    /// E.TRACE1a: this turn's trace, as the caller minted it.
+    pub fn with_trace(mut self, trace: impl Into<String>) -> Self {
+        self.trace = Some(trace.into());
+        self
+    }
+    /// E.TRACE1a: this identity with the turn's one trace -- the caller's, else the harness's
+    /// (TURN_TRACE), else a fresh one.
+    pub fn traced(self) -> Self {
+        if self.trace.as_deref().is_some_and(mind_recipes::valid_trace_id) {
+            return self;
+        }
+        let given = TURN_TRACE.try_with(|t| t.clone()).ok().filter(|t| mind_recipes::valid_trace_id(t));
+        self.with_trace(given.unwrap_or_else(mint_turn_trace))
+    }
+    /// E.TRACE1a: the caller's trace when it may cross, else a fresh one.
+    pub fn trace_or_mint(&self) -> String {
+        self.trace.clone().filter(|t| mind_recipes::valid_trace_id(t)).unwrap_or_else(mint_turn_trace)
     }
     /// This turn will be heard, not read.
     pub fn speaking(mut self, voice: bool) -> Self {
@@ -1635,6 +1666,8 @@ tokio::task_local! {
     /// A new desktop chat is a new conversation -- it never reaches the engine as a message -- so
     /// what was handed over in one chat is not a source in the next. Unset off the desktop.
     pub static TURN_CONVERSATION: String;
+    /// E.TRACE1a: the trace the harness minted for this turn and sends to the desktop on COMPLETE.
+    pub static TURN_TRACE: String;
 }
 
 /// E.STALL3: mark the step this turn is entering. No listener, no effect.
@@ -7306,6 +7339,11 @@ impl ConversationEngine {
                 &key,
                 now_ms,
             )?;
+            // E.TRACE1a: the notice is the reminder's own trace, parented on the turn that set it.
+            let trace = format!("task:{}", t.id);
+            let engine = self.notice_engine()?;
+            let parent = engine.trace_parent(&trace).ok().flatten();
+            let _ = engine.set_notice_trace(&q.notice_id, Some(&trace), parent.as_deref());
             if q.fresh {
                 fresh += 1;
                 // E.REM2: said on the next reply too -- a delivery the desktop has today. E.NOTICE1
@@ -13411,6 +13449,10 @@ WINDOW: all-time, latest 200
                 if added.is_ok() && open_before.is_some() && open_before == open_after {
                     return format!("Already an open reminder: \"{text}\" -- nothing new was added.");
                 }
+                // E.TRACE1a: the reminder names the turn that set it, for when it fires.
+                if let (Ok(t), Some(turn), Ok(engine)) = (&added, id.trace.as_deref(), self.notice_engine()) {
+                    let _ = engine.link_trace(&format!("task:{}", t.id), turn, Self::now_ms());
+                }
                 match added {
                     // E.REM1d: a ping is promised only where one will be delivered.
                     Ok(_) if due.is_some() && self.unprompted_delivery() => format!("Reminder set: \"{text}\" — {when}. I'll ping you when it's due. {REMINDER_SET_NEXT}"),
@@ -14074,7 +14116,10 @@ Open reminders you're carrying for them:",
                                         // One trace per turn, so every pack row surfaced and every tool span in this run parents
                                         // under the same id and `ym why <trace>` reconstructs which evidence served which goal.
                                         // Minted BEFORE grounding: the pack_surfaced events are the turn's first decisions.
-        let run_trace = format!("run-{}", mind_observability::now_ms());
+        let run_trace = id.trace_or_mint();
+        // E.TRACE1a: the tools this turn runs see its trace (a reminder links to it).
+        let traced = id.clone().with_trace(run_trace.clone());
+        let id = &traced;
         let grounding = self.turn_grounding(user_text, id, &run_trace).await;
         let ctx = mind_types::AccessContext::principal(
             id.viewer(),
@@ -16397,6 +16442,7 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
     }
 
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        let id = id.traced(); // E.TRACE1a: one trace per turn, whichever loops it runs.
         // E.EGRESS4d (the eighth pass): one fetch count for the whole turn, across every loop it runs --
         // each loop's guard state is fresh, so a fallback from one loop to the other got a new budget.
         if TURN_FETCHES.try_with(|_| ()).is_ok() {
@@ -17027,20 +17073,26 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         }
         if let Some((desc, due_ms)) = Self::extract_commitment(user_text) {
             match self.memory.add_task(&desc, "medium", due_ms).await {
-                Ok(t) => self.recorder.record({
-                    // The task's own id is the object trace: reminder_loop nudges, follow-through
-                    // and completion can later parent onto it (`ym why task:<id>`).
-                    let mut e = mind_observability::DecisionEvent::span(
-                        format!("task:{}", t.id),
-                        None,
-                        "commitment_captured",
-                    );
-                    e.object_id = Some(format!("task:{}", t.id));
-                    e.goal = Some(desc);
-                    e.trigger = Some("spoken commitment pattern in user turn".into());
-                    e.verdict = Some("captured".into());
-                    e
-                }),
+                Ok(t) => {
+                    // E.TRACE1a: a commitment caught from the words names its turn, as a tool's does.
+                    if let (Some(turn), Ok(engine)) = (id.trace.as_deref(), self.notice_engine()) {
+                        let _ = engine.link_trace(&format!("task:{}", t.id), turn, Self::now_ms());
+                    }
+                    self.recorder.record({
+                        // The task's own id is the object trace: reminder_loop nudges, follow-through
+                        // and completion can later parent onto it (`ym why task:<id>`).
+                        let mut e = mind_observability::DecisionEvent::span(
+                            format!("task:{}", t.id),
+                            None,
+                            "commitment_captured",
+                        );
+                        e.object_id = Some(format!("task:{}", t.id));
+                        e.goal = Some(desc);
+                        e.trigger = Some("spoken commitment pattern in user turn".into());
+                        e.verdict = Some("captured".into());
+                        e
+                    })
+                }
                 Err(e) if e.is_memory_write_gate_refusal() => {
                     let reply = REMINDER_WRITE_GATE_REFUSAL.to_string();
                     let _ = self

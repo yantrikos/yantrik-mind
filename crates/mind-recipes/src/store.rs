@@ -205,6 +205,16 @@ pub struct LeasedNotice {
     pub kind: NoticeKind,
     pub text: String,
     pub created_ms: u64,
+    /// E.TRACE1a: the obligation's own trace (`task:<id>` for a reminder), when one was recorded.
+    pub trace_id: Option<String>,
+    /// E.TRACE1a: the turn that set it (`run-…`), when known.
+    pub parent_trace_id: Option<String>,
+}
+
+/// E.TRACE1a: an id that may cross to the desktop -- `[A-Za-z0-9:_.-]{1,64}` (yantrik-os-dc's
+/// bound), so a trace can never carry markup or a control character into a card or a log.
+pub fn valid_trace_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-'))
 }
 
 /// E.NOTICE1 A3: what a lease filter sees of a verified notice before it is leased.
@@ -326,6 +336,19 @@ impl RecipeStore {
                  ALTER TABLE mind_notices ADD COLUMN show_by_ms INTEGER;",
             )?;
         }
+        // E.TRACE1a: traces live beside the verified notice rows, never inside their digests.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS mind_notice_traces (
+                notice_id TEXT PRIMARY KEY,
+                trace_id TEXT,
+                parent_trace_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS mind_trace_parents (
+                object_trace TEXT PRIMARY KEY,
+                parent_trace TEXT NOT NULL,
+                created_ms INTEGER NOT NULL
+            );",
+        )?;
         Self::migrate_run_identity(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1954,6 +1977,26 @@ mod horizon_tests {
         .unwrap()
     }
 
+    /// E.TRACE1a: a notice's traces and a trace's parent are first-write-wins, and an id that may
+    /// not cross the desktop boundary is never stored.
+    #[test]
+    fn a_trace_keeps_its_first_value_and_refuses_what_may_not_cross() {
+        let store = RecipeStore::open(":memory:").unwrap();
+        store.set_notice_trace("notice:a", Some("task:1"), Some("run-1-0")).unwrap();
+        store.set_notice_trace("notice:a", Some("task:2"), Some("run-2-0")).unwrap();
+        let q = store.queue_notice("primary", NoticeKind::Reminder, "Reminder: Stretch", "reminder:1:5", 5).unwrap();
+        store.set_notice_trace(&q.notice_id, Some("task:1"), Some("run-1-0")).unwrap();
+        store.set_notice_trace(&q.notice_id, Some("task:9"), Some("run-9-0")).unwrap();
+        let leased = store.lease_notices("primary", 10, 1_000, 10).unwrap();
+        assert_eq!((leased[0].trace_id.as_deref(), leased[0].parent_trace_id.as_deref()), (Some("task:1"), Some("run-1-0")));
+        store.link_trace("task:1", "run-1-0", 5).unwrap();
+        store.link_trace("task:1", "run-2-0", 6).unwrap();
+        assert_eq!(store.trace_parent("task:1").unwrap().as_deref(), Some("run-1-0"));
+        store.link_trace("task:3", "run <script>", 5).unwrap();
+        assert_eq!(store.trace_parent("task:3").unwrap(), None, "an id that may not cross was stored");
+        assert_eq!(store.trace_parent("task:none").unwrap(), None);
+    }
+
     #[test]
     fn horizon_checkpoint_and_outcome_survive_store_restart() {
         let scratch = mind_types::scratch::file("horizon-store", "db");
@@ -3114,10 +3157,67 @@ impl RecipeStore {
                 kind: verified.kind,
                 text: row.text,
                 created_ms: verified.created_ms,
+                trace_id: None,
+                parent_trace_id: None,
             });
+        }
+        for n in &mut leased {
+            let traces: Option<(Option<String>, Option<String>)> = tx
+                .query_row(
+                    "SELECT trace_id, parent_trace_id FROM mind_notice_traces WHERE notice_id = ?1",
+                    [&n.notice_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((trace, parent)) = traces {
+                n.trace_id = trace.filter(|t| valid_trace_id(t));
+                n.parent_trace_id = parent.filter(|t| valid_trace_id(t));
+            }
         }
         tx.commit()?;
         Ok(leased)
+    }
+
+    /// E.TRACE1a: record a notice's traces. First write wins: a re-queue or a retry keeps the
+    /// trace it was first given. An id that may not cross is not stored.
+    pub fn set_notice_trace(&self, notice_id: &str, trace_id: Option<&str>, parent_trace_id: Option<&str>) -> anyhow::Result<()> {
+        let trace = trace_id.filter(|t| valid_trace_id(t));
+        let parent = parent_trace_id.filter(|t| valid_trace_id(t));
+        if trace.is_none() && parent.is_none() {
+            return Ok(());
+        }
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO mind_notice_traces (notice_id, trace_id, parent_trace_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![notice_id, trace, parent],
+        )?;
+        Ok(())
+    }
+
+    /// E.TRACE1a: `object_trace` (a reminder's `task:<id>`) was started by the turn `parent_trace`.
+    /// First write wins.
+    pub fn link_trace(&self, object_trace: &str, parent_trace: &str, now_ms: u64) -> anyhow::Result<()> {
+        if !valid_trace_id(object_trace) || !valid_trace_id(parent_trace) {
+            return Ok(());
+        }
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO mind_trace_parents (object_trace, parent_trace, created_ms) VALUES (?1, ?2, ?3)",
+            rusqlite::params![object_trace, parent_trace, now_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    /// E.TRACE1a: the turn that started `object_trace`, when one was linked.
+    pub fn trace_parent(&self, object_trace: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT parent_trace FROM mind_trace_parents WHERE object_trace = ?1",
+                [object_trace],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
     }
 
     /// Acknowledge a paint: the chain's last receipt must be THIS live lease. `shown_now` is true

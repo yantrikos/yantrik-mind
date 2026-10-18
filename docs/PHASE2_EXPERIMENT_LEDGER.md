@@ -21161,3 +21161,64 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - Neither claims the task was done, still set, or will ping.
 - **Watch, not a fail:** "hope the kettle was ready" assumes a state the reminder never stated. It is mild speculation, not a claim.
 - **The post-"thanks" recitation habit:** 1 in 3 samples. The one sample was pre-#831 with a held note; both clean samples had the card already delivered. Not chased.
+
+## E.TRACE1a — PREREG: one trace per turn reaches the OS; a reminder names the turn that set it
+
+**Why:**
+- Agreed with dc (2026-10-18), aligning with task contracts (#841/#857):
+  - the episode id is `trace_id` (opaque, never parsed);
+  - one per turn, kept across a retry within the turn, new for each new turn;
+  - carried on the notice outbox, and on anything a later week submits to a contract;
+  - a delegated job's trace has `parent_trace_id` naming the turn that started it.
+- **What exists:** the agent loop mints `run-<ms>` per turn and records grounding and tool spans under it. Reminder tasks have object traces `task:<id>`.
+- **What does not cross:** the OS sees neither the turn's trace nor any trace on a notice.
+- Contracts week 1's first live gap on 561 ("Commands the shell showed: 0" while the Mind ran agent_run) needs the join.
+
+**What is built (slice a; delegated jobs are slice b):**
+1. **The turn's trace is minted ONCE by whoever starts the turn and carried on `TurnIdentity`** (`with_trace`).
+   - The agent loop and the cognitive path use it when present, and mint one only when no caller did.
+   - The harness mints it before the turn and sends it on COMPLETE as `trace_id`. It is on COMPLETE only.
+2. **Format:** `run-<ms>-<seq>` (the process counter keeps two turns in one ms apart).
+   - Every id that crosses is checked against `[A-Za-z0-9:_.-]{1,64}` (dc's bound).
+   - A non-conforming id is omitted, never sent.
+3. **The notice store** gains two tables, created if missing, so the verified notice rows and their digests are untouched:
+   - `mind_notice_traces(notice_id PK, trace_id, parent_trace_id)`;
+   - `mind_trace_parents(object_trace PK, parent_trace, created_ms)`.
+   - Both are first-write-wins, so a re-queue or a retry keeps the original.
+   - A leased notice carries both, and `harness.notice` sends `trace_id` / `parent_trace_id` only when present (omitted, never empty).
+4. **Reminders:**
+   - `add_reminder` links `task:<id>` → the turn's trace.
+   - When the reminder fires, its notice gets `trace_id = task:<id>` and `parent_trace_id` = that link.
+   - Reminders set before this ships, or without a traced turn, go with no parent.
+
+**Kill criteria:**
+- **K1, tests fail:**
+  - a reminder set in a turn traced T fires as a leased notice with trace `task:<id>` and parent T, and its harness payload carries both;
+  - a reminder with no link carries no `parent_trace_id` key at all;
+  - a second queue of the same notice keeps the first trace;
+  - an id with a space, markup or 65 chars is omitted from the payload;
+  - the agent loop's grounding span uses the caller's trace when one is given;
+  - two minted traces in one ms differ.
+- **K2, a mutant survives:**
+  - the validator always true;
+  - the caller's trace ignored (always minted);
+  - parent lookup removed;
+  - first-write-wins replaced by overwrite.
+- **K3:** both suites pass.
+- **Live (541):** set a reminder, then read the OS inbox row and receipts. It carries trace_id `task:<id>` and the parent `run-…`, and the parent equals the COMPLETE trace_id of the turn that set it.
+
+**E.TRACE1a — RESULT: PASS (Windows, unit).**
+- **mind-conversation tests:**
+  - `a_reminder_names_the_turn_that_set_it`: tool path, caller trace → notice parent; a second queue keeps the first.
+  - `the_harness_trace_is_the_turns_trace`: TURN_TRACE → reminder parent.
+  - `a_spoken_commitment_names_its_turn`: the extract_commitment path, which also creates tasks, so it links too.
+  - `a_reminder_with_no_turn_has_no_parent`.
+  - `minted_turn_traces_differ_and_may_cross`: 512 in a burst are distinct; the charset and length bounds hold.
+- **Store test:** `a_trace_keeps_its_first_value_and_refuses_what_may_not_cross`.
+- **mind-core tests:** the payload carries both traces and omits a non-conforming one; `complete_carries_the_turns_trace`.
+- **Mutants killed (9/9):**
+  - validator always true; agent loop ignores the caller trace; TURN_TRACE ignored; parent lookup removed;
+  - notice-trace overwrite; parent-link overwrite; payload filter removed; tool link removed;
+  - the spoken-commitment link removed. It first SURVIVED: the turn test reached the tool path. A test on the commitment path itself now kills it.
+- The E.MQ4b source guard (a 4000-byte window over `handle_turn_as`) failed when the minting lines sat inline. The minting moved into `TurnIdentity::traced()`, a one-line call, so the window was not widened.
+- **Windows workspace:** 2616 passed, 0 failed.

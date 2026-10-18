@@ -18,7 +18,7 @@ use mind_spec::ReplanAcquisition;
 use store::HorizonFailureReason;
 pub use store::{
     ActiveHorizonRecord, LeasedNotice, NoticeAck, NoticeCandidate, NoticeHistoryEntry, QueuedNotice, RecipeStore,
-    RunRecord, ShownEngagement,
+    RunRecord, ShownEngagement, valid_trace_id,
 };
 
 const HORIZON_RECIPE_RUN_PREFIX: &str = "horizon-segment:";
@@ -988,6 +988,18 @@ impl RecipeEngine {
     ) -> anyhow::Result<QueuedNotice> {
         self.notice_store()?
             .queue_notice(operator_id, kind, text, dedupe_key, now_ms)
+    }
+    /// E.TRACE1a: see [`RecipeStore::set_notice_trace`].
+    pub fn set_notice_trace(&self, notice_id: &str, trace_id: Option<&str>, parent_trace_id: Option<&str>) -> anyhow::Result<()> {
+        self.notice_store()?.set_notice_trace(notice_id, trace_id, parent_trace_id)
+    }
+    /// E.TRACE1a: see [`RecipeStore::link_trace`].
+    pub fn link_trace(&self, object_trace: &str, parent_trace: &str, now_ms: u64) -> anyhow::Result<()> {
+        self.notice_store()?.link_trace(object_trace, parent_trace, now_ms)
+    }
+    /// E.TRACE1a: see [`RecipeStore::trace_parent`].
+    pub fn trace_parent(&self, object_trace: &str) -> anyhow::Result<Option<String>> {
+        self.notice_store()?.trace_parent(object_trace)
     }
     pub fn lease_notices(
         &self,

@@ -17552,6 +17552,95 @@ mod desktop_consent_and_stall_wiring {
         assert!(!second.iter().any(|p| p.contains("Since your last reply:")), "said again on the turn after");
     }
 
+    struct NoRecipeTools;
+    #[async_trait::async_trait]
+    impl mind_recipes::RecipeHost for NoRecipeTools {
+        async fn call_tool(&self, _tool: &str, _args: &serde_json::Value) -> anyhow::Result<String> {
+            anyhow::bail!("no tools in this fixture")
+        }
+    }
+
+    /// E.TRACE1a: a conversation with a durable notice queue, played by `steps`.
+    fn traced_engine(steps: Vec<Step>) -> (ConversationEngine, Arc<dyn MemoryFacade>) {
+        let script = Script { at: AtomicUsize::new(0), steps, seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) };
+        let model: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let store = Arc::new(mind_recipes::RecipeStore::open(":memory:").unwrap());
+        let recipes = mind_recipes::RecipeEngine::new(pool.clone(), Arc::new(NoRecipeTools), "YM").with_store(store);
+        (ConversationEngine::new(mem.clone(), pool, "YM").with_recipes(Arc::new(recipes)), mem)
+    }
+
+    /// E.TRACE1a: a reminder set in a turn the caller traced fires as a notice that is the
+    /// reminder's own trace, parented on that turn -- and a second queue keeps the first trace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_names_the_turn_that_set_it() {
+        let set = Step::Call("add_reminder", serde_json::json!({"text": "Stretch", "when": "tomorrow"}));
+        let (conv, mem) = traced_engine(vec![set, Step::Say("Set.")]);
+        let turn = TurnIdentity::primary().with_trace("run-1792305935283-7");
+        let _ = conv.agent_loop_for_eval("remind me tomorrow to stretch", &turn).await;
+        let task = mem.list_tasks(false).await.unwrap().into_iter().find(|t| t.description.contains("Stretch")).expect("no reminder set");
+        let due = task.due_ms.expect("undated");
+        assert_eq!(conv.queue_due_reminders_at(due).await.unwrap(), 1);
+        conv.queue_due_reminders_at(due + 60_000).await.unwrap();
+        let leased = conv.lease_obligation_notices(due + 60_000, 30_000, 10).unwrap();
+        assert_eq!(leased.len(), 1, "{leased:?}");
+        assert_eq!(leased[0].trace_id.as_deref(), Some(format!("task:{}", task.id).as_str()));
+        assert_eq!(leased[0].parent_trace_id.as_deref(), Some("run-1792305935283-7"), "the turn's own trace, not one minted inside");
+    }
+
+    /// E.TRACE1a: the harness's trace for the turn (TURN_TRACE) is the one a reminder set in it
+    /// names, whichever path caught it -- a spoken commitment or the tool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_harness_trace_is_the_turns_trace() {
+        let set = Step::Call("add_reminder", serde_json::json!({"text": "Stretch", "when": "tomorrow"}));
+        let (conv, mem) = traced_engine(vec![set, Step::Say("Set.")]);
+        let _ = crate::TURN_TRACE
+            .scope("run-42-0".to_string(), conv.handle_turn_as("remind me tomorrow to stretch", TurnIdentity::primary()))
+            .await;
+        let tasks = mem.list_tasks(false).await.unwrap();
+        let task = tasks.iter().find(|t| t.description.to_lowercase().contains("stretch")).expect("no reminder set");
+        let engine = conv.notice_engine().unwrap();
+        assert_eq!(engine.trace_parent(&format!("task:{}", task.id)).unwrap().as_deref(), Some("run-42-0"), "{tasks:?}");
+    }
+
+    /// E.TRACE1a: a commitment caught from the words alone (no tool call) names its turn too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spoken_commitment_names_its_turn() {
+        let (conv, mem) = traced_engine(vec![Step::Say("Okay.")]);
+        let _ = crate::TURN_TRACE
+            .scope("run-43-0".to_string(), conv.handle_turn_as("remind me to stretch tomorrow", TurnIdentity::primary()))
+            .await;
+        let tasks = mem.list_tasks(false).await.unwrap();
+        let task = tasks.iter().find(|t| t.description.to_lowercase().contains("stretch")).expect("the commitment was not caught");
+        let engine = conv.notice_engine().unwrap();
+        assert_eq!(engine.trace_parent(&format!("task:{}", task.id)).unwrap().as_deref(), Some("run-43-0"), "{tasks:?}");
+    }
+
+    /// E.TRACE1a: a reminder no traced turn set (an older build's, or one written straight to the
+    /// store) fires with its own trace and no parent.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reminder_with_no_turn_has_no_parent() {
+        let (conv, mem) = traced_engine(vec![]);
+        let now = ConversationEngine::now_ms();
+        let t = mem.add_task("Check the oven", "medium", Some(now - 60_000)).await.unwrap();
+        conv.queue_due_reminders_at(now).await.unwrap();
+        let leased = conv.lease_obligation_notices(now, 30_000, 10).unwrap();
+        assert_eq!(leased.len(), 1);
+        assert_eq!(leased[0].trace_id.as_deref(), Some(format!("task:{}", t.id).as_str()));
+        assert_eq!(leased[0].parent_trace_id, None);
+    }
+
+    /// E.TRACE1a: minted traces are distinct within one millisecond, and may cross to the desktop.
+    #[test]
+    fn minted_turn_traces_differ_and_may_cross() {
+        let ids: std::collections::HashSet<String> = (0..512).map(|_| crate::mint_turn_trace()).collect();
+        assert_eq!(ids.len(), 512);
+        assert!(ids.iter().all(|t| mind_recipes::valid_trace_id(t)), "{ids:?}");
+        assert!(!mind_recipes::valid_trace_id("run 1") && !mind_recipes::valid_trace_id("<b>") && !mind_recipes::valid_trace_id(""));
+        assert!(!mind_recipes::valid_trace_id(&"a".repeat(65)) && mind_recipes::valid_trace_id(&"a".repeat(64)));
+    }
+
     /// E.ACK1: a model that plays its script whether or not it was offered tools.
     struct Insists {
         inner: SchemasSeen,

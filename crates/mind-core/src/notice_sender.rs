@@ -96,14 +96,21 @@ pub(crate) fn notice_payload(n: &mind_recipes::LeasedNotice) -> serde_json::Valu
     let first = first.trim();
     let first = if reminder { first.strip_prefix("Reminder:").map(str::trim).unwrap_or(first) } else { first };
     let title: String = first.chars().take(80).collect();
-    serde_json::json!({
+    let mut payload = serde_json::json!({
         "notice_id": n.notice_id,
         "family": if reminder { "reminder" } else { "delegated" },
         "title": title,
         "body": rest.trim(),
         "why": if reminder { "You asked me to remind you." } else { "You handed this to me." },
         "attention": if reminder { "interrupt" } else { "inbox" },
-    })
+    });
+    // E.TRACE1a: the obligation's trace and the turn that set it -- omitted, never empty.
+    for (key, id) in [("trace_id", &n.trace_id), ("parent_trace_id", &n.parent_trace_id)] {
+        if let Some(id) = id.as_deref().filter(|t| mind_recipes::valid_trace_id(t)) {
+            payload[key] = serde_json::json!(id);
+        }
+    }
+    payload
 }
 
 /// The desktop's answer to `harness.notice`. Anything it did not say plainly is "not now".
@@ -407,6 +414,8 @@ mod tests {
             kind,
             text: text.into(),
             created_ms: 0,
+            trace_id: None,
+            parent_trace_id: None,
         };
         let r = notice_payload(&leased(mind_spec::NoticeKind::Reminder, "Reminder: Stretch"));
         assert_eq!(
@@ -421,6 +430,15 @@ mod tests {
         assert_eq!(d["why"], "You handed this to me.");
         assert_eq!(d["title"].as_str().unwrap().chars().count(), 80);
         assert_eq!(d["body"], "btrfs has snapshots; ext4 is simpler.");
+        // E.TRACE1a: the traces travel when present, and an id that may not cross is omitted.
+        let mut t = leased(mind_spec::NoticeKind::Reminder, "Reminder: Stretch");
+        t.trace_id = Some("task:42".into());
+        t.parent_trace_id = Some("run-1792305935283-7".into());
+        let p = notice_payload(&t);
+        assert_eq!((p["trace_id"].as_str(), p["parent_trace_id"].as_str()), (Some("task:42"), Some("run-1792305935283-7")));
+        t.parent_trace_id = Some("run <b>x</b>".into());
+        let p = notice_payload(&t);
+        assert!(p.get("parent_trace_id").is_none(), "{p}");
     }
 
     /// E.NOTICE1 A3: the desktop's answers, as the sender acts on them.

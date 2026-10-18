@@ -761,12 +761,15 @@ async fn serve(
             let (redact_tx, mut redact_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::erase_redact::Redact>();
             // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
             let chat = turn["conversation"].as_str().unwrap_or_default().to_string();
+            let trace = mind_conversation::mint_turn_trace();
             // E.VOICE2: the answer as it is written, and the flag that stops its model call.
             let (answer_tx, mut answer_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::AnswerDelta>();
             let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cancel_in = cancel.clone();
+            // E.TRACE1a: this turn's one trace, sent to the desktop on COMPLETE.
+            let trace_in = trace.clone();
             let mut thinking = tokio::spawn(async move {
-                mind_inference::with_effort(effort, mind_inference::with_cancel(cancel_in, mind_conversation::TURN_ANSWER.scope(answer_tx, mind_conversation::TURN_CONVERSATION
+                mind_conversation::TURN_TRACE.scope(trace_in, mind_inference::with_effort(effort, mind_inference::with_cancel(cancel_in, mind_conversation::TURN_ANSWER.scope(answer_tx, mind_conversation::TURN_CONVERSATION
                     .scope(
                         chat,
                         mind_conversation::erase_redact::TURN_REDACT.scope(
@@ -783,7 +786,7 @@ async fn serve(
                                 ),
                             ),
                         ),
-                    ))))
+                    )))))
                     .await
             });
             // A turn can outlast the desktop's 90-second presence window, and this loop does not
@@ -883,7 +886,7 @@ async fn serve(
         // told it is closed. E.VOICE3: until then the host keeps the turn in flight, holding its
         // conversation for STOP_GRACE (30 s), and the words the person just spoke over it wait.
         let Some(answer) = answer else {
-            let _ = call(address.to_string(), COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id }), timeout).await;
+            let _ = call(address.to_string(), COMPLETE, complete_params(session, turn_id, Some(&trace)), timeout).await;
             eprintln!("[harness] turn {turn_id}: closed after the drop");
             continue;
         };
@@ -896,7 +899,7 @@ async fn serve(
                 // E.VOICE2: only what the stream has not already sent.
                 let rest = remainder(&streamed, &said);
                 let rest = if streamed.any { delivered_piece(&turn, &rest) } else { delivered_text(&turn, &rest) };
-                deliver_after(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &rest, streamed.any).await;
+                deliver_after(|m, p| call(address.to_string(), m, p, timeout), session, turn_id, &rest, streamed.any, Some(&trace)).await;
             }
             Err(e) => {
                 // Said, not swallowed. A turn that simply never completed would leave the person
@@ -1520,13 +1523,22 @@ where
     C: Fn(&'static str, serde_json::Value) -> F,
     F: std::future::Future<Output = Result<serde_json::Value, String>>,
 {
-    deliver_after(call, session, turn_id, said, false).await
+    deliver_after(call, session, turn_id, said, false, None).await
+}
+
+/// E.TRACE1a: harness.complete's params -- with the turn's `trace_id` when it may cross.
+pub(crate) fn complete_params(session: &str, turn_id: u64, trace: Option<&str>) -> serde_json::Value {
+    let mut p = serde_json::json!({ "session": session, "turn_id": turn_id });
+    if let Some(t) = trace.filter(|t| mind_recipes::valid_trace_id(t)) {
+        p["trace_id"] = serde_json::json!(t);
+    }
+    p
 }
 
 /// E.VOICE2: [`deliver`] after part of the answer was streamed: nothing left to say is not an
 /// empty turn, so only the end of the turn is sent.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) async fn deliver_after<C, F>(call: C, session: &str, turn_id: u64, said: &str, streamed: bool) -> bool
+pub(crate) async fn deliver_after<C, F>(call: C, session: &str, turn_id: u64, said: &str, streamed: bool, trace: Option<&str>) -> bool
 where
     C: Fn(&'static str, serde_json::Value) -> F,
     F: std::future::Future<Output = Result<serde_json::Value, String>>,
@@ -1544,7 +1556,7 @@ where
                  (New chat, a mind switch, or the person stopped it)"
             );
             // E.VOICE3: closed, so the host frees the conversation now rather than after 30 s.
-            let _ = call(COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id })).await;
+            let _ = call(COMPLETE, complete_params(session, turn_id, trace)).await;
             return false;
         }
         Ok(_) => {}
@@ -1557,7 +1569,7 @@ where
             return false;
         }
     }
-    match call(COMPLETE, serde_json::json!({ "session": session, "turn_id": turn_id })).await {
+    match call(COMPLETE, complete_params(session, turn_id, trace)).await {
         Ok(reply) if dropped(&reply) => {
             eprintln!("[harness] turn {turn_id}: the desktop dropped the end of the turn -- the chat it was for is gone");
             false
@@ -2344,7 +2356,7 @@ mod stream_rest_tests {
             log.lock().unwrap().push(m.to_string());
             async { Ok::<_, String>(serde_json::json!({ "dropped": true })) }
         };
-        assert!(!deliver_after(call, "s", 7, "Pasta tonight.", false).await, "a dropped answer did not land");
+        assert!(!deliver_after(call, "s", 7, "Pasta tonight.", false, None).await, "a dropped answer did not land");
         assert_eq!(*seen.lock().unwrap(), vec![CHUNK.to_string(), COMPLETE.to_string()]);
     }
 
@@ -2390,12 +2402,20 @@ mod stream_rest_tests {
             log.lock().unwrap().push((m.to_string(), p));
             async { Ok::<_, String>(serde_json::json!({})) }
         };
-        assert!(deliver_after(call.clone(), "s", 7, "", true).await);
+        assert!(deliver_after(call.clone(), "s", 7, "", true, None).await);
         let methods: Vec<String> = seen.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
         assert_eq!(methods, vec![COMPLETE.to_string()], "only the end of the turn");
         seen.lock().unwrap().clear();
-        assert!(deliver_after(call, "s", 7, "", false).await);
+        assert!(deliver_after(call, "s", 7, "", false, None).await);
         assert_eq!(seen.lock().unwrap()[0].1["delta"], EMPTY_TURN, "unstreamed, an empty answer still says so");
+    }
+
+    /// E.TRACE1a: the end of a turn names the Mind's trace for it -- only one that may cross.
+    #[test]
+    fn complete_carries_the_turns_trace() {
+        assert_eq!(complete_params("s", 7, Some("run-1-0")), serde_json::json!({"session": "s", "turn_id": 7, "trace_id": "run-1-0"}));
+        assert_eq!(complete_params("s", 7, None), serde_json::json!({"session": "s", "turn_id": 7}));
+        assert_eq!(complete_params("s", 7, Some("run\n1")), serde_json::json!({"session": "s", "turn_id": 7}));
     }
 }
 

@@ -988,7 +988,8 @@ impl ConversationEngine {
         // Mint one trace before grounding and compilation. `goal_compiled` becomes the identified
         // root of bounded execution; completion/refusal and every bounded-loop tool chain parent
         // beneath it, while earlier grounding evidence stays on the same turn trace.
-        let trace_id = format!("run-{}", mind_observability::now_ms());
+        // E.TRACE1a: the turn's own trace when its caller minted one.
+        let trace_id = id.trace_or_mint();
         let router = mind_inference::Router::from_env(self.inference.clone(), 4);
         let util_pool = router.pool("util");
         let chat_pool = router.pool("chat");

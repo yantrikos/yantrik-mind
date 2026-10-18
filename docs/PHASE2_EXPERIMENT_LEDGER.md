@@ -21670,3 +21670,16 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Remaining exposure (dc):** the step before the last lives on the loop's shrinking remainder (step 8: 63.4 s of a 67 s cap).
   - A mid-turn failure past step 0 now composes from the work log with the 120 s reserve, so it degrades to an answer, not a fail-closed turn.
   - Decision: measure more before adding a lever.
+
+**CORRECTION — Tumble was DELIVERED, but it DOES NOT WORK. Both contracts are rejected (dc, by Pranab's delegation).**
+- dc rendered it headless (`?demo=1`, as nobody, from a copy): the counter says "6 shapes", but the screen is one flat colour.
+  - `frame()` never re-calls `requestAnimationFrame` (the only call is main.js:321, outside frame), so the loop runs once and nothing is simulated or drawn.
+  - `#controls` has no CSS under a 100%-height canvas with overflow hidden, so every slider and the Clear button are off screen.
+  - `check-page` passed it because nothing throws.
+- c-1 (Tumble) and c-2 (Polishing Tumble) were rejected with those reasons.
+- **What stands:** the RUN-TIME result. The local lane carried a mission through 8 steps of real work after ~140 stuck turns, and E.STEP1/E.PROMPT3b/E.PROMPT4 plus the turn budget are why.
+- **What does not:** "Tumble finished" as a QUALITY result.
+  - I wrote "the result the whole day was for" on a delivery event, the delivered-is-not-accepted error #841 exists to prevent.
+  - The Mind ticked "7. Polish + settle" and "8. Final check: full page check passes" over a page whose loop never ran. It trusted a check that could not see that, and never looked at the page itself.
+- **OS #869** (dc, building): check-page fails a page that does not move in demo mode, draws one colour, or has controls off screen. After it merges, Tumble is un-finished on 561 and the Mind resumes with those lines in its fix-first prompt.
+- **Mind-side, not chased yet:** a step that claims a visual result ticks on a weak oracle. Whether the Mind should look at the rendered page before ticking is held until #869's stronger check is live, so the two are not confounded.

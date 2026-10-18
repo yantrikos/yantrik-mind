@@ -21509,3 +21509,25 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Caveats:** one tool, not 38 with a 70 KB prompt; AIG round-robins backends of differing coverage. This is evidence, not a guarantee.
 - **Decision deferred:** a names-only prose catalog on routes measured native, with dc's proposed fallback (tool-call-shaped content and no `tool_calls` → re-send that step with the full prose), waits for E.PROMPT3's 561 read. If removing stale looks brings steps under ~60 KB, the ~9 KB catalog trim may not be the binding cost.
 - **Correction (dc, verified in code):** the nanogpt 403 is NOT a latent failure on 561. `default_chain_from_env` (mind-inference lib.rs:3046) builds that link as `("nanogpt", YM_MODEL)`, and 561's env has no YM_MODEL, so it falls to the catalog default `deepseek/deepseek-v4-pro-cheaper` (lib.rs:2289), the model the gate serves. The 403 came from the probe putting the primary's model name on that route. 561's journal has 0 nanogpt 403s in 48 h.
+
+**E.PROMPT3 — LIVE (561, aa5c2d5, dc; turn 856): the trim NEVER FIRED.**
+- Failed closed again, 5 steps in 164 s, prompt 50 → 75.5 KB. The work log grew exactly as before.
+- The two looks had DIFFERENT arguments: step 0 `os_describe {app: shell}` (+7.9 KB), then step 1 `{app: shell, actions: "agent_"}` (+11 KB). Together 18.9 of the 25.2 KB work log.
+- My prereg's pattern ("the same arguments twice") came from my own reading of "os_describe twice", not from the real calls: the synthetic case shared my misconception.
+
+**E.PROMPT3b — amendment, before code: a later look at the same APP supersedes the earlier one, whatever its `actions` filter.**
+- **Why it is safe:** `condense_description_for` keeps every action signature and the state head on BOTH forms. The filtered form only gives its family's detail lines more room. So a later look at the same app carries everything the model needs from the earlier one except other families' detail lines, which it has stopped asking about.
+- **Unchanged:** a look at another app supersedes nothing (the note-titles reason), and failed looks are untouched.
+- **Key:** `args["app"]` (empty for the whole desktop) instead of the full arguments.
+- **K1 added:**
+  - shell then shell-filtered `agent_` → the first is one line;
+  - shell then notes → both whole;
+  - a test built from turn 856's real argument pair.
+- **K2 added:** keying on the full arguments again fails the test.
+- **Live:** on 561, a turn with the shell → shell-filtered pair shows the work log ~7.9 KB smaller from step 1 on.
+
+**E.PROMPT3b — RESULT: PASS (Windows, unit).**
+- The test now includes turn 856's real pair (`{app: shell}` then `{app: shell, actions: "agent_"}`): the first becomes one line.
+- Shell then notes still keeps both.
+- **Mutants killed (3/3):** keyed on the full arguments again; the app check removed; the ok check removed.
+- **Windows workspace:** 2625 passed, 0 failed.

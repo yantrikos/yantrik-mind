@@ -2697,8 +2697,8 @@ pub(crate) fn result_before_state(obs: &str) -> String {
 pub(crate) type LastLook = Option<(std::ops::Range<usize>, String, usize)>;
 
 /// E.PROMPT3 (561: ~7 KB per look, re-sent on every later step; os_describe twice before acting):
-/// append `entry` to the work log. A successful look with the same arguments as the last tracked
-/// one turns that older entry into one line -- it is stale state now. A look at another view
+/// append `entry` to the work log. A successful look at the same app as the last tracked one,
+/// whatever its `actions` filter, turns that older entry into one line -- it is stale state now. A look at another view
 /// replaces nothing (its note titles may still be wanted), and only the newest look is tracked, so
 /// a range never points at moved text.
 pub(crate) fn push_work_entry(
@@ -2714,7 +2714,9 @@ pub(crate) fn push_work_entry(
         log.push_str(entry);
         return;
     }
-    let key = args.to_string();
+    // E.PROMPT3b (561 turn 856: `{app: shell}` then `{app: shell, actions: "agent_"}`): the app is the
+    // view. Both forms keep every signature and the state head; a filter only widens one family's detail.
+    let key = args.get("app").and_then(|a| a.as_str()).unwrap_or("").to_string();
     if let Some((range, _, was)) = last.take().filter(|(_, k, _)| *k == key) {
         log.replace_range(range, &format!("\n[{was}] {DESCRIBE} -> (an earlier look at the same view; step {step} has the current one)"));
     }
@@ -3313,6 +3315,13 @@ mod tests {
         push_work_entry(&mut log3, &mut last3, DESCRIBE, &whole, true, 2, &look(2, "desktop later"));
         assert_eq!(log3.matches("screen, act:").count(), 1, "{log3}");
         assert!(log3.contains("failed"), "{log3}");
+        // E.PROMPT3b, 561 turn 856's real pair: the shell, then the shell filtered to `agent_`.
+        let (mut log4, mut last4): (String, LastLook) = (String::new(), None);
+        push_work_entry(&mut log4, &mut last4, DESCRIBE, &serde_json::json!({"app": "shell"}), true, 0, &look(0, "shell"));
+        push_work_entry(&mut log4, &mut last4, DESCRIBE, &serde_json::json!({"app": "shell", "actions": "agent_"}), true, 1, &look(1, "shell, agent_ family"));
+        assert!(log4.starts_with(&format!("
+[0] {DESCRIBE} -> (an earlier look at the same view; step 1 has the current one)")), "{log4}");
+        assert_eq!(log4.matches("screen, act:").count(), 1, "{log4}");
     }
 
     /// E.OBS1 (561: a 60 KB `cat` reached the model as 3,900 characters and nothing said so): a

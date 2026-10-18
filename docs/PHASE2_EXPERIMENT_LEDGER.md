@@ -21493,3 +21493,8 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - F30 itself is unaffected: it tracks re-looks in its own `relooked` set, never the work log.
   - The test now asserts the note appears at most once in ANY prompt and exactly once overall (its stated intent, "looked at again twice in one turn"), and that the last prompt carries the replacement line.
 - **Windows workspace:** 2625 passed, 0 failed.
+
+**The 26 KB double tool description (prose catalog + schemas): deliberately left, with the reason.**
+- The prose catalog is the authoritative surface for backends that ignore the `tools` param. They parse tools from it.
+- E.SEC8 slice 4 recorded that clearing ONE of the two surfaces "removed half a door".
+- Dropping the prose when schemas are sent is safe only for a route known to honour native tools. That is a per-route capability the inference layer would have to state, so it is a design item of its own (to raise with dc for the gate's routes), not a trim to slip in.

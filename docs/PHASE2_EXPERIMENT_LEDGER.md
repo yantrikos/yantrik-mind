@@ -21039,3 +21039,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (4/4):** the weight transfer restored; the overlap threshold lowered to 1; told beliefs allowed into a cluster; the write-side check removed.
 - **Also:** `retro_dedup_beliefs` no longer adds a duplicate hypothesis's weight to its survivor. It still runs in no production path, as found.
 - **Windows workspace:** 2608 passed, 0 failed.
+- **Linux (staging, 554b90a), E.MEM3:** mind-conversation 1294 passed, mind-core 197 passed, mind-memory 115 passed (run separately for space). **Bundle:** yantrik-mind-554b90a-linux-amd64.tar.zst, sha256 cee53eb756d5782ee406ab1db90f0117b24ccc0ab04d2de42ce5e7ae1f58d5e6. Staging disk: 90%, 4.0 GB free.

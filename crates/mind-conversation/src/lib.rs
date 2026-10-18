@@ -14681,6 +14681,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 serde_json::to_string(&schemas).map(|s| s.len()).unwrap_or(0),
                 schemas.len()
             );
+            // E.PROMPT2b: how long this step's model call took against its cap.
+            let call_started = std::time::Instant::now();
             let resp = match answer_stream::streamed_step(
                 forward,
                 // E.PACE1b: the Mind's own tool step goes at "easy" unless the person picked an effort.
@@ -14695,10 +14697,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             )
             .await
             {
-                Ok(r) => r,
+                Ok(r) => {
+                    eprintln!("[agent] step {step}: model call {} ms (cap {} s)", call_started.elapsed().as_millis(), call_cap.as_secs());
+                    r
+                }
                 // Past the first step the turn has a work log; a model that stops answering
                 // mid-turn must not throw it away.
                 Err(e) if step > 0 => {
+                    eprintln!("[agent] step {step}: model call failed after {} ms (cap {} s)", call_started.elapsed().as_millis(), call_cap.as_secs());
                     eprintln!("[agent] step {step}: the model call failed ({e:#}) — composing from the work log");
                     scratch.push_str(
                         "\n(the model stopped answering mid-turn — stop calling tools and answer from the log above)",

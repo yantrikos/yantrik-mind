@@ -850,6 +850,13 @@ pub(crate) fn compact_recent(msgs: &[(String, String)]) -> String {
             // The user's own words are never abridged: they are the smallest slice and the most
             // load-bearing one.
             if role != "assistant" {
+                // E.PROMPT4 (561: ten copies of one 795-char Director brief, re-sent every step): an
+                // exact repeat of a LATER message says no word that one lacks -- said once, and that
+                // they repeated it.
+                let repeated = msgs[i + 1..].iter().any(|(r, t)| r == role && t.trim() == text.trim());
+                if repeated {
+                    return format!("{role}: (the same message as their later one, below)");
+                }
                 return format!("{role}: {text}");
             }
             let keep = if Some(i) == last_assistant {
@@ -1574,6 +1581,25 @@ mod compaction_tests {
             "a long USER message must survive intact"
         );
         assert!(!out.contains("elided"), "nothing of the user's is elided");
+    }
+
+    /// E.PROMPT4 (561: ten copies of one 795-char Director brief): an exact repeat is said once --
+    /// the latest copy whole, the earlier ones one line each; anything different stays whole.
+    #[test]
+    fn a_repeated_identical_request_is_said_once() {
+        let brief = "Please keep going on Tumble. Build the next step of the game and show it.".to_string();
+        let u = |t: &str| ("user".to_string(), t.to_string());
+        let a = |t: &str| ("assistant".to_string(), t.to_string());
+        let msgs = vec![u(&brief), a("Step 1 done."), u(&brief), a("Step 2 done."), u(&format!(" {brief} "))];
+        let out = compact_recent(&msgs);
+        assert_eq!(out.matches(brief.as_str()).count(), 1, "{out}");
+        assert_eq!(out.matches("(the same message as their later one, below)").count(), 2, "{out}");
+        assert!(out.trim_end().ends_with(&format!("user:  {brief} ").trim_end().to_string()), "the latest copy is whole: {out}");
+        let changed = vec![u(&brief), a("ok"), u(&brief.replace("next", "last"))];
+        let out2 = compact_recent(&changed);
+        assert!(out2.contains(brief.as_str()) && out2.contains("the last step"), "a changed repeat collapsed: {out2}");
+        let prefix = vec![u("Please keep going"), a("ok"), u(&brief)];
+        assert!(compact_recent(&prefix).contains("user: Please keep going\n"), "a prefix is not a repeat");
     }
 
     #[test]

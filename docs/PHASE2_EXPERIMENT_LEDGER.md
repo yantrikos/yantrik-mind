@@ -21543,3 +21543,45 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - (b) a faster local model;
   - (c) keep it and rely on prompt trims.
 - **Revised recommendation (dc's context: 561's local lane is deliberately an owned-hardware showcase, and Pranab wants the Mind to run without a GPU or external LLM):** (b)+(c). Keep the local lane and make the prompt fit it. Next cuts, each measured on 561: stale looks (E.PROMPT3b, ≈ −8 KB/step); older replies in "recent" when the lane is local (≈ −6 to −8 KB); names-only prose on a route measured native, with dc's fallback trigger (≈ −9 KB). Target: step-4 prompts ≈ 50 KB, down from 75. (a) stays the quick fix if he wants the stream working today.
+
+**E.PROMPT3b — LIVE (561, 6c77566, dc; turn 896): the supersede FIRED, and the turn still failed closed.**
+- Work log at step 2 is 8.5 KB (was 18.9 on turn 856). The peak prompt fell 75.5 → 67.3 KB, and the turn reached one more step (6 against 5, 160 s).
+- It failed at step 5, at 67 KB. dc's reading, adopted: what binds is probably steps × per-call time against the turn deadline, not a fixed size. Size acts through prefill time. Step 0's call cap is 135 s locally (`step_call_cap`), and the journal showed no per-call latency.
+- **Recent block shape** (mind_transcript, last 20 rows, sizes only):
+  - 10 user rows, ALL identical Director briefs of exactly 795 chars;
+  - 10 assistant rows of 399–1404 chars.
+
+**E.PROMPT2b — instrument (diagnostic):** each step logs `model call N ms (cap S s)`, and on failure `model call failed after N ms (cap S s)`.
+
+## E.PROMPT4 — PREREG: a repeated identical request is said once in the recent conversation
+
+**Why:**
+- `compact_recent` never abridges user turns ("the smallest slice and the most load-bearing one").
+- On 561 the user turns are ten copies of one 795-char Director brief, ~7 KB re-sent on every step that carry no word the latest copy lacks.
+
+**What changes:**
+- A user message whose trimmed text equals a LATER user message's becomes `user: (the same message as their later one, below)`.
+- The latest copy stays whole, and so does every different user message.
+- Assistant abridging is unchanged.
+- The amended rule: a user's WORDS are never cut. An exact repeat says nothing new, and the line says that they repeated it.
+
+**Kill criteria:**
+- K1, tests fail:
+  - three identical briefs → the first two are one line each, the last is whole;
+  - two different user messages → both whole;
+  - a repeat with one word changed → both whole;
+  - the latest assistant message keeps KEEP_LATEST.
+- K2, mutants survive: the comparison made non-strict (prefix match); the later-only rule reversed (the latest collapsed).
+- K3: both suites pass.
+- **Live (561):** the "recent" block on a mission turn drops by about 6–7 KB, and the per-step call times (E.PROMPT2b) are read alongside.
+
+**E.PROMPT4 + E.PROMPT2b — RESULT: PASS (Windows, unit).**
+- `a_repeated_identical_request_is_said_once` passes:
+  - three identical briefs (the last with padding) → two one-line pointers and the latest whole;
+  - a one-word change → both whole;
+  - a prefix is not a repeat.
+- The existing compaction tests pass, including `user_messages_are_never_abridged`.
+- **Mutants killed (2/2):** prefix matching; collapsing the earlier copy's match against earlier messages (so the latest collapses).
+- **Windows workspace:** the first full run had 2 failures, `forgetting_from_chat_erases_every_copy_after_a_yes` and `on_the_desktop_forget_asks_keep_or_erase`, both on "os error 32: the file is being used by another process" on the decision log. That is a Windows file-lock flake under suite concurrency, not this change.
+  - Run alone 3/3 times: pass. The full rerun: 2626 passed, 0 failed.
+  - Recorded as a flake to watch, not explained away. If it recurs, the erase check needs to retry on a sharing violation.

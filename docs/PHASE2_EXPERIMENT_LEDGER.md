@@ -21234,3 +21234,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - A reminder linked under c804050 and fired after the fix finds no parent; that is 541 test data only.
 - **Not yet checkable:** COMPLETE's trace_id as the OS received it. The OS does not log harness.complete or harness.notice params. dc will record both ids on the OS notice receipt in contracts week 2 and re-check the wire byte for byte then.
 - **Windows workspace:** 2616 passed, 0 failed.
+- **Linux (staging, fa228fd), the task-trace fix:** mind-conversation 1299 passed, mind-core 198 passed. **Bundle:** yantrik-mind-fa228fd-linux-amd64.tar.zst, sha256 3b0e91263d9da494410afb433f7f28a0a536a272ac0b7cdf3265129b3e91d0bf (verified locally). Staging disk: 91%, 3.8 GB free.

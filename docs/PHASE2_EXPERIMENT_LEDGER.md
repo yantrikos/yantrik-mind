@@ -21154,3 +21154,10 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - The old wording restored fails the test (K2 killed).
 - **Windows workspace:** 2609 passed, 0 failed.
 - **Linux (staging, bfdaa49), E.NOTE2:** mind-conversation 1294 passed, mind-core 197 passed. **Bundle:** yantrik-mind-bfdaa49-linux-amd64.tar.zst, sha256 1fd7b1907981c342747dc9b2262c47e345bed872152e47b98f5e234d192fd0a5 (verified locally). Staging disk: 90%, 3.9 GB free.
+
+**E.NOTE2 — LIVE RESULT (541, Mind bfdaa49 + OS 919b8e14, dc; n=1): PASS.**
+- **Delivery:** due 02:12:29.7, queued +10 s, delivered +20 s, desktop card id 102 at +20 s, no held duplicate.
+- **"thanks"** got "You're welcome — hope the kettle was ready by the time the card popped up." **"ok"** got "Good."
+- Neither claims the task was done, still set, or will ping.
+- **Watch, not a fail:** "hope the kettle was ready" assumes a state the reminder never stated. It is mild speculation, not a claim.
+- **The post-"thanks" recitation habit:** 1 in 3 samples. The one sample was pre-#831 with a held note; both clean samples had the card already delivered. Not chased.

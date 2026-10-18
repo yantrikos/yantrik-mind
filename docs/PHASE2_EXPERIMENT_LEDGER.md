@@ -21105,3 +21105,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - Its test is a synthetic probe and says so ("A quiet dinner may suit Priya better this year" must not be held).
   - The first probe began with "Priya", so the opener rule stripped its anchor and the mutant survived. Reworded, the mutant is killed.
 - **Windows workspace:** 2609 passed, 0 failed.
+- **Linux (staging, 3e98e0c), E.MEM3b:** mind-memory 116 passed, mind-conversation 1294 passed, mind-core 197 passed. **Bundle:** yantrik-mind-3e98e0c-linux-amd64.tar.zst, sha256 67c107dd3c0ad6c63078d8b0898629977e220a59e5126dee6aed4f7e2066fe55 (verified locally). Staging disk: 90%, 3.9 GB free.

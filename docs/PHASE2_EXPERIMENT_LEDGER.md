@@ -21658,3 +21658,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Possible confound:** dc minimized a stale Editor that had covered the agent terminal in Mind View since 00:01 (filed as OS #868). Its time is asked.
 - Credit goes to the budget only if the minimize came after 14:14. Otherwise the progress is recorded as confounded.
 - The 375/120 env (with da6ddd9) is re-armed for the next gap, with the Editor kept minimized.
+- **Confound resolved (dc):** the Editor was minimized at 14:14 CDT, after all three changes (the main.js write at 14:02:15, then the step 4 and step 5 ticks, all visible in the 14:14 screendump's scrollback). The progress is credited to the 300 s turn budget plus the E.PROMPT3b/E.PROMPT4 trims, with the Editor still covering the terminal.

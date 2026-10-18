@@ -20528,8 +20528,12 @@ mod desktop_consent_and_stall_wiring {
         .await;
         // Count the rule, not the describes: F15 also describes Weather before the act (these fixtures
         // list no actions), so the raw count measures the fixture. F30's note is what must appear once.
+        // E.PROMPT3: the later same-view look replaces the earlier entry (and its note) in the work
+        // log, so the rule is counted in every prompt: it fired once, and never twice in one.
+        let most = twice.prompts.iter().map(|p| p.matches("it said it was still loading").count()).max().unwrap_or(0);
+        assert_eq!(most, 1, "a loading app was looked at again twice in one turn");
         let last = twice.prompts.iter().rev().find(|p| p.contains("Work log")).cloned().unwrap_or_default();
-        assert_eq!(last.matches("it said it was still loading").count(), 1, "a loading app was looked at again twice in one turn");
+        assert!(last.contains("(an earlier look at the same view;"), "the stale look was not replaced: {last}");
     }
 
     /// E.ARENA1-F39: reading the screen through `os_act shell.read_screen` changes nothing -- the

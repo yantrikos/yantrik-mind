@@ -2692,6 +2692,37 @@ pub(crate) fn result_before_state(obs: &str) -> String {
     out
 }
 
+/// E.PROMPT3: the work log's last successful look at the desktop -- its byte range, its arguments
+/// and its step -- so a newer look at the same view can replace it.
+pub(crate) type LastLook = Option<(std::ops::Range<usize>, String, usize)>;
+
+/// E.PROMPT3 (561: ~7 KB per look, re-sent on every later step; os_describe twice before acting):
+/// append `entry` to the work log. A successful look with the same arguments as the last tracked
+/// one turns that older entry into one line -- it is stale state now. A look at another view
+/// replaces nothing (its note titles may still be wanted), and only the newest look is tracked, so
+/// a range never points at moved text.
+pub(crate) fn push_work_entry(
+    log: &mut String,
+    last: &mut LastLook,
+    tool: &str,
+    args: &serde_json::Value,
+    ok: bool,
+    step: usize,
+    entry: &str,
+) {
+    if !(ok && tool == DESCRIBE) {
+        log.push_str(entry);
+        return;
+    }
+    let key = args.to_string();
+    if let Some((range, _, was)) = last.take().filter(|(_, k, _)| *k == key) {
+        log.replace_range(range, &format!("\n[{was}] {DESCRIBE} -> (an earlier look at the same view; step {step} has the current one)"));
+    }
+    let start = log.len();
+    log.push_str(entry);
+    *last = Some((start..log.len(), key, step));
+}
+
 /// One work-log line for a tool result: a desktop description condensed so its actions survive,
 /// anything else clipped to `head` as before. The agent loop's only writer of successful results, so
 /// the condensing is tested here rather than trusted to a line inside a 1,500-line loop.
@@ -3250,6 +3281,38 @@ mod tests {
         assert!(!unsaved, "after save_as");
         assert_eq!(mcp_voice(NEW), NEW);
         assert_eq!(mcp_voice(SAVED), SAVED);
+    }
+
+    /// E.PROMPT3: a newer look at the same view replaces the older one; another view, a failed
+    /// look and every other entry are left as they were.
+    #[test]
+    fn a_newer_look_at_the_same_view_replaces_the_older_one() {
+        let whole = serde_json::json!({});
+        let notes = serde_json::json!({"app": "notes"});
+        let (mut log, mut last): (String, LastLook) = (String::new(), None);
+        let look = |n: usize, what: &str| format!("\n[{n}] {DESCRIBE} -> {what} screen, act: open, close");
+        push_work_entry(&mut log, &mut last, DESCRIBE, &whole, true, 0, &look(0, "desktop"));
+        let between = format!("\n[1] {ACT} -> Done \u{2014} opened notes");
+        push_work_entry(&mut log, &mut last, ACT, &serde_json::json!({"app": "notes"}), true, 1, &between);
+        push_work_entry(&mut log, &mut last, DESCRIBE, &whole, true, 2, &look(2, "desktop again"));
+        assert!(log.starts_with(&format!("\n[0] {DESCRIBE} -> (an earlier look at the same view; step 2 has the current one)")), "{log}");
+        assert!(log.contains(&between), "the entry between was changed: {log}");
+        assert!(log.ends_with(&look(2, "desktop again")), "{log}");
+        push_work_entry(&mut log, &mut last, DESCRIBE, &whole, true, 3, &look(3, "desktop a third time"));
+        assert_eq!(log.matches("screen, act:").count(), 1, "only the last look is whole: {log}");
+        assert!(log.contains("\n[2] mcp.yantrik-os.os_describe -> (an earlier look at the same view; step 3 has the current one)"), "{log}");
+        // Another view replaces nothing; a failed look neither replaces nor is tracked.
+        let (mut log2, mut last2): (String, LastLook) = (String::new(), None);
+        push_work_entry(&mut log2, &mut last2, DESCRIBE, &whole, true, 0, &look(0, "desktop"));
+        push_work_entry(&mut log2, &mut last2, DESCRIBE, &notes, true, 1, &look(1, "notes \"Shopping\""));
+        assert_eq!(log2.matches("screen, act:").count(), 2, "{log2}");
+        let (mut log3, mut last3): (String, LastLook) = (String::new(), None);
+        push_work_entry(&mut log3, &mut last3, DESCRIBE, &whole, true, 0, &look(0, "desktop"));
+        push_work_entry(&mut log3, &mut last3, DESCRIBE, &whole, false, 1, "\n[1] os_describe -> failed");
+        assert_eq!(log3.matches("screen, act:").count(), 1, "a failed look replaced a good one: {log3}");
+        push_work_entry(&mut log3, &mut last3, DESCRIBE, &whole, true, 2, &look(2, "desktop later"));
+        assert_eq!(log3.matches("screen, act:").count(), 1, "{log3}");
+        assert!(log3.contains("failed"), "{log3}");
     }
 
     /// E.OBS1 (561: a 60 KB `cat` reached the model as 3,900 characters and nothing said so): a

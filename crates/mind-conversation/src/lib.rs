@@ -14454,6 +14454,7 @@ Open reminders you're carrying for them:",
         // minutes against a 3-minute contract.
         let started = std::time::Instant::now();
         let mut scratch = String::new();
+        let mut last_look: desktop::LastLook = None;
         // E.LOOP6: mutating tools the safety gates refused this turn. The postcondition on a
         // denied write is owned by CODE — the model is already told (Outcome::Denied's note) and
         // the live sweep proved words do not bind, so every composing exit appends a deterministic
@@ -15889,14 +15890,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // Clipped, the calendar never showed `update_event` and the shell never showed
             // `files_new_folder`, so the model re-described, re-described, and gave up saying it had
             // no tool for the job. See `desktop::condense_description`.
-            scratch.push_str(&desktop::work_log_entry(
-                step,
-                &tool,
-                &obs,
-                outcome == crate::tool_outcome::Outcome::Ok,
-                head,
-                outcome.note(),
-            ));
+            // E.PROMPT3: a newer look at the same view replaces the older one.
+            let entry = desktop::work_log_entry(step, &tool, &obs, outcome == crate::tool_outcome::Outcome::Ok, head, outcome.note());
+            desktop::push_work_entry(&mut scratch, &mut last_look, &tool, &args, outcome == crate::tool_outcome::Outcome::Ok, step, &entry);
             if stop_after_write {
                 // E.LOOP12: the request was this one write, and it is done -- the reply, now.
                 eprintln!("[agent] step {step}: the one request is done \u{2014} composing");

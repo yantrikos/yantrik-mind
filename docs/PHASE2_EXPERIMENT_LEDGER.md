@@ -21449,3 +21449,47 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Read:** the journal of a 561 mission turn on this bundle. No grading, no kill criteria. It decides which block a later prereg trims.
 - **Windows workspace:** 2624 passed, 0 failed.
 - **Linux (staging, ad2e552), E.PROMPT2:** mind-conversation 1307 passed. **Bundle:** yantrik-mind-ad2e552-linux-amd64.tar.zst, sha256 27c8c5d848fa5648178904ebac1c9cf7ddeea567627cfebf3d299d3c1bf8ab0a (verified locally). Staging disk: 91%, 3.5 GB free.
+
+**E.PROMPT2 — READ (561, ad2e552, dc; turn 816, failed closed after 5 steps in 169 s; sizes only):**
+- **Step 0, 49.7 KB:**
+  - system 6.4 KB, grounding 2.2 KB, recent 12.3 KB;
+  - prose tool catalog 10.4 KB plus schemas 15.9 KB: the same 38 tools described twice, 26.4 KB together;
+  - user 0.8 KB.
+- **Work log by step:** 7.9 / 18.9 / 20.8 / 24.8 KB, so the prompt grew 57.5 → 68.5 → 70.4 → 74.5 KB.
+- Step 2 added 11 KB, more than one capped command (4000) can. Desktop descriptions keep up to ~7 KB each (DESKTOP_STATE_HEAD 900 + DESKTOP_ACTIONS_BUDGET 6000), and dc saw os_describe called twice per turn before acting.
+- The failing step is always past ~70 KB with the AIG backends loaded.
+- Prefix reuse between steps is high (48439/57545 at step 1), so growth, not churn, is the cost.
+
+## E.PROMPT3 — PREREG: a newer look at the same view replaces the older one in the work log
+
+**Why:** a second successful `os_describe` with the same arguments supersedes the first. The older entry is stale state as well as ~7 KB re-sent on every later step. The newest look is what the model must act on.
+
+**What is built:** desktop.rs `push_work_entry`, used at the loop's work-log write.
+- When a successful `os_describe` arrives with the same arguments as the last tracked one, that older entry becomes one line: `[n] os_describe -> (an earlier look at the same view; step m has the current one)`.
+- Only the most recent tracked look is ever replaced, so byte ranges never go stale.
+- A look with different arguments (another app) supersedes nothing. `note_exists_already` reads note titles from the log, and a different view never erases the one that listed them.
+- Failed looks and every other tool's entry are untouched.
+- **Deliberately NOT changed here:** the 26 KB of double tool description. Whether the prose catalog carries guidance the schemas lack needs reading first, as its own prereg.
+
+**Kill criteria:**
+- K1, tests fail:
+  - two same-args looks → the first is one line, the second whole;
+  - different args → both whole;
+  - a failed look neither replaces nor is tracked;
+  - an entry between the two looks is byte-identical after the replacement;
+  - three same-args looks → only the last is whole.
+- K2, a mutant survives: the args check removed; the ok check removed.
+- K3: both suites pass.
+- **Live (561):** the "prompt blocks" lines of a mission turn show the work log no longer growing by a whole look on a repeated describe.
+
+**E.PROMPT3 — RESULT: PASS (Windows, unit).**
+- `a_newer_look_at_the_same_view_replaces_the_older_one` passes:
+  - same-args looks: the older becomes one line, the newest is whole, and three looks leave only the last whole;
+  - the entry between is byte-identical;
+  - another view replaces nothing;
+  - a failed look neither replaces nor is tracked.
+- **Mutants killed (2/2):** the args check removed; the ok check removed.
+- **An existing test moved its measuring point:** `a_loading_app_is_described_once_more` counted F30's "it said it was still loading" note in the LAST prompt. That note lives in the older look's entry, which the later same-view look now replaces.
+  - F30 itself is unaffected: it tracks re-looks in its own `relooked` set, never the work log.
+  - The test now asserts the note appears at most once in ANY prompt and exactly once overall (its stated intent, "looked at again twice in one turn"), and that the last prompt carries the replacement line.
+- **Windows workspace:** 2625 passed, 0 failed.

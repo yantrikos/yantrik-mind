@@ -20988,3 +20988,54 @@ Mutants killed (3/3): the ranking removed (storage order); the stopwords removed
   - OLD A1 asked "What's your name?" after a told fact; NEW did not.
   - Both builds run a `recall` inside a desktop-state ("apps open right now") turn, which is wasted work. Noted, not chased.
 - 541 stays on 8ff12aa.
+
+## E.MEM3 — PREREG: ten copies of one hypothesis remain one (shaped by yantrik-os #859, "Rampancy")
+
+**Why:**
+- On 541 the Mind holds at least five near-duplicate self-authored hypotheses about one November cluster ("triple-strike", "three-event collision", "gauntlet", "triple-booked month", "crammed into one month"), plus a meta one. They crowded `recall` until E.RECALL1, and still take a slot each.
+- **The writer** is the DMN `associate` step (proactive.rs). It free-associates over the top recalled facts and stores every insight as a new `(hypothesis)` belief (provenance `dmn`, weight 0.3), with no check against what it already holds.
+- **The deduper** that exists, `retro_dedup_beliefs`, has three problems:
+  - it runs in no production path (only tests call it);
+  - it catches only exact normalised duplicates;
+  - when it merges, it ADDS the duplicate's log-odds to the survivor. For a hypothesis that launders repetition into corroboration, which #859 forbids: "Ten copies of one unsupported claim remain one unsupported claim."
+
+**The classes, mapped onto #859 without a parallel scheme:**
+
+| Stored provenance | #859 class |
+|---|---|
+| Told | user assertion (a preference when it states one) |
+| Observed | observation |
+| dmn / inferred / consolidated | hypothesis |
+| procedures | the skill store, untouched here |
+
+Only hypotheses are consolidated. User assertions and observations are never merged into, or by, a hypothesis.
+
+**What is built:**
+1. **The write side (DMN).** Before storing, the new insight's subject is compared with every existing `(hypothesis)` belief. The subject is its entity words: capitalised names, month names normalised (Nov → november), and numbers. If an existing hypothesis shares at least 2 subject words, nothing is stored and nothing is reinforced. The log says "[dmn] already holds a hypothesis on this subject".
+2. **The store side, on the existing consolidation cadence.** `consolidate_hypotheses` clusters existing `(hypothesis)` beliefs whose subjects share at least 2 words, keeps the OLDEST of each cluster, and tombstones the rest:
+   - **no weight is transferred**, so repetition is not evidence;
+   - the survivor gets a **zero-weight evidence link** per merged member (`source: "consolidated-from"`), so the merge keeps its evidence trail;
+   - tombstoned members drop out of every belief read (`all_beliefs`, `beliefs_matching`, recall).
+3. **The deduper.** `retro_dedup_beliefs` stops transferring weight when the duplicate is a hypothesis.
+
+**Kill criteria:**
+- K1, tests fail:
+  - five paraphrased November-cluster hypotheses (Priya + Arun, different wording) consolidate to ONE, the survivor's confidence is not higher than before, and `beliefs_matching "Priya"` returns one hypothesis line;
+  - a hypothesis on a different subject (a single shared name only) survives;
+  - a told belief on the same subject is untouched;
+  - the DMN write path, given an insight on an already-held subject, stores nothing.
+- K2, a mutant survives: the weight transfer restored; the subject-overlap threshold removed; told beliefs allowed into a cluster; the write-side check removed.
+- K3: both suites pass.
+- **Live (541):** after one consolidation pass on the snapshot, the November cluster's hypotheses collapse to one, and E.HOLDOUT2's A3/A6/A7 tie-ins are re-checked by dc.
+
+**E.MEM3 — RESULT: PASS (Windows, unit).**
+- `ten_copies_of_one_hypothesis_remain_one` (mind-memory) passes:
+  - five November-cluster rewordings collapse to ONE (4 merged);
+  - a different subject (Meera), one sharing a single name ("Priya might enjoy a gardening book") and a belief the person told on the same subject all survive;
+  - no confidence rose above the pre-merge maximum;
+  - `hypothesis_held` recognises a new rewording and rejects an unrelated subject;
+  - a second pass merges nothing.
+- `the_dmn_does_not_store_a_hunch_it_already_holds` (a source guard: the DMN path calls a model) passes.
+- **Mutants killed (4/4):** the weight transfer restored; the overlap threshold lowered to 1; told beliefs allowed into a cluster; the write-side check removed.
+- **Also:** `retro_dedup_beliefs` no longer adds a duplicate hypothesis's weight to its survivor. It still runs in no production path, as found.
+- **Windows workspace:** 2608 passed, 0 failed.

@@ -740,6 +740,12 @@ impl super::ConversationEngine {
             // ASSOCIATE — free-associate over stored beliefs for ONE non-obvious insight/question, and
             // store it as a low-certainty HYPOTHESIS (provenance=dmn) the mind can later test or surface.
             _ => {
+                // E.MEM3: before adding a hunch, collapse the ones already held on one subject.
+                if let Ok(merged) = self.memory.consolidate_hypotheses().await {
+                    if merged > 0 {
+                        log.push(format!("[dmn] consolidated {merged} near-duplicate hypotheses (no weight moved)"));
+                    }
+                }
                 let rs = self
                     .memory
                     .recall_typed(
@@ -781,11 +787,15 @@ impl super::ConversationEngine {
                     .await
                 {
                     let insight = r.text.trim();
-                    if insight.len() > 8 {
-                        let statement: String = format!("(hypothesis) {insight}")
-                            .chars()
-                            .take(400)
-                            .collect();
+                    let statement: String = format!("(hypothesis) {insight}").chars().take(400).collect();
+                    // E.MEM3 (541: five rewordings of one November hunch): ten copies of one
+                    // hypothesis remain one -- a subject already hypothesised is not stored again,
+                    // nor reinforced.
+                    let held = insight.len() > 8 && self.memory.hypothesis_held(&statement).await.unwrap_or(false);
+                    if held {
+                        log.push("[dmn] already holds a hypothesis on this subject -- nothing stored".to_string());
+                    }
+                    if insight.len() > 8 && !held {
                         let _ = self
                             .memory
                             .remember_as_belief(BeliefAssertion {

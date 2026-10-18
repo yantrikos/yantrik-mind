@@ -18178,6 +18178,16 @@ mod desktop_consent_and_stall_wiring {
         assert!(!crate::claims_no_change("Added 'Spare socks' to your list."));
     }
 
+    /// E.MEM3: the DMN's write is gated on "no hypothesis on this subject yet", and consolidation runs
+    /// before it adds a hunch (its model call keeps this a source check).
+    #[test]
+    fn the_dmn_does_not_store_a_hunch_it_already_holds() {
+        let src = include_str!("proactive.rs");
+        assert!(src.contains("self.memory.hypothesis_held(&statement).await"), "the write is not checked");
+        assert!(src.contains("if insight.len() > 8 && !held {"), "a held subject is still stored");
+        assert!(src.contains("self.memory.consolidate_hypotheses().await"), "consolidation does not run");
+    }
+
     /// E.RECALL1 (E.HOLDOUT2 A4, both builds: "I don't know who looks after your plants" one turn after
     /// it was told): a fact just told leads `recall` over older beliefs sharing a common word or a
     /// name, and is found by a question that shares only its content words.

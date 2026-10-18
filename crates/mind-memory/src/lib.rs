@@ -460,6 +460,14 @@ enum Cmd {
     RetroDedupStore {
         reply: Reply<(usize, usize)>,
     },
+    // E.MEM3: ten copies of one hypothesis remain one (yantrik-os #859, "Rampancy")
+    ConsolidateHypotheses {
+        reply: Reply<usize>,
+    },
+    HypothesisHeld {
+        text: String,
+        reply: Reply<bool>,
+    },
     // immune harness: point-in-time snapshot of the live DB (seeded-belief trials run on the COPY)
     SnapshotTo {
         dest: String,
@@ -4085,7 +4093,8 @@ fn retro_dedup_beliefs(db: &YantrikDB) -> usize {
         let canon = norm_prop(prop);
         if let Some(&survivor_id) = seen.get(&canon) {
             if let NodePayload::Belief(b) = &node.payload {
-                if b.log_odds != 0.0 {
+                // E.MEM3: a repeated hypothesis is not corroboration -- its weight is not added.
+                if b.log_odds != 0.0 && !is_hypothesis(prop) {
                     let ev = YEvidence {
                         target_belief: survivor_id,
                         weight: b.log_odds,
@@ -4101,6 +4110,88 @@ fn retro_dedup_beliefs(db: &YantrikDB) -> usize {
             merged += 1;
         } else {
             seen.insert(canon, node.id);
+        }
+    }
+    merged
+}
+
+/// E.MEM3: is this proposition one of the Mind's own hypotheses (the DMN's "(hypothesis) …")?
+fn is_hypothesis(prop: &str) -> bool {
+    prop.trim_start().to_lowercase().starts_with("(hypothesis)")
+}
+
+/// E.MEM3: what a hypothesis is ABOUT -- its names, months (Nov -> november) and numbers. Two
+/// hypotheses sharing two of these are the same claim worded differently ("triple-strike",
+/// "gauntlet", "crammed into one month" were all Priya + Arun + November on 541).
+pub(crate) fn hypothesis_subject(prop: &str) -> std::collections::HashSet<String> {
+    const MONTHS: [&str; 12] = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+        "november", "december",
+    ];
+    const COMMON: [&str; 40] = [
+        "the", "a", "an", "this", "that", "these", "those", "it", "its", "if", "when", "both", "one", "two",
+        "three", "four", "five", "in", "on", "with", "and", "but", "is", "are", "why", "what", "how", "there",
+        "their", "they", "hypothesis", "user", "i", "my", "your", "all", "each", "maybe", "perhaps", "so",
+    ];
+    let body = prop.trim_start();
+    let body = if body.to_lowercase().starts_with("(hypothesis)") { &body["(hypothesis)".len()..] } else { body };
+    let mut out = std::collections::HashSet::new();
+    for tok in body.split(|c: char| !c.is_alphanumeric()).filter(|t| t.chars().count() > 1) {
+        let low = tok.to_lowercase();
+        if let Some(m) = MONTHS.iter().find(|m| low == **m || (low.len() == 3 && m.starts_with(low.as_str()))) {
+            out.insert(m.to_string());
+        } else if tok.chars().all(|c| c.is_ascii_digit()) {
+            out.insert(low);
+        } else if tok.chars().next().is_some_and(char::is_uppercase) && !COMMON.contains(&low.as_str()) {
+            out.insert(low);
+        }
+    }
+    out
+}
+
+/// E.MEM3: the hypotheses the store holds, oldest first, with their subjects. Never a belief the
+/// person told: user assertions are not merged into, or by, a hypothesis.
+fn hypothesis_nodes(db: &YantrikDB) -> Vec<(CognitiveNode, std::collections::HashSet<String>)> {
+    let mut hyps: Vec<(CognitiveNode, std::collections::HashSet<String>)> = all_beliefs(db)
+        .into_iter()
+        .filter(|n| n.attrs.provenance != Provenance::Told)
+        .filter_map(|n| {
+            let prop = node_prop(&n)?.to_string();
+            is_hypothesis(&prop).then(|| (n, hypothesis_subject(&prop)))
+        })
+        .collect();
+    hyps.sort_by_key(|(n, _)| n.attrs.last_updated_ms);
+    hyps
+}
+
+/// E.MEM3: does the store already hold a hypothesis on the same subject (two shared subject words)?
+fn hypothesis_held_db(db: &YantrikDB, text: &str) -> bool {
+    let want = hypothesis_subject(text);
+    hypothesis_nodes(db).iter().any(|(_, s)| s.intersection(&want).count() >= 2)
+}
+
+/// E.MEM3: collapse each cluster of same-subject hypotheses into its OLDEST member. The rest are
+/// tombstoned, so no read sees them, and NO weight moves to the survivor -- ten copies of one
+/// unsupported claim remain one unsupported claim. The survivor keeps a zero-weight evidence link
+/// per merged member, so the merge has its trail. Returns how many were merged.
+fn consolidate_hypotheses_db(db: &YantrikDB) -> usize {
+    let mut survivors: Vec<(NodeId, std::collections::HashSet<String>)> = Vec::new();
+    let mut merged = 0usize;
+    for (node, subject) in hypothesis_nodes(db) {
+        if let Some((survivor, _)) = survivors.iter().find(|(_, s)| s.intersection(&subject).count() >= 2) {
+            let link = YEvidence {
+                target_belief: *survivor,
+                weight: 0.0,
+                source: format!("consolidated-from:{}", node_prop(&node).unwrap_or("").chars().take(80).collect::<String>()),
+                provenance: prov("system"),
+                propagate: false,
+                timestamp: now_secs(),
+            };
+            let _ = db.assert_belief_evidence(&link, &BeliefRevisionConfig::default());
+            let _ = db.tombstone_cognitive_node(node.id);
+            merged += 1;
+        } else {
+            survivors.push((node.id, subject));
         }
     }
     merged
@@ -5592,6 +5683,12 @@ impl MemoryHandle {
                         Cmd::RetroDedupStore { reply } => {
                             let _ = reply.send(Ok(retro_dedup_store(&db)));
                         }
+                        Cmd::ConsolidateHypotheses { reply } => {
+                            let _ = reply.send(Ok(consolidate_hypotheses_db(&db)));
+                        }
+                        Cmd::HypothesisHeld { text, reply } => {
+                            let _ = reply.send(Ok(hypothesis_held_db(&db, &text)));
+                        }
                         #[cfg(test)]
                         Cmd::ForceInsertGoalPref { kind, text, reply } => {
                             ensure_goals_prefs_table(&db);
@@ -5894,6 +5991,17 @@ impl MemoryHandle {
     /// Precondition: the handle must have been opened with `DeviceAuthorization::Authorized`.
     /// Returns `MemoryError::NotAuthorized` when the authorization state is unavailable or
     /// invalid, short-circuiting before touching the store.
+    /// E.MEM3: collapse near-duplicate hypotheses into one claim each (no weight transfer).
+    pub async fn consolidate_hypotheses_now(&self) -> Result<usize> {
+        self.call(|reply| Cmd::ConsolidateHypotheses { reply }).await
+    }
+
+    /// E.MEM3: does a hypothesis on this subject already exist?
+    pub async fn hypothesis_held_now(&self, text: &str) -> Result<bool> {
+        let text = text.to_string();
+        self.call(|reply| Cmd::HypothesisHeld { text, reply }).await
+    }
+
     pub async fn retro_dedup_store(&self) -> Result<(usize, usize)> {
         if self.device_auth != DeviceAuthorization::Authorized {
             return Err(MindError::NotAuthorized);
@@ -6480,6 +6588,14 @@ impl MemoryFacade for MemoryHandle {
         // Real consolidation (clustering aging turns -> typed nodes) lands in Phase 2 with the
         // embedder wired. v1: no-op.
         Ok(0)
+    }
+
+    async fn consolidate_hypotheses(&self) -> Result<usize> {
+        self.consolidate_hypotheses_now().await
+    }
+
+    async fn hypothesis_held(&self, text: &str) -> Result<bool> {
+        self.hypothesis_held_now(text).await
     }
 
     async fn forget(&self, id: &str) -> Result<bool> {
@@ -9300,6 +9416,53 @@ MIIEvg==" });
             "case/punctuation variant of a short goal collapses: {:?}",
             ex.iter().map(|p| &p.text).collect::<Vec<_>>()
         );
+    }
+
+    /// E.MEM3 (541: five rewordings of one November hunch; yantrik-os #859 "Rampancy"): ten copies
+    /// of one hypothesis remain one. Same-subject hypotheses collapse into one with no weight moved;
+    /// a different subject, one sharing a single name, and a belief the person told all survive; and
+    /// a new hunch on a held subject is recognised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ten_copies_of_one_hypothesis_remain_one() {
+        use mind_types::MemoryFacade;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let ctx = mind_types::AccessContext::operator_audit();
+        let hunch = |s: &str, prov: &str| BeliefAssertion {
+            statement: s.into(),
+            polarity: 1.0,
+            weight: 0.3,
+            source_event: Some("dmn_associate".into()),
+            provenance: prov.into(),
+        };
+        let cluster = [
+            "(hypothesis) Priya's birthday (Nov 4) and Arun's housewarming (Nov 21) land in the same month",
+            "(hypothesis) November is a triple-strike: Priya's birthday, Arun's housewarming and Dev's surgery",
+            "(hypothesis) A gauntlet of events: Priya, Arun and Dev all in November",
+            "(hypothesis) The triple-booked month: Arun and Priya both celebrate in November",
+            "(hypothesis) Crammed into one month: Priya's birthday and Arun's housewarming",
+        ];
+        for s in cluster {
+            mem.remember_as_belief(hunch(s, "dmn")).await.unwrap();
+        }
+        mem.remember_as_belief(hunch("(hypothesis) Meera's first week at work may be tiring", "dmn")).await.unwrap();
+        mem.remember_as_belief(hunch("(hypothesis) Priya might enjoy a gardening book", "dmn")).await.unwrap();
+        mem.remember_as_belief(hunch("(hypothesis) Priya's birthday and Arun's housewarming clash, I was told", "told")).await.unwrap();
+        let before: Vec<Belief> = mem.beliefs_matching("hypothesis", &ctx).await.unwrap();
+        let top = before.iter().map(|b| b.confidence).fold(0.0_f64, f64::max);
+
+        assert!(mem.hypothesis_held("(hypothesis) Arun's party and Priya's birthday crowd November").await.unwrap());
+        assert!(!mem.hypothesis_held("(hypothesis) Ishaan's wedding needs a gift").await.unwrap());
+
+        assert_eq!(mem.consolidate_hypotheses().await.unwrap(), 4, "the five rewordings collapse into one");
+        let after: Vec<String> = mem.beliefs_matching("hypothesis", &ctx).await.unwrap().into_iter().map(|b| b.statement).collect();
+        let kept = cluster.iter().filter(|c| after.iter().any(|a| a == *c)).count();
+        assert_eq!(kept, 1, "{after:?}");
+        assert!(after.iter().any(|a| a.contains("Meera")), "a different subject was merged: {after:?}");
+        assert!(after.iter().any(|a| a.contains("gardening book")), "a single shared name was merged: {after:?}");
+        assert!(after.iter().any(|a| a.contains("I was told")), "a belief the person told was merged: {after:?}");
+        let survivors = mem.beliefs_matching("hypothesis", &ctx).await.unwrap();
+        assert!(survivors.iter().all(|b| b.confidence <= top + 1e-9), "repetition raised a confidence");
+        assert_eq!(mem.consolidate_hypotheses().await.unwrap(), 0, "a second pass merges nothing");
     }
 
     /// Retro-dedup collapses trailing-punctuation and Jaccard paraphrases that were written BEFORE

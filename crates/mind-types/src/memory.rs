@@ -998,6 +998,15 @@ pub trait MemoryFacade: Send + Sync {
     async fn hydrate_working_set(&self, focus: &str, ctx: &AccessContext) -> Result<WorkingSet>;
     /// Consolidate aging turns into typed memory (provenance-preserving). Returns #created.
     async fn consolidate(&self) -> Result<usize>;
+    /// E.MEM3: collapse near-duplicate hypotheses into one claim each, with no weight transfer.
+    /// Returns how many were merged. A store without hypotheses merges none.
+    async fn consolidate_hypotheses(&self) -> Result<usize> {
+        Ok(0)
+    }
+    /// E.MEM3: does a hypothesis on the same subject as `text` already exist?
+    async fn hypothesis_held(&self, _text: &str) -> Result<bool> {
+        Ok(false)
+    }
     /// Privacy: forget a memory by id.
     async fn forget(&self, id: &str) -> Result<bool>;
     /// Forget WITH the reason on the tombstone — the lifecycle-honest path.

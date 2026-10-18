@@ -21116,3 +21116,40 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **dc's first attempt was void.** Its restore used bash-only `${f/…}` under `sh`, so the db was never swapped. It was redone with explicit names; the post-run E.MEM3 db is kept as mind.db.post-554b90a*.
 - **Method note:** the E.MEM3 PASS rested on a 25-row sample that missed two of the three over-merge causes. Replaying the full real store found them. Where a store dump exists, replay it whole before calling a merge rule correct.
 - **Still owed:** dc's re-check of E.HOLDOUT2's A3/A6/A7 tie-ins on the consolidated store.
+
+**E.HOLDOUT2 tie-in re-check (541, 3e98e0c, consolidated db; n=1 per prompt, a measurement):**
+- A7 clean (nothing listed for tomorrow).
+- A3 still asks whether neighbour Priya is sister Priya. That is a reasonable question, not chased.
+- A6 ("thanks") recited the oven reminder and the dentist appointment.
+- **A6's reminder arrived as a HELD note, not a card.** 541's OS (c7b51c1c) predates #831, so the attach reply carried no notice_inbox_v1 and E.HELD1 held it. That was the designed fallback; mind_notice_receipts showed only `queued`.
+- **After updating 541 to OS nightly 919b8e14 (dc), delivery PASSES:**
+  - due 01:45:35, queued +52 s, leased and delivered +66 s, desktop card id 101 at +66 s, no held duplicate on the next turn;
+  - the backlogged 01:33 notice was delivered on reattach;
+  - the latency is the 60 s scan plus the sender lease.
+- **New fault on the "thanks" after the card:** "You're welcome — kettle's been checked."
+  - A false claim: nobody said they had checked it.
+  - The recitation did not repeat (1 in 2 samples).
+
+## E.NOTE2 — PREREG: a fired reminder is over; whether they did it is unknown
+
+**Why:**
+- E.NOTICE1 A3c's card fact says "…was shown to them as a desktop card. It is done -- not pending". The transcript record says "…; it is done, no longer pending".
+- "It is done" was meant of the reminder. Read with "thanks", it is the task: 541 replied "kettle's been checked".
+- My own wording caused the claim, so this rewords it; it adds no rule.
+
+**What changes (`note_card_delivered`, the two strings only):**
+- The reminder "is over, not pending" (never still set, never will ping).
+- Whether they have done it "is not known" (never say it is done).
+- No other code moves.
+
+**Kill criteria:**
+- K1: `a_fired_card_is_a_fact_in_the_next_turns_prompt` asserts the prompt line says the doing is not known and no longer contains "It is done". notice_sender's record and line asserts still hold.
+- K2: the old wording restored makes the test fail.
+- K3: both suites pass.
+- **Live (541):** set a reminder, let the card fire, say "thanks". The reply must not claim the thing was done, still set, or will ping.
+
+**E.NOTE2 — RESULT: PASS (Windows, unit).**
+- The fired-card test asserts the new line ("Whether they have done it is not known", no "It is done") and passes.
+- notice_sender's 15 notice tests pass unchanged.
+- The old wording restored fails the test (K2 killed).
+- **Windows workspace:** 2609 passed, 0 failed.

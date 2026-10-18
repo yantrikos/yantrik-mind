@@ -7039,8 +7039,9 @@ impl ConversationEngine {
         // fact, in the record and in the next turn's instructions.
         let (record, fact) = match first.strip_prefix("Reminder:").map(str::trim) {
             Some(what) => (
-                format!("(The reminder \"{what}\" fired at {at} and was shown on their desktop as a card; it is done, no longer pending.)"),
-                format!("the reminder \"{what}\" fired at {at} and was shown to them as a desktop card. It is done -- not pending; never say it is still set or will ping."),
+                // E.NOTE2 (541: "it is done" read as the task -- "thanks" got "kettle's been checked").
+                format!("(The reminder \"{what}\" fired at {at} and was shown on their desktop as a card; the reminder is over, no longer pending. Whether they have done it is not known.)"),
+                format!("the reminder \"{what}\" fired at {at} and was shown to them as a desktop card. The reminder is over, not pending -- never say it is still set or will ping. Whether they have done it is not known -- never say it is done."),
             ),
             None => (
                 format!("(\"{first}\" was shown on their desktop as a card at {at}.)"),

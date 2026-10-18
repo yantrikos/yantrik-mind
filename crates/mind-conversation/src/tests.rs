@@ -17543,6 +17543,9 @@ mod desktop_consent_and_stall_wiring {
             first.iter().any(|p| p.contains("Since your last reply: the reminder \"Stretch\" fired at") && p.contains("not pending")),
             "the fired card is not in the turn's prompt: {first:?}"
         );
+        // E.NOTE2 (541: "thanks" got "kettle's been checked"): the reminder is over; the doing is not known.
+        let line = first.iter().find(|p| p.contains("Since your last reply:")).unwrap();
+        assert!(line.contains("Whether they have done it is not known") && !line.contains("It is done"), "{line}");
         seen.lock().unwrap().clear();
         let _ = conv.agent_loop_for_eval("thanks", &TurnIdentity::primary()).await;
         let second = seen.lock().unwrap().clone();

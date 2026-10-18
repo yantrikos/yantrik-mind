@@ -21356,3 +21356,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - The E.INIT2 test first used "Priya's birthday" and silently got no candidate. That is how E.REM3 was found; the test now uses Arun.
 - **Mutants killed (5/5):** timed-reminder exclusion removed; window widened to 10 days; dedupe removed; stage dropped from the key; "priya" restored.
 - **Windows workspace:** 2621 passed, 0 failed.
+- **Linux (staging, 76905d0), E.INIT2 + E.REM3:** mind-conversation 1304 passed, mind-core 198 passed. **Bundle:** yantrik-mind-76905d0-linux-amd64.tar.zst, sha256 e0719b9de2f3b4a49255de6e5fe65ed04a510b107c1b548e958561affd58b393 (verified locally). Staging disk: 91%, 3.6 GB free. **Production note:** .90's commit 172af33 carries the same `"priya"` denylist entry (checked locally with git show, .90 untouched). It is raised with Pranab; no deploy without his word.

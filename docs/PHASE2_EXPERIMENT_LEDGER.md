@@ -21106,3 +21106,13 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - The first probe began with "Priya", so the opener rule stripped its anchor and the mutant survived. Reworded, the mutant is killed.
 - **Windows workspace:** 2609 passed, 0 failed.
 - **Linux (staging, 3e98e0c), E.MEM3b:** mind-memory 116 passed, mind-conversation 1294 passed, mind-core 197 passed. **Bundle:** yantrik-mind-3e98e0c-linux-amd64.tar.zst, sha256 67c107dd3c0ad6c63078d8b0898629977e220a59e5126dee6aed4f7e2066fe55 (verified locally). Staging disk: 90%, 3.9 GB free.
+
+**E.MEM3b — LIVE RESULT (541, dc; 3e98e0c on the restored pre-run snapshot): PASS, an exact match to the preregistered partition.**
+- Journal: "consolidated 187 near-duplicate hypotheses (no weight moved)", then "already holds a hypothesis on this subject -- nothing stored".
+- All hypotheses: 104 live / 187 tombstoned, as predicted with no ±1.
+- 7 survivors with 108 / 65 / 6 / 3 / 3 / 1 / 1 links. The 65 is "Meera's new-job day (2 Dec) and Tanvi's recital". Every survivor's log_odds is unchanged (0.27).
+- The "same probe" and "dedup failure" meta-hunches survive with 0 links.
+- In a 25-row sample of the tombstoned, every member's anchors match its survivor's group.
+- **dc's first attempt was void.** Its restore used bash-only `${f/…}` under `sh`, so the db was never swapped. It was redone with explicit names; the post-run E.MEM3 db is kept as mind.db.post-554b90a*.
+- **Method note:** the E.MEM3 PASS rested on a 25-row sample that missed two of the three over-merge causes. Replaying the full real store found them. Where a store dump exists, replay it whole before calling a merge rule correct.
+- **Still owed:** dc's re-check of E.HOLDOUT2's A3/A6/A7 tie-ins on the consolidated store.

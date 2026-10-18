@@ -14668,6 +14668,18 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 eprintln!("[agent] step {step}: prompt prefix {n}/{} bytes the same as the previous call; first difference in {at}", now.len());
                 *last = Some((now, n, at));
             }
+            // E.PROMPT2 (561: 64-75 KB prompts on a slow lane, cause unmeasured): where the bytes are.
+            eprintln!(
+                "[agent] step {step}: prompt blocks -- system {} B, grounding {} B, recent {} B, tool catalog {} B, work log {} B, user {} B, schemas {} B ({} tools)",
+                messages.iter().filter(|m| m.role == "system").map(|m| m.content.len()).sum::<usize>(),
+                grounding.len(),
+                recent.len(),
+                tools.len(),
+                scratch.len(),
+                user_text.len(),
+                serde_json::to_string(&schemas).map(|s| s.len()).unwrap_or(0),
+                schemas.len()
+            );
             let resp = match answer_stream::streamed_step(
                 forward,
                 // E.PACE1b: the Mind's own tool step goes at "easy" unless the person picked an effort.

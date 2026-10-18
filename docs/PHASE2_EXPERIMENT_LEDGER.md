@@ -21432,3 +21432,19 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutant killed (1/1):** the marker removed.
 - **Windows workspace:** 2624 passed, 0 failed.
 - **Linux (staging, e06edee), E.OBS1 + E.SPINE3:** mind-conversation 1307 passed (mind-core 198 passed at 2563fc8; E.OBS1 touches only mind-conversation). **Bundle:** yantrik-mind-e06edee-linux-amd64.tar.zst, sha256 2ddb2d9d27a6d5db773579eec6d147790d3110a41c56a37c12fa9eaa85a41d2e (verified locally). Staging disk: 91%, 3.5 GB free.
+
+**E.SPINE3 + E.INIT2 — LIVE (541, e06edee, dc): PASS.**
+- "what's coming up this week?" → "Just one thing: Arun's birthday on Tuesday, October 20th."
+- `initiative_candidates` gained one coming_up candidate: `coming-up:2026-10-20:…:ahead`, "Neighbour Arun's birthday is on 20 October (Tuesday in 2026): Tue 20 Oct, in 2 days.", would_interrupt false.
+- **Nit for Stage C:** a told belief's own date phrase plus the card's date says the date twice.
+- **E.OBS1 not exercised live:** dc's `cat /etc/services` went to an approval card and was not approved, since dc does not approve cards with synthetic input.
+  - While it waited, the reply described the file's contents without having read it. That is general knowledge, but it is a claim about an unread file. The groundedness family; logged, not chased.
+
+## E.PROMPT2 — instrument (diagnostic only, no behaviour change)
+
+- **Why:** 561's private lane fails closed on 64–75 KB step prompts. E.OBS1 showed each command adds at most ~4 KB, so the bulk is unmeasured.
+  - `prompt_audit` measures a probe, not a mission step.
+  - On 561 the chat is the live stream and the console is off.
+- **What:** next to E.PREFIX1a's per-step total, each agent step now logs `prompt blocks --` system, grounding, recent, tool catalog, work log, user and schemas bytes, plus the tool count.
+- **Read:** the journal of a 561 mission turn on this bundle. No grading, no kill criteria. It decides which block a later prereg trims.
+- **Windows workspace:** 2624 passed, 0 failed.

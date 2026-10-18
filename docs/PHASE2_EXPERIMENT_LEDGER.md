@@ -21498,3 +21498,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - The prose catalog is the authoritative surface for backends that ignore the `tools` param. They parse tools from it.
 - E.SEC8 slice 4 recorded that clearing ONE of the two surfaces "removed half a door".
 - Dropping the prose when schemas are sent is safe only for a route known to honour native tools. That is a per-route capability the inference layer would have to state, so it is a design item of its own (to raise with dc for the gate's routes), not a trim to slip in.
+- **Linux (staging, aa5c2d5), E.PROMPT3:** mind-conversation 1308 passed. **Bundle:** yantrik-mind-aa5c2d5-linux-amd64.tar.zst, sha256 1414d37a1b5a5f2b7bc9c8e20d4cf4b06fcde404ea74cb6de7a400e6ec0020c9 (verified locally). Staging disk: 92%, 3.4 GB free.

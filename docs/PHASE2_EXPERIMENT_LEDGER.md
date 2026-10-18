@@ -21606,3 +21606,11 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - the stream is fine with turns up to 5 min.
 - Side effect: a mission's 3 h limit now binds before its 40 turns.
 - **Read:** the first two finished turns, marked COMPLETED or FAILED CLOSED, with the per-step table, the Director's outcome, and whether ~/Projects/tumble changed.
+
+**561 with YM_MAX_WALL_SECS=300 (dc, from 13:48):**
+- **Turn 976 FAILED CLOSED at a single call:** 7 steps in 338 s. Step 5's call took 200.3 s of its 207 s cap; step 6 got the 60 s floor and failed.
+- **Turn 977 COMPLETED:** 3 steps in 49 s.
+- **~/Projects/tumble/main.js changed at 14:02:15 (7,197 B), the first change to the project in ~140 turns today.** PLAN.md is unchanged.
+- **Open before any per-call cap:** was step 5's 200 s queueing or generation? 7 KB of code is ~2,000 tokens, which a loaded 27B can take 100–200 s to write. A whole-call cap could abort exactly the productive call.
+  - Asked dc for which step wrote main.js and step 5's time to first byte, total time and completion size.
+  - Queue → a time-to-first-token cap plus one retry. Generation → no cap.

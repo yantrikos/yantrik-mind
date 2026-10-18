@@ -21531,3 +21531,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - Shell then notes still keeps both.
 - **Mutants killed (3/3):** keyed on the full arguments again; the app check removed; the ok check removed.
 - **Windows workspace:** 2625 passed, 0 failed.
+- **Linux (staging, 6c77566), E.PROMPT3b:** mind-conversation 1308 passed. **Bundle:** yantrik-mind-6c77566-linux-amd64.tar.zst, sha256 b8a4948e87ad8000c603824db71b788a44913de96149eeb73e31c770c17223f8 (verified locally). Staging disk: 92%, 3.3 GB free.

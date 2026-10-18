@@ -4120,39 +4120,91 @@ fn is_hypothesis(prop: &str) -> bool {
     prop.trim_start().to_lowercase().starts_with("(hypothesis)")
 }
 
-/// E.MEM3: what a hypothesis is ABOUT -- its names, months (Nov -> november) and numbers. Two
-/// hypotheses sharing two of these are the same claim worded differently ("triple-strike",
-/// "gauntlet", "crammed into one month" were all Priya + Arun + November on 541).
-pub(crate) fn hypothesis_subject(prop: &str) -> std::collections::HashSet<String> {
+/// E.MEM3: what a hypothesis is ABOUT -- its names in order of appearance, the names fit to anchor
+/// it, and its months (Nov -> november) and numbers.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct HypothesisSubject {
+    names: Vec<String>,
+    anchors: Vec<String>,
+    words: std::collections::HashSet<String>,
+}
+
+/// E.MEM3/E.MEM3b: read a hypothesis's subject. A month counts only when written as one
+/// (capitalised), so the modal "may" is not May. A sentence-opening word ("Between", "Late",
+/// "Crammed") is a name but not an anchor, unless it is a possessive ("Priya's").
+pub(crate) fn hypothesis_subject(prop: &str) -> HypothesisSubject {
     const MONTHS: [&str; 12] = [
         "january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
         "november", "december",
     ];
-    const COMMON: [&str; 40] = [
+    const COMMON: [&str; 41] = [
         "the", "a", "an", "this", "that", "these", "those", "it", "its", "if", "when", "both", "one", "two",
         "three", "four", "five", "in", "on", "with", "and", "but", "is", "are", "why", "what", "how", "there",
-        "their", "they", "hypothesis", "user", "i", "my", "your", "all", "each", "maybe", "perhaps", "so",
+        "their", "they", "hypothesis", "user", "i", "my", "your", "you", "all", "each", "maybe", "perhaps", "so",
     ];
     let body = prop.trim_start();
     let body = if body.to_lowercase().starts_with("(hypothesis)") { &body["(hypothesis)".len()..] } else { body };
-    let mut out = std::collections::HashSet::new();
-    for tok in body.split(|c: char| !c.is_alphanumeric()).filter(|t| t.chars().count() > 1) {
+    let mut out = HypothesisSubject::default();
+    let mut initial = true;
+    let mut rest = body;
+    while let Some(start) = rest.find(|c: char| c.is_alphanumeric() || matches!(c, '.' | '!' | '?')) {
+        rest = &rest[start..];
+        if rest.starts_with(['.', '!', '?']) {
+            initial = true;
+            rest = &rest[1..];
+            continue;
+        }
+        let end = rest.find(|c: char| !c.is_alphanumeric()).unwrap_or(rest.len());
+        let (tok, after) = rest.split_at(end);
+        rest = after;
+        let was_initial = std::mem::replace(&mut initial, false);
+        if tok.chars().count() < 2 {
+            continue;
+        }
         let low = tok.to_lowercase();
+        let capital = tok.chars().next().is_some_and(char::is_uppercase);
         if let Some(m) = MONTHS.iter().find(|m| low == **m || (low.len() == 3 && m.starts_with(low.as_str()))) {
-            out.insert(m.to_string());
+            if capital {
+                out.words.insert(m.to_string());
+            }
         } else if tok.chars().all(|c| c.is_ascii_digit()) {
-            out.insert(low);
-        } else if tok.chars().next().is_some_and(char::is_uppercase) && !COMMON.contains(&low.as_str()) {
-            out.insert(low);
+            out.words.insert(low);
+        } else if capital && !COMMON.contains(&low.as_str()) {
+            let possessive = after.starts_with("'s") || after.starts_with("\u{2019}s");
+            if !out.names.contains(&low) {
+                out.names.push(low.clone());
+            }
+            if (!was_initial || possessive) && !out.anchors.contains(&low) {
+                out.anchors.push(low.clone());
+            }
+            out.words.insert(low);
         }
     }
+    out.anchors.truncate(2);
     out
+}
+
+/// E.MEM3b: are two hypotheses one claim? They share two subject words, AND each one's anchors
+/// (its first two names) are among the other's names -- so "Meera + Tanvi, 2 and 6 Dec" is not
+/// "Priya + Arun + Meera within five weeks" for sharing Meera and December. Two hunches with no
+/// names match only on a shared day number; one with names never matches one without.
+pub(crate) fn same_hypothesis(a: &HypothesisSubject, b: &HypothesisSubject) -> bool {
+    if a.words.intersection(&b.words).count() < 2 {
+        return false;
+    }
+    match (a.anchors.is_empty(), b.anchors.is_empty()) {
+        (true, true) => a.words.intersection(&b.words).any(|w| w.chars().all(|c| c.is_ascii_digit())),
+        (false, false) => {
+            a.anchors.iter().all(|n| b.names.contains(n)) && b.anchors.iter().all(|n| a.names.contains(n))
+        }
+        _ => false,
+    }
 }
 
 /// E.MEM3: the hypotheses the store holds, oldest first, with their subjects. Never a belief the
 /// person told: user assertions are not merged into, or by, a hypothesis.
-fn hypothesis_nodes(db: &YantrikDB) -> Vec<(CognitiveNode, std::collections::HashSet<String>)> {
-    let mut hyps: Vec<(CognitiveNode, std::collections::HashSet<String>)> = all_beliefs(db)
+fn hypothesis_nodes(db: &YantrikDB) -> Vec<(CognitiveNode, HypothesisSubject)> {
+    let mut hyps: Vec<(CognitiveNode, HypothesisSubject)> = all_beliefs(db)
         .into_iter()
         .filter(|n| n.attrs.provenance != Provenance::Told)
         .filter_map(|n| {
@@ -4164,10 +4216,10 @@ fn hypothesis_nodes(db: &YantrikDB) -> Vec<(CognitiveNode, std::collections::Has
     hyps
 }
 
-/// E.MEM3: does the store already hold a hypothesis on the same subject (two shared subject words)?
+/// E.MEM3: does the store already hold this hypothesis, worded differently (`same_hypothesis`)?
 fn hypothesis_held_db(db: &YantrikDB, text: &str) -> bool {
     let want = hypothesis_subject(text);
-    hypothesis_nodes(db).iter().any(|(_, s)| s.intersection(&want).count() >= 2)
+    hypothesis_nodes(db).iter().any(|(_, s)| same_hypothesis(s, &want))
 }
 
 /// E.MEM3: collapse each cluster of same-subject hypotheses into its OLDEST member. The rest are
@@ -4175,10 +4227,10 @@ fn hypothesis_held_db(db: &YantrikDB, text: &str) -> bool {
 /// unsupported claim remain one unsupported claim. The survivor keeps a zero-weight evidence link
 /// per merged member, so the merge has its trail. Returns how many were merged.
 fn consolidate_hypotheses_db(db: &YantrikDB) -> usize {
-    let mut survivors: Vec<(NodeId, std::collections::HashSet<String>)> = Vec::new();
+    let mut survivors: Vec<(NodeId, HypothesisSubject)> = Vec::new();
     let mut merged = 0usize;
     for (node, subject) in hypothesis_nodes(db) {
-        if let Some((survivor, _)) = survivors.iter().find(|(_, s)| s.intersection(&subject).count() >= 2) {
+        if let Some((survivor, _)) = survivors.iter().find(|(_, s)| same_hypothesis(s, &subject)) {
             let link = YEvidence {
                 target_belief: *survivor,
                 weight: 0.0,
@@ -9463,6 +9515,79 @@ MIIEvg==" });
         let survivors = mem.beliefs_matching("hypothesis", &ctx).await.unwrap();
         assert!(survivors.iter().all(|b| b.confidence <= top + 1e-9), "repetition raised a confidence");
         assert_eq!(mem.consolidate_hypotheses().await.unwrap(), 0, "a second pass merges nothing");
+    }
+
+    /// E.MEM3b: fifteen REAL hunches from 541's store, verbatim. E.MEM3 merged them into three
+    /// survivors: "you" and the modal "may" counted as subject words, and months plus day numbers
+    /// let Meera + Tanvi (2 and 6 Dec) join Priya + Arun + Meera. One claim merges; a calendar does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_claim_merges_not_one_calendar() {
+        use mind_types::MemoryFacade;
+        let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+        let ctx = mind_types::AccessContext::operator_audit();
+        let real = [
+            r#"(hypothesis) You've been running the same probe (Priya's birthday) repeatedly and watching how I handle it — which means the real question isn't "what's my dedup bug?" but "why are you testing whether I *notice* I'm failing, rather than just whether I succeed?""#,
+            r#"(hypothesis) The dedup failure isn't a Priya-specific bug — it's a signal that every belief I hold, including your dentist appointment, may be a raw-string artifact with an unvalidated confidence level, meaning my "memory" is only as good as the last normalization pass I didn't run"#,
+            r#"(hypothesis) Priya's birthday (4 Nov), Arun's housewarming (21 Nov), and Meera's new-job start (2 Dec) land within five weeks of each other — that's a gift-and-celebration squeeze that's easy to let one slip through the cracks"#,
+            r#"(hypothesis) Every date you've listed is an obligation to someone else except the dentist — the one self-care item sits first and earliest, which means it's the most likely to get quietly displaced by the November–December social cluster that follows"#,
+            r#"(hypothesis) Your "fresh session" reset landed on 13 Oct — two days before your dentist appointment on 15 Oct — so that's the one most at risk of getting orphaned by the clean slate; want me to pin it as a standing reminder"#,
+            r#"(hypothesis) Priya's birthday (4 Nov) and Arun's housewarming (21 Nov) land in the same month — do you want to plan both gifts now, or would you rather I remind you closer to each date"#,
+            r#"(hypothesis) You've logged Priya's birthday four separate times — is that a memory-substrate duplication I should dedupe, or a signal that it matters more to you than the other dates and you'd want me to proactively help plan around it"#,
+            r#"(hypothesis) Your dentist appointment on 15 Oct is only two days after your fresh-session reset on 13 Oct — it's the most time-urgent thing in your entire list, yet it's the one most likely to slip through the cracks of a "clean slate.""#,
+            r#"(hypothesis) Meera's new job starts 2 December and Tanvi's recital is 6 December — that's her most demanding first week, so you'll likely be choosing between the two, and it's worth deciding now rather than being ambushed by the calendar"#,
+            r#"(hypothesis) You've got four social commitments — Priya's birthday (4 Nov), Arun's housewarming (21 Nov), Meera's new-job start (2 Dec), and Tanvi's recital (6 Dec) — crammed into five weeks, which means gift-buying and time-off requests are going to collide; want me to help you sequence them so nothing gets dropped"#,
+            r#"(hypothesis) Between 4 November and 6 December you have four social obligations in under a month — Priya's birthday, Arun's housewarming, Meera's first day, and Tanvi's recital — so if you want to gift or plan ahead, now (mid-October) is the window before it gets compressed"#,
+            r#"(hypothesis) November 2026 is a triple-strike — Priya's birthday (4th), Arun's housewarming (21st), and Milo's christening (30th) — and the christening almost certainly requires travel or a significant time block, so you may want to start planning logistics (gifts, travel, who's attending) well before October, not just in November"#,
+            r#"(hypothesis) Late November into early December is a collision — Arun's housewarming (21 Nov), Milo's christening (30 Nov), Meera's first day (2 Dec), and Tanvi's recital (6 Dec) all land within 16 days, with the last three squeezed into just 6 days, so you'll need to decide now which ones you're actually attending versus sending a card"#,
+            r#"(hypothesis) Arun's housewarming (21 Nov) and Milo's christening (30 Nov) are only nine days apart — if either involves travel or a gift that needs ordering, the window is tight enough to warrant deciding now which one you'll attend fully"#,
+            r#"(hypothesis) Your christening (30 Nov), Meera's first day (2 Dec), and Tanvi's recital (6 Dec) land within six days of each other — that's a three-event squeeze you'll want to plan around before it becomes a scramble"#,
+        ];
+        // Each claim, by index into `real`: the Priya + Arun squeeze (and the events after it), the
+        // dentist after the reset, Meera + Tanvi, Arun + Milo; then four that are each their own.
+        let claims: [&[usize]; 8] = [&[2, 5, 9, 10, 11], &[4, 7], &[8, 14], &[12, 13], &[0], &[1], &[3], &[6]];
+        for s in real {
+            mem.remember_as_belief(BeliefAssertion {
+                statement: s.into(),
+                polarity: 1.0,
+                weight: 0.3,
+                source_event: Some("dmn_associate".into()),
+                provenance: "dmn".into(),
+            })
+            .await
+            .unwrap();
+        }
+        // A probe, not from the store: the modal "may" is not May, so sharing Priya and "may" with
+        // the dedup-failure hunch does not make this one held already.
+        assert!(!mem.hypothesis_held("(hypothesis) A quiet dinner may suit Priya better this year").await.unwrap());
+        assert_eq!(mem.consolidate_hypotheses().await.unwrap(), 7);
+        let live: Vec<String> = mem.beliefs_matching("hypothesis", &ctx).await.unwrap().into_iter().map(|b| b.statement).collect();
+        for claim in claims {
+            let alive: Vec<usize> = claim.iter().copied().filter(|i| live.iter().any(|l| l == real[*i])).collect();
+            assert_eq!(alive.len(), 1, "claim {claim:?} should keep exactly one member, kept {alive:?}");
+        }
+    }
+
+    /// E.MEM3b K4: replay `same_hypothesis` over a full dump of a store's hypotheses (a JSON list
+    /// of {p}, oldest first) and print the partition. Run with YM_HYP_DUMP=<path> --ignored.
+    #[test]
+    #[ignore]
+    fn replay_a_hypothesis_dump() {
+        let path = std::env::var("YM_HYP_DUMP").expect("YM_HYP_DUMP");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut survivors: Vec<(String, HypothesisSubject, usize)> = Vec::new();
+        for p in rows.iter().filter_map(|r| r["p"].as_str()) {
+            let s = hypothesis_subject(p);
+            match survivors.iter_mut().find(|(_, k, _)| same_hypothesis(k, &s)) {
+                Some(hit) => hit.2 += 1,
+                None => survivors.push((p.to_string(), s, 0)),
+            }
+        }
+        let merged: usize = survivors.iter().map(|s| s.2).sum();
+        survivors.sort_by_key(|s| std::cmp::Reverse(s.2));
+        for (p, _, n) in survivors.iter().filter(|s| s.2 > 0) {
+            println!("{n:4} <- {}", p.chars().take(100).collect::<String>());
+        }
+        println!("survivors {} merged {merged}", survivors.len());
     }
 
     /// Retro-dedup collapses trailing-punctuation and Jaccard paraphrases that were written BEFORE

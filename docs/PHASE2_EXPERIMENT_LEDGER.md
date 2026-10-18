@@ -21052,3 +21052,56 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - #859's rule is to merge one claim, so this is mild over-merge (related, not the same). Nothing is lost: the members are tombstoned, not deleted, and the links are kept.
   - My suspected sentence-opener cause ("Given", "Since") did not appear in the sample.
 - **Next:** E.MEM3b tightens the subject match, with a test built from the real 291 pre-run hypotheses rather than invented ones.
+
+## E.MEM3b — PREREG: merge one claim, not one calendar
+
+**Why:**
+- E.MEM3's live run merged 202 hunches. Replaying its rule in Python over the real 291 pre-run hypotheses from 541 reproduces it exactly: 89 survivors, groups of 176/21/3/2.
+- Reading every group shows three over-merges that dc's 25-row sample missed:
+  1. **"You" counted as a name.** The meta-hunch "You've been running the same probe (Priya's birthday)… why are you testing" absorbed 21 calendar hunches on {priya, you}. This is the sentence-opener failure I suspected, and it did occur.
+  2. **The modal verb "may" counted as the month May.** The "dedup failure isn't Priya-specific" meta-hunch absorbed 2 calendar hunches on {may, priya}.
+  3. **Months and day numbers carried the match.**
+     - "Every date you've listed is an obligation except the dentist" joined on {november, december}.
+     - The Meera+Tanvi December pair (65 hunches) joined on {meera, december, 2}.
+     - The Arun+Milo and Milo trio claims joined the Priya+Arun survivor.
+
+**What is built (mind-memory):**
+- **Name tokens:**
+  - "you" joins the common words;
+  - a month counts only when written capitalised, so modal "may" is not May;
+  - names keep their order of appearance.
+- **Anchors:** a hunch's anchors are its first two names, skipping a sentence-opening word unless it is a possessive ("Priya's"). Sentence-opening words ("Between", "Late", "Crammed") are not anchors.
+- **Same claim:** two hunches are the same claim when all of these hold:
+  - they share at least 2 subject words (as before);
+  - each one's anchors all appear among the other's names.
+  - Two hunches with no anchors match only on a shared day number, and one with anchors never matches one without.
+- The same test serves the write side (`hypothesis_held`) and consolidation.
+- Nothing else changes: the oldest survives, no weight moves, and the zero-weight links stay.
+
+**Expected, from the Python replay over all 291:**
+- 104 survivors, 187 merged.
+- Priya+Arun (with later events): 108 merged.
+- Meera+Tanvi: a survivor of its own, 65 merged.
+- Arun+Milo: 6 merged.
+- The meta-hunches (testing, dedup failure, "logged four times") each survive alone.
+- **Accepted residue:** "Every event is someone else's milestone" folds into Priya+Arun, and "logged Priya's birthday four times" and its rewordings stay split.
+
+**Kill criteria:**
+- **K1, tests fail:**
+  - a test built from 15 REAL hunches (verbatim from the 541 dump) asserts the exact partition: 80←{89,134,177,256}, 88←{100}, 127←{287}, 262←{268}, with 41/74/83/95 alone;
+  - the E.MEM3 test still holds; its "Crammed into one month" rewording now merges because the opener is not an anchor.
+- **K2, a mutant survives:** "you" back as a name; lowercase "may" a month again; the mutual-anchor check removed; openers back as anchors.
+- **K3:** both suites pass.
+- **K4:** an `#[ignore]` replay over the full dump (path given by an env var) gives exactly 104 survivors / 187 merged, matching the Python model.
+- **Live (541):** restore from /root/model2-snap/mind.db, run one DMN pass on the E.MEM3b bundle, and count live / tombstoned against the expected 104 / 187.
+
+**E.MEM3b — RESULT: PASS (Windows, unit + full-dump replay).**
+- `one_claim_merges_not_one_calendar` (15 real hunches, verbatim) passes: 7 merged, and each of the 8 claims keeps exactly one member.
+- `ten_copies_of_one_hypothesis_remain_one` still passes.
+- **K4:** `replay_a_hypothesis_dump` over the full 541 dump gives **104 survivors / 187 merged**, with the same groups as the Python model (108 / 65 / 6 / 3 / 3 / 1 / 1).
+- **Mutants killed (4/4):** "you" back as a name; lowercase "may" a month; mutual anchors removed; openers as anchors.
+- **The "may" fix changes nothing on the real 291:** the anchor check already blocks those merges.
+  - It is kept for the write side, where a new single-name hunch would otherwise be "held" on {name, may}.
+  - Its test is a synthetic probe and says so ("A quiet dinner may suit Priya better this year" must not be held).
+  - The first probe began with "Priya", so the opener rule stripped its anchor and the mutant survived. Reworded, the mutant is killed.
+- **Windows workspace:** 2609 passed, 0 failed.

@@ -21153,3 +21153,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - notice_sender's 15 notice tests pass unchanged.
 - The old wording restored fails the test (K2 killed).
 - **Windows workspace:** 2609 passed, 0 failed.
+- **Linux (staging, bfdaa49), E.NOTE2:** mind-conversation 1294 passed, mind-core 197 passed. **Bundle:** yantrik-mind-bfdaa49-linux-amd64.tar.zst, sha256 1fd7b1907981c342747dc9b2262c47e345bed872152e47b98f5e234d192fd0a5 (verified locally). Staging disk: 90%, 3.9 GB free.

@@ -21532,3 +21532,13 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (3/3):** keyed on the full arguments again; the app check removed; the ok check removed.
 - **Windows workspace:** 2625 passed, 0 failed.
 - **Linux (staging, 6c77566), E.PROMPT3b:** mind-conversation 1308 passed. **Bundle:** yantrik-mind-6c77566-linux-amd64.tar.zst, sha256 b8a4948e87ad8000c603824db71b788a44913de96149eeb73e31c770c17223f8 (verified locally). Staging disk: 92%, 3.3 GB free.
+
+**Why every 561 mission step goes to the private local lane (code read, 18 Oct; dc raised it):**
+- The agent loop calls `chat_grounded_tools` on every step, which is always `PrivacyScope::Private` ("private-grounded").
+- mind-inference serves a Private call ONLY on the dedicated local lane when one exists (`self.private`, built from YM_LOCAL_OLLAMA_*), and fails CLOSED on its failure (sol 019f8287).
+- The transcript's `private:primary` (harness `think` → `TurnIdentity::primary()`) governs what the turn reads and writes, not the lane.
+- So on 561 every mission step runs on the shared qwen3.8:27b, and the ~1 s cloud brain is never used for agent steps.
+- **For Pranab (a privacy decision; nothing changed):** on 561, a sealed public showcase with no personal data, choose one of:
+  - (a) no dedicated local lane (agent steps go to the default brain, counted as escalations) — my recommendation for 561 only;
+  - (b) a faster local model;
+  - (c) keep it and rely on prompt trims.

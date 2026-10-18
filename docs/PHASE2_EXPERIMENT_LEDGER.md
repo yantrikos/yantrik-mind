@@ -21499,3 +21499,12 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - E.SEC8 slice 4 recorded that clearing ONE of the two surfaces "removed half a door".
 - Dropping the prose when schemas are sent is safe only for a route known to honour native tools. That is a per-route capability the inference layer would have to state, so it is a design item of its own (to raise with dc for the gate's routes), not a trim to slip in.
 - **Linux (staging, aa5c2d5), E.PROMPT3:** mind-conversation 1308 passed. **Bundle:** yantrik-mind-aa5c2d5-linux-amd64.tar.zst, sha256 1414d37a1b5a5f2b7bc9c8e20d4cf4b06fcde404ea74cb6de7a400e6ec0020c9 (verified locally). Staging disk: 92%, 3.4 GB free.
+
+**Native tool calls per route, measured from inside 561 (dc, 18 Oct; one trivial `get_weather` tool, stream off):**
+- ollama-cloud (deepseek-v4.1-flash, the primary): 4/4 typed `tool_calls`.
+- local (gate /api/chat → AIG, qwen3.8:27b): 5/5 typed `tool_calls`.
+- nanogpt: 1/1 typed `tool_calls`, but only with the gate's served model.
+- Arguments came back as a JSON STRING on all three, including the Ollama-native route.
+- **Finding:** 561's env names deepseek-v4.1-flash for nanogpt, and the gate serves only `deepseek/deepseek-v4-pro-cheaper` there. A fall to nanogpt with the primary's name gets 403. The nanogpt route is also rate-limited at 10 req/min.
+- **Caveats:** one tool, not 38 with a 70 KB prompt; AIG round-robins backends of differing coverage. This is evidence, not a guarantee.
+- **Decision deferred:** a names-only prose catalog on routes measured native, with dc's proposed fallback (tool-call-shaped content and no `tool_calls` → re-send that step with the full prose), waits for E.PROMPT3's 561 read. If removing stale looks brings steps under ~60 KB, the ~9 KB catalog trim may not be the binding cost.

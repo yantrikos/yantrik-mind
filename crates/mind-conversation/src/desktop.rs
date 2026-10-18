@@ -2711,7 +2711,13 @@ pub(crate) fn work_log_entry(
     .unwrap_or_else(|| {
         let obs = if ok && tool == ACT { result_before_state(obs) } else { obs.to_string() };
         let head = if ok && tool == APPS { head.max(APPS_BUDGET) } else { head };
-        obs.chars().take(head).collect::<String>()
+        let mut kept = obs.chars().take(head).collect::<String>();
+        // E.OBS1 (561: a 60 KB `cat` reached the model as 3,900 characters and nothing said so).
+        let more = obs.chars().count().saturating_sub(head);
+        if more > 0 {
+            kept.push_str(&format!("\u{2026} [{more} more characters not shown]"));
+        }
+        kept
     });
     format!("\n[{step}] {tool} -> {body}{note}")
 }
@@ -3246,6 +3252,19 @@ mod tests {
         assert_eq!(mcp_voice(SAVED), SAVED);
     }
 
+    /// E.OBS1 (561: a 60 KB `cat` reached the model as 3,900 characters and nothing said so): a
+    /// clipped result says how much was left out; one that fits says nothing.
+    #[test]
+    fn a_clipped_result_says_it_was_clipped() {
+        let long = "x".repeat(6000);
+        let entry = work_log_entry(4, "read_file", &long, true, 4000, "");
+        assert!(entry.ends_with("\u{2026} [2000 more characters not shown]"), "{}", &entry[entry.len() - 60..]);
+        let short = work_log_entry(4, "read_file", "fits", true, 4000, "");
+        assert_eq!(short, "\n[4] read_file -> fits");
+        let failed = work_log_entry(4, "read_file", &"y".repeat(500), false, 300, "");
+        assert!(failed.contains("[200 more characters not shown]"), "{failed}");
+    }
+
     /// E.ARENA1-F45, on the answer as yos-mcp builds it at yantrik-os 92fecdf (built from its code:
     /// `prefix(note, out)` around `yos act`'s print order; not a capture).
     #[test]
@@ -3728,7 +3747,15 @@ mod tests {
         let moved = result_before_state(FILES_GO);
         assert_eq!(moved.lines().count(), FILES_GO.lines().count(), "nothing dropped");
         assert!(moved.lines().last().unwrap().starts_with("state: {"));
-        assert_eq!(work_log_entry(1, DESCRIBE, FILES_GO, true, 900, ""), format!("\n[1] {DESCRIBE} -> {}", FILES_GO.chars().take(900).collect::<String>()), "only actions are reordered");
+        assert_eq!(
+            work_log_entry(1, DESCRIBE, FILES_GO, true, 900, ""),
+            format!(
+                "\n[1] {DESCRIBE} -> {}\u{2026} [{} more characters not shown]",
+                FILES_GO.chars().take(900).collect::<String>(),
+                FILES_GO.chars().count() - 900
+            ),
+            "only actions are reordered"
+        );
     }
 
     /// E.ARENA1-F25 on real yos-mcp output (185b4c0): the whole catalogue reaches the work log.
@@ -3740,7 +3767,9 @@ mod tests {
             assert!(e.contains(name), "{name} missing from the work log");
         }
         let other = work_log_entry(0, "web_fetch", APPS_185, true, 900, "");
-        assert_eq!(other.chars().count(), format!("\n[0] web_fetch -> ").chars().count() + 900, "others keep the cut");
+        let marker = format!("\u{2026} [{} more characters not shown]", APPS_185.chars().count() - 900);
+        assert_eq!(other.chars().count(), format!("\n[0] web_fetch -> ").chars().count() + 900 + marker.chars().count(), "others keep the cut");
+        assert!(other.ends_with(&marker), "E.OBS1: the cut is said");
     }
 
     /// E.ARENA1-F26: R3's T3 sequence, verbatim arguments; and what must still pass.

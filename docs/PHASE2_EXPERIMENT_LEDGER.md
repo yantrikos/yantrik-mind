@@ -21404,3 +21404,30 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - `a_told_date_is_coming_up` (initiative) passes: a told date 2 days out → one coming_up "ahead" candidate.
 - **Mutants killed (4/4):** the told filter removed; the dedupe removed; the operator's context instead of the speaker's; the detector not reading told dates.
 - **Windows workspace:** 2623 passed, 0 failed.
+
+## E.OBS1 — PREREG: a clipped tool result says it was clipped
+
+**Why (from the 561 lane-timeout report, 18 Oct; code read by an Explore pass):**
+- `work_log_entry` (desktop.rs) clips every tool result to its budget with `chars().take(head)`. For a command (`COMMAND_BUDGET`) that is 4000 characters; for a non-Ok outcome it is 300.
+- The clip is silent. A 60 KB `cat main.js` reaches the model as its first ~3,900 characters under a heading that says "command output, its last lines", with the closing fence cut off and nothing saying more existed.
+- A model that thinks it has seen the whole file writes code against a part of it.
+- **Not the cause of 561's 64–75 KB prompts:** each command adds at most ~4 KB. The bulk is elsewhere, and dc is asked for a prompt breakdown before any size change.
+
+**What changes:** when `work_log_entry` cuts a result, it appends `… [N more characters not shown]`.
+- The marker is at the end, so line-1 readers (`command_exit`) are untouched.
+- Nothing else changes, budgets included.
+
+**Kill criteria:**
+- K1, tests fail:
+  - a 6000-character result with a 4000 budget carries "2000 more characters not shown";
+  - one under its budget carries no marker;
+  - the condensed-description path is unchanged.
+- K2: the marker removed fails the test.
+- K3: both suites pass.
+- **Linux (staging, 2563fc8), E.SPINE3:** mind-conversation 1306 passed, mind-core 198 passed. Its bundle (sha256 823237eb897f18054af587e160961d2b20d59e45ea9759bef7e808e9dc946031) was superseded before any install by the E.OBS1 bundle below.
+
+**E.OBS1 — RESULT: PASS (Windows, unit).**
+- `a_clipped_result_says_it_was_clipped` passes: 6000 chars at a 4000 budget → "2000 more characters not shown"; a result that fits carries no marker; a failed result at its 300 budget carries one too.
+- Two existing tests asserted the exact old cut and were updated to expect the marker: `a_desktop_action_result_is_read_before_its_state` and `the_app_catalogue_reaches_the_model_whole`.
+- **Mutant killed (1/1):** the marker removed.
+- **Windows workspace:** 2624 passed, 0 failed.

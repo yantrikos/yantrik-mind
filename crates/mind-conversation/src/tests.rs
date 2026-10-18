@@ -17804,6 +17804,32 @@ mod desktop_consent_and_stall_wiring {
         assert!(up.contains("Priya's birthday"), "{up}");
     }
 
+    /// E.SPINE3 (541: a birthday told a minute earlier, then "nothing is on this week"): a date the
+    /// person told me is upcoming; the Mind's own guesses are not; one occasion is one row; and a
+    /// member does not see the primary's private dates.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_date_i_was_told_is_coming_up() {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let on = |d: i64| (crate::local_now() + chrono::Duration::days(d)).format("%-d %B").to_string();
+        let belief = |s: String, prov: &str| BeliefAssertion { statement: s, polarity: 1.0, weight: 0.8, source_event: Some("agent".into()), provenance: prov.into() };
+        mem.remember_as_belief(belief(format!("Neighbour Arun's birthday is on {}", on(2)), "told")).await.unwrap();
+        mem.remember_as_belief(belief(format!("Meera probably has a dentist visit on {}", on(3)), "inferred")).await.unwrap();
+        mem.remember_as_belief(belief(format!("(hypothesis) Tanvi's recital moved to {}", on(4)), "dmn")).await.unwrap();
+        mem.remember_as_belief(belief(format!("Ishaan's wedding is on {}", on(10)), "told")).await.unwrap();
+        mem.remember_as_belief(belief(format!("Ravi's birthday is on {}", on(5)), "told")).await.unwrap();
+        mem.add_task(&format!("Ravi's birthday on {}", on(5)), "medium", None).await.unwrap();
+        let up = conv.run_agent_tool("upcoming", &serde_json::json!({"days": 7})).await;
+        assert!(up.contains("Neighbour Arun's birthday"), "a told date is missing: {up}");
+        assert!(!up.contains("Meera") && !up.contains("Tanvi"), "a guess was listed as coming up: {up}");
+        assert!(!up.contains("Ishaan"), "ten days out in a seven-day list: {up}");
+        assert_eq!(up.matches("Ravi's birthday").count(), 1, "one occasion, two rows: {up}");
+        let member = TurnIdentity::new("asha", false, mind_types::OutputScope::HouseholdMember);
+        let theirs = conv.run_agent_tool_as("upcoming", &serde_json::json!({"days": 7}), &member).await;
+        assert!(!theirs.contains("Arun"), "a member saw the primary's private date: {theirs}");
+    }
+
     /// E.SPINE1: `upcoming` lists every item -- dated and undated reminders, seven of them when
     /// there are seven -- and says so when there is nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

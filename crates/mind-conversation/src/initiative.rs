@@ -12,7 +12,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::ConversationEngine;
+use crate::{ConversationEngine, TurnIdentity};
 
 /// The private profile entry holding the candidates, newest last.
 pub(crate) const CANDIDATES_KEY: &str = "initiative_candidates";
@@ -212,7 +212,10 @@ impl ConversationEngine {
         let mut fresh = 0;
         // Four days read, the local date decides: `upcoming_spine(3)` ends 72 h from now, so an item
         // three days out but later in the day than now fell outside it.
-        for (ms, line, id) in self.upcoming_spine(4).await {
+        // E.SPINE3: and the dates the primary told me.
+        let primary = TurnIdentity::primary();
+        let ctx = mind_types::AccessContext::principal(primary.viewer(), mind_types::Purpose::conversation(&primary.owner));
+        for (ms, line, id) in self.with_told(self.upcoming_spine(4).await, 4, &ctx).await {
             if id.as_ref().is_some_and(|i| timed.contains(i)) {
                 continue;
             }
@@ -332,6 +335,25 @@ mod init1_tests {
         assert!(cake.dedupe_key.ends_with(":soon") && cake.text.contains(": tomorrow ("), "{cake:?}");
         assert!(all.iter().all(|c| !c.would_interrupt && !c.text.contains("bank") && !c.text.contains("Dentist")), "{all:#?}");
         assert!(conv.take_held_notes().is_empty() && conv.take_notifications().is_empty(), "a candidate was delivered");
+    }
+
+    /// E.SPINE3: a date the person told me, 2 days out, is a coming_up candidate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_told_date_is_coming_up() {
+        let (conv, mem) = engine();
+        let on = (crate::local_now() + chrono::Duration::days(2)).format("%-d %B").to_string();
+        mem.remember_as_belief(mind_types::BeliefAssertion {
+            statement: format!("Neighbour Arun's birthday is on {on}"),
+            polarity: 1.0,
+            weight: 0.8,
+            source_event: Some("agent".into()),
+            provenance: "told".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(conv.shadow_initiative_at(crate::local_now().timestamp_millis() as u64).await, 1);
+        let c = &conv.initiative_candidates().await[0];
+        assert!(c.family == "coming_up" && c.text.contains("Arun's birthday") && c.dedupe_key.ends_with(":ahead"), "{c:?}");
     }
 
     /// E.INIT2: the stage boundaries and the card's wording.

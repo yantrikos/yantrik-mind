@@ -21363,3 +21363,44 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - An occasion set well ahead ("Arun's housewarming on the 21st", parsed with a due time) therefore gets no 2–3-day "ahead" heads-up, only its own reminder at its time.
 - Whether ahead-of-time cards for timed occasions are wanted is left to the retrospective review rather than guessed now.
 - On the desktop, a chat "remind me … on <date>" becomes a timed reminder, so the detector's sources there are mostly people's dates and text-dated tasks.
+
+**E.INIT2 — LIVE (541, 76905d0, dc): no coming_up candidates, for a reason the detector cannot fix.**
+- Seed: "Arun's birthday is on Tuesday 20 October." The turn's only tool call was `remember`, which filed a TOLD BELIEF ("Neighbour Arun's birthday is on 20 October (Tuesday in 2026)"), not a person's date.
+- "what's coming up this week?" then answered "Nothing is on your calendar for this week (October 18–24)", two days before a birthday told a minute earlier.
+- `upcoming_spine` reads the Mind's calendar, people's dates and tasks, never told beliefs. So both `upcoming` and the detector miss the commonest way a date reaches the Mind on the desktop.
+- E.REM3 confirmed live: Priya's 4 Nov birthday now appears in `upcoming`.
+- **Also seen (the told-fact tie-in family, not chased):** the reply volunteered "I already have a reminder for Arun's housewarming on 21 November. If the housewarming is actually tied to his birthday, those dates seem far apart."
+
+## E.SPINE3 — PREREG: a date the person told me is coming up
+
+**What is built (mind-conversation):**
+- **`told_dates(days, ctx)`** is a new source, read with the SPEAKER's access context. It takes beliefs found by month name (`beliefs_matching_n`, the 11 long month names plus "MAY" as a whole word, up to 200) and keeps those that:
+  - are in the epistemic class "told";
+  - are not "(hypothesis)";
+  - have a date `parse_text_date_ms` reads that falls in the window (the same half-day floor as the spine).
+- **`upcoming`** merges these into its dated rows and drops one that names the same day and shares a name word (≥4 chars) with an existing row, e.g. a task and a told belief for one birthday. Its signature gains the speaker's context.
+- **The E.INIT2 detector** reads them too, with the primary's private context.
+- `upcoming_spine`'s other five callers are unchanged.
+
+**Kill criteria:**
+- **K1, tests fail:**
+  - a told belief "Arun's birthday is on <2 days out>" appears in `upcoming` and becomes one coming_up candidate;
+  - an inferred belief and a "(hypothesis)" with a date do not;
+  - a told belief 10 days out is not in a 7-day `upcoming`;
+  - a told belief and a task for the same birthday on the same day give one row;
+  - a member's `upcoming` does not show the primary's private told date.
+- **K2, a mutant survives:** the told filter removed; the hypothesis filter removed; the dedupe removed; the speaker's context replaced by the operator's.
+- **K3:** both suites pass.
+- **Live (541):** the same seed appears in "what's coming up this week?", and a coming_up candidate is recorded.
+- **E.SPINE3 amendment, before any mutant:** the separate "(hypothesis)" filter is dropped. The Mind's hypotheses carry `dmn`/inferred provenance and never "told", so the told filter already excludes them and that guard could not be made to fail. The hypothesis case stays in the test (a dmn "(hypothesis)" with a date is not listed); its K2 mutant is withdrawn.
+
+**E.SPINE3 — RESULT: PASS (Windows, unit).**
+- `a_date_i_was_told_is_coming_up` passes:
+  - a told birthday 2 days out is listed;
+  - an inferred belief and a dmn hypothesis with dates are not;
+  - a told date 10 days out is not in the 7-day list;
+  - a told belief plus a task for one birthday give one row;
+  - a household member's `upcoming` does not show the primary's told date.
+- `a_told_date_is_coming_up` (initiative) passes: a told date 2 days out → one coming_up "ahead" candidate.
+- **Mutants killed (4/4):** the told filter removed; the dedupe removed; the operator's context instead of the speaker's; the detector not reading told dates.
+- **Windows workspace:** 2623 passed, 0 failed.

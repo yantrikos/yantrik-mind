@@ -12970,7 +12970,9 @@ WINDOW: all-time, latest 200
             // E.SPINE1: what's coming up, on demand and complete.
             "upcoming" => {
                 let days = s("days").trim().parse::<i64>().unwrap_or(7).clamp(1, 60);
-                self.upcoming_list(days).await
+                // E.SPINE3: the told dates this speaker may see.
+                let ctx = mind_types::AccessContext::principal(id.viewer(), mind_types::Purpose::conversation(&id.owner));
+                self.upcoming_list(days, &ctx).await
             }
             "now" | "date" | "datetime" | "time" | "getcurrentdatetime" => match args.get("zone").and_then(|z| z.as_str()).map(str::trim).filter(|z| !z.is_empty()) {
                 // E.ARENA1-F37: the time somewhere else, beside the person's own.

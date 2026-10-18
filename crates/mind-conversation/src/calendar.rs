@@ -110,14 +110,14 @@ impl super::ConversationEngine {
     /// than with one that fails.
     /// E.SPINE1: the `upcoming` tool's answer -- every item in the next `days`, then the open
     /// reminders that carry no date. No cap: a partial list reads as the whole.
-    pub(crate) async fn upcoming_list(&self, days: i64) -> String {
+    pub(crate) async fn upcoming_list(&self, days: i64, ctx: &mind_types::AccessContext) -> String {
         // E.CAL1 (541: the desktop calendar's trip reminder missed 8 of 8): the calendar the person
         // keeps on this desktop belongs to calendar-service -- read it, never copy it.
         let desk = if self.desktop_attached() { Some(self.desktop_calendar_lines(days).await) } else { None };
         // E.CAL3b (541 A8: "the only upcoming calendar item … scheduled for today", at 23:1x, past its
         // "(already past)" label): what is past is not upcoming, so it is not offered.
         let desk = desk.map(|read| read.map(|lines| lines.into_iter().filter(|l| !l.starts_with("earlier today ")).collect::<Vec<_>>()));
-        let spine = self.upcoming_spine(days).await;
+        let spine = self.with_told(self.upcoming_spine(days).await, days, ctx).await;
         let dated: std::collections::HashSet<String> = spine.iter().filter_map(|(_, _, id)| id.clone()).collect();
         let (reminders, _) = self.split_tasks().await;
         let undated: Vec<&Task> = reminders.iter().filter(|t| !dated.contains(&t.id) && t.due_ms.is_none()).collect();
@@ -182,6 +182,68 @@ Only the reminders I keep are below."
             obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &ask)).await;
         }
         calendar_event_lines(&obs)
+    }
+
+    /// E.SPINE3 (541: "Arun's birthday is on Tuesday 20 October" went to `remember`, and "what's
+    /// coming up this week?" said nothing was): the dated things the person TOLD me, in the next
+    /// `days`, as `upcoming` rows -- read with the speaker's own context, so a member never sees the
+    /// primary's private dates. Never the Mind's own hypotheses or inferences.
+    pub(crate) async fn told_dates(&self, days: i64, ctx: &mind_types::AccessContext) -> Vec<(i64, String)> {
+        const MONTHS: &str = "january february march april MAY june july august september october november december";
+        let today = local_now();
+        let now = today.timestamp_millis();
+        let horizon = now + days * 86_400_000;
+        let Ok(beliefs) = self.memory.beliefs_matching_n(MONTHS, 200, ctx).await else { return Vec::new() };
+        let mut out = Vec::new();
+        for b in beliefs {
+            // Told only: the Mind's hypotheses are `dmn`/inferred, never told (E.MEM3's classes).
+            if Self::epistemic_class(&b.provenance) != "told" {
+                continue;
+            }
+            let Some(ms) = parse_text_date_ms(&b.statement, &today) else { continue };
+            if ms < now - 86_400_000 / 2 || ms > horizon {
+                continue;
+            }
+            let when = chrono::DateTime::from_timestamp_millis(ms)
+                .map(|t| t.with_timezone(today.offset()).format("%a %b %-d").to_string())
+                .unwrap_or_default();
+            let mut short: String = b.statement.trim().chars().take(90).collect();
+            if b.statement.trim().chars().count() > 90 {
+                short.push('\u{2026}');
+            }
+            out.push((ms, format!("{when}: {short}")));
+        }
+        out
+    }
+
+    /// E.SPINE3: `spine` with the told dates merged in. One that names the same day and shares a
+    /// name with a row already there (a task and a told belief for one birthday) is the same
+    /// occasion, so it is not added twice.
+    pub(crate) async fn with_told(
+        &self,
+        mut spine: Vec<(i64, String, Option<String>)>,
+        days: i64,
+        ctx: &mind_types::AccessContext,
+    ) -> Vec<(i64, String, Option<String>)> {
+        let offset = *local_now().offset();
+        let day = |ms: i64| chrono::DateTime::from_timestamp_millis(ms).map(|t| t.with_timezone(&offset).date_naive());
+        let names = |line: &str| -> std::collections::HashSet<String> {
+            line.split_once(": ")
+                .map_or(line, |(_, rest)| rest)
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| w.chars().count() >= 4 && w.chars().next().is_some_and(char::is_uppercase))
+                .map(str::to_lowercase)
+                .collect()
+        };
+        for (ms, line) in self.told_dates(days, ctx).await {
+            let mine = names(&line);
+            let same = spine.iter().any(|(m, l, _)| day(*m) == day(ms) && !names(l).is_disjoint(&mine));
+            if !same {
+                spine.push((ms, line, None));
+            }
+        }
+        spine.sort_by_key(|(ms, _, _)| *ms);
+        spine
     }
 
     pub(crate) async fn upcoming_spine(&self, days: i64) -> Vec<(i64, String, Option<String>)> {

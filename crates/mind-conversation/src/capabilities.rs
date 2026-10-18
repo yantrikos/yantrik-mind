@@ -472,7 +472,7 @@ impl CapabilityHandler for ResearchCapability {
                 }
                 let (r, q, jobs, topic2) = (
                     r.clone(),
-                    host.delegated_queue.clone(),
+                    host.delegated_queue.for_job("research"),
                     host.bg_jobs.clone(),
                     topic.clone(),
                 );
@@ -488,7 +488,7 @@ impl CapabilityHandler for ResearchCapability {
                             msg.push_str(&format!("- {u}\n"));
                         }
                     }
-                    q.lock().unwrap().push(msg);
+                    q.push(msg);
                     jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 });
                 // E.NOTICE1 A2: a delivery is promised only where one will be made.
@@ -550,7 +550,7 @@ impl CapabilityHandler for CoderCapability {
                 }
                 let (c, q, jobs, task2, dead_slot) = (
                     c.clone(),
-                    host.delegated_queue.clone(),
+                    host.delegated_queue.for_job("code"),
                     host.bg_jobs.clone(),
                     task.clone(),
                     host.coder_dead.clone(),
@@ -577,7 +577,7 @@ impl CapabilityHandler for CoderCapability {
                         }
                         Err(e) => format!("🛠️ Code — \"{task2}\" failed: {e}"),
                     };
-                    q.lock().unwrap().push(out);
+                    q.push(out);
                     jobs.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 });
                 if host.unprompted_delivery() {

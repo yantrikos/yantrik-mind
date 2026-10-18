@@ -352,7 +352,7 @@ mod tests {
             ("delegate.rs", include_str!("../../mind-conversation/src/delegate.rs"), 3),
         ] {
             assert!(!src.contains("notify_queue.clone()"), "{name} hands a job the untyped queue");
-            assert_eq!(src.matches("delegated_queue.clone()").count(), sites, "{name}");
+            assert_eq!(src.matches("delegated_queue.for_job(").count(), sites, "{name}");
         }
     }
 

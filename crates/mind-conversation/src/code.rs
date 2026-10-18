@@ -304,7 +304,7 @@ impl super::ConversationEngine {
         } else {
             String::new()
         };
-        let nq = self.delegated_queue.clone();
+        let nq = self.delegated_queue.for_job("paper");
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();
@@ -338,9 +338,7 @@ impl super::ConversationEngine {
             {
                 Ok(r) => r.text,
                 Err(e) => {
-                    nq.lock()
-                        .unwrap()
-                        .push(format!("📄 Read {key2} but distillation failed: {e}"));
+                    nq.push(format!("📄 Read {key2} but distillation failed: {e}"));
                     return;
                 }
             };
@@ -358,9 +356,7 @@ impl super::ConversationEngine {
                 })
                 .unwrap_or_default();
             if facts.is_empty() {
-                nq.lock()
-                    .unwrap()
-                    .push(format!("📄 Read {key2} but couldn't distill clean facts."));
+                nq.push(format!("📄 Read {key2} but couldn't distill clean facts."));
                 return;
             }
             let mut saved = 0usize;
@@ -512,7 +508,7 @@ impl super::ConversationEngine {
                     &serde_json::to_string(&pmap2).unwrap_or_default(),
                 )
                 .await;
-            nq.lock().unwrap().push(format!(
+            nq.push(format!(
                 "📄 Studied **{key2}** — learned {saved} facts + {related_n} connections to what I already know. \
                  `paper ask {key2} <q>` answers from memory; `paper adapt {key2}` proposes improvements to our code from it."
             ));
@@ -1792,7 +1788,7 @@ impl super::ConversationEngine {
         let skeleton = det.skeleton.clone();
         let det_facts = det.facts;
         let name2 = name.clone();
-        let nq = self.delegated_queue.clone();
+        let nq = self.delegated_queue.for_job("codekb");
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();
@@ -1887,7 +1883,7 @@ impl super::ConversationEngine {
                     &chrono::Utc::now().timestamp_millis().to_string(),
                 )
                 .await;
-            nq.lock().unwrap().push(format!(
+            nq.push(format!(
                 "📖 Studied **{name2}** — {det_n} facts parsed straight from source across {module_count} modules \
                  ({file_count} files) + {synth_n} architecture facts from a single synthesis pass = {saved} total, \
                  for the cost of ONE LLM call. Ask me anything: `code ask {name2} <question>`. (`code study deep {name2}` \
@@ -1920,7 +1916,7 @@ impl super::ConversationEngine {
         let total_files: usize = modules.iter().map(|m| m.file_count).sum();
         let module_count = modules.len();
         let name2 = name.clone();
-        let nq = self.delegated_queue.clone();
+        let nq = self.delegated_queue.for_job("codekb");
         let inf = self.inference.clone();
         let mem = self.memory.clone();
         let persona = self.persona().clone();
@@ -1997,7 +1993,7 @@ impl super::ConversationEngine {
             }
 
             if all_facts.is_empty() {
-                nq.lock().unwrap().push(format!(
+                nq.push(format!(
                     "📖 Read {module_count} modules of {name2} but couldn't distill clean facts — the source may be too sparse."
                 ));
                 return;
@@ -2076,7 +2072,7 @@ impl super::ConversationEngine {
                     &chrono::Utc::now().timestamp_millis().to_string(),
                 )
                 .await;
-            nq.lock().unwrap().push(format!(
+            nq.push(format!(
                 "📖 Studied **{name2}** in depth — read {chunks_read} source passes across {modules_covered}/{module_count} modules \
                  ({total_files} files) and learned {saved} facts into memory (per-module + cross-module synthesis). \
                  I can now answer questions about it WITHOUT re-reading the code: `code ask {name2} <question>`."

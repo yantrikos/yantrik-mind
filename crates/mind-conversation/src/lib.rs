@@ -331,6 +331,63 @@ pub struct TurnIdentity {
     pub trace: Option<String>,
 }
 
+/// E.TRACE1b: run `fut` with `trace` as TURN_TRACE -- unless a caller (the harness) already set one.
+pub(crate) async fn with_turn_trace<F: std::future::Future>(trace: Option<String>, fut: F) -> F::Output {
+    match trace {
+        Some(t) if TURN_TRACE.try_with(|_| ()).is_err() => TURN_TRACE.scope(t, fut).await,
+        _ => fut.await,
+    }
+}
+
+/// E.TRACE1b: a delegated job's finished result, with the job's trace and the turn that started it.
+#[derive(Debug, Clone)]
+pub(crate) struct Delegated {
+    pub text: String,
+    pub trace: Option<String>,
+    pub parent: Option<String>,
+}
+
+/// E.NOTICE1 A2: results of work the person delegated -- the only results that become obligation
+/// notices. E.TRACE1b: a job reports through [`DelegatedQueue::for_job`], which names it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DelegatedQueue(Arc<Mutex<Vec<Delegated>>>);
+
+impl DelegatedQueue {
+    /// A sink for one job of `kind`, minted as the job starts -- inside the turn that asked, so the
+    /// turn's trace (TURN_TRACE) is its parent. Clone it into the job; it outlives the turn.
+    pub(crate) fn for_job(&self, kind: &str) -> JobSink {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let kind: String = kind.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+        JobSink {
+            queue: self.0.clone(),
+            trace: format!("job:{kind}-{}-{n}", mind_observability::now_ms()),
+            parent: TURN_TRACE.try_with(|t| t.clone()).ok().filter(|t| mind_recipes::valid_trace_id(t)),
+        }
+    }
+    pub(crate) fn push_untraced(&self, text: &str) {
+        self.0.lock().unwrap().push(Delegated { text: text.to_string(), trace: None, parent: None });
+    }
+    pub(crate) fn take(&self) -> Vec<Delegated> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// E.TRACE1b: where one delegated job reports its results.
+#[derive(Debug, Clone)]
+pub(crate) struct JobSink {
+    queue: Arc<Mutex<Vec<Delegated>>>,
+    trace: String,
+    parent: Option<String>,
+}
+
+impl JobSink {
+    pub(crate) fn push(&self, text: String) {
+        let d = Delegated { text, trace: Some(self.trace.clone()), parent: self.parent.clone() };
+        self.queue.lock().unwrap().push(d);
+    }
+}
+
 /// E.TRACE1a: a task's object trace. Task ids already read `task:17`; one that does not is
 /// prefixed (541: `task:task:17`).
 pub(crate) fn task_trace(id: &str) -> String {
@@ -6543,7 +6600,7 @@ pub struct ConversationEngine {
     notify_queue: Arc<Mutex<Vec<String>>>,
     /// E.NOTICE1 A2: results of work the person delegated (research, code, delegate jobs) -- the
     /// typed half of the notify queue, the only results that become obligation notices.
-    delegated_queue: Arc<Mutex<Vec<String>>>,
+    delegated_queue: DelegatedQueue,
     /// E.HELD1: results being handed over with THIS turn's reply -- in its prompt, so the model
     /// knows they are delivered and does not start the work again.
     held_this_turn: Mutex<Vec<String>>,
@@ -6745,7 +6802,7 @@ impl ConversationEngine {
             last_turn_answer: Mutex::new(None),
             turn_packs: Mutex::new(Vec::new()),
             notify_queue: Arc::new(Mutex::new(Vec::new())),
-            delegated_queue: Arc::new(Mutex::new(Vec::new())),
+            delegated_queue: DelegatedQueue::default(),
             held_this_turn: Mutex::new(Vec::new()),
             running_jobs: Arc::new(Mutex::new(Vec::new())),
             cards_shown: Mutex::new(Vec::new()),
@@ -6997,7 +7054,7 @@ impl ConversationEngine {
     /// this each tick and delivers each to the active chat. Empty when nothing has completed.
     pub fn take_notifications(&self) -> Vec<String> {
         let mut all = std::mem::take(&mut *self.notify_queue.lock().unwrap());
-        all.extend(std::mem::take(&mut *self.delegated_queue.lock().unwrap()));
+        all.extend(self.delegated_queue.take().into_iter().map(|d| d.text));
         all
     }
 
@@ -7006,13 +7063,14 @@ impl ConversationEngine {
     /// Returns (held, queued as notices).
     pub fn route_results_without_a_phone(&self, now_ms: u64) -> anyhow::Result<(usize, usize)> {
         let other = std::mem::take(&mut *self.notify_queue.lock().unwrap());
-        let delegated = std::mem::take(&mut *self.delegated_queue.lock().unwrap());
+        let delegated = self.delegated_queue.take();
         let held = other.len() + delegated.len();
-        for note in other.iter().chain(delegated.iter()) {
+        for note in other.iter().chain(delegated.iter().map(|d| &d.text)) {
             self.hold_for_next_turn(note);
         }
         let mut queued = 0;
-        for text in &delegated {
+        for d in &delegated {
+            let text = &d.text;
             let key = format!("delegated:{}", &mind_spec::sha256_hex(text.as_bytes())[..32]);
             if self.has_notice_queue() {
                 let q = self.notice_engine()?.queue_notice(
@@ -7022,6 +7080,8 @@ impl ConversationEngine {
                     &key,
                     now_ms,
                 )?;
+                // E.TRACE1b: the job's trace, parented on the turn that started it.
+                let _ = self.notice_engine()?.set_notice_trace(&q.notice_id, d.trace.as_deref(), d.parent.as_deref());
                 if q.fresh {
                     queued += 1;
                 }
@@ -7103,7 +7163,7 @@ impl ConversationEngine {
 
     /// E.NOTICE1 A2: a delegated job's result, as the job sites push it.
     pub fn push_delegated_result(&self, text: &str) {
-        self.delegated_queue.lock().unwrap().push(text.to_string());
+        self.delegated_queue.push_untraced(text);
     }
 
     /// Hold a finished result that could not reach any chat right now, for delivery on the user's
@@ -16447,14 +16507,21 @@ LIVE PRICES (already fetched — state these; do NOT say you will go and get the
         names_a_tool(text, &held)
     }
 
+    /// E.TRACE1b: the counted turn with its trace as TURN_TRACE, so a job it starts names the turn
+    /// on every surface, not only the desktop's.
+    async fn counted(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
+        // Boxed: the turn future is large, and one more layer on the stack overflowed a debug test.
+        with_turn_trace(id.trace.clone(), Box::pin(self.handle_turn_as_counted(user_text, id))).await
+    }
+
     pub async fn handle_turn_as(&self, user_text: &str, id: TurnIdentity) -> Result<String> {
         let id = id.traced(); // E.TRACE1a: one trace per turn, whichever loops it runs.
         // E.EGRESS4d (the eighth pass): one fetch count for the whole turn, across every loop it runs --
         // each loop's guard state is fresh, so a fallback from one loop to the other got a new budget.
         if TURN_FETCHES.try_with(|_| ()).is_ok() {
-            return self.handle_turn_as_counted(user_text, id).await;
+            return self.counted(user_text, id).await;
         }
-        TURN_FETCHES.scope(Default::default(), self.handle_turn_as_counted(user_text, id)).await
+        TURN_FETCHES.scope(Default::default(), self.counted(user_text, id)).await
     }
 
     async fn handle_turn_as_counted(&self, user_text: &str, id: TurnIdentity) -> Result<String> {

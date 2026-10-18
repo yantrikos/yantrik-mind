@@ -1842,7 +1842,7 @@ impl super::ConversationEngine {
         // carried it — the accounting would have been right for three paths and wrong for a fourth.
         let opportunity = mind_inference::current_opportunity();
         let (q, jobs, mem) = (
-            self.delegated_queue.clone(),
+            self.delegated_queue.for_job("skill"),
             self.bg_jobs.clone(),
             self.memory.clone(),
         );
@@ -1946,7 +1946,7 @@ impl super::ConversationEngine {
                 Some(msg.clone()),
             )
             .await;
-            q.lock().unwrap().push(msg);
+            q.push(msg);
             jobs.fetch_sub(1, Ordering::Relaxed);
         }));
         format!(
@@ -2111,7 +2111,7 @@ impl super::ConversationEngine {
         };
 
         let (q, jobs, mem) = (
-            self.delegated_queue.clone(),
+            self.delegated_queue.for_job("delegate"),
             self.bg_jobs.clone(),
             self.memory.clone(),
         );
@@ -2170,7 +2170,7 @@ impl super::ConversationEngine {
                 };
                 ledger_update(&mem, &id2, if built { "done" } else { "failed" }, Some(msg.clone()))
                     .await;
-                q.lock().unwrap().push(msg);
+                q.push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
             let note = dead_note(classified, kind, self.coder_dead_reason().as_deref());
@@ -2225,7 +2225,7 @@ impl super::ConversationEngine {
                     Some(msg.clone()),
                 )
                 .await;
-                q.lock().unwrap().push(msg);
+                q.push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
         } else if kind == "code" {
@@ -2341,7 +2341,7 @@ impl super::ConversationEngine {
                             }
                             let msg = format!("🛠️ [{name2}] failed in round {round}: {e}");
                             ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
-                            q.lock().unwrap().push(msg);
+                            q.push(msg);
                             jobs.fetch_sub(1, Ordering::Relaxed);
                             return;
                         }
@@ -2430,7 +2430,7 @@ impl super::ConversationEngine {
                             }
                             let msg = format!("🛠️ [{name2}] failed in round {round}: timed out before producing anything");
                             ledger_update(&mem, &id2, "failed", Some(msg.clone())).await;
-                            q.lock().unwrap().push(msg);
+                            q.push(msg);
                             jobs.fetch_sub(1, Ordering::Relaxed);
                             return;
                         }
@@ -2640,7 +2640,7 @@ impl super::ConversationEngine {
                     }
                 );
                 ledger_update(&mem, &id2, status, Some(msg.clone())).await;
-                q.lock().unwrap().push(msg);
+                q.push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
         } else {
@@ -2683,7 +2683,7 @@ impl super::ConversationEngine {
                     Some(msg.clone()),
                 )
                 .await;
-                q.lock().unwrap().push(msg);
+                q.push(msg);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
         }
@@ -2810,7 +2810,7 @@ impl super::ConversationEngine {
             }
 
             let memory = self.memory.clone();
-            let queue = self.delegated_queue.clone();
+            let queue = self.delegated_queue.for_job("resume");
             let jobs = self.bg_jobs.clone();
             let house = self.inference.clone();
             let named_critic = critic_from_env(&house);
@@ -2871,7 +2871,7 @@ impl super::ConversationEngine {
                             );
                             scratch_note(&memory, &id, &format!("resume failed: {error}")).await;
                             ledger_update(&memory, &id, "failed", Some(message.clone())).await;
-                            queue.lock().unwrap().push(message);
+                            queue.push(message);
                             jobs.fetch_sub(1, Ordering::Relaxed);
                             return;
                         }
@@ -2890,7 +2890,7 @@ impl super::ConversationEngine {
                             "🛠️ [{name}] resume attempt {attempt} produced no recoverable artifact in round {round}."
                         );
                         ledger_update(&memory, &id, "failed", Some(message.clone())).await;
-                        queue.lock().unwrap().push(message);
+                        queue.push(message);
                         jobs.fetch_sub(1, Ordering::Relaxed);
                         return;
                     }
@@ -2948,7 +2948,7 @@ impl super::ConversationEngine {
                     let message =
                         format!("🛠️ [{name}] resume attempt {attempt} produced no result.");
                     ledger_update(&memory, &id, "failed", Some(message.clone())).await;
-                    queue.lock().unwrap().push(message);
+                    queue.push(message);
                     jobs.fetch_sub(1, Ordering::Relaxed);
                     return;
                 };
@@ -2973,7 +2973,7 @@ impl super::ConversationEngine {
                 );
                 ledger_update(&memory, &id, "done", Some(message.clone())).await;
                 scratch_note(&memory, &id, &format!("resume attempt {attempt}: {status}")).await;
-                queue.lock().unwrap().push(message);
+                queue.push(message);
                 jobs.fetch_sub(1, Ordering::Relaxed);
             }));
             return format!(

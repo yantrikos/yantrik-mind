@@ -17634,6 +17634,46 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(leased[0].parent_trace_id, None);
     }
 
+    /// E.TRACE1b: a job started inside a turn reports as a notice that is the job's own trace,
+    /// parented on that turn -- even when its result lands long after the turn ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_delegated_result_names_the_turn_that_started_it() {
+        let (conv, _mem) = traced_engine(vec![]);
+        let sink = crate::TURN_TRACE.scope("run-50-0".to_string(), async { conv.delegated_queue.for_job("research") }).await;
+        let later = sink.clone();
+        tokio::spawn(async move { later.push("🔎 Research — ext4 vs btrfs:\n\nbtrfs snapshots; ext4 simpler.".into()) }).await.unwrap();
+        let outside = conv.delegated_queue.for_job("code");
+        outside.push("Code — done: a static page.".into());
+        conv.delegated_queue.push_untraced("Research — an older build's result.");
+        let now = ConversationEngine::now_ms();
+        assert_eq!(conv.route_results_without_a_phone(now).unwrap(), (3, 3));
+        let leased = conv.lease_obligation_notices(now, 30_000, 10).unwrap();
+        let by = |w: &str| leased.iter().find(|n| n.text.contains(w)).unwrap_or_else(|| panic!("{w}: {leased:?}"));
+        let research = by("ext4");
+        assert!(research.trace_id.as_deref().is_some_and(|t| t.starts_with("job:research-")), "{research:?}");
+        assert_eq!(research.parent_trace_id.as_deref(), Some("run-50-0"));
+        let code = by("static page");
+        assert!(code.trace_id.as_deref().is_some_and(|t| t.starts_with("job:code-")) && code.trace_id != research.trace_id, "{code:?}");
+        assert_eq!(code.parent_trace_id, None, "no turn started it");
+        let old = by("older build");
+        assert_eq!((old.trace_id.as_deref(), old.parent_trace_id.as_deref()), (None, None));
+    }
+
+    /// E.TRACE1b: every surface's turn is TURN_TRACE for its whole life, so a job it starts names it;
+    /// a trace the harness already set is not replaced.
+    #[tokio::test]
+    async fn a_turn_is_its_trace_on_every_surface() {
+        let seen = crate::with_turn_trace(Some("run-60-0".into()), async { crate::TURN_TRACE.try_with(|t| t.clone()).ok() }).await;
+        assert_eq!(seen.as_deref(), Some("run-60-0"));
+        let kept = crate::TURN_TRACE
+            .scope("run-61-0".into(), crate::with_turn_trace(Some("run-62-0".into()), async { crate::TURN_TRACE.try_with(|t| t.clone()).ok() }))
+            .await;
+        assert_eq!(kept.as_deref(), Some("run-61-0"), "the harness's trace was replaced");
+        let src = include_str!("lib.rs");
+        let turn = &src[src.find("pub async fn handle_turn_as").unwrap()..][..1200];
+        assert_eq!(turn.matches("self.counted(user_text, id)").count(), 2, "a turn path skips the trace scope");
+    }
+
     /// E.TRACE1a: minted traces are distinct within one millisecond, and may cross to the desktop.
     #[test]
     fn minted_turn_traces_differ_and_may_cross() {

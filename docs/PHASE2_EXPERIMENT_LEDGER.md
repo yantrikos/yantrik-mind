@@ -21235,3 +21235,55 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Not yet checkable:** COMPLETE's trace_id as the OS received it. The OS does not log harness.complete or harness.notice params. dc will record both ids on the OS notice receipt in contracts week 2 and re-check the wire byte for byte then.
 - **Windows workspace:** 2616 passed, 0 failed.
 - **Linux (staging, fa228fd), the task-trace fix:** mind-conversation 1299 passed, mind-core 198 passed. **Bundle:** yantrik-mind-fa228fd-linux-amd64.tar.zst, sha256 3b0e91263d9da494410afb433f7f28a0a536a272ac0b7cdf3265129b3e91d0bf (verified locally). Staging disk: 91%, 3.8 GB free.
+
+## E.TRACE1b — PREREG: a delegated result names the job and the turn that started it
+
+(Written after the code was drafted and its first tests ran, but before any mutant or suite. The order is stated so it is not mistaken for a blind prereg.)
+
+**Why:**
+- Slice a traced reminders. Delegated results (research, code, paper and repo study, skill and delegate jobs, resumes) still reached `harness.notice` with no trace.
+- The delegated queue was plain text pushed from 8 job sites, 19 pushes in all.
+- dc's contracts week 2 must join a delegated result to the turn and contract it belongs to.
+
+**What is built:**
+- **`DelegatedQueue`** holds `Delegated { text, trace, parent }`. Each job site calls `delegated_queue.for_job(kind)` while still inside the turn.
+  - That mints `job:<kind>-<ms>-<seq>` and captures TURN_TRACE as the parent. The returned `JobSink` is cloned into the job and outlives the turn.
+  - Pushes are `sink.push(text)`.
+  - `push_untraced` keeps the old entry point (`push_delegated_result`) with no traces.
+- **Every surface's turn is TURN_TRACE** for its whole life: `handle_turn_as` runs `counted`, which calls `with_turn_trace`. A trace the harness already set is never replaced. This keeps the E.MQ4b guard window intact; the body got shorter.
+- **`route_results_without_a_phone`** records each delegated notice's trace and parent (first write wins). The Telegram drain (`take_notifications`) passes text only.
+- **The source guard** `delegated_work_reports_through_the_typed_queue` now counts `delegated_queue.for_job(` at 2 / 3 / 3 sites.
+
+**Kill criteria:**
+- **K1, tests fail:**
+  - a job sunk inside TURN_TRACE "run-50-0" and pushed from a spawned task, after the scope ended, leases with trace `job:research-…` and parent run-50-0;
+  - a job outside any turn leases with a distinct `job:code-…` trace and no parent;
+  - an untraced push leases with neither;
+  - `with_turn_trace` scopes when unset and keeps a set one;
+  - both `handle_turn_as` paths go through `counted`.
+- **K2, a mutant survives:**
+  - for_job ignores TURN_TRACE;
+  - the route stops recording the trace;
+  - with_turn_trace never scopes;
+  - with_turn_trace replaces a set trace;
+  - one turn path bypasses counted;
+  - JobSink::push drops the trace.
+- **K3:** both suites pass, including Linux.
+- **Live (541):** ask for a research job and read its notice's trace row. It is `job:research-…` with parent = the `run-…` of the turn that asked.
+
+**E.TRACE1a fix — LIVE (541, Mind fa228fd, dc): PASS.**
+- `mind_notice_traces` holds `task:18` (one prefix) with parent `run-1792312657743-1`.
+- `mind_trace_parents` holds `task:18` → the same run, whose first decision event has goal "remind me in 2 minutes to check the kettle".
+- Card id 104 at +66 s.
+- The wire check (COMPLETE/notice params as the OS saw them) is owed in contracts week 2.
+
+**E.TRACE1b — RESULT: PASS (Windows, unit).**
+- `a_delegated_result_names_the_turn_that_started_it` passes:
+  - in-turn job, pushed from a spawned task: `job:research-…`, parent run-50-0;
+  - out-of-turn job: distinct `job:code-…`, no parent;
+  - untraced push: neither.
+- `a_turn_is_its_trace_on_every_surface` passes: it scopes when unset, keeps a set trace, and both turn paths go through `counted`.
+- The source guard now counts `for_job(` at 2 / 3 / 3 sites.
+- **Mutants killed (6/6):** for_job ignores TURN_TRACE; the route drops the trace; never scopes; replaces a set trace; a turn path bypasses counted; push drops the trace.
+- **Defect found by the suite:** the extra future layer overflowed `cli_dispatch_routes_plugins_and_chat`'s stack (debug, Windows). The inner turn future is now `Box::pin`ned.
+- **Windows workspace:** 2618 passed, 0 failed.

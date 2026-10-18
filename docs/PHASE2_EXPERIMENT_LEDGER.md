@@ -21651,3 +21651,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - the 60 s floor unchanged.
 - **Mutant killed (1/1):** the reserve not added.
 - **Windows workspace:** 2627 passed, 0 failed.
+- **Linux (staging, da6ddd9), E.STEP1:** mind-conversation 1310 passed. **Bundle:** yantrik-mind-da6ddd9-linux-amd64.tar.zst, sha256 fa2415006feef2835fe453b61f72918f9c41ea7aceb0776a02b7badec912b37a (verified locally). Staging disk: 92%, 3.2 GB free.

@@ -21222,3 +21222,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - the spoken-commitment link removed. It first SURVIVED: the turn test reached the tool path. A test on the commitment path itself now kills it.
 - The E.MQ4b source guard (a 4000-byte window over `handle_turn_as`) failed when the minting lines sat inline. The minting moved into `TurnIdentity::traced()`, a one-line call, so the window was not widened.
 - **Windows workspace:** 2616 passed, 0 failed.
+- **Linux (staging, 2c50cc4): mind-core did not compile.** The harness turn loop is `cfg(unix)`, so Windows never builds it, and `trace` was bound inside the answer block while both COMPLETE calls sit after it. The binding was hoisted above the block (checked with `cargo check --tests` on staging before committing). mind-recipes 106 and mind-conversation 1299 passed on Linux.

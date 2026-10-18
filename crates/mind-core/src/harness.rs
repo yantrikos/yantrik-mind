@@ -684,6 +684,8 @@ async fn serve(
         // after ninety seconds, and the picker would quietly lose an entry with nothing said
         // about why.
         let mut streamed = Streamed::default();
+        // E.TRACE1a: this turn's one trace, for the model's work and for COMPLETE.
+        let trace = mind_conversation::mint_turn_trace();
         let answer = {
             let mem = mem.clone();
             let conv = conv.clone();
@@ -761,7 +763,6 @@ async fn serve(
             let (redact_tx, mut redact_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::erase_redact::Redact>();
             // E.EGRESS3b: the desktop conversation, so a new chat hands nothing over from the last.
             let chat = turn["conversation"].as_str().unwrap_or_default().to_string();
-            let trace = mind_conversation::mint_turn_trace();
             // E.VOICE2: the answer as it is written, and the flag that stops its model call.
             let (answer_tx, mut answer_rx) = tokio::sync::mpsc::unbounded_channel::<mind_conversation::AnswerDelta>();
             let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -17674,6 +17674,17 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(turn.matches("self.counted(user_text, id)").count(), 2, "a turn path skips the trace scope");
     }
 
+    /// E.STEP1 (561 turn 976): the last-answer step may use the compose reserve; no other step may.
+    #[test]
+    fn the_last_answer_step_may_use_the_compose_reserve() {
+        assert_eq!(crate::step_call_left(5_000, 45_000, false), 5_000);
+        assert_eq!(crate::step_call_left(5_000, 45_000, true), 50_000);
+        let cap = crate::step_call_cap(crate::step_call_left(5_000, 120_000, true), false);
+        assert!(cap >= std::time::Duration::from_secs(125), "{cap:?}");
+        // The floor is unchanged.
+        assert_eq!(crate::step_call_cap(crate::step_call_left(5_000, 45_000, false), false), std::time::Duration::from_secs(60));
+    }
+
     /// E.TRACE1a: minted traces are distinct within one millisecond, and may cross to the desktop.
     #[test]
     fn minted_turn_traces_differ_and_may_cross() {

@@ -5272,6 +5272,17 @@ pub fn set_machine_place(place: Option<String>) {
 ///
 /// E.PACE1a (VM 541): a route with no fallback gets all of it. A failed step past the first breaks
 /// to compose, so the other half was never spent -- and a thinking 27B's 92 s call was cut at 60 s.
+/// E.STEP1 (561 turn 976: the "give the final answer now" step got the loop's last 5 s -- the 60 s
+/// floor -- and its 94 s answer was thrown away while the 45 s compose reserve went unused): the
+/// time a step may take. The last-answer step IS the composition, so it gets the reserve too.
+fn step_call_left(loop_left_ms: u64, reserve_ms: u64, last: bool) -> u64 {
+    if last {
+        loop_left_ms.saturating_add(reserve_ms)
+    } else {
+        loop_left_ms
+    }
+}
+
 fn step_call_cap(loop_left_ms: u64, fallback: bool) -> std::time::Duration {
     let share = if fallback { loop_left_ms / 2 } else { loop_left_ms };
     std::time::Duration::from_millis(share.max(60_000))
@@ -14649,8 +14660,13 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             // E.ARENA1-F9: one request may not spend the turn. Reading C, T6: one call hung 300 s
             // (the client's own timeout, sized for a 27B lane authoring a project) inside a 180 s
             // turn, and the fallback after it answered in one second.
+            // E.STEP1: the last-answer step is the composition, so it may use the compose reserve.
             let call_cap = step_call_cap(
-                loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
+                step_call_left(
+                    loop_deadline_ms.saturating_sub(started.elapsed().as_millis() as u64),
+                    reserve_ms,
+                    steps_left <= 1 || secs_left <= 15,
+                ),
                 self.inference.grounded_has_fallback(),
             );
             // E.VOICE2: on the desktop the step streams; its words go out only when no check that

@@ -21614,3 +21614,40 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Open before any per-call cap:** was step 5's 200 s queueing or generation? 7 KB of code is ~2,000 tokens, which a loaded 27B can take 100–200 s to write. A whole-call cap could abort exactly the productive call.
   - Asked dc for which step wrote main.js and step 5's time to first byte, total time and completion size.
   - Queue → a time-to-first-token cap plus one retry. Generation → no cap.
+
+**Turn 976's step 5 was GENERATION, and productive (dc, gate log):**
+- step 5's call (13:58:53 → 14:02:14, 200 s) returned 8,238 B: the agent_run whose 7,251-char command wrote main.js at 14:02:15. A whole-call cap would have killed it, so none is built.
+- First byte is not measurable: the gate's local route is unstreamed (`stream:false`; njs rebuilds the request). Making it stream is OS-side and needs a fresh security review.
+- **What bit:** step 6 was the budget's "This is your LAST step — give the final answer now" call, effectively the compose.
+  - It got the 60 s floor (5 s of loop budget left) and was abandoned at 60.8 s.
+  - The gate shows its 1,201 B answer completing 34 s later (~94 s total).
+  - The 45 s compose reserve went unused. The fail-closed compose that followed failed too.
+
+## E.STEP1 — PREREG: the final-answer step may use the time reserved for composing
+
+**Why:**
+- `loop_deadline = max_wall − compose_reserve`. A step's cap is what is left of the LOOP (floor 60 s, halved with a fallback).
+- When the budget tells the model "this is your LAST step — give the final answer", that step IS the composition, and the reserve exists for exactly it.
+- Capping it at the loop's remainder threw away a finished answer on 561 and then spent the reserve on a second compose that also failed.
+
+**What changes:** `step_call_left(loop_left, reserve, last)` gives the last-answer step (the same predicate as its budget note: `steps_left <= 1 || secs_left <= 15`) the loop's remainder PLUS the compose reserve. Every other step is unchanged, and so is the floor.
+
+**Env, not code (for dc, 561 only, measured):** `YM_COMPOSE_RESERVE_SECS=120`. 45 s is shorter than the 94 s a 1.2 KB answer took on the loaded 27B.
+
+**Kill criteria:**
+- K1, tests fail:
+  - not last: `step_call_left(5_000, 45_000, false)` = 5_000;
+  - last: = 50_000;
+  - the cap for a last step with 5 s left and 120 s reserved ≥ 125 s.
+- K2: the reserve not added fails the test.
+- K3: both suites pass.
+- **Live (561):** a turn whose last step answers in 60–125 s COMPLETES instead of failing closed.
+
+**E.STEP1 — RESULT: PASS (Windows, unit).**
+- `the_last_answer_step_may_use_the_compose_reserve` passes:
+  - not last: 5 s;
+  - last: 5 + 45 = 50 s;
+  - last with a 120 s reserve: cap ≥ 125 s;
+  - the 60 s floor unchanged.
+- **Mutant killed (1/1):** the reserve not added.
+- **Windows workspace:** 2627 passed, 0 failed.

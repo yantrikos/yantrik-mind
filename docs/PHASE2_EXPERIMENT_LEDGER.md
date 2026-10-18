@@ -21586,3 +21586,15 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - Run alone 3/3 times: pass. The full rerun: 2626 passed, 0 failed.
   - Recorded as a flake to watch, not explained away. If it recurs, the erase check needs to retry on a sharing violation.
 - **Linux (staging, 4f4240c), E.PROMPT4 + E.PROMPT2b:** mind-conversation 1309 passed (the forget tests included; no flake on Linux). **Bundle:** yantrik-mind-4f4240c-linux-amd64.tar.zst, sha256 dc156445ee7475a32432321ae717e34fd354590af55d6edc9a4baeacb4518d2f (verified locally). Staging disk: 92%, 3.3 GB free.
+
+**E.PROMPT4 + E.PROMPT2b — LIVE (561, 4f4240c, dc; turn 936): "recent" 12650 → 6025 B; the turn reached 7 successful steps (was 5–6) and failed closed at step 7.**
+- Model-call times by step: 15.7 / 7.1 / 3.2 / 16.2 / 9.0 / 9.9 / 36.7 s; then step 7 failed after 61.6 s against its 60 s floor cap.
+- Prompts were 43–59 KB.
+- **Size no longer binds:** time does not track size (51.5 KB in 3.2 s; 58.7 KB in 36.7 s). That is queue variance on the shared AIG.
+- **What fails is the turn budget:** 7 calls took ~98 s of ~135 s, so step 7 got the 60 s floor.
+- **Prefix-cache question (dc's point (b)):**
+  - At step 3 the matched prefix fell to 42193, the start of the work log: E.PROMPT3b's in-place rewrite.
+  - But step 3's 16.2 s exceeds step 0's 15.7 s, and step 0 prefilled the whole 43 KB uncached. So the re-prefill of ~10 KB was not what cost it.
+  - E.PROMPT3b is kept and the prefix numbers stay under watch. If a cached-backend reading shows misses costing more than the bytes saved, the supersede moves to append-only.
+- **Next lever, no code needed:** `YM_MAX_WALL_SECS` (config_panel `agent_budget`) already sets a turn's wall budget. Proposed to dc for 561 as a measured env change. The Director's own per-turn timeout must be checked first.
+- **Not doing:** a rule against the two-look habit (dc's (c)). Each look now costs one entry, and a rule per habit is the layer-adding the thin path forbids.

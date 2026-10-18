@@ -21357,3 +21357,9 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (5/5):** timed-reminder exclusion removed; window widened to 10 days; dedupe removed; stage dropped from the key; "priya" restored.
 - **Windows workspace:** 2621 passed, 0 failed.
 - **Linux (staging, 76905d0), E.INIT2 + E.REM3:** mind-conversation 1304 passed, mind-core 198 passed. **Bundle:** yantrik-mind-76905d0-linux-amd64.tar.zst, sha256 e0719b9de2f3b4a49255de6e5fe65ed04a510b107c1b548e958561affd58b393 (verified locally). Staging disk: 91%, 3.6 GB free. **Production note:** .90's commit 172af33 carries the same `"priya"` denylist entry (checked locally with git show, .90 untouched). It is raised with Pranab; no deploy without his word.
+
+**E.INIT2 — open design question for Stage C (not a change):**
+- Timed reminders are skipped entirely.
+- An occasion set well ahead ("Arun's housewarming on the 21st", parsed with a due time) therefore gets no 2–3-day "ahead" heads-up, only its own reminder at its time.
+- Whether ahead-of-time cards for timed occasions are wanted is left to the retrospective review rather than guessed now.
+- On the desktop, a chat "remind me … on <date>" becomes a timed reminder, so the detector's sources there are mostly people's dates and text-dated tasks.

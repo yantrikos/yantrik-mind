@@ -1163,9 +1163,12 @@ fn brief_excerpt(text: &str, max_chars: usize) -> String {
 /// True if a task reads as a PERSONAL reminder (something for the user to do) rather than internal
 /// agent/dev work. Conservative denylist of internal signals — real reminders pass through; the point
 /// is that "implement X" / "reconcile beliefs" / "check repos" never leak into the user's morning.
+///
+/// E.REM3: no person's name is on the list -- "priya" was, and every real reminder about Priya
+/// vanished from the person's reminders. A name never makes a task internal work.
 fn is_personal_reminder(desc: &str) -> bool {
     let d = desc.to_lowercase();
-    const INTERNAL: [&str; 22] = [
+    const INTERNAL: [&str; 21] = [
         "implement ",
         "refactor",
         "reconcile",
@@ -1184,7 +1187,6 @@ fn is_personal_reminder(desc: &str) -> bool {
         "news tracking",
         "conflict",
         "purge",
-        "priya",
         "outdated",
         "memory entry",
         "memory pass",

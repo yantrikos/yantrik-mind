@@ -4,7 +4,9 @@
 //! moments are worth receiving is judged afterwards, by retrospective review, before anything goes
 //! live (Stage C).
 //!
-//! The first detector is delegated work that has run past its usual time. The calendar heads-up
+//! The first detector is delegated work that has run past its usual time. E.INIT2 adds "coming
+//! up": something the Mind already holds -- a person's date, its own calendar, a task dated in its
+//! text -- close enough to be worth a heads-up. The calendar heads-up
 //! is the OS's (Pranab, 16 Oct: the desktop owns the calendar and raises its own `calendar`
 //! cards), so there is none here.
 
@@ -75,6 +77,25 @@ pub(crate) fn short_task(task: &str) -> String {
 /// unset, zero or unparseable keeps the defaults.
 pub(crate) fn stall_ms(kind: &str) -> u64 {
     stall_ms_with(kind, std::env::var("YM_STALL_MINUTES").ok().as_deref())
+}
+
+/// E.INIT2: the heads-up stage for an item `days_out` local days away -- "ahead" at 2-3 days,
+/// "soon" at 0-1, none otherwise.
+pub(crate) fn lead_stage(days_out: i64) -> Option<&'static str> {
+    match days_out {
+        0..=1 => Some("soon"),
+        2..=3 => Some("ahead"),
+        _ => None,
+    }
+}
+
+/// E.INIT2: the card a "coming up" candidate would have been.
+pub(crate) fn coming_up_text(subject: &str, when: &str, days_out: i64) -> String {
+    match days_out {
+        0 => format!("{subject}: today ({when})."),
+        1 => format!("{subject}: tomorrow ({when})."),
+        n => format!("{subject}: {when}, in {n} days."),
+    }
 }
 
 pub(crate) fn stall_ms_with(kind: &str, minutes: Option<&str>) -> u64 {
@@ -178,6 +199,50 @@ impl ConversationEngine {
                 fresh += 1;
             }
         }
+        fresh + self.shadow_coming_up(now_ms).await
+    }
+
+    /// E.INIT2: what the Mind already holds that is 0-3 days away, as candidates. A reminder with a
+    /// due time is skipped -- it fires as an obligation already. No desktop read, no model call.
+    async fn shadow_coming_up(&self, now_ms: u64) -> usize {
+        let today = crate::local_now();
+        let (reminders, _) = self.split_tasks().await;
+        let timed: std::collections::HashSet<String> =
+            reminders.iter().filter(|t| t.due_ms.is_some()).map(|t| t.id.clone()).collect();
+        let mut fresh = 0;
+        // Four days read, the local date decides: `upcoming_spine(3)` ends 72 h from now, so an item
+        // three days out but later in the day than now fell outside it.
+        for (ms, line, id) in self.upcoming_spine(4).await {
+            if id.as_ref().is_some_and(|i| timed.contains(i)) {
+                continue;
+            }
+            let Some(at) = chrono::DateTime::from_timestamp_millis(ms) else { continue };
+            let date = at.with_timezone(today.offset()).date_naive();
+            let days_out = (date - today.date_naive()).num_days();
+            let Some(stage) = lead_stage(days_out) else { continue };
+            let subject = line.split_once(": ").map_or(line.as_str(), |(_, rest)| rest).trim().trim_start_matches('\u{23f0}').trim();
+            let when = date.format("%a %-d %b").to_string();
+            let end_of_day = date
+                .and_hms_opt(23, 59, 59)
+                .and_then(|d| d.and_local_timezone(*today.offset()).single())
+                .map_or(now_ms, |d| d.timestamp_millis().max(0) as u64);
+            let c = Candidate {
+                family: "coming_up".into(),
+                trigger: format!("{days_out} day(s) out"),
+                evidence_refs: id.as_deref().map(crate::task_trace).into_iter().collect(),
+                observed_at_ms: now_ms,
+                what_changed: format!("{subject} is {days_out} day(s) away"),
+                why_it_matters: "something they told me about is close".into(),
+                next_step: "none; a heads-up".into(),
+                useful_until_ms: end_of_day,
+                dedupe_key: format!("coming-up:{date}:{}:{stage}", &mind_spec::sha256_hex(subject.to_lowercase().as_bytes())[..16]),
+                would_interrupt: false,
+                text: coming_up_text(subject, &when, days_out),
+            };
+            if self.record_candidate(c).await {
+                fresh += 1;
+            }
+        }
         fresh
     }
 }
@@ -238,6 +303,44 @@ mod init1_tests {
         assert_eq!(src.matches("host.start_job(\"research\"").count(), 1);
         assert_eq!(src.matches("host.start_job(\"code\"").count(), 1);
         assert_eq!(src.matches("let _running = running;").count(), 2, "a guard is not moved into its task");
+    }
+
+    /// E.INIT2: a task dated in its text 3 days out is one "ahead" candidate and one 1 day out a
+    /// "soon" one, however many passes run; a reminder with a due time and an item 10 days out are
+    /// none; a pass delivers nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn something_coming_up_is_one_candidate_per_stage() {
+        let (conv, mem) = engine();
+        let today = crate::local_now();
+        let on = |d: i64| (today + chrono::Duration::days(d)).format("%-d %B").to_string();
+        mem.add_task(&format!("Arun's housewarming on {}", on(3)), "medium", None).await.unwrap();
+        mem.add_task(&format!("Pick up the cake on {}", on(1)), "medium", None).await.unwrap();
+        mem.add_task(&format!("Dentist appointment on {}", on(10)), "medium", None).await.unwrap();
+        let due = (today + chrono::Duration::days(2)).timestamp_millis() as u64;
+        mem.add_task("Call the bank about the card", "medium", Some(due)).await.unwrap();
+        let now = today.timestamp_millis() as u64;
+        let mut fresh = 0;
+        for i in 0..3 {
+            fresh += conv.shadow_initiative_at(now + i * MIN).await;
+        }
+        let all = conv.initiative_candidates().await;
+        assert_eq!(fresh, 2, "{all:#?}");
+        let party = all.iter().find(|c| c.text.contains("Arun")).expect("no housewarming candidate");
+        assert_eq!(party.family, "coming_up");
+        assert!(party.dedupe_key.ends_with(":ahead") && party.text.ends_with("in 3 days."), "{party:?}");
+        let cake = all.iter().find(|c| c.text.contains("cake")).expect("no cake candidate");
+        assert!(cake.dedupe_key.ends_with(":soon") && cake.text.contains(": tomorrow ("), "{cake:?}");
+        assert!(all.iter().all(|c| !c.would_interrupt && !c.text.contains("bank") && !c.text.contains("Dentist")), "{all:#?}");
+        assert!(conv.take_held_notes().is_empty() && conv.take_notifications().is_empty(), "a candidate was delivered");
+    }
+
+    /// E.INIT2: the stage boundaries and the card's wording.
+    #[test]
+    fn the_coming_up_stages_and_cards() {
+        assert_eq!((lead_stage(-1), lead_stage(0), lead_stage(1)), (None, Some("soon"), Some("soon")));
+        assert_eq!((lead_stage(2), lead_stage(3), lead_stage(4)), (Some("ahead"), Some("ahead"), None));
+        assert_eq!(coming_up_text("Priya's birthday", "Tue 4 Nov", 0), "Priya's birthday: today (Tue 4 Nov).");
+        assert_eq!(coming_up_text("Priya's birthday", "Tue 4 Nov", 3), "Priya's birthday: Tue 4 Nov, in 3 days.");
     }
 
     /// Amendment 3: the drive knob overrides every kind; nothing usable keeps the defaults.

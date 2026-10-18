@@ -17787,6 +17787,23 @@ mod desktop_consent_and_stall_wiring {
         assert!(!prompts.last().unwrap().contains("handed over with this reply"), "{:?}", prompts.last());
     }
 
+    /// E.REM3: a person's name does not make a reminder the Mind's internal work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_name_does_not_make_a_reminder_internal() {
+        // E.REM3: "priya" sat on the internal-work denylist, so every reminder about Priya vanished.
+        assert!(crate::is_personal_reminder("Priya's birthday on 4 November"));
+        assert!(crate::is_personal_reminder("Buy a gift for Priya"));
+        assert!(!crate::is_personal_reminder("Dedupe the three Priya birthday beliefs"));
+        assert!(!crate::is_personal_reminder("Purge the outdated Priya memory entry"));
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(mind_inference::ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        let conv = ConversationEngine::new(mem.clone(), pool, "YM");
+        let on = (crate::local_now() + chrono::Duration::days(3)).format("%-d %B").to_string();
+        mem.add_task(&format!("Priya's birthday on {on}"), "medium", None).await.unwrap();
+        let up = conv.run_agent_tool("upcoming", &serde_json::json!({"days": 7})).await;
+        assert!(up.contains("Priya's birthday"), "{up}");
+    }
+
     /// E.SPINE1: `upcoming` lists every item -- dated and undated reminders, seven of them when
     /// there are seven -- and says so when there is nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

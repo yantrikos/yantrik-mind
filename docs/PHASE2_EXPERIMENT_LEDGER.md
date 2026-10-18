@@ -21294,3 +21294,65 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - `mind_notice_traces` holds `job:research-1792314278345-0` with parent `run-1792314257088-1`.
 - That run's 4 decision events carry the research request as goal. The result landed after the turn ended and still names it.
 - **Owed:** the wire byte-for-byte check, and contract submissions carrying the trace, both in dc's contracts week 2.
+
+## E.INIT2 — PREREG: a "coming up" detector over what the Mind already knows (shadow)
+
+**Why:**
+- dc read the initiative shadow on 541 and 520 (18 Oct). 541 holds exactly 1 candidate, the forced stalled-job positive from 16 Oct; 520 holds none.
+- Stage C's retrospective review (≥51/60) has nothing to judge. The only detector, stalled delegated work, is too narrow to fire on its own.
+- Pranab's direction is Jarvis: surface "a deadline at risk… something the person would want to know now".
+- Agreed split with dc: OS-owned concerns (unsaved work, backup, disk) are the OS's to raise. The Mind takes what it already holds.
+
+**What is built (mind-conversation, initiative.rs; shadow only):**
+- **Detector family `coming_up`, on each shadow pass,** reads `upcoming_spine(3)`: the Mind's own calendar, people's dates (birthdays, anniversaries), and tasks whose date is in their text.
+  - Spine rows that are reminder tasks with a due time are skipped: they fire as obligations already.
+  - No desktop or MCP read, no model call, no new authority.
+- **Two stages per item:** "ahead" at 2–3 local days out, and "soon" at 0–1. One candidate per item per stage, deduped on date + subject + stage.
+- **Inbox only** (`would_interrupt: false`).
+- **Card text:** "<subject>: tomorrow (Tue 4 Nov)." / "<subject>: today (…)." / "<subject>: Tue 4 Nov, in 3 days."
+- `useful_until` is the end of that day.
+
+**Kill criteria:**
+- **K1, tests fail:**
+  - a text-dated task 3 days out → one "ahead" candidate, however many passes run;
+  - one 1 day out → one "soon" candidate saying "tomorrow";
+  - a timed reminder 2 days out → none;
+  - an item 10 days out → none;
+  - a pass queues no notice and holds no note;
+  - the stalled-job detector still works.
+- **K2, a mutant survives:** the timed-reminder exclusion removed; the 3-day window widened; the dedupe removed; the stage ignored in the key.
+- **K3:** both suites pass.
+- **Live:**
+  - 541: dated told items produce "ahead"/"soon" candidates within days. dc sends full samples (test persona).
+  - 561: dc sends only counts by family, trigger and would_interrupt. The texts are Pranab's to review, not mine.
+- **Stage C** stays as preregistered: Pranab's retrospective review, ≥51/60 to go live, with family floors.
+
+## E.REM3 — PREREG: a person's name does not make a reminder internal work
+
+**Why (found building E.INIT2's test, 18 Oct):**
+- `is_personal_reminder` splits open tasks into the person's reminders and the Mind's internal dev work using a denylist. That list holds the literal word `"priya"`, added in a8271d3 (30 Aug, "Integrate governed autonomy…"), most likely to hide dev tasks about the Priya duplicate-belief bug.
+- So every real reminder that names Priya is classed as internal and dropped from the person's reminders: from `upcoming`, the briefing, the ambient reminders, the followthrough lifecycle, and now the coming-up detector.
+- In my test, "Priya's birthday on 21 October" silently vanished. On 541 the test persona's sister is Priya.
+- The dev tasks that word was guarding are already caught by the list's own terms ("dedup", "belief", "purge", "memory entry", "outdated", "conflict").
+
+**What changes:** `"priya"` is removed from INTERNAL (22 → 21). Nothing else.
+
+**Kill criteria:**
+- K1, tests fail:
+  - "Priya's birthday on 4 November" and "Buy a gift for Priya" are personal reminders;
+  - "Dedupe the three Priya birthday beliefs" and "Purge the outdated Priya memory entry" stay internal;
+  - a text-dated Priya reminder 3 days out appears in `upcoming`.
+- K2: the word restored fails the test.
+- K3: both suites pass.
+
+**E.INIT2 + E.REM3 — RESULT: PASS (Windows, unit).**
+- **E.INIT2:** `something_coming_up_is_one_candidate_per_stage` passes:
+  - a text-dated task 3 days out → one "ahead" candidate; 1 day out → one "soon" candidate, "tomorrow";
+  - a timed reminder 2 days out and an item 10 days out → none;
+  - three passes → no duplicates; nothing delivered.
+- `the_coming_up_stages_and_cards` passes.
+- **Defect found by the test:** `upcoming_spine(3)` ends exactly 72 h from now, so an item 3 days out later in the day than now fell outside it. The detector reads 4 days and lets the local date pick the stage.
+- **E.REM3:** `a_name_does_not_make_a_reminder_internal` passes. Priya reminders are personal; Priya dev tasks stay internal ("dedupe", "purge"); a Priya reminder appears in `upcoming`.
+  - The E.INIT2 test first used "Priya's birthday" and silently got no candidate. That is how E.REM3 was found; the test now uses Arun.
+- **Mutants killed (5/5):** timed-reminder exclusion removed; window widened to 10 days; dedupe removed; stage dropped from the key; "priya" restored.
+- **Windows workspace:** 2621 passed, 0 failed.

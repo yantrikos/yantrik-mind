@@ -21040,3 +21040,15 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Also:** `retro_dedup_beliefs` no longer adds a duplicate hypothesis's weight to its survivor. It still runs in no production path, as found.
 - **Windows workspace:** 2608 passed, 0 failed.
 - **Linux (staging, 554b90a), E.MEM3:** mind-conversation 1294 passed, mind-core 197 passed, mind-memory 115 passed (run separately for space). **Bundle:** yantrik-mind-554b90a-linux-amd64.tar.zst, sha256 cee53eb756d5782ee406ab1db90f0117b24ccc0ab04d2de42ce5e7ae1f58d5e6. Staging disk: 90%, 4.0 GB free.
+
+**E.MEM3 — LIVE RESULT (541, dc, OLD 8ff12aa vs NEW 554b90a; read-only counts against the pre-run snapshot): PASS on the preregistered collapse; the tie-in re-check is still owed.**
+- All hypotheses: pre 291 live; NEW 89 live + 202 tombstoned. The cluster (november, or priya+arun): pre 124 live; NEW **1 live + 123 tombstoned**.
+- The 202 merges went into 4 survivors (176 / 21 / 3 / 2 zero-weight `consolidated-from` links). Every survivor's log_odds equals its pre-run value (0.27): no weight moved.
+- OLD grew 128 → 129 ("associated 1 hypothesis"). NEW logged "already holds a hypothesis on this subject -- nothing stored".
+- dc counted `mind_belief_authors` first. That table never shrinks; the merge lives in yantrikdb `cognitive_nodes.tombstoned`.
+- **Over-merge, found in a 25-row sample of the tombstoned:**
+  - 7 of the 25 were a different claim: "Meera starts her new job on 2 December and Tanvi's recital is 6 December". It merged into the "Priya, Arun, Meera within five weeks" survivor.
+  - Cause: months and day numbers count toward the 2 shared subject words, so meera + december + 2 was enough.
+  - #859's rule is to merge one claim, so this is mild over-merge (related, not the same). Nothing is lost: the members are tombstoned, not deleted, and the links are kept.
+  - My suspected sentence-opener cause ("Given", "Since") did not appear in the sample.
+- **Next:** E.MEM3b tightens the subject match, with a test built from the real 291 pre-run hypotheses rather than invented ones.

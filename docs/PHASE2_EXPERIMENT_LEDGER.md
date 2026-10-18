@@ -21585,3 +21585,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Windows workspace:** the first full run had 2 failures, `forgetting_from_chat_erases_every_copy_after_a_yes` and `on_the_desktop_forget_asks_keep_or_erase`, both on "os error 32: the file is being used by another process" on the decision log. That is a Windows file-lock flake under suite concurrency, not this change.
   - Run alone 3/3 times: pass. The full rerun: 2626 passed, 0 failed.
   - Recorded as a flake to watch, not explained away. If it recurs, the erase check needs to retry on a sharing violation.
+- **Linux (staging, 4f4240c), E.PROMPT4 + E.PROMPT2b:** mind-conversation 1309 passed (the forget tests included; no flake on Linux). **Bundle:** yantrik-mind-4f4240c-linux-amd64.tar.zst, sha256 dc156445ee7475a32432321ae717e34fd354590af55d6edc9a4baeacb4518d2f (verified locally). Staging disk: 92%, 3.3 GB free.

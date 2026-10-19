@@ -21683,3 +21683,10 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - The Mind ticked "7. Polish + settle" and "8. Final check: full page check passes" over a page whose loop never ran. It trusted a check that could not see that, and never looked at the page itself.
 - **OS #869** (dc, building): check-page fails a page that does not move in demo mode, draws one colour, or has controls off screen. After it merges, Tumble is un-finished on 561 and the Mind resumes with those lines in its fix-first prompt.
 - **Mind-side, not chased yet:** a step that claims a visual result ticks on a weak oracle. Whether the Mind should look at the rendered page before ticking is held until #869's stronger check is live, so the two are not confounded.
+
+**Overnight (dc, 19 Oct; journal line counts, upper bounds per turn):**
+- **561 on da6ddd9 + 375/120, last 14 h:** 125 turns done, 15 "failing CLOSED", 66 "composing from the work log". The prior 24 h, including the pre-fix morning: 301 / 122 / 182.
+  - "composing from the work log" is printed by BOTH a failed mid-turn call and a spent wall budget. The split is asked before any floor prereg, since a floor helps only the first.
+- **561 initiative:** 0 candidates. Expected: a stream box holds no personal dates.
+- **E.INIT2 on 541:** the ":soon" candidate appeared after local midnight as predicted ("Neighbour Arun's birthday is on 20 October (Tuesday in 2026): tomorrow (Tue 20 Oct)."), beside the ":ahead" one. Both stages PASS live.
+- **Director:** 37 polish missions overnight (32 "finished refused", nothing changed). Contracts c-4…c-43 are undecided until OS #870's stronger check-page passes review (first review: CHANGES NEEDED).

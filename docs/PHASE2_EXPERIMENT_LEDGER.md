@@ -21690,3 +21690,11 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **561 initiative:** 0 candidates. Expected: a stream box holds no personal dates.
 - **E.INIT2 on 541:** the ":soon" candidate appeared after local midnight as predicted ("Neighbour Arun's birthday is on 20 October (Tuesday in 2026): tomorrow (Tue 20 Oct)."), beside the ":ahead" one. Both stages PASS live.
 - **Director:** 37 polish missions overnight (32 "finished refused", nothing changed). Contracts c-4…c-43 are undecided until OS #870's stronger check-page passes review (first review: CHANGES NEEDED).
+
+**The split of 561's 66 composes (dc, the same 14 h, 125 turns):** 31 "wall budget spent", 15 "the model call failed", 20 "barren limit reached".
+- The 15 "failing CLOSED" lines ARE those 15 mid-loop failures (0 follow a "compose failed"). Every one of those turns then composed from the work log.
+- **No turn in 14 h ended with nothing.**
+- **Decision: no scaled-floor prereg.** It would address at most 15 calls, and all were already rescued by the reserve.
+- The budget case (31, ~25% of turns) ends with an answer from the work done, and the mission continues next turn. That is the intended shape of a long mission on a slow lane, not a defect.
+- The barren-limit stops (20) are the existing guard against repeated unproductive steps, doing its job.
+- **The 561 local-lane reliability thread is CLOSED here.** What remains open there is the QUALITY of delivered work (OS #870's page check, Tumble's resumption), not the lane.

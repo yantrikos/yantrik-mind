@@ -21698,3 +21698,12 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - The budget case (31, ~25% of turns) ends with an answer from the work done, and the mission continues next turn. That is the intended shape of a long mission on a slow lane, not a defect.
 - The barren-limit stops (20) are the existing guard against repeated unproductive steps, doing its job.
 - **The 561 local-lane reliability thread is CLOSED here.** What remains open there is the QUALITY of delivered work (OS #870's page check, Tumble's resumption), not the lane.
+
+## E.EGRESS3f-H2 — yantrik-os #939: an editor tab the agent may not read is "(hidden)" (pinned; no behaviour change)
+
+- **What #939 changes:** describe.rs at cf3c4ad7 names a tab whose file an agent may not read (`home_paths::may_read_file`: protected, outside home, a link, and after #942 Yantrik's own data and state) as `Text Editor — (hidden), saved|unsaved[ · tab n of m]`, with NO line count.
+- **Already safe:** `editor_tab_name` requires the `, <n> line(s)` field, so it returns None. `note_writes` reads None as "named no tab" and takes every named file back, which is the unknown-provenance answer dc asked for.
+- Treating it like Untitled would be WRONG: that keeps the handed-over files, assuming no named file changed.
+- **Pinned:** `an_editor_answer_names_its_tab_from_the_first_line` asserts all three hidden forms give None.
+- A first-comma fallback mutant (reading "(hidden)" as a file name) is killed.
+- **Windows workspace:** 2627 passed, 0 failed.

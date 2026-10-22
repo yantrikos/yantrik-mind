@@ -21431,6 +21431,16 @@ fn an_editor_answer_names_its_tab_from_the_first_line() {
     assert_ne!(tab("Done \u{2014} Text Editor \u{2014} Untitled.md, 2 lines, unsaved").as_deref(), Some(UNTITLED_TAB), "a file called Untitled.md is a file");
     assert_eq!(tab("Done\nText Editor \u{2014} spec-1.md, 19 lines, saved"), None, "a header past the first line");
     assert_eq!(tab("Done \u{2014} Text Editor \u{2014} spec-1.md"), None, "no line count to cut at");
+    // yantrik-os #939 (describe.rs at cf3c4ad7): a tab whose file an agent may not read is named
+    // "(hidden)" with no line count. It must stay None -- provenance unknown, so `note_writes` takes
+    // every named file back -- and never read as a file called "(hidden)", nor as an untitled tab.
+    for hidden in [
+        "Done \u{2014} Text Editor \u{2014} (hidden), unsaved",
+        "Done \u{2014} Text Editor \u{2014} (hidden), saved",
+        "Done \u{2014} Text Editor \u{2014} (hidden), unsaved \u{b7} tab 2 of 3",
+    ] {
+        assert_eq!(tab(hidden), None, "{hidden}");
+    }
 }
 
 /// E.EGRESS3g (the fifth pass's H2): 4c's captures from VM 520 on OS 4f50b24a -- the JSON verbatim,

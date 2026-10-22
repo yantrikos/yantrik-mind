@@ -21438,6 +21438,8 @@ fn an_editor_answer_names_its_tab_from_the_first_line() {
         "Done \u{2014} Text Editor \u{2014} (hidden), unsaved",
         "Done \u{2014} Text Editor \u{2014} (hidden), saved",
         "Done \u{2014} Text Editor \u{2014} (hidden), unsaved \u{b7} tab 2 of 3",
+        // Observed on VM 520 with #939 merged (fbfd59ea), verbatim:
+        "Done \u{2014} Text Editor \u{2014} (hidden), saved \u{b7} tab 4 of 4 \u{b7} its text is not shown to an agent (3 tabs unsaved)",
     ] {
         assert_eq!(tab(hidden), None, "{hidden}");
     }

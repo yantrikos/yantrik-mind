@@ -21919,3 +21919,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - The first call now carries the required field plus an extra one the server's `additionalProperties: false` rejects. The -32602 repair path it guards, for errors a schema check cannot see, is exercised unchanged, with no assertion edited.
 - **Mutants killed (2/2):** the check removed; `required` read as optional.
 - **Windows workspace:** 2631 passed, 0 failed.
+- **Linux (staging, f06a458), E.TOOL2:** mind-conversation 1314 passed, mind-evals 54 passed. No bundle was built: new bundles are held at 93% staging disk (2.9 GB free) until Pranab answers on pruning.

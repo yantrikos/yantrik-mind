@@ -21874,3 +21874,12 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - #956's page scan returns nothing, so `web_click` was never reached. The defect is reported on #956 by dc.
 - **The reply was honest:** "…the page body came back empty to me, so I have no heading to report."
 - **The rerun waits for #956's scan fix.**
+
+**CORRECTION (dc's debug agent drove main's and #956's scanner directly on 520, headless and headed):** both scan example.com correctly (`link "Learn more"`, full text, `find Learn` hits). **My test prompt was wrong: example.com's link reads "Learn more", not "More information".**
+- **Batch 4 and batch 5:** `web_find "More information"` → "nothing matches" was TRUE both times.
+- **Batch 5:** "(nothing to act on in view)" was also true. The one link is below the fold, and plain `yos web` shows only what is in view.
+- **Retracted:**
+  - (1) my batch-5 claim that #956's scan is a regression;
+  - (2) my batch-4 diagnosis that `web_find` "sees only the viewport", which is the premise I gave dc for #955. With the right words, main's `find` found the below-fold link.
+- **Still unexplained:** batch 5's `web_read` returned only title and url. The rerun (e-batch5b) uses the correct "Learn more" and records exactly what web_read returns.
+- **Lesson (same as [[synthetic-cases-share-your-misconception]]):** I wrote the target text from memory of the page, not from the page. A check whose expected text is not read from the artifact first can fail for the checker's reason.

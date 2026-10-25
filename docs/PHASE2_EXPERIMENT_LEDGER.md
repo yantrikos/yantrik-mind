@@ -21707,3 +21707,41 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Pinned:** `an_editor_answer_names_its_tab_from_the_first_line` asserts all three hidden forms give None.
 - A first-comma fallback mutant (reading "(hidden)" as a file name) is killed.
 - **Windows workspace:** 2627 passed, 0 failed.
+
+## E.PRIV2 — PREREG: Private mode is not an empty calendar, and not a reason to drop a reminder (ahead of yantrik-os #930)
+
+**Why (dc's observed #930 answers on 520, 9cbbb287, private namespaces):**
+- **(a) Calendar read with Private mode on.**
+  - Through the Mind door, the answer is a JSON-RPC error carrying the sentence "PRIVATE: the person has turned on Private mode. Nothing on this desktop is shown to agents or done for them until they turn it off. Nothing was run."
+  - Through a harness envelope, it is a SUCCESS with `accepted: true`, `result: null`, `private: true`, summary "Private mode is on; this app's contents are hidden.", and a `withheld` line.
+  - `calendar_event_lines_at` reads an `accepted: True` answer with no event array as an EMPTY calendar (`Ok(vec![])`). `upcoming` would then say "On your calendar: nothing" about a calendar that is only hidden: a false claim.
+- **(b) Notices with Private mode on.**
+  - `harness.notice` is refused with the same PRIVATE sentence.
+  - If it arrives as `{"refused": "PRIVATE: …"}`, `read_answer` makes it `Stored::Refused`. `send_obligations` puts the notice in the session's `refused` set and never sends it again in that session, even after Private mode is off: a requested reminder silently lost.
+  - A JSON-RPC error already retries (`Err(_)` → retry), so only the result shape loses it.
+
+**What changes:**
+1. `calendar_event_lines_at` returns `Err(())` (unreadable, so `upcoming` says what is on the calendar is unknown) when the answer's head carries "Private mode is on", "PRIVATE:", `"private": true` or a `withheld` line. That check runs before the empty-accepted rule.
+2. `read_answer` makes a refusal whose reason starts with "PRIVATE:" a `Stored::Later(None)`: the notice is retried once Private mode is off. Every other refusal is unchanged.
+
+**Kill criteria:**
+- K1, tests fail:
+  - dc's observed envelope (verbatim) → `Err`, not `Ok(empty)`;
+  - the PRIVATE sentence as a refusal string → `Err`;
+  - a real empty accepted answer → still `Ok(empty)`;
+  - `read_answer({"stored":false,"refused":"PRIVATE: …"})` → `Later(None)`;
+  - `read_answer({"refused":"unknown family"})` → still `Refused`.
+- K2, mutants survive: the calendar private check removed; the notice PRIVATE mapping removed.
+- K3: both suites pass.
+- **Live:** after #930 is on a test box, a Private-mode `upcoming` says unknown, not nothing, and a reminder that fires during Private mode is delivered after Private mode is turned off.
+
+**E.PRIV2 — RESULT: PASS (Windows, unit).**
+- `private_mode_is_not_an_empty_calendar` passes:
+  - dc's observed #930 envelope (verbatim) → `Err`;
+  - the door's PRIVATE refusal → `Err`;
+  - a real empty accepted answer → `Ok(empty)`;
+  - events titled "PRIVATE: dentist" and "Tax withheld review" → both listed.
+  - The markers are the envelope's KEYS and the OS's own sentences, never bare words a title could hold.
+- `the_desktops_answers_are_read_as_kept_later_or_refused` passes: a "PRIVATE:" refusal → `Later(None)`; other refusals unchanged.
+- **Mutants killed (2/2):** the calendar private check removed; the notice PRIVATE mapping removed.
+- **Windows workspace:** 2628 passed, 0 failed.

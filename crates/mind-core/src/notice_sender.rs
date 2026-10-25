@@ -120,6 +120,11 @@ pub(crate) fn read_answer(answer: &serde_json::Value) -> Stored {
     }
     if let Some(why) = answer.get("refused").filter(|r| !r.is_null()) {
         let why = why.as_str().map(str::to_string).unwrap_or_else(|| why.to_string());
+        // E.PRIV2 (yantrik-os #930): Private mode is "not now", not "never" -- refused for good, a
+        // reminder that fired while it was on would never reach the person once it is off.
+        if why.trim_start().starts_with("PRIVATE:") {
+            return Stored::Later(None);
+        }
         return Stored::Refused(why);
     }
     Stored::Later(answer["retry_after_secs"].as_u64())
@@ -449,6 +454,9 @@ mod tests {
         assert_eq!(read_answer(&json!({"stored": true, "duplicate": true})), Stored::Kept);
         assert_eq!(read_answer(&json!({"stored": false, "retry_after_secs": 3600, "why": "20 an hour"})), Stored::Later(Some(3600)));
         assert_eq!(read_answer(&json!({"stored": false, "refused": "unknown family"})), Stored::Refused("unknown family".into()));
+        // E.PRIV2 (yantrik-os #930): Private mode is "not now" -- retried once it is off, never dropped.
+        let private = "PRIVATE: the person has turned on Private mode. Nothing on this desktop is shown to agents or done for them until they turn it off. Nothing was run.";
+        assert_eq!(read_answer(&json!({"stored": false, "refused": private})), Stored::Later(None));
         assert_eq!(read_answer(&json!({"error": "huh"})), Stored::Later(None));
     }
 

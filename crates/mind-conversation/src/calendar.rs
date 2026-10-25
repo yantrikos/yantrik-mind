@@ -660,6 +660,20 @@ pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> st
 pub(crate) fn calendar_event_lines_at(obs: &str, now: chrono::NaiveDateTime) -> std::result::Result<Vec<String>, ()> {
     let today = now.date();
     let head = obs.split("state: {").next().unwrap_or(obs);
+    // E.PRIV2 (yantrik-os #930 on 520: with Private mode on, the answer is `accepted`, `result: null`,
+    // "Private mode is on; this app's contents are hidden."): hidden is not empty -- unreadable.
+    // The envelope's KEYS and the OS's own sentences only -- an event titled "PRIVATE: dentist" or
+    // "Tax withheld review" is a title, not Private mode.
+    const MARKS: [&str; 5] = [
+        "\"private\": true",
+        "\"private\":true",
+        "\"withheld\":",
+        "Private mode is on; this app's contents are hidden",
+        "has turned on Private mode",
+    ];
+    if MARKS.iter().any(|m| head.contains(m)) {
+        return Err(());
+    }
     let mut found: Option<Vec<serde_json::Value>> = None;
     let mut untitled = false;
     for (i, _) in head.match_indices('[') {
@@ -727,6 +741,23 @@ fn title_day_word(title: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod cal1_tests {
     use super::{calendar_event_lines_at, calendar_event_lines_on};
+
+    /// E.PRIV2 (yantrik-os #930, observed on 520 at 9cbbb287): Private mode's answer is not an empty
+    /// calendar; a real empty one still is; a title that says PRIVATE or withheld is just a title.
+    #[test]
+    fn private_mode_is_not_an_empty_calendar() {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 10, 25).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let envelope = r#"Done — {"jsonrpc":"2.0","result":{"accepted":true,"action_id":"calendar#3","app":"calendar","private":true,"result":null,"revision":"aa0b2576ec7e78bd","settled":true,"state":{"private":true},"summary":"Private mode is on; this app's contents are hidden.","withheld":"Private mode is on; what this action answered is not shown to this caller."},"id":1}
+accepted: True, settled: True"#;
+        assert_eq!(calendar_event_lines_at(envelope, at), Err(()), "Private mode read as an empty calendar");
+        let door = "REFUSED — nothing was run. PRIVATE: the person has turned on Private mode. Nothing on this desktop is shown to agents or done for them until they turn it off. Nothing was run.";
+        assert_eq!(calendar_event_lines_at(door, at), Err(()));
+        let empty = "Done — Calendar\naccepted: True, settled: True\n[]";
+        assert_eq!(calendar_event_lines_at(empty, at), Ok(Vec::new()), "a real empty calendar");
+        let titles = r#"accepted: True
+[{"title":"PRIVATE: dentist","start":"2026-10-25T10:00:00","is_all_day":false},{"title":"Tax withheld review","start":"2026-10-25T11:00:00","is_all_day":false}]"#;
+        assert_eq!(calendar_event_lines_at(titles, at).map(|v| v.len()), Ok(2), "a title is not Private mode");
+    }
 
     /// E.CAL3 (541: "next scheduled item is today at 18:00", asked at 20:50).
     #[test]

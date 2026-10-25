@@ -21748,3 +21748,14 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Linux (staging, 0b06dff), E.PRIV2:** mind-conversation 1311 passed, mind-core 198 passed. **Bundle:** yantrik-mind-0b06dff-linux-amd64.tar.zst, sha256 1374aa5201cb9802fbaf320802cf411c3c7357e4bc097502dbb00d98585d3cb8 (verified locally). Staging disk: 92%, 3.1 GB free.
 - **Facts from dc:** while Private mode is on, every harness method (`harness.notice` included) returns a JSON-RPC ERROR (-32000, the PRIVATE sentence), never a `{"refused": …}` result. The Mind already retried on errors, so the `Later` mapping is defence in depth.
 - **Live, revised:** only the reminder item is live-testable on 520 (real Private mode, a reminder set through the Mind beforehand, delivered within ~60 s of Private mode going off). The calendar item is unreachable on the desktop, because with Private mode on no chat turn reaches the Mind. It stays covered by the unit test.
+
+**E.PRIV2 — LIVE (520, Mind 0b06dff, dc's agent; the person's REAL Private mode, 25 Oct CDT): PASS.**
+- The reminder was set through the Mind at 02:39:34 ("in 3 minutes", due ~02:42:34).
+- Private mode ON 02:41:59 (person idle 131 s). The poll failed with "Permission denied (os error 13)", then "lost the desktop; re-attaching".
+- "could not attach … Permission denied" was logged once at 02:42:59. Private mode OFF 02:47:34. "attached" at 02:47:59, then "notices: 1 delivered, 0 refused, 0 left" at 02:47:59.792.
+- Exactly one card (id 1044, "ZZ 520 test", family reminder), delivered 25 s after Private mode went off. No duplicate, and no "finished while you were away" entry.
+- **dc's two deviations, both explained:**
+  1. The attach error is "Permission denied", not "PRIVATE:": the shell sets harness.sock to 0600 while Private mode is on. `retry_after` already maps `os error 13` to the 60 s backoff (E.PRIV1's own test covers this exact string).
+  2. Only two attach lines in 5 min: `say` prints a line only when it differs from the previous one, so the identical failures at :43:59–:46:59 were suppressed, not skipped. The cadence is confirmed by arithmetic: the successful attach at 02:47:59 is exactly 5 × 60 s after the 02:42:59 failure.
+- Card 1044 remains in the person's inbox. Only the person can dismiss a Mind notice.
+- **Unblocks OS #930's merge (dc, by hand).**

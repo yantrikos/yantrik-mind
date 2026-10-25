@@ -21776,3 +21776,57 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **"Read https://example.com and tell me its heading"** → the Mind used its OWN `web_fetch` (its egress, not the desktop browser); 0 Chromium processes before and after.
   - So `may_launch` and the cold desktop-browser path were NOT exercised. An interactive ask that forces `web_*` with Chromium cold is asked as a follow-up.
   - A refusal there would be a capability loss for Pranab, not a pass.
+
+**yantrik-os #942 MERGED (99b66799) on the Mind-side pass.**
+- 520 stays on c4d0b786. The shell restart restarted only yantrik-ui; the Mind's env hash is unchanged and the reattach checks pass.
+- The packing list with the note NOT in front passed: `os_describe notes` → `os_act notes search "ZZ"` → `open_note`, three items, no path. It honestly said the copy was in Trash.
+- **The cold desktop-browser check was blocked by TWO rules before #942 could matter:**
+  - (a) the Mind's egress guard refused `example.com` (not an `http(s)://` address in the person's words);
+  - (b) the OS taint ("this conversation has already read private state") refused `web_go`, and `yos new_chat` did not clear it for the Mind. Its key (conversation or yos-mcp process) is asked of dc.
+- Notes has no per-note purge, so the two ZZ test notes stay in the person's Trash.
+
+## E.EGRESS5 — PREREG: a bare domain the person typed is their address (never a file name or an e-mail)
+
+**Why (520, 25 Oct):**
+- "Open example.com in the browser, click…" → `web_go {"url":"https://example.com"}` was refused twice: "no address from the person's words or a web result".
+- `urls_in` admits only `http(s)://…` tokens, so a domain the person typed is not "theirs".
+- People type domains bare. Refusing them is the guard misreading the person, not protecting them.
+
+**What changes (egress_planning.rs):**
+- `person_urls` and `fetch_candidates` also take a BARE DOMAIN from the person's own words (outside quoted text, by the existing `in_quoted_text` rule), as `https://<domain>[/path]`.
+- **A bare domain is:**
+  - ≥2 dot-separated labels of `[a-z0-9-]`;
+  - a last label of 2–24 letters;
+  - optionally followed by `/path`;
+  - with no `@` in the token (never an e-mail address) and no `://` (already a URL).
+- **Never a file name:** a last label in a file-extension list (md, rs, py, sh, js, ts, css, html, json, txt, pdf, csv, log, toml, yaml, yml, lock, zip, gz, png, jpg, jpeg, gif, svg, doc, docx, odt, ods, odp, xlsx, pptx, c, h, go, rb, php, java, sql, mdg) is not a domain, even where it is a TLD (`.md`, `.rs`, `.py`, `.sh`).
+  - Accepted miss: `docs.rs` typed bare is not taken. The person can type the scheme.
+- Web results stay as before: only full URLs.
+
+**Kill criteria:**
+- K1, tests fail:
+  - "Open example.com in the browser" → [`https://example.com`];
+  - "news.ycombinator.com/item?id=1" → with its path;
+  - "fix main.rs and style.css" → none; "mail alice@example.com" → none; "v2.0", "e.g." and "Node.js" → none;
+  - quoted `"example.com"` in pasted text → none;
+  - an existing `https://` URL is unchanged and not doubled.
+- K2, mutants survive: the file-extension list removed; the `@` check removed; the quoted-text check removed.
+- K3: both suites pass.
+- **Live:** on 520, in a conversation with no private read, "Open example.com in the browser…" reaches `web_go` past the Mind's guard (then the OS taint or `may_launch` decides).
+
+**E.EGRESS5 — RESULT: PASS (Windows, unit).**
+- `a_bare_domain_the_person_typed_is_their_address` passes:
+  - "Open example.com in the browser…" → [`https://example.com`]; `news.ycombinator.com/item?id=1` keeps its path; `Example.COM.` → `https://example.com`;
+  - main.rs / style.css / notes.md / report.pdf / alice@example.com / v2.0 / e.g. / Node.js → none;
+  - quoted (`> try example.com`) → none;
+  - a full URL is unchanged and not doubled;
+  - `fetch_candidates` includes the bare domain.
+- **Mutants:**
+  - killed: the file-extension list removed; the quoted-text check removed;
+  - the `@` check SURVIVED: it was redundant, since `@` already fails the label rule. It is removed (amendment), with a comment saying why an e-mail cannot pass.
+- **Windows workspace:** 2629 passed, 0 failed.
+
+**The OS taint (b), dc from the code:** the scope is the desktop's (`taint_scope.rs`), one per harness `main` conversation, kept across restarts.
+- Only the PERSON's own press of + in the Lens begins a clean scope. `yos new_chat` deliberately does not: "a caller there may be a mind that passes for the person".
+- The refusal's wording ("+ in the Lens") is the CLEAN_SCOPE case, so the Mind's bridge follows the Lens conversation.
+- Not a defect. The cold-browser check needs a real Lens + press before the turn.

@@ -763,6 +763,54 @@ pub(crate) fn person_urls(user_text: &str) -> Vec<String> {
             out.push(u);
         }
     }
+    for u in person_bare_domains(user_text) {
+        if !out.contains(&u) {
+            out.push(u);
+        }
+    }
+    out
+}
+
+/// E.EGRESS5: file extensions that are not domains here, though some are TLDs (.md, .rs, .py, .sh)
+/// -- "fix main.rs" is a file, never a site.
+const NOT_A_DOMAIN: &[&str] = &[
+    "md", "rs", "py", "sh", "js", "ts", "css", "html", "htm", "json", "txt", "pdf", "csv", "log", "toml",
+    "yaml", "yml", "lock", "zip", "gz", "png", "jpg", "jpeg", "gif", "svg", "doc", "docx", "odt", "ods",
+    "odp", "xlsx", "pptx", "c", "h", "go", "rb", "php", "java", "sql", "mdg",
+];
+
+/// E.EGRESS5 (520: "Open example.com in the browser" was refused -- "no address from the person's
+/// words"): a domain the person typed without a scheme, as `https://`. Their own words only (never
+/// quoted, fenced or forwarded text), never an e-mail address, never a file name.
+pub(crate) fn person_bare_domains(user_text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut at = 0;
+    for raw in user_text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '`' | ',')) {
+        let start = user_text[at..].find(raw).map(|i| at + i).unwrap_or(at);
+        at = start + raw.len();
+        let token = raw.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        // An e-mail address fails the label rule below ('@' is not a label character).
+        if token.is_empty() || token.contains("://") || in_quoted_text(user_text, start) {
+            continue;
+        }
+        let (host, path) = match token.find('/') {
+            Some(i) => (&token[..i], &token[i..]),
+            None => (token, ""),
+        };
+        let labels: Vec<&str> = host.split('.').collect();
+        let Some(last) = labels.last() else { continue };
+        let last = last.to_ascii_lowercase();
+        let labels_ok = labels.len() >= 2
+            && labels.iter().all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        let tld_ok = (2..=24).contains(&last.len()) && last.chars().all(|c| c.is_ascii_alphabetic());
+        if !labels_ok || !tld_ok || NOT_A_DOMAIN.contains(&last.as_str()) {
+            continue;
+        }
+        let url = format!("https://{}{path}", host.to_ascii_lowercase());
+        if !out.contains(&url) {
+            out.push(url);
+        }
+    }
     out
 }
 
@@ -777,6 +825,10 @@ pub(crate) fn fetch_candidates(user_text: &str, web_obs: &[String], named: &[Str
         }
     };
     for u in urls_in(user_text) {
+        push(u);
+    }
+    // E.EGRESS5: and the domains the person typed bare (their own words only).
+    for u in person_bare_domains(user_text) {
         push(u);
     }
     for page in web_obs {
@@ -1618,6 +1670,23 @@ mod tests {
             distinctive_pii("meet at 7 on July 4 in Pune").is_empty(),
             "dates/short numbers are not distinctive PII"
         );
+    }
+
+    /// E.EGRESS5 (520: "Open example.com in the browser" refused -- no address from the person's
+    /// words): a domain the person typed bare is theirs, as https; a file name, an e-mail, a version,
+    /// an abbreviation or a domain inside quoted text is not.
+    #[test]
+    fn a_bare_domain_the_person_typed_is_their_address() {
+        use super::{fetch_candidates, person_bare_domains as bare, person_urls};
+        assert_eq!(person_urls("Open example.com in the browser, click the 'More information' link"), vec!["https://example.com"]);
+        assert_eq!(bare("see news.ycombinator.com/item?id=1 please"), vec!["https://news.ycombinator.com/item?id=1"]);
+        assert_eq!(bare("go to Example.COM."), vec!["https://example.com"]);
+        for none in ["fix main.rs and style.css", "open notes.md", "mail alice@example.com", "v2.0 is out", "e.g. this", "Node.js rocks", "the report.pdf"] {
+            assert!(bare(none).is_empty(), "{none}: {:?}", bare(none));
+        }
+        assert!(bare("they wrote:\n> try example.com today").is_empty(), "quoted text is not the person's words");
+        assert_eq!(person_urls("read https://example.com/a now"), vec!["https://example.com/a"], "a full URL is unchanged and not doubled");
+        assert!(fetch_candidates("Open example.com", &[], &[]).contains(&"https://example.com".to_string()));
     }
 }
 

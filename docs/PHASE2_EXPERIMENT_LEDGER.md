@@ -21830,3 +21830,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - Only the PERSON's own press of + in the Lens begins a clean scope. `yos new_chat` deliberately does not: "a caller there may be a mind that passes for the person".
 - The refusal's wording ("+ in the Lens") is the CLEAN_SCOPE case, so the Mind's bridge follows the Lens conversation.
 - Not a defect. The cold-browser check needs a real Lens + press before the turn.
+- **Linux (staging, 593b8d1), E.EGRESS5:** mind-conversation 1312 passed. **Bundle:** yantrik-mind-593b8d1-linux-amd64.tar.zst, sha256 00e95d23af2a68bb73628d62f9eac8659d9f6011061aed57902768975ce5ff1e (verified locally). Staging disk: 92%, 3.0 GB free.

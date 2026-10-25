@@ -21745,3 +21745,6 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - `the_desktops_answers_are_read_as_kept_later_or_refused` passes: a "PRIVATE:" refusal → `Later(None)`; other refusals unchanged.
 - **Mutants killed (2/2):** the calendar private check removed; the notice PRIVATE mapping removed.
 - **Windows workspace:** 2628 passed, 0 failed.
+- **Linux (staging, 0b06dff), E.PRIV2:** mind-conversation 1311 passed, mind-core 198 passed. **Bundle:** yantrik-mind-0b06dff-linux-amd64.tar.zst, sha256 1374aa5201cb9802fbaf320802cf411c3c7357e4bc097502dbb00d98585d3cb8 (verified locally). Staging disk: 92%, 3.1 GB free.
+- **Facts from dc:** while Private mode is on, every harness method (`harness.notice` included) returns a JSON-RPC ERROR (-32000, the PRIVATE sentence), never a `{"refused": …}` result. The Mind already retried on errors, so the `Later` mapping is defence in depth.
+- **Live, revised:** only the reminder item is live-testable on 520 (real Private mode, a reminder set through the Mind beforehand, delivered within ~60 s of Private mode going off). The calendar item is unreachable on the desktop, because with Private mode on no chat turn reaches the Mind. It stays covered by the unit test.

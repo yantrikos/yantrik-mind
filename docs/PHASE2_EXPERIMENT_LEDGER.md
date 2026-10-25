@@ -21768,3 +21768,11 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - The only false-empty path (the harness envelope) was not on the Mind's route.
   - Nothing deployed main to any box before E.PRIV2 (0b06dff) and item B's PASS.
 - **dc's rule from now on:** a PR held for the Mind side is never on an auto-merge watch, and after any stop dc checks that no watch is left running.
+
+**yantrik-os #942 on 520 (c4d0b786, dc's agent): the Mind's side PASSES on what ran.**
+- The shell was restarted by the install and the reattach checks were fine: harness.sock fresh at 14:47:16, one yantrik-ui pid, a fresh "attached … as `mind`" line, and the Mind not restarted.
+- **"What's on my ZZ packing list?"** → step 0 `os_describe {"app":"notes"}`, then a direct reply listing passport, charger, umbrella. No files_* call, no path tried.
+  - **Caveat:** the note was the one in front (the easy case). The note-not-in-front case (find and open through `os_act notes`) is asked as a follow-up.
+- **"Read https://example.com and tell me its heading"** → the Mind used its OWN `web_fetch` (its egress, not the desktop browser); 0 Chromium processes before and after.
+  - So `may_launch` and the cold desktop-browser path were NOT exercised. An interactive ask that forces `web_*` with Chromium cold is asked as a follow-up.
+  - A refusal there would be a capability loss for Pranab, not a pass.

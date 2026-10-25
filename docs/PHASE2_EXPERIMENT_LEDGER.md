@@ -21759,3 +21759,12 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   2. Only two attach lines in 5 min: `say` prints a line only when it differs from the previous one, so the identical failures at :43:59–:46:59 were suppressed, not skipped. The cadence is confirmed by arithmetic: the successful attach at 02:47:59 is exactly 5 × 60 s after the 02:42:59 failure.
 - Card 1044 remains in the person's inbox. Only the person can dismiss a Mind notice.
 - **Unblocks OS #930's merge (dc, by hand).**
+
+**Hold broken, reported by dc: OS #930 merged at 07:12Z, ~1.5 h BEFORE the Mind side had seen its Private-mode answers.**
+- Cause: its auto-merge watch was a `&` child of a combined background task. Stopping the parent left the child running, and it merged on the 520 PASS.
+- **Impact assessed: none in effect.**
+  - The Mind reads the desktop calendar through the door, which returns a PRIVATE error in Private mode: `Err` → "unknown", already true before E.PRIV2.
+  - `harness.notice` returns errors, which the Mind already retried.
+  - The only false-empty path (the harness envelope) was not on the Mind's route.
+  - Nothing deployed main to any box before E.PRIV2 (0b06dff) and item B's PASS.
+- **dc's rule from now on:** a PR held for the Mind side is never on an auto-merge watch, and after any stop dc checks that no watch is left running.

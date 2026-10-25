@@ -20571,6 +20571,48 @@ mod desktop_consent_and_stall_wiring {
         assert!(log.contains("mcp.yantrik-os.web_click"), "{}", &log[log.len().saturating_sub(800)..]);
     }
 
+    /// E.TOOL2 (520: web_click {"words":…} against its schema's required "ref"): a call missing a
+    /// field its own schema requires is answered to the model and never reaches the tool.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_call_missing_a_required_field_goes_back_to_the_model() {
+        let schema = serde_json::json!({"type": "object", "properties": {"ref": {"type": "string", "description": "Press an element by its ref"}}, "required": ["ref"]});
+        assert_eq!(crate::desktop::missing_required(&schema, &serde_json::json!({"words": "Learn more"})), vec!["ref"]);
+        assert!(crate::desktop::missing_required(&schema, &serde_json::json!({"ref": "e1"})).is_empty());
+        assert!(crate::desktop::missing_required(&serde_json::json!({"type": "object"}), &serde_json::json!({})).is_empty());
+        let note = crate::desktop::missing_required_note("mcp.yantrik-os.web_click", &schema, &serde_json::json!({"words": "x"}));
+        assert!(
+            note.starts_with("(malformed call: mcp.yantrik-os.web_click") && note.contains("needs 'ref' (Press an element by its ref)") && !note.contains("x\""),
+            "{note}"
+        );
+        assert_eq!(crate::tool_outcome::Outcome::classify("mcp.yantrik-os.web_click", &note), crate::tool_outcome::Outcome::Malformed);
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Call("mcp.yantrik-os.web_click", serde_json::json!({"words": "Learn more"}))],
+            seen: seen.clone(),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let click = mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: "web_click".into(),
+            description: "Press an element by its ref".into(),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: schema,
+        };
+        hub.add_scripted_tool(click, vec![Ok("Done \u{2014} clicked".to_string())]).unwrap();
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone());
+        let _ = conv.agent_loop_for_eval("Click Learn more", &TurnIdentity::primary()).await;
+        assert!(hub.scripted_calls().iter().all(|(t, _)| !t.ends_with("web_click")), "the tool was reached without its required field");
+        assert!(seen.lock().unwrap().iter().any(|p| p.contains("needs 'ref'")), "the model was not told what was missing");
+    }
+
     /// E.ARENA1-F39: reading the screen through `os_act shell.read_screen` changes nothing -- the
     /// editor described before it is not re-described after it; after a REAL act it is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

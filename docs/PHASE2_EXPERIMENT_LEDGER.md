@@ -21883,3 +21883,39 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - (2) my batch-4 diagnosis that `web_find` "sees only the viewport", which is the premise I gave dc for #955. With the right words, main's `find` found the below-fold link.
 - **Still unexplained:** batch 5's `web_read` returned only title and url. The rerun (e-batch5b) uses the correct "Learn more" and records exactly what web_read returns.
 - **Lesson (same as [[synthetic-cases-share-your-misconception]]):** I wrote the target text from memory of the page, not from the page. A check whose expected text is not read from the artifact first can fail for the checker's reason.
+
+**Cold-browser 5b (520, f53c081 + #956, dc's agent; the corrected "Learn more" prompt): the OS side WORKS; one Mind defect left.**
+- `web_find {"words":"Learn more"}` → `[e1] link "Learn more" (off screen) … below the visible part`.
+- `web_read` is the in-view read (title, url, in-view controls); the page text is `web_text`. E-batch5's 238 B were correct.
+- **Defect:** the Mind called `web_click {"words":"Learn more"}`; yos-mcp's schema is `{"ref": string}`, required → "web_click needs 'ref'".
+  - web_click had no schema that turn: name-only tail, and `stable_schemas` builds schemas from pinned tools only. So the model guessed the argument.
+- **The confirmation before the click is BY DESIGN:** "click" is not in `BROWSER_UNASKED` (E.EGRESS5d). The proxy's chat "yes" was a test confirmation.
+
+## E.TOOL2 — PREREG: an MCP call missing a field its own schema requires goes back to the model, not to the person
+
+**What changes:**
+- In the MCP arm, before any run or gate, the arguments are checked against the tool's declared `input_schema.required`.
+- A missing field returns `({tool} needs '{field}': {its description} -- its arguments are {properties}. Nothing was run.)` to the model, in the same turn.
+- No card is raised, and the person is not asked to OK a call that cannot succeed.
+- A schema with no `required`, or a non-object schema, changes nothing.
+
+**Kill criteria:**
+- K1, tests fail:
+  - the helper reports `ref` missing for `{"words":…}` against `{"required":["ref"],"properties":{"ref":{"description":"Press an element by its ref…"}}}`;
+  - `{"ref":"e1"}` → nothing missing;
+  - a schema without `required` → nothing missing;
+  - a loop turn calling a hub tool without its required field gets "needs 'ref'" and the tool is NOT reached.
+- K2, mutants survive: the check removed; `required` read as optional.
+- K3: both suites pass.
+- **Live:** the cold-browser prompt on 520 reaches `web_click {"ref":"e1"}`, after one bounce at most, then the person's confirm, then the heading.
+
+**E.TOOL2 — RESULT: PASS (Windows, unit + eval).**
+- The real yos-mcp declares `required` on its tools (os_describe: app; web_click: ref; web_type: ref, text; …) and ALREADY refuses a call missing one. The check therefore blocks nothing the server would run; it only moves that refusal ahead of the confirmation, with the field's description.
+- **The note uses the argument boundary's marker** ("(malformed call: … — needs 'ref' (Press an element by its ref) — its arguments are …"). `Outcome::classify` makes it Malformed: excluded from the tool's reliability, with the "arguments did not fit" guidance. Field names and schema words only, never a value (Codex's rule for this boundary).
+- **Tests:**
+  - `a_call_missing_a_required_field_goes_back_to_the_model`: the helper's cases pass; in a loop turn, `web_click {"words":…}` never reaches the tool and the model is told "needs 'ref'".
+- **An eval moved and kept its intent:** `unfamiliar_mcp_schema_repairs_after_one_32602_without_inventing_a_tool`.
+  - Its first bad call lacked the required field. That is now caught before the server, so the scripted -32602 was never consumed.
+  - The first call now carries the required field plus an extra one the server's `additionalProperties: false` rejects. The -32602 repair path it guards, for errors a schema check cannot see, is exercised unchanged, with no assertion edited.
+- **Mutants killed (2/2):** the check removed; `required` read as optional.
+- **Windows workspace:** 2631 passed, 0 failed.

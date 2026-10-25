@@ -13737,6 +13737,13 @@ WINDOW: all-time, latest 200
                 // E.EGRESS5d (the thirteenth pass): a browser action that is neither a known read nor
                 // one the egress rules clean waits for the person, however it is driven.
                 Some(hub) => { let must_ask = desktop::browser_needs_person(name, args); match hub.lookup(name) {
+                    // E.TOOL2 (520: web_click {"words":…} against its schema's required "ref"): a call missing
+                    // a field the tool's own schema requires goes back to the model -- never to the person.
+                    Some(t) if !desktop::missing_required(&t.input_schema, args).is_empty() => {
+                        let note = desktop::missing_required_note(name, &t.input_schema, args);
+                        eprintln!("[agent] {name}: a required argument is missing -- not run");
+                        note
+                    }
                     // E.EGRESS5b (the eleventh pass): only the desktop's own read tools run unasked;
                     // another server's reads go through the gate below with the rest.
                     Some(t) if t.read_only && t.server == desktop::DESKTOP_SERVER && !must_ask => {

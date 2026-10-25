@@ -478,7 +478,9 @@ mod tests {
             answer("Teal is blue-green, according to the novel lookup."),
         ];
         let seq = Arc::new(SequencedLLM::new(replies).with_native(vec![
-            Some((tool_name, serde_json::json!({"query": "teal"}))),
+            // E.TOOL2: the required field present, so the call reaches the server; the extra field is
+            // what its `additionalProperties: false` rejects with -32602.
+            Some((tool_name, serde_json::json!({"query_v2": "teal", "query": "teal"}))),
             Some((tool_name, serde_json::json!({"query_v2": "teal"}))),
             None,
         ]));

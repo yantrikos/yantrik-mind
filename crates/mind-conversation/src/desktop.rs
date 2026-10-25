@@ -475,6 +475,43 @@ const BROWSER_UNASKED: [&str; 17] = [
 ];
 const BROWSER_DESKTOP_CARD: [&str; 1] = ["commit"];
 
+/// E.TOOL2: the fields an MCP tool's own `input_schema` requires that `args` does not carry. Empty
+/// when the schema declares none (or is not an object schema) -- the tool's server decides then.
+pub(crate) fn missing_required(schema: &serde_json::Value, args: &serde_json::Value) -> Vec<String> {
+    let Some(required) = schema.get("required").and_then(|r| r.as_array()) else { return Vec::new() };
+    required
+        .iter()
+        .filter_map(|f| f.as_str())
+        .filter(|f| args.get(*f).is_none_or(|v| v.is_null()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// E.TOOL2: what the model is told when it left a required field out -- the field, what the
+/// schema says it is, and the arguments the tool takes. Nothing was run.
+pub(crate) fn missing_required_note(tool: &str, schema: &serde_json::Value, args: &serde_json::Value) -> String {
+    let missing = missing_required(schema, args);
+    let props: Vec<String> = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().cloned().collect())
+        .unwrap_or_default();
+    let what: Vec<String> = missing
+        .iter()
+        .map(|f| {
+            let desc = schema["properties"][f.as_str()]["description"].as_str().unwrap_or("").trim();
+            if desc.is_empty() { format!("'{f}'") } else { format!("'{f}' ({desc})") }
+        })
+        .collect();
+    // The argument boundary's own marker (tool_outcome: `Outcome::Malformed`), so the call counts as
+    // the planner's, not the tool's; field names and the schema's words only, never a value.
+    format!(
+        "(malformed call: {tool} \u{2014} needs {} \u{2014} its arguments are {}. Nothing was run; call it again with the fields as documented)",
+        what.join(" and "),
+        if props.is_empty() { "not listed".to_string() } else { props.join(", ") }
+    )
+}
+
 /// E.EGRESS5d: does this call drive the desktop browser in a way that needs the person's OK?
 pub(crate) fn browser_needs_person(tool: &str, args: &serde_json::Value) -> bool {
     let action = if let Some(a) = tool.strip_prefix(WEB_PREFIX) {

@@ -331,6 +331,18 @@ pub struct TurnIdentity {
     pub trace: Option<String>,
 }
 
+/// E.TOOL1 (520, Mind 593b8d1: the model called `mcp__yantrik-os__web_read` and `mcp__yantrik-os__web_click`
+/// -- the double-underscore spelling other hosts use -- and got "unknown tool" for tools it had): the
+/// same tool by its real name, `mcp.<server>.<tool>`. Anything else is returned as it came.
+pub(crate) fn mcp_spelling(tool: &str) -> String {
+    if let Some((server, name)) = tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+        if !server.is_empty() && !name.is_empty() {
+            return format!("mcp.{server}.{name}");
+        }
+    }
+    tool.to_string()
+}
+
 /// E.TRACE1b: run `fut` with `trace` as TURN_TRACE -- unless a caller (the harness) already set one.
 pub(crate) async fn with_turn_trace<F: std::future::Future>(trace: Option<String>, fut: F) -> F::Output {
     match trace {
@@ -14884,6 +14896,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
+            // E.TOOL1 (520: `mcp__yantrik-os__web_click` -> "unknown tool"): another host's spelling.
+            let tool = mcp_spelling(&tool);
             // E.ANS1 (E.CMP1 run 1, ask 6): the answer filed as a skill named after the answer action.
             let (tool, v) = match answer_in_a_skill_call(&tool, &v) {
                 Some(text) => {

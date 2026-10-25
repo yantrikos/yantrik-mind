@@ -20547,6 +20547,30 @@ mod desktop_consent_and_stall_wiring {
         assert!(last.contains("(an earlier look at the same view;"), "the stale look was not replaced: {last}");
     }
 
+    /// E.TOOL1 (520: `mcp__yantrik-os__web_click` -> "unknown tool"): another host's spelling of a
+    /// desktop tool reaches the same tool; anything else is left as it came.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn another_hosts_spelling_reaches_the_same_tool() {
+        assert_eq!(crate::mcp_spelling("mcp__yantrik-os__web_read"), "mcp.yantrik-os.web_read");
+        assert_eq!(crate::mcp_spelling("mcp__yantrik-os__os_act"), "mcp.yantrik-os.os_act");
+        for same in ["mcp.yantrik-os.web_go", "recall", "mcp__", "mcp__yantrik-os__", "mcp____web_read"] {
+            assert_eq!(crate::mcp_spelling(same), same, "{same}");
+        }
+        // A tool the turn sent NO schema for, so mind-inference's wire map (E.WIRE1) cannot turn it
+        // back -- 520's web_click. This hub has no web_click, so routed to MCP it is "no such
+        // integration tool"; not routed, it was "unknown tool". The routing is what is under test.
+        let r = run_with(
+            "Click More information",
+            vec![Step::Call("mcp__yantrik-os__web_click", serde_json::json!({"words": "More information"}))],
+            vec!["Yantrik \u{2014} desktop screen, 1 windows open\nrevision: 1\n{}"],
+            vec!["UNUSED"],
+        )
+        .await;
+        let log = r.prompts.join("\n");
+        assert!(!log.contains("unknown tool: mcp__yantrik-os__web_click"), "another host's spelling was not routed to the desktop");
+        assert!(log.contains("mcp.yantrik-os.web_click"), "{}", &log[log.len().saturating_sub(800)..]);
+    }
+
     /// E.ARENA1-F39: reading the screen through `os_act shell.read_screen` changes nothing -- the
     /// editor described before it is not re-described after it; after a REAL act it is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

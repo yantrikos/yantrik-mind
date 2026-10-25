@@ -21831,3 +21831,36 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - The refusal's wording ("+ in the Lens") is the CLEAN_SCOPE case, so the Mind's bridge follows the Lens conversation.
 - Not a defect. The cold-browser check needs a real Lens + press before the turn.
 - **Linux (staging, 593b8d1), E.EGRESS5:** mind-conversation 1312 passed. **Bundle:** yantrik-mind-593b8d1-linux-amd64.tar.zst, sha256 00e95d23af2a68bb73628d62f9eac8659d9f6011061aed57902768975ce5ff1e (verified locally). Staging disk: 92%, 3.0 GB free.
+
+**Cold desktop-browser check — LIVE (520, Mind 593b8d1, dc's agent; Lens + pressed, Chromium cold): #942 does NOT block, E.EGRESS5 works, and the turn still FAILED on a Mind defect.**
+- Step 0: `web_go` passed the Mind's guard (E.EGRESS5) with no taint refusal, and got "the browser is not open".
+- Step 1: `os_act open_app shell name=browser` started Chromium (pid 1721830, parent yantrik-ui). No `may_launch` refusal. **#942 is cleared for the Mind's browser.**
+- Steps 2–3: `web_go` reached "Example Domain"; `web_find "More information"` found nothing (the link is below the viewport, "1 more below").
+- **Steps 4 and 6: the model called `mcp__yantrik-os__web_read` and `mcp__yantrik-os__web_click` → "(unknown tool: …)".**
+  - It spelled the tool names in the double-underscore convention other hosts use. `web_go`/`web_find` (whose schemas it had) were spelled `mcp.yantrik-os.…`.
+  - Steps 7–8: a guessed iana.org URL was refused by the fetch planner, correctly: it was not from the person or a web result.
+- **Reply:** "…couldn't finish… the click action isn't available here." Honest, but the click action WAS available under its real name.
+
+## E.TOOL1 — PREREG: `mcp__<server>__<tool>` is the same tool as `mcp.<server>.<tool>`
+
+**What changes:** the loop's tool name, on both the native and free-text paths, is normalized right after it is read.
+- `mcp__<server>__<tool>` becomes `mcp.<server>.<tool>`. The first `__` after the prefix separates the server, so the server keeps its `-` and the tool keeps its `_`.
+- Nothing else is renamed. Gates, grades and dispatch all see the real name.
+
+**Kill criteria:**
+- K1, tests fail:
+  - the helper maps `mcp__yantrik-os__web_read` → `mcp.yantrik-os.web_read` and `mcp__yantrik-os__os_act` → `mcp.yantrik-os.os_act`;
+  - it leaves `mcp.yantrik-os.web_go`, `recall` and `mcp__` (no server) unchanged;
+  - a scripted loop calling `mcp__yantrik-os__os_describe` reaches the desktop's `os_describe`.
+- K2: a mutant removing the call site fails the loop test.
+- K3: both suites pass.
+- **Live:** the same cold-browser prompt on 520 clicks through and returns the next page's heading.
+
+**E.TOOL1 — RESULT: PASS (Windows, unit), with the cause found on the way.**
+- **Cause (E.WIRE1):** mind-inference sends schema names on the wire as `mcp__yantrik-os__os_act`, since providers refuse `.`. Its reverse map covers only the names it sent as SCHEMAS.
+  - The model saw that spelling on `web_go`/`web_find` and used it for `web_read`/`web_click`, which were only in the catalog's name-only tail with no schema. Nothing mapped them back, so they hit "unknown tool".
+- **Fix:** `mcp_spelling` reverses the convention for ANY name, schema or not, before dispatch.
+- **A test that could not fail, caught by its mutant:**
+  - The first loop test used `os_describe`, which IS in the test hub's schemas, so mind-inference's wire map already reversed it. The call-site mutant survived twice.
+  - The test now uses `mcp__yantrik-os__web_click`, a tool the turn sent no schema for. Routed to MCP it gives "no such integration tool"; unrouted it gave "unknown tool". The call-site mutant is now killed.
+- **Windows workspace:** 2630 passed, 0 failed.

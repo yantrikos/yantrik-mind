@@ -21866,3 +21866,11 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Windows workspace:** 2630 passed, 0 failed.
 - **Linux (staging, f53c081), E.TOOL1:** mind-conversation 1313 passed. **Bundle:** yantrik-mind-f53c081-linux-amd64.tar.zst, sha256 12d39970e767e6020ac2949a67f6ddea3f71153aa3997801d51b537c2c5cc831 (verified locally). Staging disk: 93%, 2.9 GB free.
 - **OS #955 (dc):** web_find searches the whole page and says where each match is ("in view" / "below the visible part (about N screens down)"); web_click scrolls an out-of-view match into view. The Mind refers to web_find only by name, so nothing here changes. The cold-browser rerun is paired with #955 and E.TOOL1.
+
+**E.TOOL1 — LIVE (520, Mind f53c081 + #956's yos web files at 39a8350b, dc's agent; cold Chromium after Lens +): the Mind's side PASSES; the turn fails on an OS page-scan defect.**
+- No "unknown tool": `web_read` was reached by its real name (E.TOOL1).
+- Chromium was again launched by yantrik-ui via `os_act open_app browser`.
+- **The OS side failed:** `web_find "More information"` now said "nothing on this page matches … anywhere in the page", and `web_read` returned only title and url. Afterwards every yos web/read showed "(nothing to act on in view)" on a page curl fetches with 200.
+  - #956's page scan returns nothing, so `web_click` was never reached. The defect is reported on #956 by dc.
+- **The reply was honest:** "…the page body came back empty to me, so I have no heading to report."
+- **The rerun waits for #956's scan fix.**

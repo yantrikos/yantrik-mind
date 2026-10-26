@@ -786,7 +786,7 @@ pub(crate) fn person_bare_domains(user_text: &str) -> Vec<String> {
     bare_domains(user_text, true)
 }
 
-/// E.EGRESS5 / E.EGRESS5b: the bare domains in `text`, as `https://`. `person`: the person's own
+/// E.EGRESS5 / E.EGRESS5e: the bare domains in `text`, as `https://`. `person`: the person's own
 /// words, so quoted, fenced or forwarded text is skipped; a web result has no such part. A target
 /// the tool cut with "…" is not an address and is skipped.
 fn bare_domains(user_text: &str, person: bool) -> Vec<String> {
@@ -840,7 +840,7 @@ pub(crate) fn fetch_candidates(user_text: &str, web_obs: &[String], named: &[Str
     }
     for page in web_obs {
         let mut urls = urls_in(page);
-        // E.EGRESS5b (520 batch 7: web_find showed `→ iana.org/help/example-domains`): a link the
+        // E.EGRESS5e (520 batch 7: web_find showed `→ iana.org/help/example-domains`): a link the
         // web itself showed, scheme-less, is the page's own address.
         for u in bare_domains(page, false) {
             if !urls.contains(&u) {
@@ -1703,7 +1703,7 @@ mod tests {
         assert!(fetch_candidates("Open example.com", &[], &[]).contains(&"https://example.com".to_string()));
     }
 
-    /// E.EGRESS5b (520 batch 7: the page's own "Learn more" target, printed scheme-less by web_find,
+    /// E.EGRESS5e (520 batch 7: the page's own "Learn more" target, printed scheme-less by web_find,
     /// was refused): a link a web result showed is a candidate; a cut one, a file name and a doubled
     /// full URL are not.
     #[test]

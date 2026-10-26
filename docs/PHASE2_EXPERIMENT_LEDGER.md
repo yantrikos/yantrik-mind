@@ -21973,7 +21973,9 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - E.CONFIRM1 was not exercised: no click, so no confirmation.
 - The reply was honest: "link located, click not completed".
 
-## E.EGRESS5b — PREREG: a scheme-less address a web result showed is a candidate, as https
+## E.EGRESS5e — PREREG: a scheme-less address a web result showed is a candidate, as https
+
+(Numbered E.EGRESS5b in commit 2cc149b's subject by mistake — that id belongs to the eleventh pass above; this entry is E.EGRESS5e.)
 
 **Why:**
 - Going to an address the web itself just showed is following a link. The guard exists against the Mind BUILDING addresses that carry private bits; a web result's own link is not that, and full URLs from web results are already candidates.
@@ -21997,7 +21999,7 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - K3: both suites pass.
 - **Live:** the batch-7 path (web_go to the link's address) reaches "Example Domains".
 
-**E.EGRESS5b — RESULT: PASS (Windows, unit).**
+**E.EGRESS5e — RESULT: PASS (Windows, unit).**
 - `a_link_a_web_result_showed_is_a_candidate` passes:
   - web_find's scheme-less `→ iana.org/help/example-domains` → `https://iana.org/help/example-domains`;
   - a cut `iana.org/help/e…` → none;
@@ -22006,3 +22008,6 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - E.EGRESS5's test still passes. The person-words path is unchanged; the quoted-text rule applies to person words only.
 - **Mutants killed (2/2):** the web bare domains removed; the "…" skip removed.
 - **Windows workspace:** 2633 passed, 0 failed.
+- **Linux (staging .95, 2cc149b):** mind-conversation 1316 passed, 0 failed.
+- **Bundle:** `yantrik-mind-2cc149b-linux-amd64.tar.zst`, 62891571 bytes, sha256 `e6f4bf728d226389d049aa6a6f07a793324f580946ade13ceff8fd4546128bfb` (verified locally after copy). Sent to dc for the batch-7 rerun.
+- OS #957 (filed by dc) will print web_find targets as whole `https://` URLs, never cut; long or `data:` links get a marker with no partial URL. urls_in stays unchanged.

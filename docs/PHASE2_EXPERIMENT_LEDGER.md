@@ -21964,3 +21964,4 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - `send_email_requires_confirmation_then_sends` (a recipe confirm with no kept request) still replies "Done…".
 - **Mutants killed (2/2):** the request not kept; the compose skipped.
 - **Windows workspace:** 2632 passed, 0 failed.
+- **Linux (staging, 2f21720), E.CONFIRM1:** mind-conversation 1315 passed. **Bundle:** yantrik-mind-2f21720-linux-amd64.tar.zst, sha256 e492baa0e3b74a609bfccb91c6578e067ed38f89e948d61856ef769212f46600 (verified locally). Staging disk: 90%, 4.0 GB free.

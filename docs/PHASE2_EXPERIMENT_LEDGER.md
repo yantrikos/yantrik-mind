@@ -21922,3 +21922,13 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Linux (staging, f06a458), E.TOOL2:** mind-conversation 1314 passed, mind-evals 54 passed. No bundle was built: new bundles are held at 93% staging disk (2.9 GB free) until Pranab answers on pruning.
 - **Staging pruned on Pranab's word (25 Oct: "Yes, keep the last 6"):** 20 older bundles and their .sha256 were removed from /root/ym-bundles, and the 6 newest kept (f53c081, 593b8d1, 0b06dff, da6ddd9, 4f4240c, 6c77566). Disk went from 93% / 2.9 GB free to 90% / 4.1 GB free.
 - **Bundle (staging, 5a04a8e = E.TOOL2 + ledger):** yantrik-mind-5a04a8e-linux-amd64.tar.zst, sha256 2cb0a71cad906fde6b5884a8270c97c80b8698ea314d0f3e76f258270e5af443 (verified locally). Staging disk: 90%, 4.1 GB free.
+
+**Cold desktop browser — LIVE PASS (520, Mind 5a04a8e + #956 files from 51c46525, dc's agent, batch 6; Chromium cold, Lens +).**
+- The facts were checked first: example.com's `/s.js` inserts the "Learn more" link, and the target's `<h1>` is "Example Domains".
+- **Turn 1012, 6 steps in 10 s:**
+  - `web_go` (browser not open) → `os_act open_app browser` → `web_go` "Example Domain";
+  - `web_find "Learn more"` → `[e1] … (off screen)`;
+  - `web_click {"words":…}` → **"(malformed call … needs 'ref' … Nothing was run)" (E.TOOL2)** → `web_click {"ref":"e1"}` → the confirmation (E.EGRESS5d, by design);
+  - after the proxy's "yes": "Clicked link \"Learn more\" (e1). Now on: \"Example Domains\"…".
+- **What this proves together:** #942 does not block the Mind's browser; E.EGRESS5 (bare domain); the Lens + clears the desktop taint; E.TOOL1 (no unknown tool); E.TOOL2 (one bounce, then the right argument); #956's whole-page find.
+- **Residual, a quality follow-up:** after "yes", the reply is the RAW click result, not a composed answer to "tell me the heading". The confirmed action runs and its output is returned as the reply, so the turn does not continue to compose. It is held as the next candidate, not built yet.

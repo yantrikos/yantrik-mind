@@ -21920,3 +21920,5 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (2/2):** the check removed; `required` read as optional.
 - **Windows workspace:** 2631 passed, 0 failed.
 - **Linux (staging, f06a458), E.TOOL2:** mind-conversation 1314 passed, mind-evals 54 passed. No bundle was built: new bundles are held at 93% staging disk (2.9 GB free) until Pranab answers on pruning.
+- **Staging pruned on Pranab's word (25 Oct: "Yes, keep the last 6"):** 20 older bundles and their .sha256 were removed from /root/ym-bundles, and the 6 newest kept (f53c081, 593b8d1, 0b06dff, da6ddd9, 4f4240c, 6c77566). Disk went from 93% / 2.9 GB free to 90% / 4.1 GB free.
+- **Bundle (staging, 5a04a8e = E.TOOL2 + ledger):** yantrik-mind-5a04a8e-linux-amd64.tar.zst, sha256 2cb0a71cad906fde6b5884a8270c97c80b8698ea314d0f3e76f258270e5af443 (verified locally). Staging disk: 90%, 4.1 GB free.

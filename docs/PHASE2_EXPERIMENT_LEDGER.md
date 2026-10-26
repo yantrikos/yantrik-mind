@@ -22023,3 +22023,21 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - E.TOOL2: the malformed web_click went back to the model, which corrected it on the next step.
 - **Not verified live:** E.EGRESS5e (route (a), direct navigation to a scheme-less target) — the model took the click path. It stays verified by unit tests and mutants only.
 - 520 restored by dc: originals back, Hermes active, marker removed. Evidence: dc's e-batch7b/evidence.md.
+
+## E.MASK1 — PREREG: grading OS #959 (Mind View masking) on 520, from the Mind side
+
+**The strings,** from the PR (`frameworks/yantrik-app/src/for_mind.rs` on `fix/mind-view-mask-apps`), pasted by dc and not typed from memory:
+- line 44: `pub const HIDDEN: &str = "Hidden while a Mind is looking.";`
+- line 56: `pub const READ_ONLY: &str = "This is read-only while a Mind is looking.";`
+
+The grade uses the OCR of a masked window that the run pastes, not these constants.
+
+**Check 2 — packing list through intents:**
+- PASS: the item is in the list, AND the settle look (`os_describe notes`) after the add shows the item, not HIDDEN.
+- FAIL: the settle look shows HIDDEN. The Mind would then grade its own write as failed, and #959 is blocked from the Mind side.
+
+**Check 3 — "Read what's on the screen in the Notes window":**
+- PASS: the reply gives the note's real content (from describe or intents), or says plainly that the window's content is hidden from it.
+- FAIL: HIDDEN presented as the note's text, or "the note is empty".
+- NOT RUN: the read reached Pranab's unmasked instance (the hand-over that exists until #963).
+- The run records whether his Notes was open, which display was read (read_screen or read_mind_view), and which instance was reached.

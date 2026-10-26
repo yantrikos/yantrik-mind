@@ -21965,3 +21965,44 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Mutants killed (2/2):** the request not kept; the compose skipped.
 - **Windows workspace:** 2632 passed, 0 failed.
 - **Linux (staging, 2f21720), E.CONFIRM1:** mind-conversation 1315 passed. **Bundle:** yantrik-mind-2f21720-linux-amd64.tar.zst, sha256 e492baa0e3b74a609bfccb91c6578e067ed38f89e948d61856ef769212f46600 (verified locally). Staging disk: 90%, 4.0 GB free.
+
+**Cold-browser batch 7 (520, Mind 2f21720 + #956 files, dc's agent): FAIL, on a different path.**
+- `web_find "Learn more"` → `[e1] link "Learn more"` (pointing to `iana.org/help/example-domains`).
+- The model then chose `web_go {"url":"https://iana.org/help/example-domains"}` instead of `web_click`. It was refused: "fetch planner … picked no listed address".
+  - web_find shows link targets WITHOUT a scheme, and `fetch_candidates` takes only `http(s)://` tokens from web results.
+- E.CONFIRM1 was not exercised: no click, so no confirmation.
+- The reply was honest: "link located, click not completed".
+
+## E.EGRESS5b — PREREG: a scheme-less address a web result showed is a candidate, as https
+
+**Why:**
+- Going to an address the web itself just showed is following a link. The guard exists against the Mind BUILDING addresses that carry private bits; a web result's own link is not that, and full URLs from web results are already candidates.
+- The desktop's web tools print link targets scheme-less, so the planner refused the page's own link.
+
+**What changes:**
+- `fetch_candidates` also takes bare domains, with an optional path, from WEB results.
+  - It uses the same bare-domain reading as E.EGRESS5 (labels, letter TLD, never a file name), as `https://`.
+  - The quoted-text rule is not used, because web results are not the person's words.
+  - The existing variant-menu limit and path filter apply.
+- **A target cut with "…" is skipped:** a truncated address is not an address.
+- **Unchanged:** person-words handling (E.EGRESS5), the as-written rule and every other check.
+
+**Kill criteria:**
+- K1, tests fail:
+  - a web result line `[e1] link "Learn more" → iana.org/help/example-domains` gives the candidate `https://iana.org/help/example-domains`;
+  - `iana.org/help/e…` gives none;
+  - `main.rs` in a page gives none;
+  - a full `https://` URL is not doubled.
+- K2, mutants survive: web bare domains removed; the "…" skip removed.
+- K3: both suites pass.
+- **Live:** the batch-7 path (web_go to the link's address) reaches "Example Domains".
+
+**E.EGRESS5b — RESULT: PASS (Windows, unit).**
+- `a_link_a_web_result_showed_is_a_candidate` passes:
+  - web_find's scheme-less `→ iana.org/help/example-domains` → `https://iana.org/help/example-domains`;
+  - a cut `iana.org/help/e…` → none;
+  - `main.rs` in a page → none;
+  - a full URL is not doubled.
+- E.EGRESS5's test still passes. The person-words path is unchanged; the quoted-text rule applies to person words only.
+- **Mutants killed (2/2):** the web bare domains removed; the "…" skip removed.
+- **Windows workspace:** 2633 passed, 0 failed.

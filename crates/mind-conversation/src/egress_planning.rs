@@ -783,6 +783,13 @@ const NOT_A_DOMAIN: &[&str] = &[
 /// words"): a domain the person typed without a scheme, as `https://`. Their own words only (never
 /// quoted, fenced or forwarded text), never an e-mail address, never a file name.
 pub(crate) fn person_bare_domains(user_text: &str) -> Vec<String> {
+    bare_domains(user_text, true)
+}
+
+/// E.EGRESS5 / E.EGRESS5b: the bare domains in `text`, as `https://`. `person`: the person's own
+/// words, so quoted, fenced or forwarded text is skipped; a web result has no such part. A target
+/// the tool cut with "…" is not an address and is skipped.
+fn bare_domains(user_text: &str, person: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut at = 0;
     for raw in user_text.split(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '`' | ',')) {
@@ -790,7 +797,7 @@ pub(crate) fn person_bare_domains(user_text: &str) -> Vec<String> {
         at = start + raw.len();
         let token = raw.trim_end_matches(['.', ',', ';', ':', '!', '?']);
         // An e-mail address fails the label rule below ('@' is not a label character).
-        if token.is_empty() || token.contains("://") || in_quoted_text(user_text, start) {
+        if token.is_empty() || token.contains("://") || token.contains('\u{2026}') || (person && in_quoted_text(user_text, start)) {
             continue;
         }
         let (host, path) = match token.find('/') {
@@ -832,7 +839,14 @@ pub(crate) fn fetch_candidates(user_text: &str, web_obs: &[String], named: &[Str
         push(u);
     }
     for page in web_obs {
-        let urls = urls_in(page);
+        let mut urls = urls_in(page);
+        // E.EGRESS5b (520 batch 7: web_find showed `→ iana.org/help/example-domains`): a link the
+        // web itself showed, scheme-less, is the page's own address.
+        for u in bare_domains(page, false) {
+            if !urls.contains(&u) {
+                urls.push(u);
+            }
+        }
         let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for u in &urls {
             *groups.entry(variant_group(u)).or_default() += 1;
@@ -1687,6 +1701,23 @@ mod tests {
         assert!(bare("they wrote:\n> try example.com today").is_empty(), "quoted text is not the person's words");
         assert_eq!(person_urls("read https://example.com/a now"), vec!["https://example.com/a"], "a full URL is unchanged and not doubled");
         assert!(fetch_candidates("Open example.com", &[], &[]).contains(&"https://example.com".to_string()));
+    }
+
+    /// E.EGRESS5b (520 batch 7: the page's own "Learn more" target, printed scheme-less by web_find,
+    /// was refused): a link a web result showed is a candidate; a cut one, a file name and a doubled
+    /// full URL are not.
+    #[test]
+    fn a_link_a_web_result_showed_is_a_candidate() {
+        use super::fetch_candidates;
+        let found = vec![r#"[e1] link "Learn more" (off screen) → iana.org/help/example-domains, below the visible part"#.to_string()];
+        let c = fetch_candidates("click the 'Learn more' link", &found, &[]);
+        assert!(c.contains(&"https://iana.org/help/example-domains".to_string()), "{c:?}");
+        let cut = vec![r#"[e1] link "Learn more" → iana.org/help/e… below"#.to_string()];
+        assert!(!fetch_candidates("click it", &cut, &[]).iter().any(|u| u.contains("iana.org")), "a cut address was taken");
+        let file = vec!["see main.rs for details".to_string()];
+        assert!(fetch_candidates("x", &file, &[]).is_empty());
+        let full = vec!["go to https://iana.org/help/example-domains now".to_string()];
+        assert_eq!(fetch_candidates("x", &full, &[]).iter().filter(|u| u.contains("iana.org")).count(), 1, "a full URL was doubled");
     }
 }
 

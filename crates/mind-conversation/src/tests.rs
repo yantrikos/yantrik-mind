@@ -20571,6 +20571,51 @@ mod desktop_consent_and_stall_wiring {
         assert!(log.contains("mcp.yantrik-os.web_click"), "{}", &log[log.len().saturating_sub(800)..]);
     }
 
+    /// E.CONFIRM1 (520 batch 6: after "yes" the reply was the raw click result): a turn that ended
+    /// on a confirmation is answered after the yes, from what the action returned; the action runs once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_yes_the_reply_answers_what_was_asked() {
+        use mind_types::{ActionRuntime, Capability};
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let script = Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Call("mcp.yantrik-os.web_click", serde_json::json!({"ref": "e1"}))],
+            seen: seen.clone(),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        };
+        let script: Arc<dyn LLMBackend> = Arc::new(script);
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let click = mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: "web_click".into(),
+            description: "Press an element by its ref".into(),
+            read_only: false,
+            open_world: true,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object", "properties": {"ref": {"type": "string"}}, "required": ["ref"]}),
+        };
+        hub.add_scripted_tool(click, vec![Ok("Clicked link \"Learn more\" (e1). Now on: \"Example Domains\"".to_string())]).unwrap();
+        let executor = Arc::new(mind_tools::ToolActionExecutor::new().with_mcp_hub(hub.clone()));
+        let runtime: Arc<dyn ActionRuntime> = Arc::new(mind_governance::GovernedActionRuntime::new(
+            Arc::new(mind_governance::RealHarmGate::new()),
+            executor,
+            vec![Capability::Network, Capability::LocalControl],
+        ));
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone()).with_runtime(runtime);
+        let ask = conv.agent_loop_for_eval("Click Learn more and tell me the heading of the page it opens", &TurnIdentity::primary()).await.unwrap();
+        assert!(ask.contains("confirm with"), "{ask}");
+        assert!(hub.scripted_calls().is_empty(), "it ran before the yes");
+        let answer = conv.handle_turn("yes").await.unwrap();
+        assert_eq!(answer, COMPOSED, "the yes was reported, not answered: {answer}");
+        assert_eq!(hub.scripted_calls().iter().filter(|(t, _)| t.ends_with("web_click")).count(), 1, "the action did not run exactly once");
+        assert!(
+            seen.lock().unwrap().iter().any(|p| p.contains("The person asked: Click Learn more") && p.contains("Example Domains")),
+            "the compose did not carry the request and the result"
+        );
+    }
+
     /// E.TOOL2 (520: web_click {"words":…} against its schema's required "ref"): a call missing a
     /// field its own schema requires is answered to the model and never reaches the tool.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

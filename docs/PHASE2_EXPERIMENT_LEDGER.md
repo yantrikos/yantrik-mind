@@ -21932,3 +21932,35 @@ Only hypotheses are consolidated. User assertions and observations are never mer
   - after the proxy's "yes": "Clicked link \"Learn more\" (e1). Now on: \"Example Domains\"…".
 - **What this proves together:** #942 does not block the Mind's browser; E.EGRESS5 (bare domain); the Lens + clears the desktop taint; E.TOOL1 (no unknown tool); E.TOOL2 (one bounce, then the right argument); #956's whole-page find.
 - **Residual, a quality follow-up:** after "yes", the reply is the RAW click result, not a composed answer to "tell me the heading". The confirmed action runs and its output is returned as the reply, so the turn does not continue to compose. It is held as the next candidate, not built yet.
+
+## E.CONFIRM1 — PREREG: after "yes", the reply answers what was asked
+
+**Why (520 batch 6):**
+- "…click the 'Learn more' link, and tell me the heading of the page it opens" → the click waited for the person (E.EGRESS5d).
+- After "yes" the reply was the RAW click result ("Done — Clicked link … Now on: \"Example Domains\"…"), not an answer.
+- `handle_pending_action` runs the stored action and returns `Done — {output}`. The asking turn's request is not kept, so nothing answers it.
+
+**What changes:**
+- When the agent loop ends a turn on a confirmation ("Ready to …") with an action pending, it keeps that turn's request beside the pending action.
+- On "yes", after a SUCCESSFUL run, one compose call answers the kept request from the action's result.
+  - The call uses `chat_grounded`, the private lane, the same as compose.
+  - The result is bounded and marked as reference data, not instructions.
+- A failed compose, a failed action, or no kept request (the email and comment recipes) keeps today's reply unchanged.
+- "no" and a superseding message drop the kept request with the action.
+
+**Kill criteria:**
+- K1, tests fail:
+  - a scripted turn whose MCP call needs confirmation, then "yes" → the reply is the compose's answer, not `Done — <raw>`, and the action ran exactly once;
+  - the email-recipe confirm still replies "Done…" (no kept request);
+  - "no" → "Cancelled…" and no compose.
+- K2, mutants survive: the request not kept; the compose skipped.
+- K3: both suites pass.
+- **Live (520):** the batch-6 prompt; after "yes", the reply names "Example Domains" in a sentence.
+
+**E.CONFIRM1 — RESULT: PASS (Windows, unit).**
+- `after_yes_the_reply_answers_what_was_asked` passes:
+  - a scripted turn ends on `web_click`'s confirmation, with nothing run;
+  - "yes" → the reply is the compose's answer (not `Done — <raw>`), web_click ran exactly once, and the compose prompt carried the request and the result.
+- `send_email_requires_confirmation_then_sends` (a recipe confirm with no kept request) still replies "Done…".
+- **Mutants killed (2/2):** the request not kept; the compose skipped.
+- **Windows workspace:** 2632 passed, 0 failed.

@@ -22011,3 +22011,15 @@ Only hypotheses are consolidated. User assertions and observations are never mer
 - **Linux (staging .95, 2cc149b):** mind-conversation 1316 passed, 0 failed.
 - **Bundle:** `yantrik-mind-2cc149b-linux-amd64.tar.zst`, 62891571 bytes, sha256 `e6f4bf728d226389d049aa6a6f07a793324f580946ade13ceff8fd4546128bfb` (verified locally after copy). Sent to dc for the batch-7 rerun.
 - OS #957 (filed by dc) will print web_find targets as whole `https://` URLs, never cut; long or `data:` links get a marker with no partial URL. urls_in stays unchanged.
+
+## Cold desktop browser — 520 batch 7b (Mind 2cc149b): PASS, route (b)
+
+- **Turn 1017** (7 steps, 11 s):
+  - web_go (browser not open) → os_act open_app browser → web_go example.com → web_find "Learn more" [e1] → web_find repeated (nudged);
+  - web_click {"words"} sent back as malformed (needs ref) → web_click {"ref":"e1"} → "Ready to run … confirm with yes".
+- **Turn 1018** "yes", about 7 s to reply: "The click worked — it opened IANA's page at https://www.iana.org/help/example-domains, and its heading is "Example Domains.""
+- **What this verifies live:**
+  - E.CONFIRM1: the reply after "yes" is a composed sentence answering the ask, not raw tool output;
+  - E.TOOL2: the malformed web_click went back to the model, which corrected it on the next step.
+- **Not verified live:** E.EGRESS5e (route (a), direct navigation to a scheme-less target) — the model took the click path. It stays verified by unit tests and mutants only.
+- 520 restored by dc: originals back, Hermes active, marker removed. Evidence: dc's e-batch7b/evidence.md.

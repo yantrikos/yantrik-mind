@@ -22041,3 +22041,21 @@ The grade uses the OCR of a masked window that the run pastes, not these constan
 - FAIL: HIDDEN presented as the note's text, or "the note is empty".
 - NOT RUN: the read reached Pranab's unmasked instance (the hand-over that exists until #963).
 - The run records whether his Notes was open, which display was read (read_screen or read_mind_view), and which instance was reached.
+
+## E.MASK1 — RESULT (520, OS #959, checks 2 and 3): masking NOT EXERCISED; two defects found
+
+Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is reported separately.
+
+**Check 2 — packing list:**
+- The add PASSED with a defect:
+  - steps: os_describe notes → os_act append "- socks" → reply. The act answered "settled: True", so no separate settle look ran;
+  - the act's result showed the note (5 lines, saved), not HIDDEN;
+  - reply: "Socks are on the list - but the append ran the bullet onto the umbrella line, so it reads - umbrella- socks."
+- Follow-up ("What's on my ZZ packing list?"): "passport, charger, umbrella- socks". A faithful report of the joined line.
+- **Masking criterion: NOT RUN (#963).** Pranab's own Notes was open (pid 953957, wayland-0), so the Mind's acts reached his unmasked instance. "Not HIDDEN" proves nothing here. I first read this as a pass; it is the same hand-over that voids check 3.
+- **Defect D1 (the join):** "- socks" appended to a note whose last line had no trailing newline, giving "- umbrella- socks". The Mind saw it and said so, but did not repair it. Owner pending: does Notes append join on a line boundary by contract? Asked dc.
+
+**Check 3 — read-screen: NOT RUN (#963)** under the preregistered rule: os_screen, then open_note plus os_describe on Pranab's unmasked instance.
+- **Defect D2 (a trashed note answered the question):** open_note resolved "ZZ packing list" to an OLDER, TRASHED note left by an earlier test run. The reply gave that note's text and told the person the socks line was not on their list. That is a wrong answer to the person, independent of masking.
+- Owner pending: whether the Mind passed a title (then Notes' resolution should prefer live notes over trashed ones) or an id taken from a listing that did not mark trashed notes. Asked dc for the open_note args.
+- Test hygiene: earlier runs' "ZZ packing list" notes sit in Trash (Notes has no per-note purge), and that is what D2 picked up. Future runs use a unique title per run.

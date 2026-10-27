@@ -22089,3 +22089,14 @@ Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is repo
 - Mutants: restore each old sentence → its test fails.
 - **Added before building** (dc, the same day: while an on-demand start is in progress, describe says "<app> is starting; ask again in a moment"): `still_starting` also matches `is starting; ask again`, so the existing wait-3-s-and-look-once-more applies. A failed start ("not running") does not match. Test: `an_app_started_on_demand_is_still_starting`. Mutant: drop the new phrase → red.
 - **Added before building** (dc: an act on a framework app still starting waits up to 15 s, then runs once; past that it is dropped, never replayed, answering "<App> is starting; nothing was done — send it again in a moment."): `nothing_was_run` also matches "nothing was done" in the answer's first two lines. Otherwise, if that answer came back as success text, the act would be recorded as made and the duplicate-change guard (E.LEDGER1) would refuse the resend. The phrase deeper in an app's content does not count. Test: `an_act_dropped_while_starting_ran_nothing`. Mutant: drop the branch → red.
+
+**E.OPEN1 — RESULT: PASS (unit; Windows and Linux).** Commit 8353862.
+- Tests: the goal-note and desktop-map tests are tightened, and `an_app_started_on_demand_is_still_starting` and `an_act_dropped_while_starting_ran_nothing` are new.
+- **Mutants killed (4/4):**
+  - file_steps open made unconditional;
+  - desktop_sentence open made unconditional;
+  - the new starting phrase unmatched;
+  - the "nothing was done" branch dropped.
+- **Windows workspace:** 2635 passed, 0 failed. **Linux (staging .95):** mind-conversation 1318 passed, 0 failed.
+- **Bundle:** `yantrik-mind-8353862-linux-amd64.tar.zst`, 62807927 bytes, sha256 `b64974761898ca53946de4f1654c20269d9b3db43c15a1a8f890347df566426d` (verified locally after copy).
+- Not yet live: needs the OS #978 step-1 build. dc will send its describe for a stopped app and a starting one, and I will run against the real strings.

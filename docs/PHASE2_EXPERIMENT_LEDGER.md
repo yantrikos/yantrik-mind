@@ -22063,3 +22063,9 @@ Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is repo
 - **Check 1 (dc):** the bodies of all four apps on wayland-1 show HIDDEN, with no sentinel. Titles and Snippets tags show, by #959's design. READ_ONLY is logged but never drawn, a UX gap that dc has filed.
 - **Mind-side merge condition:** that the Mind sees real data through a MASKED instance's describe/act rests on dc's intents-unchanged probe, not on this run. Asked dc to confirm that the probe covers os_describe (the state summary) as well as the actions.
 - **Merge (dc):** #959 merged as fe2b8b41. The Mind-side condition rests on `apps/notes/src/tests/mind_view.rs::masking_is_visual_only_describe_and_calls_are_as_for_a_normal_instance`, which checks that {summary, state, search, read_notes} from a `start_for_mind` instance equal those from a normal instance over the same store, sentinel present. Each app has its equivalent. It is a unit test, not a live check: the live check of the masked path waits for #963. The trashed-note defect is tracked as #968. Runs now use a unique note title per run.
+- **That test, watched to fail (dc, on main fe2b8b41):**
+  - Mutant A: `describe` returns summary = HIDDEN when for_mind → red at mind_view.rs:134;
+  - Mutant B: `Act::ReadNotes` answers HIDDEN when for_mind → red at the same line;
+  - the other 6 mind_view tests stayed green, as expected, since they test the visual mask;
+  - both mutations reverted.
+- The Mind-side condition now holds at unit level. Live confirmation waits for #963.

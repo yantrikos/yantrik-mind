@@ -22069,3 +22069,23 @@ Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is repo
   - the other 6 mind_view tests stayed green, as expected, since they test the visual mask;
   - both mutations reverted.
 - The Mind-side condition now holds at unit level. Live confirmation waits for #963.
+
+## E.OPEN1 — PREREG: the editor hints stop telling the model to open a framework app first
+
+**Why:**
+- OS #978 step 1 (Pranab's decision, 27 Oct: ship before step 3): no framework app opens in a Mind's view. `open_app` answers "<App> cannot open in your view; use its actions and os_describe <id> instead."
+- Step 1 adds an on-demand start: an agent's act or describe on a framework app that is not running starts it windowless, and describe never says "open it".
+- Two Mind prompt lines tell the model to open the editor first: `desktop_sentence` ("open it with the shell's open_app if it is not running") and `file_steps` ("open the editor first with … open_app … if it is closed"). On step 1's OS, following them costs a refused call per write.
+- Checked in code: the Mind never calls open_app itself. Only those hints do.
+
+**Change:** both hints say to call the editor's actions directly, and to open it with open_app ONLY IF the desktop says it is not running. This is version-safe:
+- today's OS says "not running" for a closed app, so the model opens it as now;
+- step 1's OS never says it, so the model never makes the refused call.
+- The stray run of spaces inside `desktop_sentence` (a lost line continuation) goes too.
+
+**Tests:**
+- the goal-note test asserts the open_app call is conditioned on "only if the desktop says";
+- the desktop-map test asserts the same and that the old unconditional wording is gone.
+- Mutants: restore each old sentence → its test fails.
+- **Added before building** (dc, the same day: while an on-demand start is in progress, describe says "<app> is starting; ask again in a moment"): `still_starting` also matches `is starting; ask again`, so the existing wait-3-s-and-look-once-more applies. A failed start ("not running") does not match. Test: `an_app_started_on_demand_is_still_starting`. Mutant: drop the new phrase → red.
+- **Added before building** (dc: an act on a framework app still starting waits up to 15 s, then runs once; past that it is dropped, never replayed, answering "<App> is starting; nothing was done — send it again in a moment."): `nothing_was_run` also matches "nothing was done" in the answer's first two lines. Otherwise, if that answer came back as success text, the act would be recorded as made and the duplicate-change guard (E.LEDGER1) would refuse the resend. The phrase deeper in an app's content does not count. Test: `an_act_dropped_while_starting_ran_nothing`. Mutant: drop the branch → red.

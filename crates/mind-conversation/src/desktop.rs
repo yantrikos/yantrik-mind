@@ -362,7 +362,12 @@ pub(crate) fn nothing_was_run(obs: &str) -> bool {
     // E.CMD1: in a command's answer (yantrik-os #566) the program's own output sits inside the
     // bridge's fence, and the bridge's refusal is never shaped as a finished or running command --
     // so words a program printed cannot make a run read as refused.
-    shaped_command(obs).is_none() && obs.contains("REFUSED \u{2014} nothing was run")
+    shaped_command(obs).is_none()
+        && (obs.contains("REFUSED \u{2014} nothing was run")
+            // E.OPEN1 (OS #978 step 1): an act on an app still starting on demand is dropped, never
+            // replayed -- "<App> is starting; nothing was done — send it again in a moment." Not a
+            // change made, so the resend is not refused as a second one. The desktop's own lines only.
+            || obs.lines().take(2).any(|l| l.contains("nothing was done")))
 }
 
 /// E.CMD1: a command's answer in the shape yantrik-os #566 gives it (869de6ea), behind the "Done — "
@@ -1373,8 +1378,10 @@ pub(crate) fn still_loading(obs: &str) -> bool {
 /// E.ARENA1-F34 (yantrik-os #464): the app's window is up but it has not answered yet. The desktop
 /// has already waited 15 s and says to describe again -- not a failure, and nothing to open again.
 /// The sentence is on the reply's second line (the first is yos-mcp's generic "failed (exit 1)").
+/// E.OPEN1 (OS #978 step 1): an app the desktop is starting on demand, windowless, says
+/// "<app> is starting; ask again in a moment" -- the same wait, the same one more look.
 pub(crate) fn still_starting(obs: &str) -> bool {
-    obs.contains("is open but still starting")
+    obs.contains("is open but still starting") || obs.contains("is starting; ask again")
 }
 
 /// E.ARENA1-F34: how long to wait before describing a starting app again.
@@ -2304,8 +2311,9 @@ fn file_steps(path: &str, home: Option<&str>) -> String {
     let at = files_path(path, home).unwrap_or_else(|| path.to_string());
     format!(
         "The next calls are, in order: os_act {{\"app\": \"editor\", \"action\": \"new\", \"args\": {{\"text\": \"<the text>\"}}}}, \
-         then os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{at}\"}}}} -- open the editor \
-         first with os_act {{\"app\": \"shell\", \"action\": \"open_app\", \"args\": {{\"name\": \"editor\"}}}} if it is closed."
+         then os_act {{\"app\": \"editor\", \"action\": \"save_as\", \"args\": {{\"path\": \"{at}\"}}}} -- call them directly; \
+         open the editor with os_act {{\"app\": \"shell\", \"action\": \"open_app\", \"args\": {{\"name\": \"editor\"}}}} only \
+         if the desktop says it is not running."
     )
 }
 
@@ -2571,7 +2579,11 @@ pub(crate) fn desktop_sentence(desktop: bool) -> String {
     if !desktop {
         return String::new();
     }
-    " On this desktop a file's text is written with the `editor` app (open it with the shell's      open_app if it is not running; os_describe editor shows its actions); folders are the shell's      files_* actions; the calendar and notes are apps of their own."
+    // E.OPEN1 (OS #978 step 1): a Mind's open_app of a framework app is refused, and the desktop starts
+    // the app for an act or a describe. Open only on the desktop's own word -- today's OS still says it.
+    " On this desktop a file's text is written with the `editor` app (call its actions directly -- os_describe \
+     editor shows them; open it with the shell's open_app only if the desktop says it is not running); folders \
+     are the shell's files_* actions; the calendar and notes are apps of their own."
         .to_string()
 }
 
@@ -3615,6 +3627,8 @@ mod tests {
         let n = goal_nudge(4, "~/week-plan.md", None, Some("/home/yantrik"));
         assert!(n.contains(r#""action": "save_as", "args": {"path": "/home/yantrik/week-plan.md"}"#), "{n}");
         assert!(n.contains(r#""action": "new""#) && n.contains(r#""action": "open_app", "args": {"name": "editor"}"#), "{n}");
+        // E.OPEN1: the open is the fallback, on the desktop's word -- never a first step.
+        assert!(n.contains("call them directly") && n.contains("only if the desktop says it is not running"), "{n}");
     }
 
     /// E.ARENA1-F55 on the real calendar description and `events_between` answer (520, d95f4444).
@@ -3967,7 +3981,27 @@ mod tests {
         let s = desktop_sentence(true);
         assert!(s.contains("written with the `editor` app") && s.contains("os_describe editor"), "{s}");
         assert!(s.contains("files_*"), "{s}");
+        // E.OPEN1: actions first; open_app only on the desktop's word; no stray runs of spaces.
+        assert!(s.contains("call its actions directly") && s.contains("only if the desktop says it is not running"), "{s}");
+        assert!(!s.contains("  "), "{s}");
         assert_eq!(desktop_sentence(false), "");
+    }
+
+    /// E.OPEN1: both desktops' "starting" sentences earn the one more look; a failed start does not.
+    #[test]
+    fn an_app_started_on_demand_is_still_starting() {
+        assert!(still_starting("failed (exit 1)\nBlender is open but still starting; describe it again."));
+        assert!(still_starting("Notes is starting; ask again in a moment."));
+        assert!(!still_starting("Notes is not running."));
+    }
+
+    /// E.OPEN1: an act dropped while its app starts ran nothing -- with or without the Mind's prefix;
+    /// the phrase deep in an app's own content does not count.
+    #[test]
+    fn an_act_dropped_while_starting_ran_nothing() {
+        assert!(nothing_was_run("Notes is starting; nothing was done \u{2014} send it again in a moment."));
+        assert!(nothing_was_run("Done \u{2014} Notes is starting; nothing was done \u{2014} send it again in a moment."));
+        assert!(!nothing_was_run("Done \u{2014} Notes \u{2014} \"Diary\" open (3 lines, saved)\nrevision: 4\n{\n  \"body\": \"nothing was done today\"\n}"));
     }
 
     #[test]

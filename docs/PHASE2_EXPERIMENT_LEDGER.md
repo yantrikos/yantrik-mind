@@ -22197,3 +22197,12 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
   - the full-trail replace reverted to drop → red;
   - the refusal head back to 120 → red.
 - **Added before running:** the plain test turn calls no tool, so the "tool call" mark had no test. `a_turn_leaves_a_trail_of_its_stages` also runs a turn that calls discover_tools: "tool call" is followed by "model call". Mutant: the tool-call mark removed → red.
+
+**E.STALL4 — RESULT: PASS (unit; Windows and Linux).** Commit 833b270.
+- **Mutants killed (4/4):**
+  - the model-call mark removed;
+  - the tool-call mark removed;
+  - a full trail drops the new mark;
+  - the refusal head back to 120.
+- **Windows workspace:** 2637 passed, 0 failed (no new test functions; two were extended). **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
+- **Bundle:** `yantrik-mind-833b270-linux-amd64.tar.zst`, 62819893 bytes, sha256 `bc4fe2f2817003d781a97001725164788a7b9c56a13f814343c62e921e4451fe` (verified locally after copy). It supersedes d042f10 for the #980 rerun.

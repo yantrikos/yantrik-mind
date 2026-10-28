@@ -22111,3 +22111,49 @@ Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is repo
 - **PASS:** the file holds `hello`, and the trace goes editor new → save_as with no open_app, or at most one open_app refused with its next step followed. Any "is starting; ask again" gets exactly one re-look; any "nothing was done" act is resent and runs.
 - **FAIL:** a describe/act loop, a second open_app, or a reply claiming success with no file.
 - At the OS rollback to c4d0b786 the Mind stays on 8353862, which is version-safe; Hermes is made active again.
+
+## E.CAP1 — PREREG: the final answer's model call is capped by what the turn has left
+
+**Why (520, the #980 run, turn 1034, c05g-journal):**
+- three steps took 2 s (a refused files_open, then two repeats, nudged), and the loop broke to compose;
+- compose then waited about 304 s on a provider that never answered: "[agent] compose failed: OpenAI-compatible API request to https://ollama.com/v1/chat/completions failed";
+- the turn's budget is 180 s (step 0's cap read 135 = 180 − 45), and it took 306 s.
+- Every step's call is capped (`with_call_cap`, E.ARENA1-F9); compose's is not, so it waits the client's own 300 s.
+
+**Change:** compose runs under `with_call_cap(compose_call_cap(wall, elapsed, reserve))`: what the turn has left, never less than the compose reserve (YM_COMPOSE_RESERVE_SECS, default 45). The reserve is read by one helper, which the loop's deadline uses too. A capped compose that fails ends in the existing fail-closed line.
+
+**Tests:**
+- `a_step_call_is_capped_and_a_mid_turn_failure_composes` also asserts the compose call's timeout is within 170..=180 s (today: 300);
+- a unit test on `compose_call_cap`: what is left; the reserve floor past the wall; the reserve floor near the wall.
+- Mutants: drop the `with_call_cap` wrap at the call site → red; drop the reserve floor → red.
+
+Not in scope: the harness heartbeat reports "last stage: route" for the whole loop and compose (a stale label), and a refused act's args still mark a named file as written (over-strict, E.EGRESS3g's refusal shape). Both are recorded for later.
+
+## E.FIND1 — PREREG: the desktop note leads discover_tools' answer, and names agent_run
+
+**Why (520, the #980 run, turn 1037, c09b-journal):**
+- "Use agent_run to run the command: echo e980-agent-run" → `discover_tools {"query":"agent_run run shell command"}` ×2 → reply "I can't run that — I have no agent_run tool … What I do have: live market quotes and a trading workflow".
+- `discover_tools` already appends DISCOVER_DESKTOP_NOTE (E.ARENA1-F5: this search does not cover the desktop's apps; os_describe lists their actions) — but at the END.
+- A tool result keeps its first 900 characters in the work log; step 1's work log was 963 B. The native list filled the 900, and the note was cut off.
+
+**Change:** with a desktop attached, the note comes FIRST in discover_tools' answer, and it says a command line is the shell's `agent_run` (os_act {app: shell, action: agent_run}).
+
+**Tests:**
+- a scripted desktop turn calling discover_tools: its work-log entry begins with the note, and the note names agent_run.
+- Mutant: the note back at the end → red.
+
+## E.LOG1 — PREREG: the work log says whose calls it holds
+
+**Why (520, the #980 run, turn 1026, c01b-journal):**
+- "Now use os_act on notes to make a new note titled E980-0043 …" → step 0 `os_act new_note` → "Done — Notes — "E980-0043" open (3 lines, saved), 21 notes".
+- At step 1 the model chose no tool and replied: "The note already exists — **E980-0043** … That's the work-log entry from a moment ago, so no second note was needed."
+- No guard fired. The model read its own fresh call as earlier history: the prompt's heading is the bare "Work log:", and an entry is "[0] <tool> -> <result>" with no args.
+- n=1, on a fast "thin" route. This clarifies an existing label; it adds no rule.
+
+**Change:** the heading reads "Work log: (the calls YOU made for this request, in order; [0] was your first)". The "Work log:" text that tests and readers match is kept.
+
+**Tests:**
+- a scripted desktop turn: the step-1 prompt carries the sentence.
+- Mutant: the sentence removed → red.
+
+**Live check (next 520 run):** "make a new note titled <unique>" → the reply says it made the note, not that it existed.

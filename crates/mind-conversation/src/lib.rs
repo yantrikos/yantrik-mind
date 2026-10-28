@@ -5295,6 +5295,22 @@ fn step_call_left(loop_left_ms: u64, reserve_ms: u64, last: bool) -> u64 {
     }
 }
 
+/// E.LOG1 (520, the #980 run, turn 1026: the model made a note at step 0, then told the person it
+/// "already exists -- that's the work-log entry from a moment ago"): whose calls the log holds.
+const WORK_LOG_WHOSE: &str = "(the calls YOU made for this request, in order; [0] was your first)";
+
+/// The compose step's share of the turn (YM_COMPOSE_RESERVE_SECS, 45 s by default).
+fn compose_reserve_ms() -> u64 {
+    std::env::var("YM_COMPOSE_RESERVE_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(45) * 1000
+}
+
+/// E.CAP1 (520, the #980 run, turn 1034: three steps in 2 s, then compose waited 304 s on a
+/// provider that never answered -- a 180 s turn took 306 s): every step's call was capped and
+/// compose's was not. The final answer gets what the turn has left, never less than its reserve.
+fn compose_call_cap(wall_ms: u64, elapsed_ms: u64, reserve_ms: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(wall_ms.saturating_sub(elapsed_ms).max(reserve_ms))
+}
+
 fn step_call_cap(loop_left_ms: u64, fallback: bool) -> std::time::Duration {
     let share = if fallback { loop_left_ms / 2 } else { loop_left_ms };
     std::time::Duration::from_millis(share.max(60_000))
@@ -13737,7 +13753,7 @@ WINDOW: all-time, latest 200
                 };
                 // E.ARENA1-F5: this search covers the mind's own tools, not the desktop's actions.
                 if self.desktop_attached() {
-                    format!("{out}{}", desktop::DISCOVER_DESKTOP_NOTE)
+                    format!("{}\n\n{out}", desktop::DISCOVER_DESKTOP_NOTE)
                 } else {
                     out
                 }
@@ -14583,11 +14599,7 @@ Open reminders you're carrying for them:",
             // exactly the turns that reach compose. Measured distribution: three of eight turns
             // used ZERO tools and never composed at all, so charging every turn a 45s reserve up
             // front would tax the common case for the rare one.
-            let reserve_ms = std::env::var("YM_COMPOSE_RESERVE_SECS")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(45)
-                * 1000;
+            let reserve_ms = compose_reserve_ms();
             let loop_deadline_ms = budget.max_wall_ms.saturating_sub(reserve_ms).max(1_000);
             if step > 0 && elapsed_ms >= loop_deadline_ms {
                 eprintln!(
@@ -14661,7 +14673,7 @@ Open reminders you're carrying for them:",
                 desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
-                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log:{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log: {WORK_LOG_WHOSE}{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![
@@ -16007,10 +16019,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         let compose_scope = COMPOSE_SCOPE;
         // Boxed (E.STACK1): held across either arm below, the compose future inline overflowed the
         // Windows test stack in `cli_dispatch_routes_plugins_and_chat`.
-        let compose_call = Box::pin(self.chat_streamed_to_progress(
-            vec![ChatMessage::system(&self.persona()), ChatMessage::user(&wrap)],
-            cfg.clone(),
-            compose_scope,
+        // E.CAP1: what the turn has left, never less than compose's reserve -- not the client's 300 s.
+        let compose_cap = compose_call_cap(budget.max_wall_ms, started.elapsed().as_millis() as u64, compose_reserve_ms());
+        let compose_call = Box::pin(mind_inference::with_call_cap(
+            compose_cap,
+            self.chat_streamed_to_progress(
+                vec![ChatMessage::system(&self.persona()), ChatMessage::user(&wrap)],
+                cfg.clone(),
+                compose_scope,
+            ),
         ));
         // E.PACE2: compose at its own effort when one is set; the person's pick still wins, and only
         // the gateway is sent one (`effort_for`).
@@ -16024,7 +16041,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 visible
             }
             Err(e) => {
-                eprintln!("[agent] compose failed: {e}");
+                eprintln!("[agent] compose failed after {} s (cap {} s): {e}", compose_started.elapsed().as_secs(), compose_cap.as_secs());
                 // FAIL CLOSED, WITH A STATUS LINE WRITTEN BY CODE (E.SEC14, Codex's shape).
                 //
                 // A private compose that cannot reach the owned lane must NOT retry on Household:
@@ -16059,8 +16076,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             }
         };
         eprintln!(
-            "[agent] compose took {}s",
-            compose_started.elapsed().as_secs()
+            "[agent] compose took {}s (cap {} s)",
+            compose_started.elapsed().as_secs(),
+            compose_cap.as_secs()
         );
         // AN EMPTY COMPOSE IS NOT AN ANSWER — it is a blank bubble, which reads as the mind having
         // nothing to say after doing all the work. Two ordinary paths land here empty, and neither

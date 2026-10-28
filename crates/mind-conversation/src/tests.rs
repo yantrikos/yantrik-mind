@@ -17679,6 +17679,11 @@ mod desktop_consent_and_stall_wiring {
     fn the_last_answer_step_may_use_the_compose_reserve() {
         assert_eq!(crate::step_call_left(5_000, 45_000, false), 5_000);
         assert_eq!(crate::step_call_left(5_000, 45_000, true), 50_000);
+        // E.CAP1: compose gets what the turn has left, and its reserve even past the wall.
+        let ms = |d: std::time::Duration| d.as_millis() as u64;
+        assert_eq!(ms(crate::compose_call_cap(180_000, 2_000, 45_000)), 178_000);
+        assert_eq!(ms(crate::compose_call_cap(180_000, 170_000, 45_000)), 45_000, "near the wall");
+        assert_eq!(ms(crate::compose_call_cap(180_000, 400_000, 45_000)), 45_000, "past the wall");
         let cap = crate::step_call_cap(crate::step_call_left(5_000, 120_000, true), false);
         assert!(cap >= std::time::Duration::from_secs(125), "{cap:?}");
         // The floor is unchanged.
@@ -18924,8 +18929,41 @@ mod desktop_consent_and_stall_wiring {
         .await;
         let first = *r.timeouts.first().expect("the model was called");
         assert!((130..=135).contains(&first), "step 0 waited up to {first} s");
+        // E.CAP1 (520, turn 1034): compose too waits only what the turn has left -- not the client's 300 s.
+        let compose = *r.timeouts.last().expect("compose called the model");
+        assert!((170..=180).contains(&compose), "compose waited up to {compose} s");
         assert!(r.reply.contains(COMPOSED), "the work log was thrown away: {}", r.reply);
         assert!(!r.reply.contains("couldn't think just now"), "{}", r.reply);
+    }
+
+    /// E.FIND1 (520, the #980 run, turn 1037): "Use agent_run" sent the model to discover_tools, whose
+    /// desktop note sat past the work log's 900 characters -- "I have no agent_run tool". The note
+    /// now leads the answer, and names the shell's agent_run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_desktop_note_leads_a_tool_search() {
+        let r = run(
+            vec![Step::Call("discover_tools", serde_json::json!({"query": "agent_run run shell command"}))],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        let second = r.prompts.iter().find(|p| p.contains("[0] discover_tools ->")).expect("the search reached the work log");
+        assert!(second.contains("[0] discover_tools -> ON THIS COMPUTER"), "the note does not lead: {second}");
+        assert!(crate::desktop::DISCOVER_DESKTOP_NOTE.contains("agent_run"));
+    }
+
+    /// E.LOG1 (520, the #980 run, turn 1026): the work log says the calls in it are the model's own,
+    /// for this request -- it called a note made at its step 0 one that "already exists".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_work_log_says_whose_calls_it_holds() {
+        let r = run(
+            vec![Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "notes"}))],
+            vec!["Notes \u{2014} nothing open, 20 notes"],
+            vec!["UNUSED"],
+        )
+        .await;
+        let second = r.prompts.iter().find(|p| p.contains("[0] mcp.yantrik-os.os_describe ->")).expect("the look reached the work log");
+        assert!(second.contains("Work log: (the calls YOU made for this request, in order; [0] was your first)"), "{second}");
     }
 
     /// The desktop's refusal from Reading D's T5.

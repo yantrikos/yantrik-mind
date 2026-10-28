@@ -271,7 +271,9 @@ pub(crate) fn condense_description_for(obs: &str, family: Option<&str>) -> Optio
 /// "write file", was told "no tool or saved skill matches — use build_capability to create one",
 /// and concluded it could not. That search covers only the mind's OWN tools. The desktop's
 /// `files_new_folder` and `editor_save_as` are listed by `os_describe`, and nothing said so.
-pub(crate) const DISCOVER_DESKTOP_NOTE: &str = "\nON THIS COMPUTER the desktop's own apps do most things, and this search does not cover them: files and folders are the `shell` app (files_*), writing a file's text is the `editor` app, and the calendar and notes are apps too. mcp.yantrik-os.os_describe {app} lists each app's actions; call them with mcp.yantrik-os.os_act.";
+/// E.FIND1 (520, turn 1037): it LEADS the answer -- appended, it fell past the work log's 900
+/// characters behind a list of trading tools, and the model said it had no agent_run tool.
+pub(crate) const DISCOVER_DESKTOP_NOTE: &str = "ON THIS COMPUTER the desktop's own apps do most things, and this search does not cover them: files and folders are the `shell` app (files_*), a command line is the shell's agent_run, writing a file's text is the `editor` app, and the calendar and notes are apps too. mcp.yantrik-os.os_describe {app} lists each app's actions; call them with mcp.yantrik-os.os_act.";
 
 /// E.ARENA1-F5: the nudge for a turn that has not looked at the desktop at all and wants to answer.
 ///

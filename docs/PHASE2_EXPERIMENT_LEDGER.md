@@ -22206,3 +22206,14 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
   - the refusal head back to 120.
 - **Windows workspace:** 2637 passed, 0 failed (no new test functions; two were extended). **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
 - **Bundle:** `yantrik-mind-833b270-linux-amd64.tar.zst`, 62819893 bytes, sha256 `bc4fe2f2817003d781a97001725164788a7b9c56a13f814343c62e921e4451fe` (verified locally after copy). It supersedes d042f10 for the #980 rerun.
+
+## E.CAP1 / E.FIND1 / E.LOG1 / E.STALL4 — PREREG (live): check 10b of the #980 gate at 1ffd75e2, Mind 833b270 on 520
+
+- **find1** ("Use agent_run to run: echo find1-<runid>"):
+  - PASS: a resend reaches the shell's request_approval (a first "(not sent: … pointed at the apps first)" is the Mind's own redirect); with the card denied, the reply says plainly the person declined and nothing ran.
+  - FAIL: "I have no agent_run tool", the turn ends at discover_tools, or the reply claims the command ran.
+- **log1** ("Make a new note titled log1-<runid> with the text hi"): PASS if the reply says the note was made; FAIL if it says the note already existed or no new note was needed.
+- **E.CAP1:** any composed turn's journal has "[agent] compose took Ns (cap S s)" with S ≤ 180.
+- **E.STALL4:**
+  - the heartbeat during find1's approval wait reads "last stage: tool call";
+  - any refused act's journal line shows its reason after " | ".

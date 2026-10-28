@@ -22241,3 +22241,8 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant: the old order → red.
 
 **Live check (next 520 run):** "Make a new note titled <unique> with the text hi": the reply says it made the note, with no "already exists".
+
+**E.LOG1b — RESULT: PASS (unit; Windows and Linux).** Commit 610ef5c.
+- Mutant (the old order) → red; 1/1.
+- **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
+- **Bundle:** `yantrik-mind-610ef5c-linux-amd64.tar.zst`, 62834841 bytes, sha256 `7281dcebd29546464bda2eafaa3a1f55a59f2cdcea4947de48e617984b99b18f` (verified locally after copy). It supersedes 833b270 for the next #980 gate (the log1 recheck).

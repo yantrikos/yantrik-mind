@@ -5315,7 +5315,9 @@ fn step_call_left(loop_left_ms: u64, reserve_ms: u64, last: bool) -> u64 {
 
 /// E.LOG1 (520, the #980 run, turn 1026: the model made a note at step 0, then told the person it
 /// "already exists -- that's the work-log entry from a moment ago"): whose calls the log holds.
-const WORK_LOG_WHOSE: &str = "(the calls YOU made for this request, in order; [0] was your first)";
+/// E.LOG1b (the #980 gate, turn 1058: "I created it in the step just before your message"): the
+/// log printed BEFORE the request read as history the request came after. It follows it now.
+const WORK_LOG_WHOSE: &str = "(what YOU have done since the request above, in order; [0] was your first call)";
 
 /// The compose step's share of the turn (YM_COMPOSE_RESERVE_SECS, 45 s by default).
 fn compose_reserve_ms() -> u64 {
@@ -14691,7 +14693,7 @@ Open reminders you're carrying for them:",
                 desktop::desktop_sentence(self.desktop_attached())
             );
             let prompt = format!(
-                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\nWork log: {WORK_LOG_WHOSE}{}\n\n{attached}User: {user_text}\n\n{budget_note}\n\n{protocol}",
+                "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\n{attached}User: {user_text}\n\nWork log: {WORK_LOG_WHOSE}{}\n\n{budget_note}\n\n{protocol}",
                 if scratch.is_empty() { " (empty)".to_string() } else { scratch.clone() }
             );
             let mut messages = vec![

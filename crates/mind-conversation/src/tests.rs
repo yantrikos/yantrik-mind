@@ -18979,7 +18979,11 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         let second = r.prompts.iter().find(|p| p.contains("[0] mcp.yantrik-os.os_describe ->")).expect("the look reached the work log");
-        assert!(second.contains("Work log: (the calls YOU made for this request, in order; [0] was your first)"), "{second}");
+        assert!(second.contains("Work log: (what YOU have done since the request above, in order; [0] was your first call)"), "{second}");
+        // E.LOG1b (turn 1058): the request comes first, then what was done for it.
+        // The request is the LAST "User: " -- the recent conversation above has its own.
+        let (user_at, log_at) = (second.rfind("User: ").expect("the request"), second.find("Work log:").expect("the log"));
+        assert!(user_at < log_at, "the work log is printed before the request: {second}");
     }
 
     /// The desktop's refusal from Reading D's T5.

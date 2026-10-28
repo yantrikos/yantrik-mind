@@ -22217,3 +22217,27 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **E.STALL4:**
   - the heartbeat during find1's approval wait reads "last stage: tool call";
   - any refused act's journal line shows its reason after " | ".
+
+## Check 10b — LIVE RESULT (520, the #980 gate at 1ffd75e2, Mind 833b270), graded by the prereg above
+
+- **E.CAP1: PASS.** "[agent] compose took 0s (cap 174 s)", "1s (cap 176 s)", "0s (cap 177 s)", "0s (cap 175 s)": each cap ≤ 180.
+- **E.STALL4: PASS.**
+  - During find1's approval wait: "last stage: tool call (trail: … route > model call > tool call > …)".
+  - A refused act's journal line keeps its reason: "… failed (exit 1) | yos: shell.app.act refused: Images cannot open in your view; …".
+- **E.FIND1 (find1, turn 1057): FAIL by the preregistered rule.** The mechanism worked: discover_tools now leads with the desktop note → os_describe shell {actions: agent_run} → agent_run (held once by the Mind's redirect) → resent → request_approval → denied. The reply then opened: "I don't have an `agent_run` tool - that's not in my toolset. / I can't run that - you were asked to allow `shell.agent_run` and said no, so nothing ran …". The rest is right. The first sentence is a tool-versus-action quibble that the prereg named as a FAIL. No rule added for one sentence.
+- **E.LOG1 (log1, turn 1058): FAIL.** os_describe notes → os_act new_note → "Done — Notes — "log1-1435" open (3 lines, saved)" → direct reply: "The note already exists - I made it a moment ago …". dc saw "already exists - I created it in the step just before your message" on 2 other new_note turns. The heading moved the model from "it existed" to "I made it", but the cause is ORDER: the prompt prints "Work log: … [1] os_act -> Done …" and THEN "User: Make a new note …", so the model reads the request as coming after its own work. That is E.LOG1b.
+- Also seen: the model again sent agent_run `"wait": true` (as in c09d). OS #995 refuses that before a card is shown.
+
+## E.LOG1b — PREREG: the request comes before the work log
+
+**Why:** above. In the step prompt the work log precedes "User: …", so a call the model made for this request reads as history the request came after: "I created it in the step just before your message" (×3 on 520).
+
+**Change:**
+- the step prompt prints "{attached}User: {user_text}", then "Work log: (what YOU have done since the request above, in order; [0] was your first call){log}", then the budget note and the protocol as before;
+- this reads as a chat does: the request, then what was done for it. The user text, constant across a turn's steps, moves into the shared prefix.
+
+**Tests:**
+- `the_work_log_says_whose_calls_it_holds`: in the step-1 prompt, "User: " comes before "Work log:", and the heading reads the new sentence.
+- Mutant: the old order → red.
+
+**Live check (next 520 run):** "Make a new note titled <unique> with the text hi": the reply says it made the note, with no "already exists".

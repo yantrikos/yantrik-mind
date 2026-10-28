@@ -22157,3 +22157,23 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant: the sentence removed → red.
 
 **Live check (next 520 run):** "make a new note titled <unique>" → the reply says it made the note, not that it existed.
+
+**E.OPEN1 — LIVE RESULT: PASS** (520, OS #980 step 1 at cba8afc9, Mind 8353862; turn at 19:40 CT, by the preregistered rule):
+- the editor was confirmed closed by ps (the tester stopped an instance its own describe had started);
+- trace: os_describe editor → os_act new "hello" → save_as ~/open1-e980-1940.txt → read (one repeat, nudged);
+- no open_app, no "is starting", no "nothing was done"; 12 s wall;
+- od -c: `hello`, 5 bytes.
+- #980 itself FAILED on an OS defect (the person's dock launch into a Mind-started windowless instance maps no window). 520 is rolled back to c4d0b786; the Mind stays on 8353862.
+
+**E.CAP1 / E.FIND1 / E.LOG1 — RESULT: PASS (unit; Windows and Linux).** Commit d042f10.
+- **Mutants killed (5/5):**
+  - compose uncapped (the client's 300 s);
+  - compose's reserve floor dropped;
+  - the desktop note back at the end;
+  - the work-log sentence removed;
+  - (E.CAP1 unit) the near-wall and past-wall cases.
+- **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
+- **Bundle:** `yantrik-mind-d042f10-linux-amd64.tar.zst`, 62752734 bytes, sha256 `e8c360d32ce2c30dc9e3dbc077320022aff54944d250032c67574456f0cc2233` (verified locally after copy).
+- **Also from the #980 run:** c09d's first agent_run approval was granted 266 ms before the call failed its own `wait` type check (`wait: true`; a number is expected), so it was never spendable. OS #995 will check arguments at request_approval, before any card. Mind follow-ups:
+  - the journal keeps a refusal's reason line;
+  - the heartbeat's stale "route" label.

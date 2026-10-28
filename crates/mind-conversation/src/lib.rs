@@ -1748,14 +1748,32 @@ tokio::task_local! {
 }
 
 /// E.STALL3: mark the step this turn is entering. No listener, no effect.
+/// E.STALL4: a repeat of the last mark is skipped, and a full trail keeps its LAST mark true -- the
+/// agent loop marks every model and tool call, and the heartbeat reads the last.
 pub(crate) fn stage(s: &'static str) {
     let _ = TURN_STAGE.try_with(|t| {
         if let Ok(mut t) = t.lock() {
-            if t.len() < 64 {
-                t.push(s);
-            }
+            push_stage(&mut t, s);
         }
     });
+}
+
+fn push_stage(t: &mut Vec<&'static str>, s: &'static str) {
+    if t.last() == Some(&s) {
+        return;
+    }
+    if t.len() >= 64 {
+        t.pop();
+    }
+    t.push(s);
+}
+
+/// E.STALL4 (c09d: the refusal's reason was on line 2, past the 120 characters kept): what the
+/// step journal keeps of a result -- more, newlines shown, when the desktop refused the act.
+fn journal_head(obs: &str, refused: bool) -> String {
+    let n = if refused { 400 } else { 120 };
+    let sep = if refused { " | " } else { " " };
+    obs.chars().take(n).collect::<String>().replace('\n', sep)
 }
 
 /// Marks a progress message as REASONING rather than a status line, so the transport can route it
@@ -14762,6 +14780,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 schemas.len()
             );
             // E.PROMPT2b: how long this step's model call took against its cap.
+            stage("model call");
             let call_started = std::time::Instant::now();
             let resp = match answer_stream::streamed_step(
                 forward,
@@ -15473,6 +15492,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let predicted = self.record_tool_prediction(
                 &run_trace, &tool, user_text, prior_rate, prior_n, &object_id, lane, &goal_id,
             );
+            stage("tool call");
             let tool_started = std::time::Instant::now();
             // Before a desktop action can put a card in front of the person: E.ARENA1-F10, a card
             // they already answered this turn is not raised again (and a no covers the twin);
@@ -15758,7 +15778,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
             let latency_ms = tool_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             eprintln!(
                 "[agent] step {step}: {tool} -> {}",
-                obs.chars().take(120).collect::<String>().replace('\n', " ")
+                journal_head(&obs, tool == desktop::ACT && (desktop::nothing_was_run(&obs) || obs.contains(" refused: ")))
             );
             // The pipeline's post side: reliability ledger, unavailable set, egress provenance —
             // and the five-way outcome for this loop's own rendering.
@@ -16019,6 +16039,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         let compose_scope = COMPOSE_SCOPE;
         // Boxed (E.STACK1): held across either arm below, the compose future inline overflowed the
         // Windows test stack in `cli_dispatch_routes_plugins_and_chat`.
+        stage("compose");
         // E.CAP1: what the turn has left, never less than compose's reserve -- not the client's 300 s.
         let compose_cap = compose_call_cap(budget.max_wall_ms, started.elapsed().as_millis() as u64, compose_reserve_ms());
         let compose_call = Box::pin(mind_inference::with_call_cap(

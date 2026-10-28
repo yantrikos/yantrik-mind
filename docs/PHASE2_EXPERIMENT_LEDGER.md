@@ -22176,3 +22176,24 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Also from the #980 run:** c09d's first agent_run approval was granted 266 ms before the call failed its own `wait` type check (`wait: true`; a number is expected), so it was never spendable. OS #995 will check arguments at request_approval, before any card. Mind follow-ups:
   - the journal keeps a refusal's reason line;
   - the heartbeat's stale "route" label.
+
+## E.STALL4 — PREREG: the heartbeat names the loop's step, and a refusal's reason reaches the journal
+
+**Why (520, the #980 run):**
+- Turn 1034's heartbeat said "last stage: route" every 30 s for 300 s, while the time went to compose (E.CAP1). Turns 1038 and 1040 said "route" while a tool call waited about 100 s on the person's approval card. "route" is the last stage the agent loop marks; nothing inside the loop marks one.
+- c09d's refusal reason was on line 2 ("REFUSED — nothing was run. refused: the desktop did not start the command; its reason is on the next line."). The step journal keeps 120 characters of line 1, so the reason was never logged, and the cause (`wait: true`) took a log hunt on the OS side.
+
+**Change:**
+- the agent loop marks "model call" before each step's model call, "tool call" before running a tool, and "compose" before compose;
+- `stage()` skips an entry equal to the one before it, and when the trail is full (64) it replaces the last entry rather than dropping the new one, so "last stage" stays true in a long loop;
+- the step journal keeps 400 characters, newlines as " | ", for an act the desktop refused (`nothing_was_run` or " refused: "), and 120 otherwise.
+
+**Tests:**
+- `a_turn_leaves_a_trail_of_its_stages`: the plain turn now ends in "model call" (was "route"), and "route" is still in its trail;
+- a unit test on `stage`: a repeat is skipped, and a full trail keeps the newest last;
+- a unit test on the journal head: a two-line refusal keeps its reason line, and an ordinary result is 120 characters.
+- **Mutants:**
+  - the loop's marks removed → red;
+  - the full-trail replace reverted to drop → red;
+  - the refusal head back to 120 → red.
+- **Added before running:** the plain test turn calls no tool, so the "tool call" mark had no test. `a_turn_leaves_a_trail_of_its_stages` also runs a turn that calls discover_tools: "tool call" is followed by "model call". Mutant: the tool-call mark removed → red.

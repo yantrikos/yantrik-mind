@@ -17679,6 +17679,22 @@ mod desktop_consent_and_stall_wiring {
     fn the_last_answer_step_may_use_the_compose_reserve() {
         assert_eq!(crate::step_call_left(5_000, 45_000, false), 5_000);
         assert_eq!(crate::step_call_left(5_000, 45_000, true), 50_000);
+        // E.STALL4: a repeat mark is skipped; a full trail keeps its newest mark last.
+        let mut t: Vec<&'static str> = Vec::new();
+        crate::push_stage(&mut t, "model call");
+        crate::push_stage(&mut t, "model call");
+        assert_eq!(t, vec!["model call"]);
+        for i in 0..70 {
+            crate::push_stage(&mut t, if i % 2 == 0 { "tool call" } else { "model call" });
+        }
+        crate::push_stage(&mut t, "compose");
+        assert_eq!((t.len(), t.last()), (64, Some(&"compose")));
+        // E.STALL4 (c09d): a refusal keeps its reason line; anything else, 120 characters on one line.
+        let refusal = format!("REFUSED \u{2014} nothing was run. refused: the desktop did not start the command; its reason is on the next line.\n`wait` is a number of seconds.{}", "x".repeat(500));
+        let kept = crate::journal_head(&refusal, true);
+        assert!(kept.contains(" | `wait` is a number of seconds."), "{kept}");
+        assert_eq!(kept.chars().count(), 402, "400 characters plus the line mark");
+        assert_eq!(crate::journal_head(&"y".repeat(300), false).chars().count(), 120);
         // E.CAP1: compose gets what the turn has left, and its reserve even past the wall.
         let ms = |d: std::time::Duration| d.as_millis() as u64;
         assert_eq!(ms(crate::compose_call_cap(180_000, 2_000, 45_000)), 178_000);
@@ -19894,8 +19910,24 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(mail.last(), Some(&"mail"), "{mail:?}");
         assert!(mail.contains(&"episode") && mail.contains(&"knock"), "{mail:?}");
         let plain = trail_of("What should I cook tonight with rice and lentils?").await;
-        assert_eq!(plain.last(), Some(&"route"), "{plain:?}");
+        // E.STALL4: the loop marks its own steps, so the heartbeat stops saying "route" for all of it.
+        assert_eq!(plain.last(), Some(&"model call"), "{plain:?}");
+        assert!(plain.contains(&"route"), "{plain:?}");
         assert!(plain.contains(&"sandbox") && plain.contains(&"handle turn"), "{plain:?}");
+        // E.STALL4: a turn that calls a tool marks it, then the model call after it.
+        let script: Arc<dyn LLMBackend> = Arc::new(Script {
+            at: AtomicUsize::new(0),
+            steps: vec![Step::Call("discover_tools", serde_json::json!({"query": "weather"})), Step::Say("ok")],
+            seen: Arc::new(StdMutex::new(Vec::new())),
+            timeouts: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+        let tooled = Arc::new(ConversationEngine::new(Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap()) as Arc<dyn MemoryFacade>, pool, "YM"));
+        let trail: crate::StageTrail = Default::default();
+        let _ = crate::TURN_STAGE.scope(trail.clone(), tooled.turn("What should I cook tonight with rice and lentils?", TurnIdentity::primary())).await;
+        let t = trail.lock().unwrap().clone();
+        let at = t.iter().position(|s| *s == "tool call").unwrap_or_else(|| panic!("no tool call mark: {t:?}"));
+        assert_eq!(t.get(at + 1), Some(&"model call"), "{t:?}");
     }
 
     /// E.STALL2 through the turn: a mail question whose answer never comes ends the turn within the

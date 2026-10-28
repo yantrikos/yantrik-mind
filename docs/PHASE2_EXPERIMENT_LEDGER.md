@@ -22100,3 +22100,14 @@ Evidence: dc's scratchpad/e959/evidence.md. Check 1 (the masking matrix) is repo
 - **Windows workspace:** 2635 passed, 0 failed. **Linux (staging .95):** mind-conversation 1318 passed, 0 failed.
 - **Bundle:** `yantrik-mind-8353862-linux-amd64.tar.zst`, 62807927 bytes, sha256 `b64974761898ca53946de4f1654c20269d9b3db43c15a1a8f890347df566426d` (verified locally after copy).
 - Not yet live: needs the OS #978 step-1 build. dc will send its describe for a stopped app and a starting one, and I will run against the real strings.
+
+## E.OPEN1 — PREREG (live): the editor-closed hello turn on 520 with OS #980 step 1 (cba8afc9)
+
+- **Setup** (dc's gate runner):
+  - OS step 1 installed; Mind 2cc149b → 8353862 via `yantrik-update install-mind`, sha checked;
+  - harness.sock fresh, one yantrik-ui pid;
+  - the editor confirmed closed before the turn.
+- **Turn:** "Write 'hello' to ~/open1-<runid>.txt".
+- **PASS:** the file holds `hello`, and the trace goes editor new → save_as with no open_app, or at most one open_app refused with its next step followed. Any "is starting; ask again" gets exactly one re-look; any "nothing was done" act is resent and runs.
+- **FAIL:** a describe/act loop, a second open_app, or a reply claiming success with no file.
+- At the OS rollback to c4d0b786 the Mind stays on 8353862, which is version-safe; Hermes is made active again.

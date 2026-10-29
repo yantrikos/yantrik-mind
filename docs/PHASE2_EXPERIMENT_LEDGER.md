@@ -22282,3 +22282,16 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - 3 steps in 56 s, most of it the card's wait.
 - A first attempt sent right after the Mind's restart answered "mind restarted before it answered": a turn sent too soon after install, not a defect.
 - 7ebfb50 stays on 520; Hermes is active again; the OS is rolled back to c4d0b786.
+
+## Test fleet on 29 Oct (dc): every test VM on OS nightly v0.1.0-2293-g05d566b2 with Mind 7ebfb50
+
+- **520, 541, 542:** OS applied, then yantrik-mind restarted so its yos-mcp child is the new build ("attached to the desktop as `mind`"; one yantrik-ui each).
+  - 520's first nightly apply (2276) had left the Mind's yos-mcp child on the old build (05:59 CT against a 09:10 apply); restarting the Mind fixed it.
+  - 541/542: YM_* env identical before and after.
+- **561** (Pranab: "you can update 561"):
+  - OS 1806 → 2293;
+  - Mind da6ddd9 → 7ebfb50 the ISO way (561 is on isolated vmbr9; no network path added), installed between turns (the last turn ended 15:19:49; nothing in flight at 15:25:05);
+  - YM_MAX_WALL_SECS=375 and YM_COMPOSE_RESERVE_SECS=120 intact; yos-mcp started 15:25:11;
+  - counts only, no text read.
+- **Hermes:** its yos-mcp bridges on these VMs are still the previous build until hermes-gateway restarts; that is Pranab's call.
+- **Mac mini (.49):** unknown (booted into macOS).

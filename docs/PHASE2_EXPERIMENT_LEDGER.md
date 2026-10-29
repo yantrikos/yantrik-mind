@@ -22295,3 +22295,4 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
   - counts only, no text read.
 - **Hermes:** its yos-mcp bridges on these VMs are still the previous build until hermes-gateway restarts; that is Pranab's call.
 - **Mac mini (.49):** unknown (booted into macOS).
+- **Hermes, closed the same day** (Pranab left it to dc): the 4 venv packages are kept (the YantrikDB memory plugin the updater installs on purpose, #677). hermes-gateway was restarted while idle on all four VMs (15:29–15:30), so its yos-mcp bridges are on 2293 too. Every test VM now has fresh bridges for both the Mind and Hermes.

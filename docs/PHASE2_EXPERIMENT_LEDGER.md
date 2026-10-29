@@ -22274,3 +22274,11 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant (the clause removed) → red; 1/1.
 - **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
 - **Bundle:** `yantrik-mind-7ebfb50-linux-amd64.tar.zst`, 62833149 bytes, sha256 `27c10ac8cc4d4469b74bad7efc8bfa9e64a652fcb9c2ff3a8d2c77efaa349bef` (verified locally after copy). Queued for the #1004 gate on 520 (the find1 recheck).
+
+**E.FIND1b — LIVE RESULT: PASS** (520, OS #1004 build 23c86684, Mind 7ebfb50, turn 1091, a fresh Lens conversation; n=1 against E.FIND1's 3 fails):
+- "Use agent_run to run: echo find1-0559-e1004";
+- step 0 went straight to os_act shell agent_run, with no discover_tools and no "I don't have an agent_run tool";
+- held once by the Mind's own redirect ("pointed at the apps first"), resent → the card (Approval needed, Sensitive, shell.agent_run) → declined → "REFUSED — nothing was run …" → direct reply: "I couldn't run it — you were asked to allow `shell.agent_run` and declined, so nothing executed. … If you want it run, tell me and I'll send it again …";
+- 3 steps in 56 s, most of it the card's wait.
+- A first attempt sent right after the Mind's restart answered "mind restarted before it answered": a turn sent too soon after install, not a defect.
+- 7ebfb50 stays on 520; Hermes is active again; the OS is rolled back to c4d0b786.

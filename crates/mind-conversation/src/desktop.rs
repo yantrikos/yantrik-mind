@@ -2585,7 +2585,8 @@ pub(crate) fn desktop_sentence(desktop: bool) -> String {
     // the app for an act or a describe. Open only on the desktop's own word -- today's OS still says it.
     " On this desktop a file's text is written with the `editor` app (call its actions directly -- os_describe \
      editor shows them; open it with the shell's open_app only if the desktop says it is not running); folders \
-     are the shell's files_* actions; the calendar and notes are apps of their own."
+     are the shell's files_* actions; a command line is the shell's agent_run action (os_act {app: shell, action: \
+     agent_run}); the calendar and notes are apps of their own."
         .to_string()
 }
 
@@ -3986,6 +3987,8 @@ mod tests {
         // E.OPEN1: actions first; open_app only on the desktop's word; no stray runs of spaces.
         assert!(s.contains("call its actions directly") && s.contains("only if the desktop says it is not running"), "{s}");
         assert!(!s.contains("  "), "{s}");
+        // E.FIND1b (the batch gate, turns 1084-1085: "I don't have an agent_run tool" at step 0).
+        assert!(s.contains("a command line is the shell's agent_run action"), "{s}");
         assert_eq!(desktop_sentence(false), "");
     }
 

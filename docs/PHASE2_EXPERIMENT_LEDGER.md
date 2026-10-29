@@ -22246,3 +22246,26 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant (the old order) → red; 1/1.
 - **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
 - **Bundle:** `yantrik-mind-610ef5c-linux-amd64.tar.zst`, 62834841 bytes, sha256 `7281dcebd29546464bda2eafaa3a1f55a59f2cdcea4947de48e617984b99b18f` (verified locally after copy). It supersedes 833b270 for the next #980 gate (the log1 recheck).
+
+## Batch gate (#980 + #1003 + #1006, OS 88533669, Mind 610ef5c on 520) — LIVE RESULT
+
+- **E.LOG1b: PASS** (turn 1087). os_describe notes → os_act new_note → "Done — Notes — "log1-1959" open (3 lines, saved)" → reply "Note **log1-1959** is created and saved, with "hi" as the body." No "already exists".
+- **E.STALL4: PASS again.** "last stage: tool call" during an approval wait (turn 1080); a refusal's reason was kept after " | ". No turn composed, so E.CAP1 has no line this run.
+- **E.FIND1 (find1): FAIL ×2** (turns 1084, 1085, each a fresh Lens conversation).
+  - Step 0: "no tool chosen — returning a direct reply", 0 s, with no discover_tools: "I don't have an `agent_run` tool — that's not in my toolset … What I can do: run a shell command through the desktop's shell app if it has an action for it."
+  - Grounding 1398 B, recent 0 B, 32 tools.
+  - Turn 1057 (833b270) had searched first; this time the model never searched, so E.FIND1's note, which lives in the search's answer, was never seen.
+  - Not attributable to E.LOG1b's reorder on n=2 against n=1.
+  - A turn that said "call os_act on shell agent_run directly" reached the card and ran.
+
+## E.FIND1b — PREREG: the per-turn desktop map names where commands run
+
+**Why:** above. `desktop_sentence`, given on every desktop turn, maps files, folders, the calendar and notes to their apps, and says nothing about commands. The model read "agent_run" as a tool name, found none, and answered at step 0.
+
+**Change:** the map adds "a command line is the shell's agent_run action (os_act {app: shell, action: agent_run})".
+
+**Tests:**
+- `the_desktop_map_is_said_only_with_a_desktop` asserts the clause.
+- Mutant: the clause removed → red.
+
+**Live check (next 520 run):** "Use agent_run to run: echo find1-<runid>". PASS if a call reaches os_act shell agent_run, with no "I don't have an agent_run tool".

@@ -22314,3 +22314,9 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant (the 423 branch disabled) → red; 1/1.
 - **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-inference 100 passed, 0 failed.
 - No bundle yet: this is dead code until yantrik-os #1017 ships 423. It rides the next bundle.
+
+**OS #1015 gate (520, build 65ad60b4), check 7: a Mind turn after the vault change — NO COLLATERAL** (the direct lane; the gateway was not exercised):
+- "In one sentence, what is a haiku?" → "[agent] step 0: model call 671 ms (cap 135 s)" → "A haiku is a short Japanese poem of three lines — five syllables, then seven, then five — …".
+- The lane is the Mind's own ollama-cloud provider (YM_PRIVATE_PROVIDERS), not the OS gateway, so the vault-backed gateway path is untested by this.
+- #1015 itself FAILED on an OS defect (providers.yaml never migrated: the start pass logged failed=1 and did not retry after unlock).
+- 520 is back on 2293; Mind 7ebfb50 restarted twice ("attached to the desktop as `mind`" both times).

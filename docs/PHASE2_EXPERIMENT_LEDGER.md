@@ -22361,3 +22361,10 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutant: judge the whole text again → red.
 
 **Live check (next 520 run):** the same prompt. PASS if the reply is the essay and the journal shows no "claims a change", no desktop look and no save_as.
+
+**E.CLAIM4 — RESULT: PASS (unit; Windows and Linux).** Commit 9df9a58.
+- Mutant (whole text judged again) → red; 1/1.
+- **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-conversation 1320 passed, 0 failed.
+- **Bundle:** `yantrik-mind-9df9a58-linux-amd64.tar.zst`, 62827811 bytes, sha256 `e8f9d2c2cd826be6d25b99c14d0af98509bc0bf079d23707ee733a83e101b06e` (verified locally after copy). It also carries E.PROV2b (423 → the vault sentence).
+
+**Turn 1112 (#1024 gate: `open_app files` on the person's desktop):** not E.OPEN1. The OS's own describe answered "files is not running … Open it first with os_act", and the model followed it; the open switched the PERSON's shell to its Files screen. Filed by dc as yantrik-os #1033 (a Mind cannot move the person's shell). #1033 keeps the Mind's `folder_steps` working through a private per-Mind files cursor and adds explicit-path files_* actions; the Mind moves `folder_steps` to them when the PR's shapes are final.

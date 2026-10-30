@@ -22320,3 +22320,21 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - The lane is the Mind's own ollama-cloud provider (YM_PRIVATE_PROVIDERS), not the OS gateway, so the vault-backed gateway path is untested by this.
 - #1015 itself FAILED on an OS defect (providers.yaml never migrated: the start pass logged failed=1 and did not retry after unlock).
 - 520 is back on 2293; Mind 7ebfb50 restarted twice ("attached to the desktop as `mind`" both times).
+
+## E.REM3 — PRODUCTION DEPLOY (.90, family Mind), 30 Oct 00:53Z, on Pranab's word ("go ahead" → "Deploy priya fix to .90")
+
+- **What shipped:** 1eb8247 on branch `prod-priya-rem3` = production's 172af33 + E.REM3 alone ("priya" removed from `is_personal_reminder`'s denylist, plus a unit test). Nothing else from os-shared-memory went with it. main is untouched; the kill switch stays on.
+- **Tests at 1eb8247:**
+  - the E.REM3 unit test passes; with "priya" back, it fails (mutant 1/1);
+  - Linux (staging .95): mind-conversation 1040 passed, 0 failed.
+- **Build:** ON .90 in ym-autodeploy (detached), YM_BUILD_COMMIT stamped, release in 3m50s; the binary's --build-commit equals the checkout.
+- **Swap (by hand, mirroring deploy/self_deploy.sh, which refuses while the kill switch is on):**
+  - checked quiet first (1 journal line in the prior 5 min);
+  - stop 00:52:58Z → backups mind-core.rollback-172af33 and mind.db / -wal / -shm .pre-1eb8247 → atomic install → start 00:53:02Z;
+  - health probe (/cli "now") ok; evolution.log line written.
+- **After:**
+  - active; running 1eb8247;
+  - "telegram channel live as @th_ym_c1_bot";
+  - LOCAL primary (ollama-local:qwen3.8:27b-q4_K_M) + private lane active.
+  - No turn was sent to the family Mind.
+- **Seen at startup, NOT caused by this, reported to Pranab:** YM_ROLE_RESEARCH names nim:z-ai/glm-5.2 and YM_ROLE_VERIFY names nim:deepseek-ai/deepseek-v4-flash-0731, which the provider no longer serves, so those routes fail when used.

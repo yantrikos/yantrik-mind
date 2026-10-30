@@ -22338,3 +22338,8 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
   - LOCAL primary (ollama-local:qwen3.8:27b-q4_K_M) + private lane active.
   - No turn was sent to the family Mind.
 - **Seen at startup, NOT caused by this, reported to Pranab:** YM_ROLE_RESEARCH names nim:z-ai/glm-5.2 and YM_ROLE_VERIFY names nim:deepseek-ai/deepseek-v4-flash-0731, which the provider no longer serves, so those routes fail when used.
+
+**OS #1015 rerun (520, b2af0ba4), check 7: NO COLLATERAL again.**
+- "[agent] step 0: model call 1030 ms (cap 135 s)" → a one-sentence haiku answer.
+- The OS's saved ollama-cloud account now keeps its key in the vault, but the Mind does not read it there. When the desktop hands a provider to the Mind (`provider_set.rs`), the key is written once into the Mind's own env file (`write_env_600`), and the Mind reads that copy on every call. So the vault was not on this turn's path, either through the gateway or through the hand-off.
+- The gate failed on an OS display defect: after a restart and unlock, AI accounts shows "the vault is locked" until "List models again" is pressed.

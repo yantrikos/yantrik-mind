@@ -22296,3 +22296,16 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Hermes:** its yos-mcp bridges on these VMs are still the previous build until hermes-gateway restarts; that is Pranab's call.
 - **Mac mini (.49):** unknown (booted into macOS).
 - **Hermes, closed the same day** (Pranab left it to dc): the 4 venv packages are kept (the YantrikDB memory plugin the updater installs on purpose, #677). hermes-gateway was restarted while idle on all four VMs (15:29–15:30), so its yos-mcp bridges are on 2293 too. Every test VM now has fresh bridges for both the Mind and Hermes.
+
+## E.PROV2b — PREREG: a locked key vault is said as such (gateway 423)
+
+**Why:**
+- OS #1015 moves the gateway's saved-account keys into the credential vault. When a key cannot be read (`keys::Missing::Vault`: vault locked, read failed or timed out, no value), the gateway refuses.
+- yantrik-ml drops an error's body, so the Mind sees only the status, and `gateway_sentence` (E.PROV2) maps only 401/403/404. At #1015 (65ad60b4) the refusal is 503, which falls through to "couldn't think just now".
+- dc agreed: #1017 item 5 makes `Missing::Vault` → **423 Locked** (code `vault_locked`), used for nothing else; the other `Missing` cases stay 503.
+
+**Change:** `gateway_sentence` maps "status: 423" → "the key for the picked model's account could not be read from the credential vault -- if the vault is locked, unlock the desktop; otherwise enter the key again in Settings → AI & Intelligence → AI accounts". Gateway route only, as the other three. It is dead code until #1017 ships 423.
+
+**Tests:**
+- `a_gateway_failure_is_said_in_its_own_terms_and_nothing_else_is_touched` adds 423 → the vault sentence, and another provider's 423 untouched.
+- Mutant: the 423 branch removed → red.

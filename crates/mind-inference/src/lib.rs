@@ -2509,6 +2509,10 @@ pub fn gateway_sentence(detail: &str) -> Option<&'static str> {
         Some("the account behind the picked model does not take private context -- set up a private lane, or allow sharing with it in Settings \u{2192} AI & Intelligence \u{2192} AI accounts")
     } else if detail.contains("status: 404") {
         Some("no model is picked for this mind yet -- pick one in the ask bar")
+    } else if detail.contains("status: 423") {
+        // E.PROV2b (yantrik-os #1015/#1017): the gateway's saved-account key is in the credential vault,
+        // and 423 is its one answer for "could not read it" -- the vault locked, the read failed.
+        Some("the key for the picked model's account could not be read from the credential vault -- if the vault is locked, unlock the desktop; otherwise enter the key again in Settings \u{2192} AI & Intelligence \u{2192} AI accounts")
     } else {
         None
     }
@@ -6182,6 +6186,12 @@ mod gateway_tests {
         assert!(gateway_sentence("http status: 403").unwrap().contains("AI accounts"));
         assert!(gateway_sentence("http status: 404").unwrap().contains("ask bar"));
         assert_eq!(gateway_sentence("http status: 500"), None);
+        // E.PROV2b: a locked key vault (yantrik-os #1017's 423) -- the gateway's only, as the others.
+        assert!(gateway_sentence("http status: 423").unwrap().contains("credential vault"));
+        let locked = format!("{:#}", provider_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 423")));
+        assert!(locked.starts_with("the key for the picked model's account") && locked.contains("423"), "{locked}");
+        let elsewhere = format!("{:#}", provider_said("nanogpt:deepseek", anyhow::anyhow!("http status: 423")));
+        assert_eq!(elsewhere, "http status: 423", "another provider's 423 is not the gateway's");
         let said = format!("{:#}", provider_said("yantrik-gateway:picked", anyhow::anyhow!("http status: 403")));
         assert!(said.starts_with("the account behind the picked model") && said.contains("403"), "{said}");
         let other = format!("{:#}", provider_said("nanogpt:deepseek", anyhow::anyhow!("http status: 403")));

@@ -22389,3 +22389,10 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Mutants** (the IMAP path cannot be unit-tested without a server):
   - the reply's all-failed branch removed → red;
   - the partial note removed → red.
+
+**E.MAIL1 — RESULT: PASS (unit; Windows and Linux).** Commit b7608be.
+- **Mutants killed (2/2):** the all-failed branch removed; the partial note removed. The IMAP client's refusal path needs a live server and is not unit-tested; it rides the next live mail check.
+- **Windows workspace:** 2638 passed, 0 failed. **Linux (staging .95):** mind-conversation 1321 and mind-tools 268 passed, 0 failed.
+- **Bundle:** `yantrik-mind-b7608be-linux-amd64.tar.zst`, 62782465 bytes, sha256 `c31e2c7f7a5dcaa0696c8c8df31be88fce31767f386ad9cef9fa1259122ee70c` (verified locally after copy). It supersedes 9df9a58 (carries E.CLAIM4 and E.PROV2b).
+
+**Private lane after the AIG fix (dc, counts only):** 561 this boot: 24 model calls ok, 0 "private lane FAILED", 0 failed calls, 1 turn done. Before the fix it was about one FAILED per turn. Provisional on n=1 turn; dc will recount. Production .90 had made no private call since the fix at 18:09 UTC; the open check is kept in memory.

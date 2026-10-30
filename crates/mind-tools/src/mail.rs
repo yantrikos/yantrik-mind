@@ -403,12 +403,19 @@ impl MailClient for ImapClient {
                 vec!["INBOX", "Archive"]
             };
             let mut out: Vec<(EmailMsg, String)> = Vec::new();
+            // E.MAIL1 (OS #1031: "café" refused by the server): a refused search is not an empty
+            // mailbox. Remember it; with nothing found, the refusal is the answer, not "no results".
+            let mut refused: Option<String> = None;
             for mb in mailboxes {
                 if session.select(mb).is_err() {
                     continue;
                 }
-                let Ok(ids) = session.search(format!("TEXT \"{needle}\"")) else {
-                    continue;
+                let ids = match session.search(format!("TEXT \"{needle}\"")) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        refused.get_or_insert_with(|| e.to_string());
+                        continue;
+                    }
                 };
                 let mut idv: Vec<u32> = ids.into_iter().collect();
                 idv.sort_unstable();
@@ -455,6 +462,11 @@ impl MailClient for ImapClient {
                 }
             }
             let _ = session.logout();
+            if out.is_empty() {
+                if let Some(e) = refused {
+                    anyhow::bail!("the mail server refused the search: {e}");
+                }
+            }
             out.reverse();
             Ok(out)
         })

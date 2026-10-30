@@ -23011,3 +23011,40 @@ async fn the_weather_tool_shows_the_days_ahead() {
     let without = engine(mind_tools::ScriptedWeather::new(report)).run_agent_tool_as("weather", &serde_json::json!({"place": "Dallas"}), &id).await;
     assert_eq!(without, report);
 }
+
+/// E.MAIL1 (OS #1031: "café" refused by the server): a mail search that failed is never said as
+/// "no matching message" -- not for every account, and not as a blanket for the ones it skipped.
+mod mail1_tests {
+    use super::*;
+    use mind_tools::{EmailMsg, MailClient, ScriptedMailClient};
+
+    struct RefusedSearch;
+    #[async_trait::async_trait]
+    impl MailClient for RefusedSearch {
+        async fn inbox(&self, _limit: usize) -> anyhow::Result<Vec<EmailMsg>> {
+            Ok(vec![])
+        }
+        async fn search(&self, _needle: &str, _limit: usize) -> anyhow::Result<Vec<(EmailMsg, String)>> {
+            anyhow::bail!("the mail server refused the search: BAD [BADCHARSET]")
+        }
+    }
+
+    fn engine(accounts: Vec<(&str, Arc<dyn MailClient>)>) -> ConversationEngine {
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let pool = InferencePool::new(Arc::new(ScriptedLLM::new("")) as Arc<dyn LLMBackend>, 1);
+        accounts.into_iter().fold(ConversationEngine::new(mem, pool, "YM"), |e, (label, c)| e.with_scan_inbox(label, c))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_mail_search_is_not_no_results() {
+        let refused = || Arc::new(RefusedSearch) as Arc<dyn MailClient>;
+        let empty = || Arc::new(ScriptedMailClient::new(vec![])) as Arc<dyn MailClient>;
+        let all = engine(vec![("a@x", refused())]).mail_search_all("café").await;
+        assert!(all.contains("couldn't search") && all.contains("does not mean there is no such email"), "{all}");
+        assert!(!all.contains("no matching message"), "a refused search was said as no results: {all}");
+        let some = engine(vec![("a@x", refused()), ("b@x", empty())]).mail_search_all("café").await;
+        assert!(some.contains("1 account(s) could not be searched") && some.contains("of 1 account(s)"), "{some}");
+        let none = engine(vec![("b@x", empty())]).mail_search_all("café").await;
+        assert!(none.contains("no matching message") && !none.contains("could not be searched"), "{none}");
+    }
+}

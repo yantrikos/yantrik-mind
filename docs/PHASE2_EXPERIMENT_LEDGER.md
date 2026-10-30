@@ -22368,3 +22368,24 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Bundle:** `yantrik-mind-9df9a58-linux-amd64.tar.zst`, 62827811 bytes, sha256 `e8f9d2c2cd826be6d25b99c14d0af98509bc0bf079d23707ee733a83e101b06e` (verified locally after copy). It also carries E.PROV2b (423 → the vault sentence).
 
 **Turn 1112 (#1024 gate: `open_app files` on the person's desktop):** not E.OPEN1. The OS's own describe answered "files is not running … Open it first with os_act", and the model followed it; the open switched the PERSON's shell to its Files screen. Filed by dc as yantrik-os #1033 (a Mind cannot move the person's shell). #1033 keeps the Mind's `folder_steps` working through a private per-Mind files cursor and adds explicit-path files_* actions; the Mind moves `folder_steps` to them when the PR's shapes are final.
+
+## E.MAIL1 — PREREG: a mail search that failed is never said as "no matching message"
+
+**Why (found 30 Oct from OS #1031's "café" IMAP error):**
+- mind-tools `ImapMailClient::search` sends `TEXT "<needle>"` (raw UTF-8, no CHARSET) and skips any mailbox whose search errors (`let Ok(ids) = session.search(..) else { continue }`). A refused search returns `Ok(vec![])`, indistinguishable from "nothing matches".
+- `mail_search_all` then says "Searched the full mailboxes of N account(s) for "café" — no matching message", or with an unreachable account "… no matching message (1 account(s) unreachable)". In both cases it claims an absence it never established.
+
+**Change:**
+- **mind-tools:** a mailbox search that errors is remembered; if nothing was found and any search errored, `search` returns an error naming the refusal, never `Ok(vec![])`. Hits from mailboxes that did search are still returned.
+- **mind-conversation:**
+  - when every account failed, `mail_search_all` says it could not search, and that this does not mean there is no such email;
+  - when some failed and the rest found nothing, it says no match in the account(s) it could search, and that N account(s) could not be searched.
+- The encoding fix (CHARSET UTF-8 with a literal, or UTF8=ACCEPT) is separate, waiting on #1031's choice and a live server test.
+
+**Tests:**
+- a scripted account whose search errors → the reply says it could not search, with no "no matching message";
+- one failing account plus one empty account → "could not be searched" for one, with no blanket absence claim;
+- an empty account alone → "no matching message", as before.
+- **Mutants** (the IMAP path cannot be unit-tested without a server):
+  - the reply's all-failed branch removed → red;
+  - the partial note removed → red.

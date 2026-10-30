@@ -63,14 +63,21 @@ impl super::ConversationEngine {
             }
         }
         if sections.is_empty() {
+            // E.MAIL1 (OS #1031: "café" refused by the server): a search that failed found nothing
+            // out -- never say "no matching message" for an account that was not searched.
+            if errors == inboxes.len() {
+                return format!(
+                    "📬 I couldn't search your mail for \"{q}\": the search failed on every account ({errors}) -- the server refused it or could not be reached. That does not mean there is no such email."
+                );
+            }
             let err_note = if errors > 0 {
-                format!(" ({errors} account(s) unreachable)")
+                format!(" {errors} account(s) could not be searched, so it may still be there.")
             } else {
-                String::new()
+                " If it exists, it's in an account I don't scan yet.".to_string()
             };
             return format!(
-                "📬 Searched the full mailboxes of {} account(s) for \"{q}\" — no matching message{err_note}. If it exists, it's in an account I don't scan yet.",
-                inboxes.len()
+                "📬 Searched the full mailboxes of {} account(s) for \"{q}\" — no matching message.{err_note}",
+                inboxes.len() - errors
             );
         }
         format!("📬 Mail search \"{q}\":\n\n{}", sections.join("\n\n"))

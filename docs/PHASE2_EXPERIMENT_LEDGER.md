@@ -22396,3 +22396,37 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Bundle:** `yantrik-mind-b7608be-linux-amd64.tar.zst`, 62782465 bytes, sha256 `c31e2c7f7a5dcaa0696c8c8df31be88fce31767f386ad9cef9fa1259122ee70c` (verified locally after copy). It supersedes 9df9a58 (carries E.CLAIM4 and E.PROV2b).
 
 **Private lane after the AIG fix (dc, counts only):** 561 this boot: 24 model calls ok, 0 "private lane FAILED", 0 failed calls, 1 turn done. Before the fix it was about one FAILED per turn. Provisional on n=1 turn; dc will recount. Production .90 had made no private call since the fix at 18:09 UTC; the open check is kept in memory.
+
+**E.CLAIM4 — LIVE: FAIL** (520, Mind b7608be, turn 1129, 14:20 CT, a fresh chat, the preregistered prompt). The reply: "The guide is written and saved to `/home/yantrik/haiku-guide.md` — 148 lines, …". Steps:
+- step 0: "would refuse "write a very detailed guide…" without looking at the desktop — sending it to look" (`unattempted_side_effect`: the request's first verb "write" is on its CHANGING list);
+- step 1: "the reply claims a change and nothing changed this turn — sent back once";
+- steps 2–3: os_describe editor, editor `new`;
+- step 4: "answering with the document still unsaved — asking for the save" (the unsaved nudge, with no path requested);
+- step 5: `save_as ~/haiku-guide.md`.
+- E.CLAIM4 fixed one of THREE desktop-steering nudges that each override "Do not use any tools". The file is archived on 520 at ~/Archive/2026-10-30/.
+
+**E.MAIL1 — LIVE: not exercised** (turn 1131). "search my mail for café" took the OS Email path, not mind-tools IMAP: os_act search "café" → refused (IMAP parse error) → retry "cafe" → 0. The reply led with "No mail matches "café" — the accented search broke IMAP, so I retried as "cafe" and got 0 results". Half honest: it states the break, but leads with an absence for the term it could not search.
+
+**dc note:** the 14:19:57 install on 561 interrupted a showcase turn (an idle-test error, fixed in dc's briefs).
+
+## E.NOTOOL1 — PREREG: "do not use any tools" stands down the desktop-steering nudges
+
+**Why:** above, and turn 1118. Three nudges built for desktop tasks each override an explicit instruction not to use tools:
+- look-first (`unattempted_side_effect`);
+- the claimed-change send-back (`claims_a_change`);
+- the unsaved/goal nudges (`may_nudge_goal`).
+
+**Change:** `desktop::forbids_tools(user_text)` recognises the person forbidding tools or saving: "do not / don't use (any) tools", "without (using) (any) tools", "no tools", "do not / don't save". When it holds:
+- `unattempted_side_effect` returns None;
+- in `agent_loop_focused`, `steer = false` gates every `claims_a_change` send-back/correction and every `may_nudge_goal` nudge.
+- Nothing else changes; the person's words are the gate, not a guess about the task.
+
+**Tests:**
+- unit: the phrases → true; "use the editor to write a guide" and "save it to ~/x.md" → false;
+- turn: "Write a very detailed guide … Do not use any tools." with the model answering the essay at step 0 → exactly one model call, no os_* call, and the reply is the essay.
+- **Mutants:**
+  - `unattempted_side_effect` ignores the gate → red;
+  - steer forced true → red.
+- **Added before running:** the first turn test could not see `steer`. CLAIM4 already keeps a mid-essay "wrote the" out of the claim check, and no editor draft is made, so forcing steer on survived. A second case answers "I've written the guide below." + the essay: with tools forbidden it stands (one model call); with steer forced on it is sent back.
+
+**Live check (next 520 gate):** turn 1129's prompt → the essay, with no os_describe, os_act or save_as in the journal.

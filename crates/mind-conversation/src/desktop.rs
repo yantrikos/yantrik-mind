@@ -1386,6 +1386,19 @@ pub(crate) fn still_starting(obs: &str) -> bool {
     obs.contains("is open but still starting") || obs.contains("is starting; ask again")
 }
 
+/// E.NOTOOL1 (520, turns 1118 and 1129: "... Do not use any tools." ended in ~/haiku-guide.md): the
+/// person forbade tools or saving. The desktop-steering nudges -- look first, a claimed change sent
+/// back, save the draft, make the missing file -- stand down; the person's words are the gate.
+pub(crate) fn forbids_tools(user_text: &str) -> bool {
+    const SAID: [&str; 11] = [
+        "do not use any tools", "don't use any tools", "do not use tools", "don't use tools",
+        "without using any tools", "without using tools", "without any tools", "without tools",
+        "no tools", "do not save", "don't save",
+    ];
+    let t = user_text.to_lowercase().replace('\u{2019}', "'");
+    SAID.iter().any(|s| t.contains(s))
+}
+
 /// E.ARENA1-F34: how long to wait before describing a starting app again.
 pub(crate) const STARTING_WAIT_MS: u64 = if cfg!(test) { 0 } else { 3000 };
 
@@ -4007,6 +4020,17 @@ mod tests {
         assert!(nothing_was_run("Notes is starting; nothing was done \u{2014} send it again in a moment."));
         assert!(nothing_was_run("Done \u{2014} Notes is starting; nothing was done \u{2014} send it again in a moment."));
         assert!(!nothing_was_run("Done \u{2014} Notes \u{2014} \"Diary\" open (3 lines, saved)\nrevision: 4\n{\n  \"body\": \"nothing was done today\"\n}"));
+    }
+
+    /// E.NOTOOL1: the person's own words forbid tools or saving; asking for a tool or a save does not.
+    #[test]
+    fn the_person_forbidding_tools_is_heard() {
+        for said in ["Write a guide. Do not use any tools.", "Answer without tools", "no tools please", "Draft it but don\u{2019}t save it"] {
+            assert!(forbids_tools(said), "{said}");
+        }
+        for asked in ["Use the editor to write a guide", "Write the guide and save it to ~/x.md", "Write a very detailed guide to the haiku form"] {
+            assert!(!forbids_tools(asked), "{asked}");
+        }
     }
 
     #[test]

@@ -5071,6 +5071,10 @@ fn unattempted_side_effect(
         "search", "look", "recall",
     ];
 
+    // E.NOTOOL1: a request the person said to answer without tools has no desktop side to attempt.
+    if desktop::forbids_tools(user_text) {
+        return None;
+    }
     let acted = calls.keys().any(|name| {
         let n = name.to_lowercase();
         !READING.iter().any(|r| n.contains(r))
@@ -14529,6 +14533,8 @@ Open reminders you're carrying for them:",
         // E.ARENA1-F10: what the person did with each card this turn, keyed `app.action`.
         let mut answered: std::collections::HashMap<String, desktop::Answer> =
             std::collections::HashMap::new();
+        // E.NOTOOL1: the person forbade tools -- the desktop-steering nudges stand down.
+        let steer = !desktop::forbids_tools(user_text);
         // E.ARENA1-F12: a document written this turn is still unsaved (the desktop's own word).
         let mut unsaved_doc = false;
         // E.ARENA1-F58: how many times this turn was told its document is still unsaved.
@@ -14931,7 +14937,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     continue;
                 }
                 // E.CLAIM2: and the same claim check.
-                if !changed_this_turn && claims_a_change(&a) {
+                if steer && !changed_this_turn && claims_a_change(&a) {
                     if !claim_nudged {
                         claim_nudged = true;
                         eprintln!("[agent] step {step}: the reply claims a change and nothing changed this turn \u{2014} sent back once");
@@ -15131,7 +15137,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     continue;
                 }
                 // E.CLAIM2 (561: "FINISHED … wrote the code … ran the page check" over reads only).
-                if !changed_this_turn && claims_a_change(&a) {
+                if steer && !changed_this_turn && claims_a_change(&a) {
                     if !claim_nudged {
                         claim_nudged = true;
                         eprintln!("[agent] step {step}: the reply claims a change and nothing changed this turn \u{2014} sent back once");
@@ -15142,7 +15148,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 // E.ARENA1-F12: the turn wrote a document and is about to end with it unsaved.
                 if unsaved_doc {
-                    if desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if steer && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         eprintln!("[agent] step {step}: answering with the document still unsaved — asking for the save");
                         scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
@@ -15151,14 +15157,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     a = format!("{a}\n\n{}", desktop::UNSAVED_NOTE);
                 } else if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
                     // E.ARENA1-F21: the world, not a result's first line, says the file is not there.
-                    if desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if steer && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         goal_nudges += 1;
                         eprintln!("[agent] step {step}: answering with {path} still missing \u{2014} asking for it");
                         scratch.push_str(&desktop::goal_nudge(step, &path, folder.as_deref(), self.person_home().as_deref()));
                         continue;
                     }
                     a = format!("{a}\n\n{}", desktop::goal_missing_note(&path));
-                } else if desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                } else if steer && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                     // E.ARENA1-F60: the pages it saved link to files it never wrote.
                     if let Some(note) = self.link_nudge_now(step, &saved_files, id).await {
                         goal_nudges += 1;
@@ -15396,7 +15402,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     // E.ARENA1-F17: repeats would end the turn with a document still unsaved --
                     // tell it once and give it the step (VM 520, 0f3e733: `new{text}` three times,
                     // never `save_as`).
-                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if unsaved_doc && steer && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
                         scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
@@ -15404,7 +15410,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
                     // what is missing, and what blocks it, once, instead of composing.
-                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if !unsaved_doc && steer && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
                             goal_nudges += 1;
                             barren = 0;
@@ -15448,7 +15454,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     // E.ARENA1-F17: repeats would end the turn with a document still unsaved --
                     // tell it once and give it the step (VM 520, 0f3e733: `new{text}` three times,
                     // never `save_as`).
-                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if unsaved_doc && steer && desktop::may_nudge_goal(unsaved_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
                         scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
@@ -15456,7 +15462,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     }
                     // E.ARENA1-F33: nor with the file the request asked for still missing -- say
                     // what is missing, and what blocks it, once, instead of composing.
-                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
+                    if !unsaved_doc && steer && desktop::may_nudge_goal(goal_nudges, started.elapsed().as_millis() as u64, budget.max_wall_ms) {
                         if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
                             goal_nudges += 1;
                             barren = 0;
@@ -15939,14 +15945,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     // missing and most of the budget left (VM 520, L2-ra: 44 s of 180). It now gives the
                     // same bounded notes as the repeat counter's exits first.
                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                    if unsaved_doc && desktop::may_nudge_goal(unsaved_nudges, elapsed_ms, budget.max_wall_ms) {
+                    if unsaved_doc && steer && desktop::may_nudge_goal(unsaved_nudges, elapsed_ms, budget.max_wall_ms) {
                         unsaved_nudges += 1;
                         barren = 0;
                         eprintln!("[agent] step {step}: nothing new, with the document unsaved \u{2014} asking for the save");
                         scratch.push_str(&desktop::unsaved_nudge(step, desktop::unsaved_save_path(last_save_target.as_deref(), &saved_files, last_new_text.as_deref(), user_text).as_deref()));
                         continue;
                     }
-                    if !unsaved_doc && desktop::may_nudge_goal(goal_nudges, elapsed_ms, budget.max_wall_ms) {
+                    if !unsaved_doc && steer && desktop::may_nudge_goal(goal_nudges, elapsed_ms, budget.max_wall_ms) {
                         if let Some((path, folder)) = self.missing_goal_now(user_text, id).await {
                             goal_nudges += 1;
                             barren = 0;
@@ -16165,7 +16171,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
         desktop::apply_failed_commands(&mut ans, &failed_cmds);
         // E.CLAIM2: compose cannot be sent back; a claimed change over a turn that changed nothing
         // is corrected in the reply itself.
-        if !changed_this_turn && claims_a_change(&ans) {
+        if steer && !changed_this_turn && claims_a_change(&ans) {
             eprintln!("[agent] compose claims a change and nothing changed this turn \u{2014} corrected");
             ans = format!("{ans}\n\n{CHANGE_CORRECTION}");
         }

@@ -18977,6 +18977,31 @@ mod desktop_consent_and_stall_wiring {
         assert!(crate::desktop::DISCOVER_DESKTOP_NOTE.contains("agent_run"));
     }
 
+    /// E.NOTOOL1 (520, turns 1118 and 1129): "... Do not use any tools." answered with the essay at
+    /// step 0 is the answer -- not sent to look at the desktop, not sent back as a claim, never saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn do_not_use_any_tools_is_honoured() {
+        let essay: &'static str = Box::leak(
+            format!(
+                "A Detailed Guide to the Haiku Form\n\n1. What a Haiku Is\n{}Basho wrote the frog poem in 1686.\n{}",
+                "A haiku is a short poem of three lines. ".repeat(30),
+                "Seasonal words anchor the poem in time. ".repeat(30)
+            )
+            .into_boxed_str(),
+        );
+        let ask = "Write a very detailed guide to the haiku form, at least 2500 words, in 15 numbered sections with examples in every section. Do not use any tools.";
+        let r = run_with(ask, vec![Step::Say(essay)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert!(r.reached.is_empty(), "a tool was called: {:?}", r.reached);
+        assert_eq!(r.prompts.len(), 1, "the essay was sent back or steered: {:?}", r.prompts.iter().map(|p| p.len()).collect::<Vec<_>>());
+        assert!(r.reply.contains("Basho wrote the frog poem"), "{}", r.reply);
+        // A reply that opens "I've written the guide below." is the answer here, not a claimed change
+        // to send back -- the claim check stands down when the person forbade tools.
+        let framed: &'static str = Box::leak(format!("I've written the guide below.\n\n{essay}").into_boxed_str());
+        let f = run_with(ask, vec![Step::Say(framed)], vec!["UNUSED"], vec!["UNUSED"]).await;
+        assert_eq!(f.prompts.len(), 1, "the framed essay was sent back: {:?}", f.prompts.iter().map(|p| p.len()).collect::<Vec<_>>());
+        assert!(f.reply.starts_with("I've written the guide below."), "{}", f.reply);
+    }
+
     /// E.LOG1 (520, the #980 run, turn 1026): the work log says the calls in it are the model's own,
     /// for this request -- it called a note made at its step 0 one that "already exists".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

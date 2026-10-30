@@ -22309,3 +22309,8 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 **Tests:**
 - `a_gateway_failure_is_said_in_its_own_terms_and_nothing_else_is_touched` adds 423 → the vault sentence, and another provider's 423 untouched.
 - Mutant: the 423 branch removed → red.
+
+**E.PROV2b — RESULT: PASS (unit; Windows and Linux).** Commit 8330b18.
+- Mutant (the 423 branch disabled) → red; 1/1.
+- **Windows workspace:** 2637 passed, 0 failed. **Linux (staging .95):** mind-inference 100 passed, 0 failed.
+- No bundle yet: this is dead code until yantrik-os #1017 ships 423. It rides the next bundle.

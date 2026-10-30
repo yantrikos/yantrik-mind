@@ -22435,3 +22435,12 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Mutants killed (2/2):** `unattempted_side_effect` ignores the gate; steer forced true (caught by the added framed-essay case).
 - **Windows workspace:** 2640 passed, 0 failed. **Linux (staging .95):** mind-conversation 1323 passed, 0 failed.
 - **Bundle:** `yantrik-mind-584d0f1-linux-amd64.tar.zst`, 62759396 bytes, sha256 `b8c508990eebbf7cbd40a15657bfe9581e8347066f94687cfe8caa5efc8ee267` (verified locally after copy). It supersedes b7608be (carries E.MAIL1, E.CLAIM4, E.PROV2b).
+
+**E.NOTOOL1 — LIVE: PASS** (520, Mind 584d0f1, turn 1134, 15:21 CT, a fresh chat, turn 1129's exact prompt):
+- step 0: "no tool chosen — returning a direct reply (8742 chars)" → "turn done: 1 steps in 10s … no tools";
+- no os_describe, os_act or save_as, no "claims a change", no look-first; `calls: []`; no file created;
+- the reply is the essay ("# A Detailed Guide to the Haiku Form …").
+- This closes turn 1118/1129's chain (E.CLAIM4 + E.NOTOOL1).
+- The essay was about 1,400 words against the 2,500 asked. The step call's max_tokens is 8000 (lib.rs `max_tokens: 8000`) and the reply used about 2,000, so nothing truncated it: it is the model's length choice. No rule added.
+
+**dc's idle rule for installs, corrected:** a bare /new, /reset or /clear is answered by code before the loop (E.SLASH1) and writes no "turn done". Idle = no non-slash "[harness] turn N:" newer than the last "turn done", and no "[agent] step" line in the last 2 min.

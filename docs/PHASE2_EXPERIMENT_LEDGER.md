@@ -22430,3 +22430,8 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Added before running:** the first turn test could not see `steer`. CLAIM4 already keeps a mid-essay "wrote the" out of the claim check, and no editor draft is made, so forcing steer on survived. A second case answers "I've written the guide below." + the essay: with tools forbidden it stands (one model call); with steer forced on it is sent back.
 
 **Live check (next 520 gate):** turn 1129's prompt → the essay, with no os_describe, os_act or save_as in the journal.
+
+**E.NOTOOL1 — RESULT: PASS (unit; Windows and Linux).** Commit 584d0f1.
+- **Mutants killed (2/2):** `unattempted_side_effect` ignores the gate; steer forced true (caught by the added framed-essay case).
+- **Windows workspace:** 2640 passed, 0 failed. **Linux (staging .95):** mind-conversation 1323 passed, 0 failed.
+- **Bundle:** `yantrik-mind-584d0f1-linux-amd64.tar.zst`, 62759396 bytes, sha256 `b8c508990eebbf7cbd40a15657bfe9581e8347066f94687cfe8caa5efc8ee267` (verified locally after copy). It supersedes b7608be (carries E.MAIL1, E.CLAIM4, E.PROV2b).

@@ -2242,9 +2242,24 @@ pub(crate) fn claims_a_change(text: &str) -> bool {
         "i've added", "i created", "i've created", "i updated", "i've updated", "i edited", "i changed", "i've changed",
         "i ran ", "ran the", "i've run", "i fixed", "i've fixed", "wrote it",
     ];
-    let t = text.to_lowercase().replace('\u{2019}', "'");
+    // E.CLAIM4 (520, turn 1118: a 2500-word haiku guide said "Bashō wrote the ...", was sent back
+    // as a claimed change, and ended saved to ~/haiku-guide.md over "do not use any tools"): a reply
+    // says what it did at its start or its end; the content it delivers in between is not a claim.
+    let t = claim_edges(text).to_lowercase().replace('\u{2019}', "'");
     // "FINISHED" as a completion token, in capitals: "your research finished" is not a claim.
     CLAIMS.iter().any(|c| t.contains(c)) || text.contains("FINISHED")
+}
+
+/// E.CLAIM4: a reply's first and last 300 characters -- the whole of a short one.
+fn claim_edges(text: &str) -> String {
+    const EDGE: usize = 300;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 2 * EDGE {
+        return text.to_string();
+    }
+    let head: String = chars[..EDGE].iter().collect();
+    let tail: String = chars[chars.len() - EDGE..].iter().collect();
+    format!("{head}\n{tail}")
 }
 
 /// E.OFFER1 (Pranab, 17 Oct: offers survived three models and two prompts): the reply without a

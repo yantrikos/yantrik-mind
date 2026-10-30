@@ -22343,3 +22343,21 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - "[agent] step 0: model call 1030 ms (cap 135 s)" → a one-sentence haiku answer.
 - The OS's saved ollama-cloud account now keeps its key in the vault, but the Mind does not read it there. When the desktop hands a provider to the Mind (`provider_set.rs`), the key is written once into the Mind's own env file (`write_env_600`), and the Mind reads that copy on every call. So the vault was not on this turn's path, either through the gateway or through the hand-off.
 - The gate failed on an OS display defect: after a restart and unlock, AI accounts shows "the vault is locked" until "List models again" is pressed.
+
+## E.CLAIM4 — PREREG: a reply's claim of a change is read at its edges, not in the content it delivers
+
+**Why (520, OS #1024 gate, turn 1118, 30 Oct 12:28 CT):** "Write a very detailed guide to the haiku form, at least 2500 words, … **Do not use any tools.**" The chain:
+1. Step 0: the model answered with the essay (right). Then "the reply claims a change and nothing changed this turn — sent back once". `claims_a_change` searches the WHOLE reply for "wrote the", "written to", "i wrote" and the like, and a haiku guide says things like "Bashō wrote the …".
+2. Step 1: "would refuse … without looking at the desktop — sending it to look".
+3. Steps 2–4: editor `new` with the essay, then `save_as ~/haiku-guide.md`. A file was saved in the person's home over "Do not use any tools".
+- The step-1 push fired only because step 0 had sent back a correct answer; the cause is the step-0 false positive.
+
+**Change:** `claims_a_change` judges only the reply's first 300 and last 300 characters, where a reply says what it did ("Done — I wrote …", "… I've saved it."). A short reply is judged whole, as now. Phrases unchanged.
+
+**Tests:**
+- a 2500-character essay with "Bashō wrote the …" and "I added a line" in its middle → no claim;
+- the same essay opening "I wrote the guide to ~/x.md." → claim; closing "… I've saved it." → claim;
+- the existing short-claim asserts unchanged.
+- Mutant: judge the whole text again → red.
+
+**Live check (next 520 run):** the same prompt. PASS if the reply is the essay and the journal shows no "claims a change", no desktop look and no save_as.

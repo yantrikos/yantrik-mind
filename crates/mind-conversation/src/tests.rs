@@ -18616,6 +18616,15 @@ mod desktop_consent_and_stall_wiring {
         assert!(!crate::changed_something("recall", &serde_json::json!({})));
         assert!(crate::claims_a_change(claim) && crate::claims_a_change("I've added the button."));
         assert!(!crate::claims_a_change("Your research finished; here is what it found."));
+        // E.CLAIM4 (520, turn 1118): content in the middle of a long reply is not a claim; its edges are.
+        let body = format!(
+            "A Detailed Guide to the Haiku Form\n\n1. What a Haiku Is\n{}Basho wrote the frog poem in 1686, and I added a line of my own reading here.\n{}",
+            "A haiku is a short poem of three lines. ".repeat(30),
+            "Seasonal words anchor the poem in time. ".repeat(30)
+        );
+        assert!(!crate::claims_a_change(&body), "an essay's content read as a claimed change");
+        assert!(crate::claims_a_change(&format!("I wrote the guide to ~/haiku.md.\n{body}")));
+        assert!(crate::claims_a_change(&format!("{body}\nI've saved it.")));
     }
 
     /// E.GROUND1 (561: nine turns of "it needs your approval" from lapsed cards, with nothing tried):

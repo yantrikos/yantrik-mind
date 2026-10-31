@@ -22537,3 +22537,13 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Windows workspace:** 2643 passed, 0 failed. **Linux (staging .95):** mind-conversation 1325 and mind-tools 269 passed, 0 failed.
 - **Bundle:** `yantrik-mind-294f870-linux-amd64.tar.zst`, 62840452 bytes, sha256 `ef74c0c223f43dc7fe89d35031029a08283940b56d67c7777ef276ca1e0f0bf7` (verified locally after copy). It supersedes 85c6acb; 2e27406's own bundle was never sent.
 - **Live (pending, 520):** turn 1139's prompt.
+
+**E.WX2 — LIVE (520, Mind 294f870, turn 1157, 15:48 CT, Pranab's exact prompt): graded PASS on substance, with an audit gap (dc's runner graded it FAIL).**
+- step 0: `weather {"place":"Bentonville, Arkansas"}` → refused by egress → "weather's place came from memory — read the person's own Weather app instead". That line prints only AFTER the redirect's `os_describe weather` has returned.
+- The work log went 0 → 2060 B before step 1 (the app's describe; the refusal alone is about 300 B).
+- The reply's numbers match the app: "Today (Sat) 19/16, 73%" against the describe dc captured at 14:33 ("Today" high 19°, low 16°, 74%).
+- No `[egress] … weather sent as` line: no third-party weather request.
+- **Why it was graded FAIL:** the redirect calls the describe directly, so it wrote no "[agent] step N: … os_describe raw args" line and left `calls: []`. The read was invisible to the journal and the turn record. dc then read the reply as fabricated.
+- **Fix, E.WX2b (journal and record only):** the redirect logs "raw args" and "->" lines like any call and counts `os_describe` in the turn's calls. Behaviour is unchanged; no new test. Windows 2643 passed, 0 failed (one mind-evals immune test flaked once and passed twice on rerun).
+- **The `[privacy] household lane dispatch attempted via ollama-cloud … egress-clean` line:** the egress planner's own model call at Household scope, which passed the household allowlist (a non-allowlisted provider logs "[privacy] REFUSED"). Per ARCH3 slice 2 the planner re-authors from the person's words and discards the grounded value. Expected path.
+- Asked dc for independent confirmation: the OS-side log of a `describe weather` from the Mind at 15:48:00–04, and the app's forecast at 15:48 against the reply.

@@ -15349,6 +15349,11 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     if !weather_from_app && matches!(tool.as_str(), "weather" | "wx") && self.desktop_attached() {
                         weather_from_app = true;
                         let look = serde_json::json!({"app": "weather"});
+                        // E.WX2b (520, turn 1157: the read happened but left no step line and no
+                        // entry in the turn's calls, and was graded as never made): journalled and
+                        // counted like any call the model makes.
+                        eprintln!("[agent] step {step}: {} raw args {look}", desktop::DESCRIBE);
+                        *cost.calls.entry(desktop::DESCRIBE.to_string()).or_insert(0) += 1;
                         let mut seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
                         // A cold start answers "Weather — loading <place>" (dc, 520): look once more, as F30 does.
                         if desktop::still_loading(&seen) {
@@ -15357,6 +15362,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             // all `loaded_since` keeps.
                             seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
                         }
+                        eprintln!("[agent] step {step}: {} -> {}", desktop::DESCRIBE, journal_head(&seen, false));
                         eprintln!("[agent] step {step}: weather's place came from memory \u{2014} read the person's own Weather app instead");
                         scratch.push_str(&format!(
                             "\n[{step}] {tool} -> (the outside weather service was not asked -- that place could not be sent; the person's own Weather app, on this machine, says:)\n{seen}"

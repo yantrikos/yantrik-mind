@@ -22529,3 +22529,11 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Follow-up (not in this change):** the general F30 path (`still_loading` → `loaded_since` in the loop) has the same limit for any app whose content sits below the first line.
 
 **Live (520):** Pranab's exact prompt. PASS if the Weather app's forecast is used and no third-party weather call leaves the machine.
+
+**E.EGRESS7b + E.WX2 — RESULT: PASS (unit; Windows and Linux).** E.EGRESS7b at 2e27406, E.WX2 at 294f870.
+- **Mutants killed:**
+  - E.EGRESS7b 2/2: `name_shaped` always true; the Token routed past the check;
+  - E.WX2 2/2: the redirect removed; no second look on loading.
+- **Windows workspace:** 2643 passed, 0 failed. **Linux (staging .95):** mind-conversation 1325 and mind-tools 269 passed, 0 failed.
+- **Bundle:** `yantrik-mind-294f870-linux-amd64.tar.zst`, 62840452 bytes, sha256 `ef74c0c223f43dc7fe89d35031029a08283940b56d67c7777ef276ca1e0f0bf7` (verified locally after copy). It supersedes 85c6acb; 2e27406's own bundle was never sent.
+- **Live (pending, 520):** turn 1139's prompt.

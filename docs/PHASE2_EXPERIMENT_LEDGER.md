@@ -22568,3 +22568,10 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - E.WX2c mutant (`forecast_empty` always false) → red; 1/1.
 - **Windows workspace:** 2643 passed, 0 failed. **Linux (staging .95):** mind-conversation 1325 passed, 0 failed.
 - **Bundle:** `yantrik-mind-53820fe-linux-amd64.tar.zst`, 62850473 bytes, sha256 `a9fcf0ef5bec6c7dfae2cbad9f98e3bb8dee7a7ed32bd6c5c266e947aecc2377` (verified locally after copy). It supersedes 294f870; ad2e75b's bundle was built but not sent.
+
+**E.WX2 (+b, +c) — LIVE: PASS** (520, Mind 53820fe, turn 1165, 16:33 CT, Pranab's exact prompt, a fresh chat; dc's runner):
+- step 0: `weather {"place":"Bentonville, Arkansas"}` → refused by egress → `mcp.yantrik-os.os_describe raw args {"app":"weather"}` → "-> Weather - 17C in Bentonville, Dense drizzle …" → "weather's place came from memory — read the person's own Weather app instead". The read is now visible in the journal and counted (`os_describex1` in "turn done").
+- The reply ("From your Weather app in Bentonville (updated just now)") matches `yos describe weather --json` taken right after it, day by day: Wed 22/10 8%, Fri 18/9 4%, Sun 40%, Thu 15%, Tue 89%, current 17°C dense drizzle.
+- 0 `[egress] … weather sent as` lines: no third-party weather request.
+- The privacy line at step 0 is the egress planner's Household dispatch, as before.
+- **Seen:** `upcoming` said "The desktop calendar could not be read, so what is on it is unknown", and the reply said so honestly. Raised with dc.

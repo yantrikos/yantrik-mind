@@ -19003,6 +19003,59 @@ mod desktop_consent_and_stall_wiring {
         assert!(f.reply.starts_with("I've written the guide below."), "{}", f.reply);
     }
 
+    /// E.WX2 (Pranab, 31 Oct, option A; 520 turn 1139): on the desktop, the weather of a place that
+    /// came from memory is read from the person's own Weather app -- nothing goes to the outside
+    /// weather service. A city the person names still goes, as their words; off the desktop the
+    /// refusal stands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_remembered_places_weather_comes_from_the_persons_weather_app() {
+        use mind_governance::egress::EgressBroker;
+        // The shape `yos describe weather` gave on 520 (2299, dc, 31 Oct): a first line, then "forecast".
+        const APP: &str = "Weather \u{2014} 18\u{b0}C in Bentonville, Overcast, feels like 18\u{b0}C\nrevision: 9cb3fc1ad07dca5b\n{\n  \"forecast\": [{\"day\": \"Today\", \"high\": \"19\u{b0}\", \"low\": \"16\u{b0}\", \"precipitation\": \"74%\"}, {\"day\": \"Sun\", \"high\": \"62\u{b0}\", \"low\": \"41\u{b0}\", \"precipitation\": \"5%\"}]\n}";
+        const COLD: &str = "Weather \u{2014} loading Bentonville\nrevision: 1\n{}";
+        let run = |ask: &'static str, desktop: bool| async move {
+            let seen = Arc::new(StdMutex::new(Vec::new()));
+            let script: Arc<dyn LLMBackend> = Arc::new(Script {
+                at: AtomicUsize::new(0),
+                steps: vec![Step::Call("weather", serde_json::json!({"place": "Bentonville, Arkansas"})), Step::Say("Here is the week.")],
+                seen: seen.clone(),
+                timeouts: Arc::new(StdMutex::new(Vec::new())),
+            });
+            // The egress planner's call (no tools) gets no usable arguments here, so the outside call is refused.
+            let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+            let hub = Arc::new(mind_tools::McpHub::new());
+            if desktop {
+                let tool = |name: &str| mind_tools::McpTool {
+                    server: "yantrik-os".into(),
+                    name: name.into(),
+                    description: format!("{name} on this computer"),
+                    read_only: true,
+                    open_world: false,
+                    destructive: false,
+                    input_schema: serde_json::json!({"type": "object"}),
+                };
+                // A cold start first, then the loaded app.
+                hub.add_scripted_tool(tool("os_describe"), vec![Ok(COLD.to_string()), Ok(APP.to_string())]).unwrap();
+                hub.add_scripted_tool(tool("os_act"), vec![Ok("UNUSED".to_string())]).unwrap();
+            }
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(mem, pool, "YM")
+                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)))
+                .with_mcp(hub.clone());
+            let _ = conv.agent_loop_for_eval(ask, &TurnIdentity::primary()).await;
+            let prompts = seen.lock().unwrap().clone();
+            (hub.scripted_calls(), prompts.join("\n"))
+        };
+        let ask = "Can you please check the weather forecast for this week and plan for the fall color tour";
+        let (reached, log) = run(ask, true).await;
+        assert!(reached.iter().any(|(t, a)| t.ends_with("os_describe") && a["app"] == "weather"), "the Weather app was not read: {reached:?}");
+        assert!(log.contains("the person's own Weather app, on this machine, says:") && log.contains("\"precipitation\": \"74%\""), "the app's forecast did not reach the model");
+        assert_eq!(reached.iter().filter(|(t, _)| t.ends_with("os_describe")).count(), 2, "a cold start was not looked at again");
+        let (reached, log) = run(ask, false).await;
+        assert!(reached.is_empty() && log.contains("nothing was sent"), "off the desktop the refusal should stand: {reached:?}");
+        assert!(!log.contains("Weather app, on this machine"), "no desktop, no app to read");
+    }
+
     /// E.LOG1 (520, the #980 run, turn 1026): the work log says the calls in it are the model's own,
     /// for this request -- it called a note made at its step 0 one that "already exists".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

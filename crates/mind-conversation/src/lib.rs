@@ -14535,6 +14535,8 @@ Open reminders you're carrying for them:",
             std::collections::HashMap::new();
         // E.NOTOOL1: the person forbade tools -- the desktop-steering nudges stand down.
         let steer = !desktop::forbids_tools(user_text);
+        // E.WX2: the person's Weather app answers a remembered place once per turn.
+        let mut weather_from_app = false;
         // E.ARENA1-F12: a document written this turn is still unsaved (the desktop's own word).
         let mut unsaved_doc = false;
         // E.ARENA1-F58: how many times this turn was told its document is still unsaved.
@@ -15341,6 +15343,26 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     kind: guards::RefusalKind::EgressUnsafe,
                     msg,
                 } => {
+                    // E.WX2 (Pranab, 31 Oct, option A): a remembered place's weather comes from the
+                    // person's own Weather app on the desktop -- their city stays on this machine.
+                    // Any refusal of the outside call qualifies: reading the person's own app sends nothing.
+                    if !weather_from_app && matches!(tool.as_str(), "weather" | "wx") && self.desktop_attached() {
+                        weather_from_app = true;
+                        let look = serde_json::json!({"app": "weather"});
+                        let mut seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        // A cold start answers "Weather — loading <place>" (dc, 520): look once more, as F30 does.
+                        if desktop::still_loading(&seen) {
+                            tokio::time::sleep(std::time::Duration::from_millis(desktop::LOADING_WAIT_MS)).await;
+                            // The whole second answer: its forecast is below the first line, which is
+                            // all `loaded_since` keeps.
+                            seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                        }
+                        eprintln!("[agent] step {step}: weather's place came from memory \u{2014} read the person's own Weather app instead");
+                        scratch.push_str(&format!(
+                            "\n[{step}] {tool} -> (the outside weather service was not asked -- that place could not be sent; the person's own Weather app, on this machine, says:)\n{seen}"
+                        ));
+                        continue;
+                    }
                     scratch.push_str(&format!("\n[{step}] {tool} -> {msg}"));
                     // E.LOOP9 (VM 541): a refused call learned nothing; eleven refused fetches ran
                     // unstopped because this branch skipped the count.

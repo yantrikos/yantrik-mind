@@ -22503,3 +22503,29 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - Mutants: `name_shaped` always true → red; the Token routed past the check → red.
 
 **For Pranab (not code):** whether to mark the home city shareable with weather services (YM_SHAREABLE_FACTS) so "weather this week" needs no city. That is the privacy setting this design leaves to the person.
+
+## E.WX2 — PREREG: on the desktop, a remembered place's weather comes from the person's own Weather app
+
+**Why:** turn 1139 (E.EGRESS7b). Pranab chose option A (relayed by dc, 31 Oct): "steer the desktop Mind to his own Weather app's describe for weather, so his city stays private". Option B (YM_SHAREABLE_FACTS) was NOT consented, and nothing is marked shareable.
+
+**Change:** in `agent_loop_focused`'s egress-refusal branch, when the refused tool is `weather` or `wx`, the refusal is E.EGRESS7b's TokenNotFromPerson, and a desktop is attached, then once per turn:
+- the Mind runs `os_describe {"app":"weather"}`;
+- it logs that answer, prefixed "(the place came from memory, so the outside weather service was not asked; the person's own Weather app, on this machine, says:)";
+- this step does not count as barren.
+- A city the person names still goes to the third-party tool as their words. Off the desktop, nothing changes (the refusal stands).
+
+**Tests:**
+- a desktop turn: the model calls `weather {"place":"Bentonville, Arkansas"}` for "check the weather forecast for this week …", and the planner returns a phrase → `os_describe weather` is reached, its text is in the work log, and no weather request leaves;
+- the person naming the city → the third-party tool, no describe;
+- no desktop → the refusal stands, no describe.
+- Mutant: the redirect branch removed → red.
+
+**dc answered (31 Oct 14:33, 520 at 2299):** the forecast IS in the describe, under `"forecast"`, as a list of {day, high, low, precipitation}. Loaded first line: "Weather — 18°C in Bentonville, Overcast, feels like 18°C". A cold start reads "Weather — loading <place>". No OS change is needed.
+**Revised before results:**
+- (1) the condition is ANY egress refusal of `weather`/`wx` on a desktop, not only TokenNotFromPerson. Reading the person's own app sends nothing, and it drops a fragile message match. In the test harness the planner gives no usable arguments, which is a different refusal reason;
+- (2) a "loading" first line gets one more look after LOADING_WAIT_MS (F30's `still_loading`/`loaded_since`);
+- (3) the test uses the real describe's shape: a cold start, then loaded, with exactly 2 describes.
+- (4) found by the test: `loaded_since` keeps only the second look's FIRST line, so the forecast (below it) was lost. E.WX2 uses the whole second answer.
+- **Follow-up (not in this change):** the general F30 path (`still_loading` → `loaded_since` in the loop) has the same limit for any app whose content sits below the first line.
+
+**Live (520):** Pranab's exact prompt. PASS if the Weather app's forecast is used and no third-party weather call leaves the machine.

@@ -80,6 +80,10 @@ pub(crate) enum PreVerdict {
 /// failed, and that nothing left the device. "safe outbound request" stays in it: it is the marker
 /// `Outcome::classify` reads as a gate refusal.
 pub(crate) fn egress_refusal(tool: &str, failure: crate::egress_planning::CleanArgsFailure) -> String {
+    // E.EGRESS7b: a name only the person can supply -- retrying cannot help, asking can.
+    if matches!(failure, crate::egress_planning::CleanArgsFailure::TokenNotFromPerson) {
+        return format!("(not sent: {tool}'s {} — do not call it again with the same value.)", failure.why());
+    }
     format!(
         "(I couldn't compose a safe outbound request for {tool}: {} — nothing was sent. Try again, or give me the exact URL or search terms.)",
         failure.why()
@@ -555,12 +559,45 @@ mod tests {
             eng.note_handed_over(&key, "/home/p/trip.md", "We fly to Bentonville on Friday");
             let state = Mutex::new(GuardState::default());
             match pre(&eng, &state, &id, "what will the weather be there", "weather", serde_json::json!({"place": "Bentonville"}), "t").await {
-                PreVerdict::Proceed(a) => a,
-                PreVerdict::Refuse { msg, .. } => panic!("{msg}"),
+                PreVerdict::Proceed(a) => Ok(a),
+                PreVerdict::Refuse { msg, .. } => Err(msg),
             }
         };
-        assert_eq!(run(1_790_602_795).await, serde_json::json!({"place": "Bentonville"}), "an unchanged handed file's token was rewritten");
-        assert_eq!(run(4_102_444_800).await, serde_json::json!({"place": "planned"}), "a file written after it was named stayed a token source");
+        assert_eq!(run(1_790_602_795).await, Ok(serde_json::json!({"place": "Bentonville"})), "an unchanged handed file's token was rewritten");
+        assert_eq!(run(4_102_444_800).await, Ok(serde_json::json!({"place": "planned"})), "a file written after it was named stayed a token source");
+    }
+
+    /// E.EGRESS7b (520, turn 1139): a remembered place the person did not say is refused with a sentence
+    /// the model can act on; the same place in the person's words goes as their words.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_remembered_place_is_refused_not_rewritten() {
+        use mind_governance::egress::EgressBroker;
+        let run = |said: &'static str| async move {
+            let pool = mind_inference::InferencePool::new(
+                Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"weather forecast this week fall color tour"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+                1,
+            );
+            let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+            let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+            let state = Mutex::new(GuardState::default());
+            match pre(&eng, &state, &TurnIdentity::primary(), said, "weather", serde_json::json!({"place": "Bentonville, Arkansas"}), "t").await {
+                PreVerdict::Proceed(a) => Ok(a),
+                PreVerdict::Refuse { msg, .. } => Err(msg),
+            }
+        };
+        let refused = run("Can you please check the weather forecast for this week and plan for the fall color tour").await;
+        let msg = refused.expect_err("a remembered place left the machine");
+        assert!(msg.contains("ask the person to say it") && msg.contains("Shareable facts") && !msg.contains("Try again"), "{msg}");
+        let named = run("What's the weather in Bentonville, Arkansas this week?").await;
+        assert_eq!(named, Ok(serde_json::json!({"place": "Bentonville, Arkansas"})));
+        // A name is at most four words and 48 characters; a query-shaped phrase is not one.
+        for name in ["NYC", "New York", "Rio de Janeiro Brazil", "AAPL", "owner/repo"] {
+            assert!(crate::egress_planning::name_shaped(name), "{name}");
+        }
+        for not in ["", "weather forecast this week fall color tour", "a b c d e", &"x".repeat(49)] {
+            assert!(!crate::egress_planning::name_shaped(not), "{not}");
+        }
     }
 
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.

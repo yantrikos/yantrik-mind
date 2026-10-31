@@ -22477,3 +22477,29 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Windows workspace:** 2641 passed, 0 failed. **Linux (staging .95):** mind-conversation 1323 and mind-tools 269 passed, 0 failed.
 - **Bundle:** `yantrik-mind-85c6acb-linux-amd64.tar.zst`, 62760699 bytes, sha256 `fb52d506abb63a4712a5e2c1f5afee8a50d7726831d628126f266a4846685bed` (verified locally after copy). It supersedes 584d0f1.
 - Unit-proven only: no test VM's Mind searches through its own IMAP account.
+
+## E.EGRESS7b — PREREG: a short name the person did not give is refused, never rewritten into a phrase
+
+**Why (520, Mind 584d0f1, turn 1139, 31 Oct ~13:30 CT, found by dc):** "Can you please check the weather forecast for this week and plan for the fall color tour".
+- `weather raw args {"place":"Bentonville, Arkansas"}` → `[egress] weather sent as {"place":"weather forecast this week fall color tour"}` → "couldn't find a place called …", three steps running. The reply then said it could not get the forecast.
+- `place` is a Token field. "Bentonville" came from memory, not the person's words, a handed file or YM_SHAREABLE_FACTS, so it fell through to the shared `Query | Token` arm, where the free-text QUERY planner rewrote it. A query planner can only produce a phrase, never a name, so the request was garbage by construction.
+
+**Change:**
+- The Token arm no longer goes to the query planner. A Token that is not shareable, not a span and not a leading span of the person's words refuses with a new `CleanArgsFailure::TokenNotFromPerson`.
+- The refusal says the name came from memory and was not sent: ask the person to say it, or they can mark it shareable for this kind of service (YM_SHAREABLE_FACTS, e.g. `weather:<city>`). It does not invite "try again".
+- Query fields are unchanged.
+
+**Tests:**
+- a weather call whose place is not in the person's words → refused with the new reason; nothing rewritten, nothing sent;
+- the same with the person naming the city ("weather in Bentonville") → sent as the person's words;
+- a shareable fact → sent as is (existing tests stay green).
+- Mutant: route the Token back to the query planner → red.
+
+**REVISED before results:** the first version (refuse every Token the person did not give) broke 3 tests encoding a REVIEWED rule: E.EGRESS5, the eighth review's HIGH, "a query or token the person did not write is the planner's" ("NYC" → "New York", "apple stock" → "AAPL"). Revised:
+- the Token still goes to the planner;
+- its answer is sent only if `name_shaped`: at most 4 words and 48 characters. Otherwise it is refused with `TokenNotFromPerson`.
+- The turn-1139 phrase (7 words) is refused; the planner's short re-derivations pass.
+- Tests: the three are restored as written; the new test's planner returns the 7-word phrase → refused; the person naming the city → sent as their words; unit tests on `name_shaped` at the bounds.
+- Mutants: `name_shaped` always true → red; the Token routed past the check → red.
+
+**For Pranab (not code):** whether to mark the home city shareable with weather services (YM_SHAREABLE_FACTS) so "weather this week" needs no city. That is the privacy setting this design leaves to the person.

@@ -649,6 +649,13 @@ pub(crate) fn shareable_facts_from(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// E.EGRESS7b: a short name -- a place, a ticker, a repo, a handle -- is at most four words and 48
+/// characters. A planner's query-shaped phrase is not one.
+pub(crate) fn name_shaped(value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && v.chars().count() <= 48 && v.split_whitespace().count() <= 4
+}
+
 /// E.EGRESS5: is `value` a fact the person marked shareable with tools of this `kind`?
 pub(crate) fn shareable_fact(kind: &str, value: &str) -> bool {
     shareable_fact_in(&mind_net::person_var("YM_SHAREABLE_FACTS").unwrap_or_default(), kind, value)
@@ -948,6 +955,10 @@ pub(crate) enum CleanArgsFailure {
     FetchBudget,
     /// E.EGRESS5 (Pranab, 5 Oct): a tool the person has not turned on (the work radar).
     NotOptedIn,
+    /// E.EGRESS7b (520, turn 1139: a remembered "Bentonville, Arkansas" became the place "weather
+    /// forecast this week fall color tour"): a short name -- a place, a ticker, a handle -- from
+    /// neither the person's words, a file they handed over, nor a fact they marked shareable.
+    TokenNotFromPerson,
 }
 
 impl CleanArgsFailure {
@@ -965,6 +976,9 @@ impl CleanArgsFailure {
             }
             CleanArgsFailure::UrlNotFromSources => {
                 "that address is not in the person's words or in what a search returned this turn; search first, then fetch an address the results give"
+            }
+            CleanArgsFailure::TokenNotFromPerson => {
+                "that name (a place, a ticker or a handle) came from memory, not from the person's words, so it was not sent; ask the person to say it -- or they can mark it shareable with this kind of service in settings (Shareable facts)"
             }
         }
     }
@@ -1148,7 +1162,19 @@ impl ConversationEngine {
                 mind_governance::egress::FieldKind::Token if leading_span(value, &token_sources, &named).is_some() => {
                     leading_span(value, &token_sources, &named).unwrap_or_default()
                 }
-                mind_governance::egress::FieldKind::Query | mind_governance::egress::FieldKind::Token => {
+                // E.EGRESS5 (the eighth review): a token the person did not write is the planner's.
+                // E.EGRESS7b (520, turn 1139): but the planner writes queries, and its answer is sent
+                // only if it is shaped like a name -- "weather forecast this week fall color tour" is
+                // not a place, and is refused with a sentence the model can act on.
+                mind_governance::egress::FieldKind::Token => {
+                    let r = Box::pin(self.egress_clean_args_with("search", user_text, serde_json::json!({ "query": value }), external_provenance, web_obs, fetched, key)).await?;
+                    let planned = r.get("query").and_then(|q| q.as_str()).unwrap_or_default().trim().to_string();
+                    if !name_shaped(&planned) {
+                        return Err(CleanArgsFailure::TokenNotFromPerson);
+                    }
+                    planned
+                }
+                mind_governance::egress::FieldKind::Query => {
                     let r = Box::pin(self.egress_clean_args_with("search", user_text, serde_json::json!({ "query": value }), external_provenance, web_obs, fetched, key)).await?;
                     r.get("query").and_then(|q| q.as_str()).unwrap_or_default().to_string()
                 }

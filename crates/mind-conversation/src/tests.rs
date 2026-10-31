@@ -2567,11 +2567,12 @@ async fn arch3_slice2_egress_clean_planning_discards_grounded_args() {
     // E.EGRESS5 (the eighth review's HIGH): the github tool is no longer "documented not-yet-covered" --
     // its repo is a token, and one the person did not write is the planner's to write.
     let g = serde_json::json!({ "repo": "owner/private-repo" });
-    let cleaned = conv
-        .egress_clean_args("github_repo_items", "my open PRs", g.clone(), "")
-        .await
-        .unwrap();
-    assert_ne!(cleaned, g, "a repo the person never named left as the model wrote it");
+    // E.EGRESS7b: the planner's answer leaves only if it is name-shaped; this planner writes a phrase,
+    // so the repo is refused -- either way, never the model's value.
+    match conv.egress_clean_args("github_repo_items", "my open PRs", g.clone(), "").await {
+        Ok(cleaned) => assert_ne!(cleaned, g, "a repo the person never named left as the model wrote it"),
+        Err(e) => assert_eq!(e, crate::egress_planning::CleanArgsFailure::TokenNotFromPerson),
+    }
     // A repo the person named leaves as they wrote it.
     let named = conv
         .egress_clean_args("github_repo_items", "show my open PRs in owner/repo", serde_json::json!({ "repo": "owner/repo" }), "")

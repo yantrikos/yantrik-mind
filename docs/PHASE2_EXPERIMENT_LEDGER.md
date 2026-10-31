@@ -22444,3 +22444,30 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - The essay was about 1,400 words against the 2,500 asked. The step call's max_tokens is 8000 (lib.rs `max_tokens: 8000`) and the reply used about 2,000, so nothing truncated it: it is the model's length choice. No rule added.
 
 **dc's idle rule for installs, corrected:** a bare /new, /reset or /clear is answered by code before the loop (E.SLASH1) and writes no "turn done". Idle = no non-slash "[harness] turn N:" newer than the last "turn done", and no "[agent] step" line in the last 2 min.
+
+## E.MAIL2 — PREREG: the Mind's own IMAP search sends non-ASCII text the way #1031 proved on Gmail
+
+**Why:** E.MAIL1 stopped a refused "café" search reading as "no results". This makes it search. yantrik-os #1031 at 46e1b6ba passed its regate on 520's real Gmail account (31 Oct):
+- "café" → a count (0), no error; "hello café" → 0, no error; plain "hello" → 1;
+- a CRLF query is refused with no connection to port 993.
+
+**Change:** in mind-tools `ImapMailClient::search`, the query comes from a pure `search_query(needle, literal_plus, literal_minus)`:
+- CR, LF, NUL and U+0085 in the needle → refused before anything is sent;
+- an ASCII needle → `TEXT "<needle>"` as now (`"` and `\` stripped), with no CAPABILITY call;
+- non-ASCII → `CHARSET UTF-8 TEXT {n+}\r\n<needle>` under LITERAL+, or `{n-}` under LITERAL- when n ≤ 4096, with n in UTF-8 bytes;
+- neither capability → an error saying the server cannot search non-ASCII text.
+- The capabilities are read once per session, only for a non-ASCII needle.
+
+**Tests (unit, on `search_query`):**
+- "cafe" → `TEXT "cafe"`;
+- "café" under LITERAL+ → `CHARSET UTF-8 TEXT {5+}\r\ncafé` (5 bytes, not 4 chars);
+- "café" under LITERAL- → `{5-}`;
+- over 4096 bytes under LITERAL- only → refused;
+- neither capability → refused;
+- CR, LF, NUL and U+0085 → refused.
+- **Mutants:**
+  - the byte count taken as chars → red;
+  - the CR/LF refusal removed → red;
+  - the LITERAL- size bound removed → red.
+
+**Live:** it needs a mind-tools IMAP account (520's Mind searches through the OS Email app). Until a Mind with its own IMAP account searches "café", this is unit-proven only.

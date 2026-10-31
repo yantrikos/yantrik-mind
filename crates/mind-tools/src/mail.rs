@@ -118,6 +118,29 @@ fn strip_block(s: &str, tag: &str) -> String {
 /// Strip an email body to readable text: quoted-printable decode, drop MIME/base64 scaffolding,
 /// remove style/script CONTENT (not just tags), convert block tags to breaks, strip remaining
 /// tags, decode HTML entities, collapse whitespace — bounded to `max_chars`.
+/// E.MAIL2: the SEARCH criteria for `needle` (line breaks and NUL already refused by the caller).
+/// ASCII: a quoted string, as ever. Otherwise CHARSET UTF-8 with a NON-synchronising literal --
+/// `{n+}` under LITERAL+, `{n-}` under LITERAL- up to 4096 bytes -- the byte count in UTF-8 bytes.
+/// The encoding yantrik-os #1031 proved against 520's real Gmail account (31 Oct).
+fn search_query(needle: &str, literal_plus: bool, literal_minus: bool) -> Result<String, String> {
+    if needle.chars().any(|c| matches!(c, '\r' | '\n' | '\0' | '\u{85}')) {
+        return Err("that search term holds a line break or NUL, which an IMAP search cannot carry".into());
+    }
+    if needle.is_ascii() {
+        let quoted: String = needle.chars().filter(|c| *c != '"' && *c != '\\').collect();
+        return Ok(format!("TEXT \"{quoted}\""));
+    }
+    let n = needle.len();
+    let mark = if literal_plus {
+        '+'
+    } else if literal_minus && n <= 4096 {
+        '-'
+    } else {
+        return Err("this mail server cannot search for text beyond plain ASCII".into());
+    };
+    Ok(format!("CHARSET UTF-8 TEXT {{{n}{mark}}}\r\n{needle}"))
+}
+
 fn clean_body(raw: &[u8], max_chars: usize) -> String {
     use base64::Engine;
     let lossy = String::from_utf8_lossy(raw);
@@ -390,7 +413,11 @@ impl MailClient for ImapClient {
             self.user.clone(),
             self.password.clone(),
         );
-        let needle: String = needle.chars().filter(|c| *c != '"' && *c != '\\').collect();
+        // E.MAIL2: refused before any byte is sent -- a line break or NUL would end the command early.
+        if needle.chars().any(|c| matches!(c, '\r' | '\n' | '\0' | '\u{85}')) {
+            anyhow::bail!("that search term holds a line break or NUL, which an IMAP search cannot carry");
+        }
+        let needle = needle.to_string();
         let limit = limit.clamp(1, 10);
         tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(EmailMsg, String)>> {
             let tls = native_tls::TlsConnector::builder().build()?;
@@ -406,11 +433,20 @@ impl MailClient for ImapClient {
             // E.MAIL1 (OS #1031: "café" refused by the server): a refused search is not an empty
             // mailbox. Remember it; with nothing found, the refusal is the answer, not "no results".
             let mut refused: Option<String> = None;
+            // E.MAIL2 (yantrik-os #1031, proved on Gmail 31 Oct): non-ASCII text goes as CHARSET UTF-8
+            // with a non-synchronising literal; ASCII asks the server nothing more.
+            let query = if needle.is_ascii() {
+                search_query(&needle, false, false)
+            } else {
+                let caps = session.capabilities()?;
+                search_query(&needle, caps.has_str("LITERAL+"), caps.has_str("LITERAL-"))
+            }
+            .map_err(|e| anyhow::anyhow!(e))?;
             for mb in mailboxes {
                 if session.select(mb).is_err() {
                     continue;
                 }
-                let ids = match session.search(format!("TEXT \"{needle}\"")) {
+                let ids = match session.search(&query) {
                     Ok(ids) => ids,
                     Err(e) => {
                         refused.get_or_insert_with(|| e.to_string());
@@ -706,6 +742,23 @@ impl MailSender for ScriptedMailSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// E.MAIL2: ASCII as a quoted string; non-ASCII as CHARSET UTF-8 with a non-synchronising literal
+    /// whose count is UTF-8 bytes; refused when the server offers no literal form, or for a line break.
+    #[test]
+    fn a_non_ascii_search_goes_as_a_utf8_literal() {
+        assert_eq!(search_query("cafe", false, false).unwrap(), "TEXT \"cafe\"");
+        assert_eq!(search_query("say \"hi\"", false, false).unwrap(), "TEXT \"say hi\"");
+        assert_eq!(search_query("café", true, false).unwrap(), "CHARSET UTF-8 TEXT {5+}\r\ncafé", "5 bytes, not 4 chars");
+        assert_eq!(search_query("café", false, true).unwrap(), "CHARSET UTF-8 TEXT {5-}\r\ncafé");
+        let long = "é".repeat(2049); // 4098 bytes
+        assert!(search_query(&long, false, true).is_err(), "LITERAL- stops at 4096 bytes");
+        assert!(search_query(&long, true, false).is_ok(), "LITERAL+ has no such bound");
+        assert!(search_query("café", false, false).is_err(), "no literal form offered");
+        for bad in ["a\r\nb", "a\nb", "a\0b", "a\u{85}b", "caf\u{e9}\r"] {
+            assert!(search_query(bad, true, true).is_err(), "{bad:?}");
+        }
+    }
 
     fn msg(from: &str, subj: &str) -> EmailMsg {
         EmailMsg {

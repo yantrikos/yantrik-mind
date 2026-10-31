@@ -22547,3 +22547,19 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Fix, E.WX2b (journal and record only):** the redirect logs "raw args" and "->" lines like any call and counts `os_describe` in the turn's calls. Behaviour is unchanged; no new test. Windows 2643 passed, 0 failed (one mind-evals immune test flaked once and passed twice on rerun).
 - **The `[privacy] household lane dispatch attempted via ollama-cloud … egress-clean` line:** the egress planner's own model call at Household scope, which passed the household allowlist (a non-allowlisted provider logs "[privacy] REFUSED"). Per ARCH3 slice 2 the planner re-authors from the person's words and discards the grounded value. Expected path.
 - Asked dc for independent confirmation: the OS-side log of a `describe weather` from the Mind at 15:48:00–04, and the app's forecast at 15:48 against the reply.
+
+**dc, independently (31 Oct):** turn 1157 is NOT fabrication. The reply's highs and lows match the 14:33 app capture day by day (19/16, 20/15, 24/15, 21/12, 22/10, 21/11, 18/9); rain drifts a few points over the hour. The shell log did not record the describe, so that side is unconfirmed, but the numbers settle it. "Fabrication" was withdrawn.
+
+## E.WX2c — PREREG: an empty forecast is looked at again, then said plainly, never answered from
+
+**Why (dc, 520, 15:56:54):** `yos describe weather --json` returned `"forecast": []` (cold or refreshing).
+
+**Change:** in E.WX2's redirect, after the loading re-look:
+- if the describe's forecast is empty (`desktop::forecast_empty`: `"forecast": []` with any whitespace), look once more;
+- if still empty, the work-log entry adds "(the Weather app has no forecast right now — say so plainly and give no figures)".
+
+**Tests:**
+- empty then full → 2 describes, and the full forecast reaches the model;
+- empty twice → the "no forecast" sentence is in the work log;
+- `forecast_empty` unit: `"forecast": []`, `"forecast":[ ]` → true; a filled list or no forecast key → false.
+- Mutant: `forecast_empty` always false → red.

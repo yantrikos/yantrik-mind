@@ -15362,6 +15362,15 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                             // all `loaded_since` keeps.
                             seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
                         }
+                        // E.WX2c (dc, 520: `"forecast": []` while cold or refreshing): look once more;
+                        // still empty, the model is told to say so -- never figures from an empty list.
+                        if desktop::forecast_empty(&seen) {
+                            tokio::time::sleep(std::time::Duration::from_millis(desktop::LOADING_WAIT_MS)).await;
+                            seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
+                            if desktop::forecast_empty(&seen) {
+                                seen.push_str("\n(the Weather app has no forecast right now \u{2014} say so plainly and give no figures)");
+                            }
+                        }
                         eprintln!("[agent] step {step}: {} -> {}", desktop::DESCRIBE, journal_head(&seen, false));
                         eprintln!("[agent] step {step}: weather's place came from memory \u{2014} read the person's own Weather app instead");
                         scratch.push_str(&format!(

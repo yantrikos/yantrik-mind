@@ -1399,6 +1399,13 @@ pub(crate) fn forbids_tools(user_text: &str) -> bool {
     SAID.iter().any(|s| t.contains(s))
 }
 
+/// E.WX2c (dc, 520: `"forecast": []` while the Weather app was cold or refreshing): the describe
+/// carries a forecast key with nothing in it.
+pub(crate) fn forecast_empty(obs: &str) -> bool {
+    let squeezed: String = obs.chars().filter(|c| !c.is_whitespace()).collect();
+    squeezed.contains("\"forecast\":[]")
+}
+
 /// E.ARENA1-F34: how long to wait before describing a starting app again.
 pub(crate) const STARTING_WAIT_MS: u64 = if cfg!(test) { 0 } else { 3000 };
 

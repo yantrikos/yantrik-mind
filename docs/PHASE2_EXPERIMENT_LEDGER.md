@@ -22598,3 +22598,9 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Windows workspace:** 2645 passed, 0 failed. **Linux (staging .95):** mind-conversation 1327 passed, 0 failed.
 - **Bundle:** `yantrik-mind-6f66fbf-linux-amd64.tar.zst`, 62810221 bytes, sha256 `d7b110ab446fd865bfc03f3e3c73fd8419bcca3d9347dd93949ac04fcb5197bf` (verified locally after copy). It supersedes 53820fe.
 - **Live (pending, 520):** "What's coming up this week?" → the calendar read, with no "could not be read".
+
+**E.CAL4 — LIVE: PASS** (520, Mind 6f66fbf, turn 1167, 17:00 CT, a fresh chat; dc's runner):
+- before the turn: `yos act calendar events_between from=2026-10-31 to=2026-11-07` → count 0;
+- step 0: `upcoming {"days":7}` → "Today is Sat 31 Oct. On your calendar: nothing. Next 7 days: - Tue Nov 3: ⏰ Launch day …" → "the one request is done — composing" → "compose took 0s (cap 178 s)";
+- 0 "could not be read" and 0 "unknown action" lines;
+- the reply: "Nothing on your calendar today, and the only thing in the next seven days is launch day on Tuesday, November 3." This is accurate; Launch day is a reminder, which the wording folds in with the calendar.

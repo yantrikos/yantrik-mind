@@ -170,16 +170,23 @@ Only the reminders I keep are below."
     async fn desktop_calendar_lines(&self, days: i64) -> std::result::Result<Vec<String>, ()> {
         let today = local_now().date_naive();
         let end = today + chrono::Duration::days(days);
-        let ask = serde_json::json!({
-            "app": "calendar",
-            "action": "list_events",
-            "args": {"start_date": today.format("%Y-%m-%d").to_string(), "end_date": end.format("%Y-%m-%d").to_string()},
-        });
+        let (from, to) = (today.format("%Y-%m-%d").to_string(), end.format("%Y-%m-%d").to_string());
+        // E.CAL4 (520 at 2299, turn 1165: "unknown action 'list_events'; this app offers: ...
+        // events_between ..."): the action the Calendar app's own describe offers.
+        let ask = calendar_read(CALENDAR_READ, &from, &to);
         let mut obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &ask)).await;
         if obs.to_lowercase().contains("no socket") {
             let start = serde_json::json!({"app": "shell", "action": "start_service", "args": {"name": "calendar"}});
             let _ = Box::pin(self.run_agent_tool(crate::desktop::ACT, &start)).await;
             obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &ask)).await;
+        }
+        if obs.contains("unknown action") {
+            eprintln!("[calendar] the desktop calendar refused {CALENDAR_READ}: unknown action -- trying {CALENDAR_READ_OLD}");
+            // Older builds' calendar-service (E.CAL1) answered list_events.
+            obs = Box::pin(self.run_agent_tool(crate::desktop::ACT, &calendar_read(CALENDAR_READ_OLD, &from, &to))).await;
+            if obs.contains("unknown action") {
+                eprintln!("[calendar] the desktop calendar refused {CALENDAR_READ_OLD} too: unknown action");
+            }
         }
         calendar_event_lines(&obs)
     }
@@ -657,6 +664,22 @@ pub(crate) fn calendar_event_lines_on(obs: &str, today: chrono::NaiveDate) -> st
 
 /// E.CAL3 (541: at 20:50, "your next scheduled item is today at 18:00"): as of `now`, so a timed
 /// event earlier today says it is already past.
+/// E.CAL4: the Calendar app's read of a date range, as its describe offers it --
+/// `events_between(from, to)`, YYYY-MM-DD, inclusive, up to 62 days.
+pub(crate) const CALENDAR_READ: &str = "events_between";
+/// E.CAL1's action, which older builds' calendar-service answered.
+pub(crate) const CALENDAR_READ_OLD: &str = "list_events";
+
+/// E.CAL4: the call for `action` over `from`..=`to`, each action with its own argument names.
+pub(crate) fn calendar_read(action: &str, from: &str, to: &str) -> serde_json::Value {
+    let args = if action == CALENDAR_READ_OLD {
+        serde_json::json!({"start_date": from, "end_date": to})
+    } else {
+        serde_json::json!({"from": from, "to": to})
+    };
+    serde_json::json!({"app": "calendar", "action": action, "args": args})
+}
+
 pub(crate) fn calendar_event_lines_at(obs: &str, now: chrono::NaiveDateTime) -> std::result::Result<Vec<String>, ()> {
     let today = now.date();
     let head = obs.split("state: {").next().unwrap_or(obs);
@@ -757,6 +780,24 @@ accepted: True, settled: True"#;
         let titles = r#"accepted: True
 [{"title":"PRIVATE: dentist","start":"2026-10-25T10:00:00","is_all_day":false},{"title":"Tax withheld review","start":"2026-10-25T11:00:00","is_all_day":false}]"#;
         assert_eq!(calendar_event_lines_at(titles, at).map(|v| v.len()), Ok(2), "a title is not Private mode");
+    }
+
+    /// E.CAL4 (520 at 2299, turn 1165: `list_events` refused as an unknown action): the read is the
+    /// action the Calendar app's own describe offers, and its real answers parse -- an empty week is
+    /// an empty calendar, not one that could not be read.
+    #[test]
+    fn the_calendar_is_read_with_the_action_it_offers() {
+        const DESCRIBE: &str = include_str!("../fixtures/desktop/describe_calendar_fold_d95f4444.txt");
+        assert!(DESCRIBE.contains(&format!("act: {}(from, to)", super::CALENDAR_READ)), "the calendar no longer offers {}", super::CALENDAR_READ);
+        assert_eq!(super::calendar_read(super::CALENDAR_READ, "2026-10-31", "2026-11-10")["args"], serde_json::json!({"from": "2026-10-31", "to": "2026-11-10"}));
+        assert_eq!(super::calendar_read(super::CALENDAR_READ_OLD, "2026-10-31", "2026-11-10")["args"], serde_json::json!({"start_date": "2026-10-31", "end_date": "2026-11-10"}));
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap().and_hms_opt(9, 0, 0).unwrap();
+        let empty = include_str!("../fixtures/desktop/act_events_between_empty_2299.txt");
+        assert_eq!(calendar_event_lines_at(empty, at), Ok(Vec::new()), "an empty week read as unreadable");
+        let three = include_str!("../fixtures/desktop/act_events_between_three_2299.txt");
+        let lines = calendar_event_lines_at(three, at).expect("the real events_between answer did not parse");
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("Lunch with Sam")), "{lines:?}");
     }
 
     /// E.CAL3 (541: "next scheduled item is today at 18:00", asked at 20:50).

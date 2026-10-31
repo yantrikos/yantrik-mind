@@ -22575,3 +22575,20 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - 0 `[egress] … weather sent as` lines: no third-party weather request.
 - The privacy line at step 0 is the egress planner's Household dispatch, as before.
 - **Seen:** `upcoming` said "The desktop calendar could not be read, so what is on it is unknown", and the reply said so honestly. Raised with dc.
+
+## E.CAL4 — PREREG: upcoming reads the calendar with the action the Calendar app offers
+
+**Why (520 at 2299, turn 1165; root cause by dc, read-only):** `upcoming` said "The desktop calendar could not be read". `desktop_calendar_lines` (E.CAL1, e05ecc7) sends `os_act calendar list_events {start_date, end_date}`, written against the older calendar-service. The framework Calendar answers `calendar.app.act refused: unknown action 'list_events'; this app offers: select_day, show_date, events_between, …`. That refusal does not parse as events, so it read as "could not be read". The calendar is readable (`yos describe calendar` works).
+
+**Change:**
+- `desktop_calendar_lines` asks `events_between {"from": <YYYY-MM-DD>, "to": <YYYY-MM-DD>}`: the action and parameters in the app's own describe ("List the events from one date to another, inclusive, up to 62 days"). Its answer's `events` array of {date, start, end, title, location} is what `calendar_event_lines` already parses.
+- If the app answers "unknown action", it falls back once to `list_events {start_date, end_date}` for older OS builds.
+- An "unknown action" answer is journalled as its own line ("[calendar] the desktop calendar refused <action>: unknown action") rather than only becoming "could not be read".
+
+**Tests:**
+- a contract test: the action `desktop_calendar_lines` sends appears in the recorded calendar describe's act list (fixtures describe_calendar_fold_d95f4444);
+- an upcoming test through a scripted desktop: os_act answers `events_between` with the recorded events fixture → the events are listed, not "could not be read";
+- an "unknown action" answer first → the `list_events` fallback is tried.
+- **Mutants:**
+  - the action back to list_events (contract test) → red;
+  - the fallback removed → red.

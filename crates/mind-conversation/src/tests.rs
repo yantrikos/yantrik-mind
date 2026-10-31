@@ -19065,6 +19065,19 @@ mod desktop_consent_and_stall_wiring {
         assert!(!crate::desktop::forecast_empty(APP) && !crate::desktop::forecast_empty(COLD));
     }
 
+    /// E.CAL4 (520 at 2299, turn 1165): `upcoming` reads the calendar with `events_between`; an older
+    /// build that answers "unknown action" gets `list_events` once, and what it lists is shown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upcoming_reads_the_calendar_with_the_action_it_offers() {
+        let refused = "ERR:failed (exit 1)\nyos: calendar.app.act refused: unknown action 'events_between'; this app offers: list_events, add_event";
+        let old = "Done \u{2014} Calendar\naccepted: True, settled: True\n[{\"title\":\"Fallback check\",\"start\":\"2050-01-05T10:00:00\",\"is_all_day\":false}]";
+        let r = run_with("What's coming up this week?", vec![Step::Call("upcoming", serde_json::json!({"days": 10}))], vec!["UNUSED"], vec![refused, old]).await;
+        let actions: Vec<String> = r.reached.iter().filter(|(t, _)| t.ends_with("os_act")).map(|(_, a)| a["action"].as_str().unwrap_or_default().to_string()).collect();
+        assert_eq!(actions, vec!["events_between", "list_events"], "{:?}", r.reached);
+        let log = r.prompts.join("\n");
+        assert!(log.contains("Fallback check") && !log.contains("could not be read"), "the older build's events were not shown");
+    }
+
     /// E.LOG1 (520, the #980 run, turn 1026): the work log says the calls in it are the model's own,
     /// for this request -- it called a note made at its step 0 one that "already exists".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

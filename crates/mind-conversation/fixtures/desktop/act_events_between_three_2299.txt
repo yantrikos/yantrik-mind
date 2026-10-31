@@ -1,0 +1,32 @@
+Calendar — October 2026, nothing on day 31
+accepted: True, settled: True
+revision: 3c9f1f9a27cb8285
+{
+  "count": 3,
+  "events": [
+    {
+      "date": "2026-10-22",
+      "end": "2026-10-22T17:00:00",
+      "location": null,
+      "start": "2026-10-22T16:00:00",
+      "title": "Answer new GitHub issues"
+    },
+    {
+      "date": "2026-10-23",
+      "end": "2026-10-23T10:30:00",
+      "location": null,
+      "start": "2026-10-23T10:00:00",
+      "title": "Post launch checklist to Discord"
+    },
+    {
+      "date": "2026-10-23",
+      "end": "2026-10-23T14:00:00",
+      "location": null,
+      "start": "2026-10-23T13:00:00",
+      "title": "Lunch with Sam"
+    }
+  ],
+  "from": "2026-10-20",
+  "to": "2026-10-25"
+}
+state: {"days_with_events":[{"day":22,"events":1},{"day":23,"events":2}],"events_on_selected_day":[],"events_this_month":3,"month":"October 2026","month_number":10,"notice":"","selected_day":31,"today":"2026-10-31 Saturday","view":"month","week_starts_on":"sunday","year":2026,"you":"timeout"}

@@ -1,0 +1,10 @@
+Calendar — October 2026, nothing on day 31
+accepted: True, settled: True
+revision: 3c9f1f9a27cb8285
+{
+  "count": 0,
+  "events": [],
+  "from": "2026-10-31",
+  "to": "2026-11-10"
+}
+state: {"days_with_events":[{"day":22,"events":1},{"day":23,"events":2}],"events_on_selected_day":[],"events_this_month":3,"month":"October 2026","month_number":10,"notice":"","selected_day":31,"today":"2026-10-31 Saturday","view":"month","week_starts_on":"sunday","year":2026,"you":"timeout"}

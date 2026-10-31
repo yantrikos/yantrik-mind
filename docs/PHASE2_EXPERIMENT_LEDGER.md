@@ -22471,3 +22471,9 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
   - the LITERAL- size bound removed → red.
 
 **Live:** it needs a mind-tools IMAP account (520's Mind searches through the OS Email app). Until a Mind with its own IMAP account searches "café", this is unit-proven only.
+
+**E.MAIL2 — RESULT: PASS (unit; Windows and Linux).** Commit 85c6acb.
+- **Mutants killed (3/3):** the byte count as chars; the CR/LF refusal removed (in `search_query`); the LITERAL- bound removed. The caller's own line-break refusal (before connecting, so no connection to port 993) duplicates the builder's and is not separately tested.
+- **Windows workspace:** 2641 passed, 0 failed. **Linux (staging .95):** mind-conversation 1323 and mind-tools 269 passed, 0 failed.
+- **Bundle:** `yantrik-mind-85c6acb-linux-amd64.tar.zst`, 62760699 bytes, sha256 `fb52d506abb63a4712a5e2c1f5afee8a50d7726831d628126f266a4846685bed` (verified locally after copy). It supersedes 584d0f1.
+- Unit-proven only: no test VM's Mind searches through its own IMAP account.

@@ -22563,3 +22563,8 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - empty twice → the "no forecast" sentence is in the work log;
 - `forecast_empty` unit: `"forecast": []`, `"forecast":[ ]` → true; a filled list or no forecast key → false.
 - Mutant: `forecast_empty` always false → red.
+
+**E.WX2b + E.WX2c — RESULT: PASS (unit; Windows and Linux).** E.WX2b at ad2e75b (journal and record only), E.WX2c at 53820fe.
+- E.WX2c mutant (`forecast_empty` always false) → red; 1/1.
+- **Windows workspace:** 2643 passed, 0 failed. **Linux (staging .95):** mind-conversation 1325 passed, 0 failed.
+- **Bundle:** `yantrik-mind-53820fe-linux-amd64.tar.zst`, 62850473 bytes, sha256 `a9fcf0ef5bec6c7dfae2cbad9f98e3bb8dee7a7ed32bd6c5c266e947aecc2377` (verified locally after copy). It supersedes 294f870; ad2e75b's bundle was built but not sent.

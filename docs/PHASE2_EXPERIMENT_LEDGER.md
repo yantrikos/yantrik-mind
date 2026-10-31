@@ -22592,3 +22592,9 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - **Mutants:**
   - the action back to list_events (contract test) → red;
   - the fallback removed → red.
+
+**E.CAL4 — RESULT: PASS (unit; Windows and Linux).** Commit 6f66fbf.
+- **Mutants killed (2/2):** the action back to list_events (the contract and upcoming tests); the fallback removed.
+- **Windows workspace:** 2645 passed, 0 failed. **Linux (staging .95):** mind-conversation 1327 passed, 0 failed.
+- **Bundle:** `yantrik-mind-6f66fbf-linux-amd64.tar.zst`, 62810221 bytes, sha256 `d7b110ab446fd865bfc03f3e3c73fd8419bcca3d9347dd93949ac04fcb5197bf` (verified locally after copy). It supersedes 53820fe.
+- **Live (pending, 520):** "What's coming up this week?" → the calendar read, with no "could not be read".

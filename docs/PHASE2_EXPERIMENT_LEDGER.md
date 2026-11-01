@@ -22616,3 +22616,9 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - the desktop map names the `email` app and its search action.
 - **Mutants:** `email` removed from the note → red; `email` removed from the map → red.
 - **Live (520, after the bundle, outside 03:00–04:30 CT):** "Search my email for café" → an `os_describe email` or `os_act email search` call in the journal, and a reply drawn from what the Email app answered, never "I have no email tool".
+
+**E.FIND2 — RESULT: PASS (unit; Windows and Linux).** Commit 38cec3d.
+- **Mutants killed (2/2):** `email` removed from the note (the turn-level test `a_mail_search_is_pointed_at_the_email_app`); `email` removed from the map (`the_desktop_map_is_said_only_with_a_desktop`). Each was caught by its own test only.
+- **Windows workspace:** 2646 passed, 0 failed. **Linux (staging .95):** mind-conversation 1328 passed, 0 failed. The first Linux run hit ENOSPC compiling the debug test build (91% disk, 3.5 GB free, with a fresh 5.3 GB release tree). It passed when rerun with `CARGO_INCREMENTAL=0` and debug info off (1.4 GB debug tree, then removed).
+- **Bundle:** `yantrik-mind-38cec3d-linux-amd64.tar.zst`, 62809238 bytes, sha256 `a006ec759201117ed116c24c29d38ca022db42133fdc4792f36b80e61fd21676` (verified locally after copy). It supersedes 6f66fbf. The first bundle run exited 1 with its output filtered away, so the cause is unknown; the rerun built cleanly.
+- **Live (pending, 520):** "Search my email for café", typed through the Lens with real UTF-8.

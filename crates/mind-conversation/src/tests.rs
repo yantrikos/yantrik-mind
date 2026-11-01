@@ -18978,6 +18978,22 @@ mod desktop_consent_and_stall_wiring {
         assert!(crate::desktop::DISCOVER_DESKTOP_NOTE.contains("agent_run"));
     }
 
+    /// E.FIND2 (520, turns 1190-1191): "search my email" searched only the mind's own tools, twice,
+    /// and stopped. On the desktop the person's mail is the Email app; the search must say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mail_search_is_pointed_at_the_email_app() {
+        let r = run(
+            vec![Step::Call("discover_tools", serde_json::json!({"query": "search email inbox messages"}))],
+            vec!["UNUSED"],
+            vec!["UNUSED"],
+        )
+        .await;
+        let second = r.prompts.iter().find(|p| p.contains("[0] discover_tools ->")).expect("the search reached the work log");
+        let note = second.split("[0] discover_tools -> ").nth(1).expect("the search's answer");
+        let head: String = note.chars().take(crate::desktop::DISCOVER_DESKTOP_NOTE.chars().count()).collect();
+        assert!(head.contains("mail is the `email` app") && head.contains("its search finds a message"), "{head}");
+    }
+
     /// E.NOTOOL1 (520, turns 1118 and 1129): "... Do not use any tools." answered with the essay at
     /// step 0 is the answer -- not sent to look at the desktop, not sent back as a claim, never saved.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

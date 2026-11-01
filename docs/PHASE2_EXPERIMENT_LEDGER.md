@@ -22604,3 +22604,15 @@ Not in scope: the harness heartbeat reports "last stage: route" for the whole lo
 - step 0: `upcoming {"days":7}` → "Today is Sat 31 Oct. On your calendar: nothing. Next 7 days: - Tue Nov 3: ⏰ Launch day …" → "the one request is done — composing" → "compose took 0s (cap 178 s)";
 - 0 "could not be read" and 0 "unknown action" lines;
 - the reply: "Nothing on your calendar today, and the only thing in the next seven days is launch day on Tuesday, November 3." This is accurate; Launch day is a reminder, which the wording folds in with the calendar.
+
+## E.FIND2 — PREREG: a desktop Mind is told that mail is the Email app
+
+**Why (520 at 2325, turns 1190 and 1191, 05:01 and 05:04 CT; dc's runner, after the #1026 gate):** "Search my email for café". Both turns ran only `discover_tools` ("search email inbox messages", 2–3 times), then answered, in 2 seconds, with no `os_describe` and no search. The Mind has no mail account of its own on 520, so its `mail_search` reaches nothing. Both turns' `discover_tools` answers led with that note (dc's capture: `discover_tools -> ON THIS COMPUTER …`); 1190 ended on the barren limit, composing from the work log. The person's mail is the desktop Email app: a read-only `yos describe email` on 520 lists `search(query)`, `open_message(which)` and `select_folder(folder)`. The note that leads every `discover_tools` answer on the desktop (`DISCOVER_DESKTOP_NOTE`, E.FIND1) and the desktop map in every desktop turn's place line (`desktop_sentence`, E.ARENA1-F16) name shell, files_*, agent_run, editor, calendar and notes, but never email. The look-before-refusing guard (E.ARENA1-F5) fires only for requests that change something, and a search is a read. (The word itself was mangled on the runner's `send_to_agent` path, as dc confirmed: dc's root capture logs "user 25 B", the length of "Search my email for cafÃ©", where "café" would be 24. So the Mind received "cafÃ©". That is a runner defect, not a Mind one. It does not change what the model did: it never reached a search. The live check below sends real UTF-8 through the Lens.)
+
+**Change (thin path, no new rule):** both lists name the app they were missing: mail is the `email` app, whose `search` finds a message and `open_message` opens one. Nothing else changes. The guard stays side-effect only.
+
+**Tests:**
+- a turn-level test: on the desktop, a `discover_tools` search for "search email inbox messages" leads with a note that names the `email` app and its `search`;
+- the desktop map names the `email` app and its search action.
+- **Mutants:** `email` removed from the note → red; `email` removed from the map → red.
+- **Live (520, after the bundle, outside 03:00–04:30 CT):** "Search my email for café" → an `os_describe email` or `os_act email search` call in the journal, and a reply drawn from what the Email app answered, never "I have no email tool".

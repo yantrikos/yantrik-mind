@@ -271,9 +271,11 @@ pub(crate) fn condense_description_for(obs: &str, family: Option<&str>) -> Optio
 /// "write file", was told "no tool or saved skill matches — use build_capability to create one",
 /// and concluded it could not. That search covers only the mind's OWN tools. The desktop's
 /// `files_new_folder` and `editor_save_as` are listed by `os_describe`, and nothing said so.
+/// E.FIND2 (520, turns 1190-1191): "search my email" searched only the mind's own tools and stopped --
+/// the person's mail is the Email app, and this list never named it.
 /// E.FIND1 (520, turn 1037): it LEADS the answer -- appended, it fell past the work log's 900
 /// characters behind a list of trading tools, and the model said it had no agent_run tool.
-pub(crate) const DISCOVER_DESKTOP_NOTE: &str = "ON THIS COMPUTER the desktop's own apps do most things, and this search does not cover them: files and folders are the `shell` app (files_*), a command line is the shell's agent_run, writing a file's text is the `editor` app, and the calendar and notes are apps too. mcp.yantrik-os.os_describe {app} lists each app's actions; call them with mcp.yantrik-os.os_act.";
+pub(crate) const DISCOVER_DESKTOP_NOTE: &str = "ON THIS COMPUTER the desktop's own apps do most things, and this search does not cover them: files and folders are the `shell` app (files_*), a command line is the shell's agent_run, writing a file's text is the `editor` app, mail is the `email` app (its search finds a message, open_message opens one), and the calendar and notes are apps too. mcp.yantrik-os.os_describe {app} lists each app's actions; call them with mcp.yantrik-os.os_act.";
 
 /// E.ARENA1-F5: the nudge for a turn that has not looked at the desktop at all and wants to answer.
 ///
@@ -2606,7 +2608,8 @@ pub(crate) fn desktop_sentence(desktop: bool) -> String {
     " On this desktop a file's text is written with the `editor` app (call its actions directly -- os_describe \
      editor shows them; open it with the shell's open_app only if the desktop says it is not running); folders \
      are the shell's files_* actions; a command line is the shell's agent_run action (os_act {app: shell, action: \
-     agent_run}); the calendar and notes are apps of their own."
+     agent_run}); mail is the `email` app (its search action finds a message); the calendar and notes are apps \
+     of their own."
         .to_string()
 }
 
@@ -4009,6 +4012,8 @@ mod tests {
         assert!(!s.contains("  "), "{s}");
         // E.FIND1b (the batch gate, turns 1084-1085: "I don't have an agent_run tool" at step 0).
         assert!(s.contains("a command line is the shell's agent_run action"), "{s}");
+        // E.FIND2 (turns 1190-1191: "search my email" never looked at the Email app).
+        assert!(s.contains("mail is the `email` app (its search action finds a message)"), "{s}");
         assert_eq!(desktop_sentence(false), "");
     }
 

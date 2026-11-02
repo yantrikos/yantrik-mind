@@ -3381,6 +3381,27 @@ mod tests {
         assert!(!from_os.contains("the calendar and notes are apps"), "the hand list stayed: {from_os}");
     }
 
+    /// E.LOOK1, on what OS #1065 really answered (the 520 gate, 2 Nov): `actions` is a family, and the
+    /// answer still lists the whole app with its grades, so one look serves any later action.
+    #[test]
+    fn a_signatures_answer_still_gives_every_grade() {
+        let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let calendar = f("describe_calendar_add_signatures_pr1065.txt");
+        let shell = f("describe_shell_agent_signatures_pr1065.txt");
+        assert!(calendar.starts_with("(action signatures only: this answer holds no state)"), "not the state-free form");
+        assert!(!calendar.contains("\"events_this_month\"") && !shell.contains("\"mind_mode\""), "state came back");
+        let mut d = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "calendar", "actions": "add_"}), &calendar, &mut d);
+        record_described(&serde_json::json!({"app": "shell", "actions": "agent_"}), &shell, &mut d);
+        assert_eq!(d["calendar"].len(), 12);
+        assert_eq!(d["shell"].len(), 129);
+        assert_eq!(grade_of(&d, "calendar", "add_event"), Some("standard"));
+        assert_eq!(grade_of(&d, "calendar", "select_day"), Some("standard"), "outside the family asked for");
+        assert_eq!(grade_of(&d, "shell", "agent_run"), Some("sensitive"));
+        assert_eq!(grade_of(&d, "shell", "files_new_folder"), Some("standard"), "outside the family asked for");
+        assert_eq!(commands_would_ask(&shell), None, "no state, so no word on the mode");
+    }
+
     /// E.ASKOK1, on the shape OS #1079 describes, bare and in the desktop's envelope.
     #[test]
     fn the_approvals_answer_is_read_or_left_to_the_fallback() {

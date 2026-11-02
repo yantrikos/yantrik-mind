@@ -22843,3 +22843,5 @@ The model is told the event is there and to update it or say so. Other events at
 
 **E.ASKOK1 — RESULT (code; goes in the next bundle).** Mutants killed (3/3): the action's answer not used; `on` inverted; the fallback removed. On an OS without the action, yos-mcp's guard refuses an unlisted action with no card (`no_such_action`, read in main's `guard_act`), so the fallback is quiet. Not yet seen live: the envelope in the tests is built from #1079's description.
 
+**E.MAP1 + E.LOOK1 — checked against OS #1065's real output (520 gate, 2 Nov; dc's runner):** E.MAP1's fixture is now the live `yos ls --catalog`, and `the_map_comes_from_the_desktops_own_list` passes on it. `os_describe {calendar, actions: "add_"}` and `{shell, actions: "agent_"}` answered "(action signatures only: this answer holds no state)", with 12 and 129 actions and every grade, and left `taint_scope` empty. New fixtures and `a_signatures_answer_still_gives_every_grade` pin that. Still not seen: E.LOOK1's own turn, because the Mind in that gate was decd846.
+

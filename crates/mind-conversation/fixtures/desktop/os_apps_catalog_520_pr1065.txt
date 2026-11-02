@@ -1,5 +1,31 @@
 Open now (describe these by name):
-    shell              Yantrik
+    blender            
+    browser              (also chromium)
+    calendar           
+    notes              
+    shell              
+    terminal           
+Services answering: credentials, network, notifications, system-monitor, weather
+    a service shares a name with its app (weather, calendar); the app is the window,
+    and `describe <name>` means the window whenever it is open.
+Answers when asked, with no window (`describe` or `act` on it starts it; it cannot be opened in your view):
+    arcade             (not running)  game making: small JSON specs in, one playable HTML game out
+    containers         (not running)  Docker or Podman containers
+    download-manager   (not running)  fetch a URL to a file, with progress
+    editor             (not running)  write a new text or code file (new with its text, then save_as a path), or open and edit one by path
+    email              (not running)  read and send mail
+    image-viewer       (not running)  view pictures
+    music              (not running)  play the music in your library folders, or one sound file, through mpv
+    network            (not running)  this machine's connections, Wi-Fi and firewall state
+    snippets           (not running)  reusable pieces of code and text
+    studio             (not running)  make pictures from a sentence, on your own GPU or a hosted service; they land as files
+    system-monitor     (not running)  CPU, memory, disk and processes
+    weather            (not running)  current conditions and forecast
+    documents          (not running)  written documents — reports, letters, plans — saved as files in ~/Documents
+    presentation       (not running)  slide decks
+    spreadsheet        (not running)  a sheet of numbers and formulas, opened from and saved to CSV files
+Screens of the desktop itself (also open_app): files, settings, bond, personality, memory, notifications, system, about, packages, devices, permissions, problems, agents, recipes
+The launcher (open_app name=launchpad, or show_screen): every app on this machine, by category, searchable
 Every app on this machine, open or not, from the desktop's own list, `describe shell` > apps (name, what it is for, how it opens, what to describe it as; this holds no state of any app):
     {"name": "browser", "for": "the web", "opens": "web browser"}
     {"name": "blender", "for": "3D scenes: model them, light them, render them", "opens": "app", "describe_as": "blender"}
@@ -37,3 +63,7 @@ Every app on this machine, open or not, from the desktop's own list, `describe s
     {"name": "documents", "for": "written documents — reports, letters, plans — saved as files in ~/Documents", "opens": "app", "describe_as": "documents"}
     {"name": "presentation", "for": "slide decks", "opens": "app", "describe_as": "presentation"}
     {"name": "spreadsheet", "for": "a sheet of numbers and formulas, opened from and saved to CSV files", "opens": "app", "describe_as": "spreadsheet"}
+Every door asks the same way: an action graded above what the desktop's mode allows
+    needs the person's Allow — from a mind's tools, from `yos act` here, or straight
+    at the socket; the app itself refuses without a grant. `yos act` raises the card
+    and waits (120 s). `describe shell` shows the mode; `describe` never asks.

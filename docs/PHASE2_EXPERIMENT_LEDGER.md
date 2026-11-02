@@ -22854,3 +22854,9 @@ The model is told the event is there and to update it or say so. Other events at
 - E.MAP1 said to `os_describe` every app's name, while the browser's row has no `describe_as` (the only such row in 520's 36). It now reads "browser (not described): the web".
 Sound as they stand: the catalogue line appears only when the OS itself lists the apps, and an older OS keeps the old text; E.LOOK1 and E.ASKOK1 tell the model nothing new. **One known condition:** E.FOLDER1's call assumes OS #1038. All four VMs have it (nightly 2359); the Mac mini's version is unknown, and a machine rolled back below #1038 would get a refusal from the desktop.
 
+**Reliability batch bundle: E.DONE1, E.MAP1, E.FOLDER1, E.SIGTERM1, E.LOOK1, E.ASKOK1.** Commit 3d8303c. Released without waiting for OS #1065, at dc's word.
+- **Windows workspace:** 2662 passed, 0 failed. **Linux (staging .95):** mind-conversation 1344 passed, mind-core 199 passed, 0 failed.
+- **Bundle:** `yantrik-mind-3d8303c-linux-amd64.tar.zst`, 62935720 bytes, sha256 `85899143a6997b434853ef6b2a5f32a439b51ced85ef9c0fde9400a77734c67b` (verified locally after copy). It supersedes decd846.
+- **Has not run on any desktop.** Live bars: `systemctl stop yantrik-mind` under 5 s with `Result=success`, under `PrivatePIDs` on 257.13; a first `agent_run` with no describe before it; the battery, 3 runs per arm with `YM_COMPLETION_CHECK=off` as the off arm, baseline 8/18 done on 38cec3d.
+- **On an OS without #1065:** the catalogue line and the state-free look do not take effect. The hand list stands, and F15's look still taints, as today.
+

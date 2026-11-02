@@ -626,16 +626,17 @@ pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
-/// E.SIGTERM1 (OS PR #1076): a SIGTERM ends this process at once, status 143, as the default action
-/// does. With `PrivatePIDs=yes` on its unit the Mind is PID 1, and the kernel drops a signal PID 1 has
-/// no handler for: `systemctl stop` would wait out its timeout and then SIGKILL. Call it on a runtime.
+/// E.SIGTERM1 (OS PR #1076): a SIGTERM ends this process at once. With `PrivatePIDs=yes` on its unit
+/// the Mind is PID 1, and the kernel drops a signal PID 1 has no handler for: on the OS's systemd, a
+/// stop took 30 s. Status 0, not 143: systemd counts a death BY SIGTERM as clean but an exit with 143
+/// as a failure, which left the unit `failed` after every stop (542, 3d8303c). Call it on a runtime.
 #[cfg(unix)]
 pub fn exit_on_sigterm() -> std::io::Result<()> {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::spawn(async move {
         term.recv().await;
         eprintln!("[mind] SIGTERM: exiting");
-        std::process::exit(143);
+        std::process::exit(0);
     });
     Ok(())
 }
@@ -644,7 +645,7 @@ pub fn exit_on_sigterm() -> std::io::Result<()> {
 mod sigterm_tests {
     /// A real signal to a real process: this test binary again, as the child.
     #[test]
-    fn a_sigterm_ends_the_process_with_143() {
+    fn a_sigterm_ends_the_process_cleanly() {
         use std::io::BufRead;
         if std::env::var_os("YM_SIGTERM_CHILD").is_some() {
             tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -655,7 +656,7 @@ mod sigterm_tests {
             panic!("still running thirty seconds after the parent's signal");
         }
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "sigterm_tests::a_sigterm_ends_the_process_with_143", "--nocapture"])
+            .args(["--exact", "sigterm_tests::a_sigterm_ends_the_process_cleanly", "--nocapture"])
             .env("YM_SIGTERM_CHILD", "1")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -667,7 +668,7 @@ mod sigterm_tests {
         assert!(sent.success());
         let started = std::time::Instant::now();
         let status = child.wait().unwrap();
-        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert_eq!(status.code(), Some(0), "not a status systemd reads as clean: {status:?}");
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
     }
 }

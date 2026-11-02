@@ -18441,6 +18441,54 @@ mod desktop_consent_and_stall_wiring {
         assert_eq!(run(OLD_OS, "Yantrik \u{2014} signatures only").await, (true, true), "neither says: no card");
     }
 
+    /// E.RAN1, through the loop, on turn 76's real error: a compose that times out says so, with what ran.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_compose_that_times_out_says_it_ran_out_of_time() {
+        struct SlowCompose {
+            steps: StdMutex<Vec<Step>>,
+            error: &'static str,
+        }
+        impl LLMBackend for SlowCompose {
+            fn chat(&self, _m: &[ChatMessage], _c: &GenerationConfig, tools: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                if !tools.is_some_and(|t| !t.is_empty()) {
+                    anyhow::bail!("{}", self.error);
+                }
+                let mut steps = self.steps.lock().unwrap();
+                match (!steps.is_empty()).then(|| steps.remove(0)) {
+                    Some(Step::Call(n, a)) => Ok(yantrik_ml::LLMResponse { thinking: String::new(), text: String::new(), prompt_tokens: 0, completion_tokens: 0, tool_calls: vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a }], api_tool_calls: vec![], stop_reason: "stop".to_string() }),
+                    _ => anyhow::bail!("{}", self.error),
+                }
+            }
+            fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+                self.chat(m, c, t)
+            }
+            fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+                Ok(t.len() / 4)
+            }
+            fn backend_name(&self) -> &str {
+                "slow-compose"
+            }
+        }
+        let run = |error: &'static str| async move {
+            let note = serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Checklist", "text": "water"}});
+            let model: Arc<dyn LLMBackend> = Arc::new(SlowCompose { steps: StdMutex::new(vec![Step::Call("mcp.yantrik-os.os_act", note)]), error });
+            let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+            let hub = Arc::new(mind_tools::McpHub::new());
+            let tool = |name: &str| mind_tools::McpTool { server: "yantrik-os".into(), name: name.into(), description: "x".into(), read_only: true, open_world: false, destructive: false, input_schema: serde_json::json!({"type": "object"}) };
+            hub.add_scripted_tool(tool("os_describe"), vec![Ok("Notes\nrevision: 1\n{}".to_string()); 3]).unwrap();
+            hub.add_scripted_tool(tool("os_act"), vec![Ok("Done \u{2014} Notes \u{2014} \"Checklist\" open\naccepted: True, settled: True\nrevision: 2\n{}".to_string())]).unwrap();
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub);
+            conv.agent_loop_for_eval("Make a checklist note and plan my hike", &TurnIdentity::primary()).await.unwrap_or_default()
+        };
+        let slow = run("reading SSE line: timeout: global").await;
+        assert!(slow.contains("I ran out of time after 1 tool call,") && slow.contains("answering slowly"), "{slow}");
+        assert!(slow.contains("notes.new_note (Checklist)"), "what was done is not said: {slow}");
+        assert!(!slow.contains("couldn't write my reply"), "{slow}");
+        let down = run("connection refused").await;
+        assert!(!down.contains("ran out of time"), "another failure is not a timeout: {down}");
+    }
+
     /// E.DONE1: a model that plays tool steps and answers the completion check from a list.
     struct PartsChecked {
         steps: StdMutex<Vec<Step>>,
@@ -21706,6 +21754,13 @@ fn a_failed_compose_says_the_true_reason_and_what_was_done() {
         (serde_json::json!({"app": "shell", "action": "files_new_folder", "args": {"name": "~/longtask/recipes"}}), "Done".to_string()),
         (serde_json::json!({"app": "editor", "action": "new", "args": {"text": "<!DOCTYPE html>secret body"}}), "Done".to_string()),
     ];
+    // E.RAN1: out of time, said as that; a refused call is not listed as done.
+    assert!(!cloud.contains("connection"), "not measured: {cloud}");
+    let out = crate::out_of_time_reply(2, 203);
+    assert!(out.starts_with("I didn't finish this: I ran out of time after 2 tool calls, about 203 seconds in"), "{out}");
+    assert!(crate::out_of_time_reply(0, 180).contains("before I could do anything"));
+    let refused = vec![(serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "x"}}), "REFUSED \u{2014} nothing was run.".to_string())];
+    assert_eq!(crate::actions_done_line(&refused), "", "a refused call was listed as done");
     let line = crate::actions_done_line(&made);
     assert!(line.contains("shell.files_new_folder (~/longtask/recipes)"), "{line}");
     assert!(line.contains("editor.new") && !line.contains("secret body"), "names actions, never contents: {line}");

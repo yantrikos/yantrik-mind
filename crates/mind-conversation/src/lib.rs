@@ -4976,7 +4976,17 @@ private context and I'll work from what's public.";
 /// answer. VM 520, E.LONG1 L2e: the connection to ollama.com was refused, and the person was told
 /// "my own hardware is unreachable" -- on a machine with no local model at all.
 const COMPOSE_MODEL_DID_NOT_ANSWER: &str = "I couldn't write my reply \u{2014} the model I use \
-did not answer just now (the connection to it failed). Ask me again in a moment.";
+did not answer just now. Ask me again in a moment.";
+
+/// E.LOOP2: told to the model when the wall is spent. E.RAN1: also how compose knows it was.
+const OUT_OF_TIME_NOTE: &str = "\n(out of time for this turn \u{2014} stop calling tools and answer from the log above)";
+
+/// E.RAN1 (542, turns 74 and 76, Pranab's standard: a true, named reason): the turn ran out of time on
+/// a slow model, and was told "the connection to it failed". `actions_done_line` follows this.
+pub(crate) fn out_of_time_reply(calls: usize, secs: u64) -> String {
+    let so_far = if calls == 0 { "before I could do anything".to_string() } else { format!("after {calls} tool call{}", if calls == 1 { "" } else { "s" }) };
+    format!("I didn't finish this: I ran out of time {so_far}, about {secs} seconds in, because the model I use was answering slowly. Ask me again to try once more.")
+}
 
 /// E.ARENA1-F53: the compose-failure sentence that is true of this machine's private lane: a model
 /// on its own hardware that could not be reached, a cleared cloud model that did not answer, or no
@@ -4994,6 +5004,8 @@ pub(crate) fn compose_failure_reply(dedicated_local: bool, cleared: bool) -> &'s
 pub(crate) fn actions_done_line(made: &[(serde_json::Value, String)]) -> String {
     let done: Vec<String> = made
         .iter()
+        // E.RAN1: `made` also holds a call the desktop refused; only what it calls done is done.
+        .filter(|(_, head)| head.trim_start().starts_with("Done"))
         .filter_map(|(args, _)| {
             let (app, action) = desktop::act_target(desktop::ACT, args)?;
             let inner = args.get("args");
@@ -14747,9 +14759,7 @@ Open reminders you're carrying for them:",
                     budget.max_wall_ms / 1000,
                     reserve_ms / 1000
                 );
-                scratch.push_str(
-                    "\n(out of time for this turn — stop calling tools and answer from the log above)",
-                );
+                scratch.push_str(OUT_OF_TIME_NOTE);
                 break;
             }
             // A step-count nudge is a poor proxy when the clock is what will actually stop us, so
@@ -16259,7 +16269,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.ARENA1-F53: the sentence that is true of THIS lane, then what was already done.
                 // E.QUOTA1: a sentence this code wrote for the failure (a spent allowance) is still a
                 // constant in what it may carry -- the provider's own words never reach it.
+                // E.RAN1 (542, turns 74 and 76): out of time is said as out of time.
+                let ran_out = scratch.contains(OUT_OF_TIME_NOTE)
+                    || compose_started.elapsed() + std::time::Duration::from_secs(1) >= compose_cap
+                    || format!("{e:#}").to_lowercase().contains("timeout");
                 let mut reply = mind_inference::person_sentence(&e).unwrap_or_else(|| {
+                    if ran_out {
+                        return out_of_time_reply(cost.calls.values().sum(), started.elapsed().as_secs());
+                    }
                     compose_failure_reply(
                         self.inference.has_private_lane(),
                         self.inference.private_lane_configured(),

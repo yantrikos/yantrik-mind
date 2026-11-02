@@ -22885,3 +22885,15 @@ Sound as they stand: the catalogue line appears only when the OS itself lists th
 
 **Bundle:** `yantrik-mind-1b41822-linux-amd64.tar.zst`, 62928880 bytes, sha256 `9569b71cebc048353854782f57f3b3954bdc1c42830f432c0aa7d606ec63873b` (verified locally after copy). It adds E.EGRESS8 and E.MAP1's corrected sentence to 3d8303c. **Windows workspace:** 2665 passed, 0 failed. **Linux (staging .95):** mind-conversation 1347, mind-core 199, mind-governance 40 passed, 0 failed. Has not run on a desktop. Live bar: battery task 20 on this bundle: with a desktop attached, any `share_with_member` the model attempts is refused by the gate's sentence, with nothing sent.
 
+## E.RAN1 — PREREG: out of time is said as out of time; E.SIGTERM1 exits 0
+
+**Why (542, Mind 3d8303c, 2 Nov; dc's runner):**
+- Turns 74 and 76 spent the 180 s wall on a slow model (40-60 s a call, on qwen3.5:27b via the gateway, with a battery running against the same model on 541), and compose then hit its 45 s cap. The reply: "I couldn't write my reply -- the model I use did not answer just now (the connection to it failed). Ask me again in a moment." The connection had not failed, and the turn had done work worth naming. Under Pranab's standard that is an unnamed failure, with a false reason.
+- **E.SIGTERM1, bar 1:** a stop took 24-48 ms (it was 30 s), so the handler does its job; but `Result=exit-code`, `ActiveState=failed`, with or without `PrivatePIDs`, and a rapid restart hit the start limit. My code exited 143 "as the default action does". systemd counts a death by SIGTERM as clean, and an exit with 143 as a failure. **Fix:** exit 0. No unit line needed: only my two bundles have the handler.
+
+**Change (E.RAN1):** when compose fails and the turn ran out of time (the wall was spent, or compose reached its cap, or the error is a timeout), the reply says so: "I didn't finish this: I ran out of time after N steps in about S seconds, because the model I use was answering slowly." then what was done, then that they can ask again. Other failures keep their sentence, with the unmeasured "(the connection to it failed)" removed.
+
+**Tests:** the sentence, both ways, on turn 76's real error text; a turn-level test with a compose that times out, where the reply names the steps and what was changed; a failure that is not a timeout keeps its sentence. **Mutants:** the out-of-time branch removed; the steps left out. **E.SIGTERM1:** the test now wants status 0; the old 143 restored → red (Linux).
+
+**E.RAN1 + E.SIGTERM1 exit 0 — RESULT.** Also fixed: `actions_done_line` listed a refused call as done, because `made` holds those too. Windows and Linux results and the bundle are in the next entry or the commit that follows; live bar unchanged: `systemctl stop yantrik-mind` with `Result=success`. **Fable's D11 (via dc, not built, held for OS #1072 and #1087 and for usage):** a progressive turn that continues while a step changes state or adds evidence, the barren limit unchanged, a hard ceiling of 45 minutes, changed only by the person through `YM_MAX_WALL_SECS`, included lanes only until Pranab sets `YM_MAX_USD`.
+

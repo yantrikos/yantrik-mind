@@ -18334,6 +18334,56 @@ mod desktop_consent_and_stall_wiring {
         assert!(!reply.contains("Firefox") && !reply.to_lowercase().contains("source"), "{reply}");
     }
 
+    /// E.MAP1, through the loop: the desktop's own list reaches every step's prompt, from one
+    /// `os_apps` call across two turns; a desktop with no catalogue keeps the hand list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_prompt_carries_the_desktops_own_app_list() {
+        const CATALOG: &str = include_str!("../fixtures/desktop/os_apps_catalog_520_pr1065.txt");
+        const OLD: &str = include_str!("../fixtures/desktop/os_apps_185b4c0.txt");
+        let run = |apps: &'static str| async move {
+            let seen = Arc::new(StdMutex::new(Vec::new()));
+            let script: Arc<dyn LLMBackend> = Arc::new(Script {
+                at: AtomicUsize::new(0),
+                steps: vec![Step::Call("discover_tools", serde_json::json!({"query": "search email"})), Step::Say("Nothing fits."), Step::Say("Hello.")],
+                seen: seen.clone(),
+                timeouts: Arc::new(StdMutex::new(Vec::new())),
+            });
+            let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+            let hub = Arc::new(mind_tools::McpHub::new());
+            let tool = |name: &str| mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: name.into(),
+                description: format!("{name} on this computer"),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            };
+            hub.add_scripted_tool(tool("os_apps"), vec![Ok(apps.to_string()), Ok(apps.to_string())]).unwrap();
+            hub.add_scripted_tool(tool("os_describe"), vec![Ok("x".to_string())]).unwrap();
+            hub.add_scripted_tool(tool("os_act"), vec![Ok("x".to_string())]).unwrap();
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone());
+            let _ = conv.agent_loop_for_eval("Search my email for cafe", &TurnIdentity::primary()).await;
+            let _ = conv.agent_loop_for_eval("Hello", &TurnIdentity::primary()).await;
+            let calls = hub.scripted_calls().iter().filter(|(t, _)| t.ends_with("os_apps")).count();
+            let prompts = seen.lock().unwrap().clone();
+            (calls, prompts)
+        };
+        let (calls, prompts) = run(CATALOG).await;
+        assert_eq!(calls, 1, "one read across two turns");
+        assert!(prompts[0].contains("browser: the web") && prompts[0].contains("email: read and send mail"), "the place line lacks the list");
+        assert!(!prompts[0].contains("the calendar and notes are apps of their own"), "the hand list stayed");
+        let searched = prompts.iter().find(|p| p.contains("[0] discover_tools ->")).expect("the search reached the work log");
+        let answer = searched.split("[0] discover_tools -> ").nth(1).unwrap();
+        assert!(answer.starts_with("ON THIS COMPUTER"), "the note no longer leads: {answer}");
+        assert!(prompts.last().unwrap().contains("browser: the web"), "the second turn lost the list");
+        // An older OS: asked once, no rows, the hand list.
+        let (calls, prompts) = run(OLD).await;
+        assert_eq!(calls, 1, "a read with no rows is not asked again at once");
+        assert!(prompts[0].contains("mail is the `email` app"), "the hand list is gone");
+    }
+
     /// E.DONE1: a model that plays tool steps and answers the completion check from a list.
     struct PartsChecked {
         steps: StdMutex<Vec<Step>>,

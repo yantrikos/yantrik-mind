@@ -1,0 +1,39 @@
+Open now (describe these by name):
+    shell              Yantrik
+Every app on this machine, open or not, from the desktop's own list, `describe shell` > apps (name, what it is for, how it opens, what to describe it as; this holds no state of any app):
+    {"name": "browser", "for": "the web", "opens": "web browser"}
+    {"name": "blender", "for": "3D scenes: model them, light them, render them", "opens": "app", "describe_as": "blender"}
+    {"name": "files", "for": "browse, move, rename and delete files", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "settings", "for": "this desktop's settings", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "bond", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "personality", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "memory", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "notifications", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "system", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "about", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "skills", "opens": "a section of Settings", "describe_as": "shell"}
+    {"name": "packages", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "devices", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "permissions", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "problems", "for": "what went wrong on this machine, and the report you can choose to send", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "agents", "for": "every agent at work — each mind's conversation, its tool calls and their output, in one list", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "recipes", "for": "every recipe the companion holds, as its stages while it runs — answer the one waiting on you, pause, resume or cancel", "opens": "a screen of the desktop itself", "describe_as": "shell"}
+    {"name": "launchpad", "for": "every app on this machine, by category, searchable", "opens": "the launcher, over the desktop", "describe_as": "shell"}
+    {"name": "arcade", "for": "game making: small JSON specs in, one playable HTML game out", "opens": "app", "describe_as": "arcade"}
+    {"name": "calendar", "for": "events and appointments", "opens": "app", "describe_as": "calendar"}
+    {"name": "containers", "for": "Docker or Podman containers", "opens": "app", "describe_as": "containers"}
+    {"name": "download-manager", "for": "fetch a URL to a file, with progress", "opens": "app", "describe_as": "download-manager"}
+    {"name": "editor", "for": "write a new text or code file (new with its text, then save_as a path), or open and edit one by path", "opens": "app", "describe_as": "editor"}
+    {"name": "email", "for": "read and send mail", "opens": "app", "describe_as": "email"}
+    {"name": "image-viewer", "for": "view pictures", "opens": "app", "describe_as": "image-viewer"}
+    {"name": "music", "for": "play the music in your library folders, or one sound file, through mpv", "opens": "app", "describe_as": "music"}
+    {"name": "network", "for": "this machine's connections, Wi-Fi and firewall state", "opens": "app", "describe_as": "network"}
+    {"name": "notes", "for": "quick markdown notes kept in the notes library, not files you name", "opens": "app", "describe_as": "notes"}
+    {"name": "snippets", "for": "reusable pieces of code and text", "opens": "app", "describe_as": "snippets"}
+    {"name": "studio", "for": "make pictures from a sentence, on your own GPU or a hosted service; they land as files", "opens": "app", "describe_as": "studio"}
+    {"name": "system-monitor", "for": "CPU, memory, disk and processes", "opens": "app", "describe_as": "system-monitor"}
+    {"name": "terminal", "for": "a shell: run commands", "opens": "app", "describe_as": "terminal"}
+    {"name": "weather", "for": "current conditions and forecast", "opens": "app", "describe_as": "weather"}
+    {"name": "documents", "for": "written documents — reports, letters, plans — saved as files in ~/Documents", "opens": "app", "describe_as": "documents"}
+    {"name": "presentation", "for": "slide decks", "opens": "app", "describe_as": "presentation"}
+    {"name": "spreadsheet", "for": "a sheet of numbers and formulas, opened from and saved to CSV files", "opens": "app", "describe_as": "spreadsheet"}

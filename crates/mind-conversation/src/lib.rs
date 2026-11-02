@@ -6526,6 +6526,8 @@ pub struct ConversationEngine {
     thin_desktop: bool,
     /// E.DONE1: see `with_completion_check`.
     completion_check: bool,
+    /// E.MAP1: when `os_apps`' catalogue was read, and the sentence made from it.
+    app_catalog: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>,
     /// E.SPINE1: whether every turn's grounding carries the ambient "Next 7 days" and "Open
     /// reminders" blocks. On until the A/B decides; `YM_AMBIENT_UPCOMING=0` turns it off and the
     /// `upcoming` tool answers on demand.
@@ -6834,6 +6836,7 @@ impl ConversationEngine {
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
             completion_check: false,
+            app_catalog: std::sync::Mutex::new(None),
             ambient_upcoming: true,
             compose_effort: None,
             unprompted_delivery: std::sync::atomic::AtomicBool::new(false),
@@ -8423,6 +8426,23 @@ impl ConversationEngine {
     /// E.ARENA1-F57: and for ANY repeated call while the goal is missing -- VM 520, E.LONG1 L1c and
     /// L1-r2 re-read a settled `events_between` 4 and 6 times with ~/week-plan.md unwritten, each repeat
     /// meeting the generic "already ran" note.
+    /// E.MAP1: the catalogue sentence, read from `os_apps` at most once per TTL, a failed read too:
+    /// a turn does not wait on it twice. None without a desktop or on an older OS.
+    async fn app_catalog_now(&self, id: &TurnIdentity) -> Option<String> {
+        if !self.desktop_attached() || self.mcp.as_ref().and_then(|h| h.lookup(desktop::APPS)).is_none() {
+            return None;
+        }
+        if let Some((at, line)) = self.app_catalog.lock().unwrap().as_ref() {
+            if at.elapsed() < desktop::APP_CATALOG_TTL {
+                return line.clone();
+            }
+        }
+        let seen = self.run_agent_tool_as(desktop::APPS, &serde_json::json!({}), id).await;
+        let line = desktop::catalog_line(&seen);
+        *self.app_catalog.lock().unwrap() = Some((std::time::Instant::now(), line.clone()));
+        line
+    }
+
     /// E.DONE1: the check's verdict on this answer; None (journalled) when it has no usable one, and
     /// the answer then stands as it is.
     async fn completion_verdict(&self, request: &str, reply: &str, record: &str) -> Option<completion::Verdict> {
@@ -14778,11 +14798,13 @@ Open reminders you're carrying for them:",
             let handed = self.handed_section();
             // E.OPT1: the files the person attached to this message, as content.
             let attached = attachments::attachments_section();
+            // E.MAP1: what is on this desktop, in the desktop's own words.
+            let apps = self.app_catalog_now(id).await;
             let place = format!(
                 "{}{}{}",
                 machine_place_line(),
                 desktop::home_sentence(self.desktop_attached(), self.person_home().as_deref()),
-                desktop::desktop_sentence(self.desktop_attached())
+                desktop::desktop_sentence(self.desktop_attached(), apps.as_deref())
             );
             let prompt = format!(
                 "Current date/time: {now}.{place}\n{grounding}\n\n{handover}{handed}{shown}Recent conversation:\n{recent}\n\n{tools}{skill_line}\n\n{attached}User: {user_text}\n\nWork log: {WORK_LOG_WHOSE}{}\n\n{budget_note}\n\n{protocol}",

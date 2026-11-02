@@ -22764,3 +22764,24 @@ The model is told the event is there and to update it or say so. Other events at
 - **Not covered:** a turn that ends through the barren or budget compose path gets no check. It cannot go back to the loop from there.
 - **Windows workspace:** 2656 passed, 0 failed. Linux pending, with the bundle.
 
+## E.MAP1 — PREREG: the desktop's map comes from the desktop (reliability batch 1, R1)
+
+**Why:** the map in every desktop turn's place line and the note that leads a tool search are lists I wrote by hand. Twice a missing name lost a task: email (E.FIND2, turns 1190-1191) and the browser (541, turn 819, "Open Wikipedia's page on Lake Tahoe in Mind View": `see_page`, twice, then "I'd need the exact URL"). 520's own list has 36 apps and my list names 5. Adding names one at a time is the rule-per-failure this path is meant to avoid.
+
+**Change (needs OS #1065 for the live effect):**
+- Once per ten minutes on a desktop, the Mind calls `os_apps` (never a private read) and reads #1065's catalogue rows: one JSON object per line after "Every app on this machine".
+- A line of every app with a stated purpose, in the desktop's order, each purpose capped at 60 characters, and the name to describe it by when that differs ("files, via shell: …"), goes in the place line. (Not after the tool-search note, as first written here: the work log keeps about 900 characters of a result, which would cut the list off, and the place line is on every step anyway.)
+- With a browser row, one sentence says how a page opens in the Mind's own view (`open_app` browser, then `web_go`), as dc confirmed from a live run.
+- An older OS prints no rows: the hand list stays, unchanged. A failed read is cached for the same ten minutes, so a turn never waits on it twice.
+
+**Tests:** on 520's real 36 rows in the print format of #1065's `print_catalogue` (the rows are real; the formatting is built, because the PR is unmerged, and is to be re-recorded from a live call once it lands):
+- the line names email, browser and spreadsheet; "files, via shell"; a row with no purpose is left out;
+- an older OS's `os_apps` (the recorded fixture) → None, and the hand list stands;
+- turn-level: every step's prompt carries the line, and the search note still leads its answer; `os_apps` is called once across two turns; no `os_apps` tool → the hand list.
+- **Mutants:** the cache removed; the hand-list fallback removed; the place line not using the catalogue.
+
+**E.MAP1 — RESULT (code; no bundle yet, held for OS #1065).**
+- **Mutants killed (4/4):** the cache removed; the place line ignoring the catalogue; the browser sentence; rows accepted without the catalogue's header. That last one survived twice: nothing tested the header, and my first added case put its JSON on line one, which the code skips anyway. The second case puts it on line two, and only then was the mutant watched to fail.
+- **Live effect is pending #1065:** on today's OS, `os_apps` prints no rows, so the hand list stands, unchanged. The fixture's rows are 520's real ones, but its print format is built from the PR's `print_catalogue`; re-record it from a live call once the PR lands.
+- **Windows workspace:** see the bundle's entry. Linux pending, with the bundle.
+

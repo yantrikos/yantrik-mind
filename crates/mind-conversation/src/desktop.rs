@@ -846,6 +846,45 @@ pub(crate) fn within_ceiling(
     ))
 }
 
+/// E.MAP1: how long `os_apps`' catalogue is used before it is read again.
+pub(crate) const APP_CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// E.MAP1 (OS #1065): every app on this machine with a stated purpose, from `os_apps`' catalogue rows
+/// (one JSON object per line after "Every app on this machine"), as one sentence for the prompt. None
+/// when the answer holds no such rows -- an older OS -- and the hand list in `desktop_sentence` stands.
+pub(crate) fn catalog_line(obs: &str) -> Option<String> {
+    let rows = obs.split_once("Every app on this machine")?.1;
+    let mut apps = Vec::new();
+    let mut browser = false;
+    for line in rows.lines().skip(1) {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let text = |k: &str| row.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
+        let Some(name) = text("name") else {
+            continue;
+        };
+        browser |= name == "browser";
+        let Some(purpose) = text("for") else {
+            continue;
+        };
+        let short: String = purpose.chars().take(60).collect();
+        apps.push(match text("describe_as").filter(|d| *d != name) {
+            Some(via) => format!("{name}, via {via}: {short}"),
+            None => format!("{name}: {short}"),
+        });
+    }
+    if apps.is_empty() {
+        return None;
+    }
+    let open_page = if browser {
+        " A web page opens in your own view (Mind View) with os_act {app: shell, action: open_app, args: {name: browser}}, then web_go {url}."
+    } else {
+        ""
+    };
+    Some(format!(" Every app on this computer, open or not (os_describe its name, or the name after \"via\", lists what it can do): {}.{open_page}", apps.join("; ")))
+}
+
 /// E.DUP1: what a dated `calendar.add_event` asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EventAsked {
@@ -2712,9 +2751,17 @@ pub(crate) fn already_answered(
 /// written (`DISCOVER_DESKTOP_NOTE`) was only shown when the model searched for tools, and it did
 /// not. This is that note, on every desktop turn. It names where, not how -- `os_describe editor`
 /// shows how, on whichever editor this OS has, and F7/F14 route a card-raising write.
-pub(crate) fn desktop_sentence(desktop: bool) -> String {
+pub(crate) fn desktop_sentence(desktop: bool, catalog: Option<&str>) -> String {
     if !desktop {
         return String::new();
+    }
+    // E.MAP1: the desktop's own list where it gives one. The how-to stays: a list says what exists.
+    if let Some(apps) = catalog {
+        return format!(
+            " On this desktop a file's text is written with the `editor` app (call its actions directly; open it with the \
+             shell's open_app only if the desktop says it is not running); a command line is the shell's agent_run action \
+             (os_act {{app: shell, action: agent_run}}).{apps}"
+        );
     }
     // E.OPEN1 (OS #978 step 1): a Mind's open_app of a framework app is refused, and the desktop starts
     // the app for an act or a describe. Open only on the desktop's own word -- today's OS still says it.
@@ -3299,6 +3346,29 @@ mod tests {
             assert!(!note.contains(above), "{above} is above a standard limit: {note}");
         }
         assert_eq!(ceiling_refusal("REFUSED \u{2014} nothing was run. refused: shell.files_create_folder was not run, because how the OS grades it could not be read"), None, "another refusal");
+    }
+
+    /// E.MAP1, on 520's own 36 apps in the print format of OS #1065's `print_catalogue`. Email and the
+    /// browser are the two names my hand list lost tasks over.
+    #[test]
+    fn the_map_comes_from_the_desktops_own_list() {
+        let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let line = catalog_line(&f("os_apps_catalog_520_pr1065.txt")).expect("the catalogue rows");
+        for want in ["email: read and send mail", "browser: the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "open_app, args: {name: browser}"] {
+            assert!(line.replace("action: open_app, args", "open_app, args").contains(want), "{want} missing: {line}");
+        }
+        assert!(!line.contains("bond"), "a row with no purpose says nothing: {line}");
+        assert!(!line.contains("Open now") && !line.contains("Yantrik\n"), "what is open is not the map: {line}");
+        assert!(!line.contains("via email") && !line.contains("via calendar"), "a name that is its own: {line}");
+        assert!(line.chars().count() < 2200, "{}", line.chars().count());
+        // An older OS: no rows, the hand list stands.
+        assert_eq!(catalog_line(&f("os_apps_185b4c0.txt")), None);
+        assert_eq!(catalog_line("Open now:\n{\"name\": \"x\", \"for\": \"not a catalogue row\"}"), None, "only rows after the catalogue's own header");
+        let hand = desktop_sentence(true, None);
+        assert!(hand.contains("mail is the `email` app"), "{hand}");
+        let from_os = desktop_sentence(true, Some(&line));
+        assert!(from_os.contains("browser: the web") && from_os.contains("agent_run") && from_os.contains("`editor` app"), "{from_os}");
+        assert!(!from_os.contains("the calendar and notes are apps"), "the hand list stayed: {from_os}");
     }
 
     /// E.DUP1, turn 814's values in the recorded shape of `events_between`.
@@ -4186,7 +4256,7 @@ mod tests {
 
     #[test]
     fn the_desktop_map_is_said_only_with_a_desktop() {
-        let s = desktop_sentence(true);
+        let s = desktop_sentence(true, None);
         assert!(s.contains("written with the `editor` app") && s.contains("os_describe editor"), "{s}");
         assert!(s.contains("files_*"), "{s}");
         // E.OPEN1: actions first; open_app only on the desktop's word; no stray runs of spaces.
@@ -4196,7 +4266,8 @@ mod tests {
         assert!(s.contains("a command line is the shell's agent_run action"), "{s}");
         // E.FIND2 (turns 1190-1191: "search my email" never looked at the Email app).
         assert!(s.contains("mail is the `email` app (its search action finds a message)"), "{s}");
-        assert_eq!(desktop_sentence(false), "");
+        assert_eq!(desktop_sentence(false, None), "");
+        assert_eq!(desktop_sentence(false, Some(" Every app.")), "", "no desktop, no map");
     }
 
     /// E.OPEN1: both desktops' "starting" sentences earn the one more look; a failed start does not.

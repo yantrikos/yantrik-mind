@@ -885,7 +885,7 @@ pub(crate) fn catalog_line(obs: &str) -> Option<String> {
         return None;
     }
     let web_tools = if browser {
-        " The web tools (web_go and the rest) drive the desktop's Browser, which is the person's own, with their sign-ins, so what you do there is done in their name."
+        " The web tools (web_go and the rest) drive a browser that can be the person's own, with their sign-ins, so treat what you do there as done in their name."
     } else {
         ""
     };
@@ -3367,10 +3367,10 @@ mod tests {
     fn the_map_comes_from_the_desktops_own_list() {
         let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let line = catalog_line(&f("os_apps_catalog_520_pr1065.txt")).expect("the catalogue rows");
-        for want in ["email: read and send mail", "browser (not described): the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "which is the person's own, with their sign-ins"] {
+        for want in ["email: read and send mail", "browser (not described): the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "that can be the person's own, with their sign-ins"] {
             assert!(line.contains(want), "{want} missing: {line}");
         }
-        // Not "your own view": on OS main the web tools drive the person's Browser (dc, from the code).
+        // Not "your own view" and not flatly "the person's": which browser depends on what started first (520, #1072).
         assert!(!line.contains("your own view") && !line.contains("Mind View"), "{line}");
         assert!(!line.contains("bond"), "a row with no purpose says nothing: {line}");
         assert!(!line.contains("Open now") && !line.contains("Yantrik\n"), "what is open is not the map: {line}");

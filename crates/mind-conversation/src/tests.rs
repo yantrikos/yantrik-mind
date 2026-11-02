@@ -20740,13 +20740,14 @@ mod desktop_consent_and_stall_wiring {
         let went = "Done \u{2014} Yantrik \u{2014} files screen, 1 windows open\naccepted: True, settled: True\nrevision: 1";
         let prompt = "Make a small static recipe website in ~/longtask/recipes.";
         let r = run_at(prompt, Some(h.clone()), vec![go(), go()], vec![SHELL, SHELL, SHELL], vec![went, went]).await;
-        let want = r#""action": "files_new_folder", "args": {"name": "longtask"}"#;
-        assert!(r.prompts.iter().any(|p| p.contains(want) && p.contains("already there")), "the repeat did not name the next call");
+        // E.FOLDER1: one call, with the whole path.
+        let want = format!(r#""action": "files_new_folder", "args": {{"path": "{h}/longtask/recipes"}}"#);
+        assert!(r.prompts.iter().any(|p| p.contains(&want) && p.contains("already there")), "the repeat did not name the next call");
 
         // Nothing the request asked for is missing: today's note.
         std::fs::create_dir_all(home.join("longtask").join("recipes")).unwrap();
         let fine = run_at(prompt, Some(h.clone()), vec![go(), go()], vec![SHELL, SHELL, SHELL], vec![went, went]).await;
-        assert!(!fine.prompts.iter().any(|p| p.contains(want)), "a folder that exists was offered");
+        assert!(!fine.prompts.iter().any(|p| p.contains(&want)), "a folder that exists was offered");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

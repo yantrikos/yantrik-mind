@@ -22789,3 +22789,15 @@ The model is told the event is there and to update it or say so. Other events at
 
 **A real-task test, not a battery (520, Mind decd846, OS 2325, turn 1217, 2 Nov):** a site about the Yantrik ecosystem, saved and shown. 13 steps in 60 s. Built and saved (166 lines, 9001 bytes); not shown, and the reply said so with the desktop's real refusal, which meets the standard. **Blocker, OS side:** every route for a Mind to show a local page is refused (`files_open`; the browser's `go` refuses file:). Raised with dc. **Mind side, not fixed:** the page holds claims grounded only in recalled hypotheses, which E.DONE1 cannot see, because it reads the record and the reply, not the file; five near-identical `recall` calls.
 
+## E.FOLDER1 — PREREG: the folder steps are one call that touches nobody's screen
+
+**Why:** `folder_steps` (E.ARENA1-F50) tells the model the exact next calls toward a missing folder: `files_go` to the parent and `files_new_folder {name}`, repeated per level. Held until OS #1038 reached the test fleet; on 2 Nov all four VMs moved to nightly 2359 (dc's runner). 520's live describe: `files_new_folder(name?, parent?, path?)`, "path: The folder to make, e.g. /home/user/a/b; missing parents are made too. Touches nobody's screen". The model already used this form on its own on turn 1183.
+
+**Change:** one call, `files_new_folder {"path": <absolute target>}`; when the goal is a file, then the editor steps as before. The target is the asked folder when it is one, otherwise the missing folder. Without a known home, the words say to give an absolute path, as before. The note beside it stops saying "go to its parent".
+
+**Not checked:** the Mac mini's OS version. On a build without #1038, `path` would not make the folder, and the model would be told so by the desktop.
+
+**Tests:** the pinned nested case becomes one call with the full path and no `files_go`; a file goal keeps its editor step; no home → the words. **Mutant:** the old go-then-name form back → red.
+
+**E.FOLDER1 — RESULT (code; goes in the next bundle).** The mutant (`name` for `path`) was watched to fail in both tests that pin it. Windows workspace: 2658 passed, 0 failed. Three pinned tests were updated from the old form to the new one, on purpose.
+

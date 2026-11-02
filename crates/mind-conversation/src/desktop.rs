@@ -2448,23 +2448,18 @@ pub(crate) fn folder_steps(asked: &str, missing_folder: Option<&str>, home: Opti
         None if is_folder(asked) => asked,
         None => return None,
     };
-    let (parent, name) = first.rsplit_once('/')?;
-    let parent = if parent.is_empty() { "/" } else { parent };
-    let call = |action: &str, args: String| format!("os_act {{\"app\": \"shell\", \"action\": \"{action}\", \"args\": {args}}}");
-    let go = |p: &str| match files_path(p, home) {
-        Some(abs) => call("files_go", format!("{{\"path\": \"{abs}\"}}")),
-        None => format!("files_go to {p} (as an absolute path)"),
+    first.rsplit_once('/')?;
+    // E.FOLDER1 (OS #1038, on the test fleet since nightly 2359): one call. `path` makes the missing
+    // parents too, and touches nobody's screen.
+    let target = if is_folder(asked) { asked } else { first };
+    let make = match files_path(target.trim_end_matches('/'), home) {
+        Some(abs) => format!("os_act {{\"app\": \"shell\", \"action\": \"files_new_folder\", \"args\": {{\"path\": \"{abs}\"}}}}"),
+        None => format!("files_new_folder with path set to {target} (as an absolute path)"),
     };
-    let mut steps = vec![go(parent), call("files_new_folder", format!("{{\"name\": \"{name}\"}}"))];
-    if first != asked {
-        if let Some((_, last)) = asked.rsplit_once('/').filter(|_| is_folder(asked)) {
-            steps.push(go(first));
-            steps.push(call("files_new_folder", format!("{{\"name\": \"{last}\"}}")));
-        } else {
-            steps.push(format!("then write {asked} (editor: `new` with the text, then `save_as` with that path)"));
-        }
+    if is_folder(asked) {
+        return Some(format!("The next call is: {make}."));
     }
-    Some(format!("The next calls are, in order: {}.", steps.join(", then ")))
+    Some(format!("The next calls are, in order: {make}, then write {asked} (editor: `new` with the text, then `save_as` with that path)."))
 }
 
 /// E.ARENA1-F54: how many times one turn may be told its goal is still missing.
@@ -2501,7 +2496,7 @@ pub(crate) fn goal_nudge(step: usize, path: &str, missing_folder: Option<&str>, 
     let folder = match (missing_folder, folder_steps(path, missing_folder, home)) {
         (Some(f), Some(steps)) => format!(" The folder {f} does not exist yet: make it first. {steps}"),
         (None, Some(steps)) => format!(" {steps}"),
-        (Some(f), None) => format!(" The folder {f} does not exist yet: make it first (Files: go to its parent, then `files_new_folder`)."),
+        (Some(f), None) => format!(" The folder {f} does not exist yet: make it first (Files: `files_new_folder` with its absolute `path`)."),
         // E.ARENA1-F54: a file whose folder is there gets its calls too.
         (None, None) => format!(" {}", file_steps(path, home)),
     };
@@ -3587,7 +3582,7 @@ mod tests {
         assert_eq!(on_this_machine("/tmp/a.txt", None), Some(std::path::PathBuf::from("/tmp/a.txt")));
         assert!(goal_missing_note("~/a.txt").contains("~/a.txt"));
         assert!(goal_nudge(3, "~/a.txt", None, None).contains("save_as"));
-        assert!(goal_nudge(3, "~/d/a.txt", Some("~/d"), None).contains(r#""action": "files_new_folder", "args": {"name": "d"}"#), "F50: the folder's call to copy");
+        assert!(goal_nudge(3, "~/d/a.txt", Some("~/d"), Some("/h")).contains(r#""action": "files_new_folder", "args": {"path": "/h/d"}"#), "F50: the folder's call to copy");
         assert!(!goal_nudge(3, "~/a.txt", None, None).contains("files_new_folder"));
         assert_eq!(missing_folder_of("~/a.txt", Some("/home/y")), None, "home itself is never the missing folder");
         assert_eq!(missing_folder_of("/ym-f33-nowhere/sub/a.txt", None).as_deref(), Some("/ym-f33-nowhere/sub"));
@@ -3957,21 +3952,16 @@ mod tests {
     #[test]
     fn the_way_to_a_missing_folder_is_calls_to_copy() {
         let s = folder_steps("~/longtask/recipes", Some("~/longtask"), Some("/home/yantrik/")).expect("folders to make");
-        let order = [
-            r#""action": "files_go", "args": {"path": "/home/yantrik"}"#,
-            r#""action": "files_new_folder", "args": {"name": "longtask"}"#,
-            r#""action": "files_go", "args": {"path": "/home/yantrik/longtask"}"#,
-            r#""action": "files_new_folder", "args": {"name": "recipes"}"#,
-        ];
-        let at: Vec<usize> = order.iter().map(|o| s.find(o).unwrap_or_else(|| panic!("{o} missing from {s}"))).collect();
-        assert!(at.windows(2).all(|w| w[0] < w[1]), "out of order: {s}");
+        // E.FOLDER1: one call, the whole path; `path` makes the parents and moves no one's screen.
+        assert_eq!(s, r#"The next call is: os_act {"app": "shell", "action": "files_new_folder", "args": {"path": "/home/yantrik/longtask/recipes"}}."#);
+        assert!(!s.contains("files_go"), "{s}");
         let no_home = folder_steps("~/longtask/recipes", Some("~/longtask"), None).unwrap();
-        assert!(no_home.contains("files_go to ~ (as an absolute path)"), "{no_home}");
+        assert!(no_home.contains("files_new_folder with path set to ~/longtask/recipes (as an absolute path)"), "{no_home}");
         let one = folder_steps("~/arena-x", None, Some("/home/yantrik")).unwrap();
-        assert!(one.contains(r#""name": "arena-x""#) && one.contains(r#""path": "/home/yantrik""#), "{one}");
+        assert!(one.contains(r#""path": "/home/yantrik/arena-x""#), "{one}");
         assert_eq!(folder_steps("~/notes.txt", None, Some("/home/yantrik")), None, "a file whose folder exists keeps its editor steps");
         let file_in_missing = folder_steps("~/d/plan.md", Some("~/d"), Some("/h")).unwrap();
-        assert!(file_in_missing.contains(r#""name": "d""#) && file_in_missing.contains("save_as"), "{file_in_missing}");
+        assert!(file_in_missing.contains(r#""path": "/h/d""#) && file_in_missing.contains("then write ~/d/plan.md") && file_in_missing.contains("save_as"), "{file_in_missing}");
     }
 
     /// E.ARENA1-F49 on the desktop's real answer to `os_describe {app: shell, actions: files_}` (520,

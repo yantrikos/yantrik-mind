@@ -22811,3 +22811,5 @@ The model is told the event is there and to update it or say so. Other events at
 
 **Tests (Linux only; a unix-only test is unbuilt on Windows):** a child of the test binary installs the handler, the parent sends it a real SIGTERM, and it exits 143 promptly. **Mutant:** the handler not installed → the child's status differs (killed by the signal, no code) → red. **Live, dc's VM:** with `PrivatePIDs=yes` on the unit, `systemctl stop yantrik-mind` returns within a few seconds.
 
+**E.SIGTERM1 — RESULT (code; goes in the next bundle).** Commit c61c83b. The test is unix-only, so Windows does not run it: Windows workspace 2658 passed, 0 failed, without it. **Linux (staging .95):** the test passes under `--locked`; the mutant (the handler not installed) was watched to fail: the child died by the signal, with no exit code. **Not shown:** the handler working with the Mind actually as PID 1. The test's child is not PID 1. That is the VM check on the unit line.
+

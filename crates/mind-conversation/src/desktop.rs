@@ -881,12 +881,12 @@ pub(crate) fn catalog_line(obs: &str) -> Option<String> {
     if apps.is_empty() {
         return None;
     }
-    let open_page = if browser {
-        " A web page opens in your own view (Mind View) with os_act {app: shell, action: open_app, args: {name: browser}}, then web_go {url}."
+    let web_tools = if browser {
+        " The web tools (web_go and the rest) drive the desktop's Browser, which is the person's own, with their sign-ins, so what you do there is done in their name."
     } else {
         ""
     };
-    Some(format!(" Every app on this computer, open or not (os_describe its name, or the name after \"via\", lists what it can do): {}.{open_page}", apps.join("; ")))
+    Some(format!(" Every app on this computer, open or not (os_describe its name, or the name after \"via\", lists what it can do): {}.{web_tools}", apps.join("; ")))
 }
 
 /// E.DUP1: what a dated `calendar.add_event` asks for.
@@ -3364,9 +3364,11 @@ mod tests {
     fn the_map_comes_from_the_desktops_own_list() {
         let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let line = catalog_line(&f("os_apps_catalog_520_pr1065.txt")).expect("the catalogue rows");
-        for want in ["email: read and send mail", "browser: the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "open_app, args: {name: browser}"] {
-            assert!(line.replace("action: open_app, args", "open_app, args").contains(want), "{want} missing: {line}");
+        for want in ["email: read and send mail", "browser: the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "which is the person's own, with their sign-ins"] {
+            assert!(line.contains(want), "{want} missing: {line}");
         }
+        // Not "your own view": on OS main the web tools drive the person's Browser (dc, from the code).
+        assert!(!line.contains("your own view") && !line.contains("Mind View"), "{line}");
         assert!(!line.contains("bond"), "a row with no purpose says nothing: {line}");
         assert!(!line.contains("Open now") && !line.contains("Yantrik\n"), "what is open is not the map: {line}");
         assert!(!line.contains("via email") && !line.contains("via calendar"), "a name that is its own: {line}");

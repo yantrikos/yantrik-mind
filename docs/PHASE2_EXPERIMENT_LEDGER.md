@@ -22785,3 +22785,7 @@ The model is told the event is there and to update it or say so. Other events at
 - **Live effect is pending #1065:** on today's OS, `os_apps` prints no rows, so the hand list stands, unchanged. The fixture's rows are 520's real ones, but its print format is built from the PR's `print_catalogue`; re-record it from a live call once the PR lands.
 - **Windows workspace:** see the bundle's entry. Linux pending, with the bundle.
 
+**E.POLICY1 + E.PLAIN1 — turn 1215 settled:** the reply's "you declined" was true. The Lens history on 520 records "Declined by you - 23:09 - shell.agent_run" (dc's runner, 2 Nov). The runner's flag came from its own timing. So E.PLAIN1's check 2 passes outright.
+
+**A real-task test, not a battery (520, Mind decd846, OS 2325, turn 1217, 2 Nov):** a site about the Yantrik ecosystem, saved and shown. 13 steps in 60 s. Built and saved (166 lines, 9001 bytes); not shown, and the reply said so with the desktop's real refusal, which meets the standard. **Blocker, OS side:** every route for a Mind to show a local page is refused (`files_open`; the browser's `go` refuses file:). Raised with dc. **Mind side, not fixed:** the page holds claims grounded only in recalled hypotheses, which E.DONE1 cannot see, because it reads the record and the reply, not the file; five near-identical `recall` calls.
+

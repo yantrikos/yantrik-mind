@@ -14598,7 +14598,7 @@ Open reminders you're carrying for them:",
         let mut twin_hinted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F48: would a command put a card up on this desktop (read from the shell's
         // mind_mode), whether the loop has looked for that, and whether the model was steered once.
-        let (mut commands_ask, mut mode_looked, mut command_steered): (Option<bool>, bool, bool) = (None, false, false);
+        let (mut commands_ask, mut command_steered): (Option<bool>, bool) = (None, false);
         // E.ARENA1-F56: the text of the last `editor new` that ran, and the saves already held once.
         let mut last_new_text: Option<String> = None;
         let mut kind_held: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -15724,21 +15724,14 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // first -- for the loop, not the model -- so the checks below can see them.
                 if let Some(look) = desktop::grade_lookup(&tool, &args, &described) {
                     if twin_looked.insert(look.to_string()) {
+                        eprintln!("[agent] step {step}: reading the grades of {look} first");
                         let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
                         desktop::record_described(&look, &seen, &mut described);
-                        if let Some(asks) = desktop::commands_would_ask(&seen) {
-                            commands_ask = Some(asks);
-                        }
                     }
                 }
-                // E.ARENA1-F48: before the turn's first command, know whether it would ask.
-                if desktop::is_agent_run(&tool, &args) && commands_ask.is_none() && !mode_looked && !command_steered {
-                    mode_looked = true;
-                    let look = serde_json::json!({ "app": desktop::TWIN_HOST });
-                    let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;
-                    desktop::record_described(&look, &seen, &mut described);
-                    commands_ask = desktop::commands_would_ask(&seen);
-                }
+                // E.LOOK1 (542, turn 66): F48 read the whole shell here to learn the mode. That is a
+                // private read: the conversation was then refused its first command for having read
+                // private state. Whether a command asks now comes from a describe the model made.
                 if let Some(look) = desktop::twin_lookup(&tool, &args, &described) {
                     if twin_looked.insert(look.to_string()) {
                         let seen = self.run_agent_tool_as(desktop::DESCRIBE, &look, id).await;

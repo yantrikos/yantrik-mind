@@ -19558,7 +19558,7 @@ mod desktop_consent_and_stall_wiring {
         )
         .await;
         let read_editor = r.reached.iter().any(|(t, a)| {
-            t.ends_with("os_describe") && *a == serde_json::json!({"app": "editor"})
+            t.ends_with("os_describe") && *a == serde_json::json!({"app": "editor", "actions": "set_"})
         });
         assert!(read_editor, "the loop did not read the editor's grades: {:?}", r.reached);
         assert!(r.prompts.iter().any(|p| p.contains("`new(text?)` graded standard")), "no route offered");
@@ -20773,20 +20773,27 @@ mod desktop_consent_and_stall_wiring {
         let prompt = "Write the titles of everything on my calendar on 25 September into a new file ~/arena-x-friday.txt.";
         let runs = |r: &Run| reached_acts(r).iter().filter(|(_, a)| a == "agent_run").count();
 
-        // The real shell description is in `ask` mode with no session rule.
-        let asked = run_with(prompt, vec![write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        // E.LOOK1 (542, turn 66): the loop no longer reads the shell itself: that read is what got
+        // the command refused. With no describe, the first command goes, and no describe goes first.
+        let look = || Step::Call("mcp.yantrik-os.os_describe", serde_json::json!({"app": "shell"}));
+        let first = run_with(prompt, vec![write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        assert_eq!(runs(&first), 1, "{:?}", first.reached);
+        assert!(!first.reached.iter().any(|(t, _)| t.ends_with("os_describe")), "the loop read the desktop by itself: {:?}", first.reached);
+
+        // The model read the shell, in `ask` mode with no session rule: F48's steering.
+        let asked = run_with(prompt, vec![look(), write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
         assert_eq!(runs(&asked), 0, "the first command went to the person: {:?}", asked.reached);
         assert!(asked.prompts.iter().any(|p| p.contains("a command puts a card in front of the person")), "the model was not told");
-        let again = run_with(prompt, vec![write(), write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
+        let again = run_with(prompt, vec![look(), write(), write()], vec![SHELL, SHELL, SHELL], vec![&done]).await;
         assert_eq!(runs(&again), 1, "sent again, it goes to the person: {:?}", again.reached);
 
         // Where commands ask nothing (bypass, or a session rule), the first command is sent.
         let sb = bypass_shell();
-        let free = run_with(prompt, vec![write()], vec![&sb, &sb, &sb], vec![&done]).await;
+        let free = run_with(prompt, vec![look(), write()], vec![&sb, &sb, &sb], vec![&done]).await;
         assert_eq!(runs(&free), 1, "{:?}", free.reached);
         let ruled = SHELL.replace("\"session_rules\": []", "\"session_rules\": [{\"app\": \"shell\", \"action\": \"agent_run\"}]");
         assert_ne!(ruled, SHELL);
-        let ruled_run = run_with(prompt, vec![write()], vec![&ruled, &ruled, &ruled], vec![&done]).await;
+        let ruled_run = run_with(prompt, vec![look(), write()], vec![&ruled, &ruled, &ruled], vec![&done]).await;
         assert_eq!(runs(&ruled_run), 1, "{:?}", ruled_run.reached);
 
         // Waiting on a running command is never held back.

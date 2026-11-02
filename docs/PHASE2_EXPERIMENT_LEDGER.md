@@ -22813,3 +22813,21 @@ The model is told the event is there and to update it or say so. Other events at
 
 **E.SIGTERM1 — RESULT (code; goes in the next bundle).** Commit c61c83b. The test is unix-only, so Windows does not run it: Windows workspace 2658 passed, 0 failed, without it. **Linux (staging .95):** the test passes under `--locked`; the mutant (the handler not installed) was watched to fail: the child died by the signal, with no exit code. **Not shown:** the handler working with the Mind actually as PID 1. The test's child is not PID 1. That is the VM check on the unit line.
 
+## E.LOOK1 — PREREG: the loop's own looks do not read the person's state unasked
+
+**Why (542, OS 2359, Mind decd846, turn 66, 2 Nov; dc's self-fix experiment):** a fresh chat from a real + press; step 0 is `agent_run`, the turn's first call; the desktop refuses: "This conversation has already read private state (os_describe)". The journal shows no describe. From the code: E.ARENA1-F48 calls `os_describe {app: shell}` before a turn's first command to learn the mode, with no journal line, and `os_describe` is a private read. So the Mind tainted itself one line before asking, and in `bypass_all`, which has no card, that ended the task. E.ARENA1-F15 does the same with `{app}` for any app the turn has not described. **Mechanism from the code, with one matching turn: occurrence not yet measured** (dc can read `taint_scope.reads`). OS #1065 makes `{app, actions}` untainted, so `{app}` would stay tainted after it too. It also bears on every first command in the 541 battery.
+
+**Change:**
+- F48's look is removed. Whether a command would ask is learned from a describe the model itself made, or from the desktop's answer to the command. (F48's steering still fires when the model has described the shell.)
+- F15 asks `{app, actions: "<family>_"}`, the word before the action's first underscore: signatures and grades of every action in the app, no state. On an OS with #1065 that taints nothing; on an older one it is what it was. (`actions` is a family prefix, not an exact name, as dc read from `render_folded`; 520's live answer on 2359 lists every action with its grade, though that build does not yet leave the state out. To re-check once #1065 lands.)
+- F15's look gets a journal line.
+- `listed_actions` also reads a brief line indented under a family heading.
+
+**Nothing lost:** the answer still lists the whole app, so F35's list stands.
+
+**Found on the way, needs OS #1065's author:** `approvals_off_for_test` reads state from `{shell, actions: "set_approvals"}`, and #1065 removes state from that form, so on a machine with #1065 `forget`'s card falls back to the typed flow. Raised with dc.
+
+**Tests:** turn-level: a first `agent_run` sends no describe at all; a first `calendar.add_event` looks only with `actions: "add_"`; F48's steering still fires after the model's own describe. Unit: the family word. **Mutants:** F48's look restored; `actions` dropped from F15.
+
+**E.LOOK1 — RESULT (code; goes in the next bundle).** Mutants killed (2/2): `actions` dropped from F15 (2 tests); F48's look restored (the turn-level test). Three pinned tests were updated on purpose; `a_command_that_would_ask_is_not_the_first_resort` now also proves a first command goes with no describe before it. **Not yet shown live:** that this was what refused turn 66. dc's rerun reads `taint_scope.reads` after a + press and after a first-call `agent_run`. **Fable's decision (via dc):** a tainted command, hand-off or new web address raises the taint card in every mode, `bypass_all` included, and never runs unasked. So after this fix, a turn that really did read private state still gets a card, not a refusal.
+

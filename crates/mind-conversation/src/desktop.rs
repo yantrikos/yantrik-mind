@@ -584,7 +584,7 @@ pub(crate) fn is_safe_read(
 /// Every `act: name(args)  [grade, …]` line in a description.
 pub(crate) fn listed_actions(obs: &str) -> ActionList {
     obs.lines()
-        .filter_map(|l| l.strip_prefix("  act: "))
+        .filter_map(|l| l.trim_start().strip_prefix("act: "))
         .filter_map(|rest| {
             let name = rest.split('(').next()?.trim();
             let grade = rest.split('[').nth(1)?.split([',', ']']).next()?.trim();
@@ -653,8 +653,12 @@ pub(crate) fn grade_lookup(
     args: &serde_json::Value,
     described: &std::collections::HashMap<String, ActionList>,
 ) -> Option<serde_json::Value> {
-    let (app, _) = act_target(tool, args)?;
-    (app != TWIN_HOST && !described.contains_key(&app)).then(|| serde_json::json!({ "app": app }))
+    let (app, action) = act_target(tool, args)?;
+    // E.LOOK1 (542, turn 66): `{app}` is a read of the app's state, and the desktop then holds this
+    // conversation to it. `actions` answers with every action's signature and grade and, from OS
+    // #1065, no state. It is a family prefix, not an exact name.
+    let family = action.split('_').next().unwrap_or(&action);
+    (app != TWIN_HOST && !described.contains_key(&app)).then(|| serde_json::json!({ "app": app, "actions": format!("{family}_") }))
 }
 
 /// E.ARENA1-F8: the one read a sensitive action needs before it may put a card in front of the
@@ -3242,7 +3246,9 @@ mod tests {
     fn an_undescribed_apps_grades_are_read_before_acting_on_it() {
         let write = serde_json::json!({"app": "editor", "action": "set_content", "args": {"text": "x"}});
         let empty = std::collections::HashMap::new();
-        assert_eq!(grade_lookup(ACT, &write, &empty), Some(serde_json::json!({"app": "editor"})));
+        assert_eq!(grade_lookup(ACT, &write, &empty), Some(serde_json::json!({"app": "editor", "actions": "set_"})), "E.LOOK1: signatures, not state");
+        let bare = serde_json::json!({"app": "editor", "action": "new"});
+        assert_eq!(grade_lookup(ACT, &bare, &empty), Some(serde_json::json!({"app": "editor", "actions": "new_"})), "a name with no underscore is its own family");
         let d = described_from_fixtures();
         assert_eq!(grade_lookup(ACT, &write, &d), None, "already described this turn");
         let shell = serde_json::json!({"app": "shell", "action": "files_go"});

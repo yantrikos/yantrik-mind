@@ -8503,6 +8503,13 @@ impl ConversationEngine {
         if !self.desktop_attached() {
             return true;
         }
+        // E.ASKOK1 (OS #1079): the action made for this. From OS #1065 the read below has no state to
+        // find the flag in. Anything but a clear answer falls back to it, and that fails safe.
+        let ask = serde_json::json!({"app": "shell", "action": "approvals_test_state"});
+        let said = Box::pin(self.run_agent_tool_as(desktop::ACT, &ask, id)).await;
+        if let Some(on) = desktop::approvals_test_on(&said) {
+            return on;
+        }
         let look = serde_json::json!({"app": "shell", "actions": "set_approvals"});
         let seen = Box::pin(self.run_agent_tool_as(desktop::DESCRIBE, &look, id)).await;
         !desktop::approvals_plainly_on(&seen)

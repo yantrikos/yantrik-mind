@@ -18384,6 +18384,43 @@ mod desktop_consent_and_stall_wiring {
         assert!(prompts[0].contains("mail is the `email` app"), "the hand list is gone");
     }
 
+    /// E.ASKOK1, on the real check: the new action decides when it answers, with no describe; an older
+    /// OS's refusal leaves it to the old read; neither readable means no card.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn whether_a_card_may_go_up_is_read_from_the_action_made_for_it() {
+        const OFF: &str = "{\"on\": false, \"expires_in_secs\": null, \"means\": \"Off: approvals work as the mode says.\"}";
+        const ON: &str = "{\"on\": true, \"expires_in_secs\": 120, \"means\": \"On.\"}";
+        const OLD_OS: &str = "That didn't go through: yos: shell.app.act refused: unknown action 'approvals_test_state'";
+        let run = |act: &'static str, describe: &'static str| async move {
+            let hub = Arc::new(mind_tools::McpHub::new());
+            let tool = |name: &str| mind_tools::McpTool {
+                server: "yantrik-os".into(),
+                name: name.into(),
+                description: format!("{name} on this computer"),
+                read_only: true,
+                open_world: false,
+                destructive: false,
+                input_schema: serde_json::json!({"type": "object"}),
+            };
+            hub.add_scripted_tool(tool("os_describe"), vec![Ok(describe.to_string())]).unwrap();
+            hub.add_scripted_tool(tool("os_act"), vec![Ok(act.to_string())]).unwrap();
+            let script: Arc<dyn LLMBackend> = Arc::new(Script { at: AtomicUsize::new(0), steps: vec![], seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) });
+            let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(script, "script");
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone());
+            let off = conv.approvals_off_for_test(&TurnIdentity::primary()).await;
+            let described = hub.scripted_calls().iter().any(|(t, _)| t.ends_with("os_describe"));
+            (off, described)
+        };
+        let plainly_on = "{\n  \"approvals_off_for_test\": {\"expires_in_secs\": null, \"on\": false},\n}";
+        let test_run = "{\n  \"approvals_off_for_test\": {\"expires_in_secs\": null, \"on\": true},\n}";
+        assert_eq!(run(OFF, "UNUSED").await, (false, false), "the action says approvals work, so a card may go up");
+        assert_eq!(run(ON, "UNUSED").await, (true, false), "a test run has them off");
+        assert_eq!(run(OLD_OS, plainly_on).await, (false, true), "an older OS: the old read decides");
+        assert_eq!(run(OLD_OS, test_run).await, (true, true));
+        assert_eq!(run(OLD_OS, "Yantrik \u{2014} signatures only").await, (true, true), "neither says: no card");
+    }
+
     /// E.DONE1: a model that plays tool steps and answers the completion check from a list.
     struct PartsChecked {
         steps: StdMutex<Vec<Step>>,

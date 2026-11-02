@@ -1088,6 +1088,15 @@ pub(crate) fn save_took(obs: &str) -> bool {
     (head.contains("editing \"") || head.contains("Text Editor \u{2014}")) && !head.contains(", unsaved")
 }
 
+/// E.ASKOK1: `shell.approvals_test_state`'s `on`: whether a test run has the approvals off. None for
+/// anything that is not that answer -- an older OS's refusal, a failure -- so the caller falls back.
+pub(crate) fn approvals_test_on(obs: &str) -> Option<bool> {
+    let at = if obs.starts_with('{') { 0 } else { obs.find("\n{")? + 1 };
+    let state: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter().next()?.ok()?;
+    state.get("means")?.as_str()?;
+    state.get("on")?.as_bool()
+}
+
 /// E.ERASE2: does the shell plainly say its approvals work as usual (`approvals_off_for_test` with
 /// `"on": false`)? Anything else -- on, missing, unreadable -- is not plainly on.
 pub(crate) fn approvals_plainly_on(description: &str) -> bool {
@@ -3370,6 +3379,20 @@ mod tests {
         let from_os = desktop_sentence(true, Some(&line));
         assert!(from_os.contains("browser: the web") && from_os.contains("agent_run") && from_os.contains("`editor` app"), "{from_os}");
         assert!(!from_os.contains("the calendar and notes are apps"), "the hand list stayed: {from_os}");
+    }
+
+    /// E.ASKOK1, on the shape OS #1079 describes, bare and in the desktop's envelope.
+    #[test]
+    fn the_approvals_answer_is_read_or_left_to_the_fallback() {
+        let means = "\"means\": \"Off: approvals work as the mode says.\"";
+        assert_eq!(approvals_test_on(&format!("{{\"on\": false, \"expires_in_secs\": null, {means}}}")), Some(false));
+        let wrapped = format!("Done \u{2014} Yantrik \u{2014} desktop screen\naccepted: True, settled: True\nrevision: 1\n{{\n  \"on\": true,\n  \"expires_in_secs\": 120,\n  {means}\n}}");
+        assert_eq!(approvals_test_on(&wrapped), Some(true));
+        // What an older OS says, and what is not this answer.
+        assert_eq!(approvals_test_on("That didn't go through: yos: shell.app.act refused: unknown action 'approvals_test_state'; this app offers: x"), None);
+        assert_eq!(approvals_test_on("Done \u{2014} Yantrik\nrevision: 1\n{\"on\": true}"), None, "another action's `on`");
+        assert_eq!(approvals_test_on("{\"on\": \"yes\", \"means\": \"x\"}"), None);
+        assert_eq!(approvals_test_on(""), None);
     }
 
     /// E.DUP1, turn 814's values in the recorded shape of `events_between`.

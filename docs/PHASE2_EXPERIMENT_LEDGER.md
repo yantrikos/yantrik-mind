@@ -22833,3 +22833,13 @@ The model is told the event is there and to update it or say so. Other events at
 
 **E.SIGTERM1 — CORRECTION (2 Nov):** the prereg's premise was reasoned, not measured, and half wrong. "`systemctl stop` would wait out the timeout and then SIGKILL": measured on staging (systemd 257.8), a plain `kill -TERM` to a no-handler PID 1 is ignored, as the kernel rule says, but `systemctl stop` took 0.017 s, because systemd went straight to SIGKILL. So an older Mind under `PrivatePIDs` stops at once, and the handler is not what makes the unit line safe. It stays: it is small, a plain `kill -TERM` now works, and a plain `kill -TERM` ends the Mind, which otherwise it would ignore as PID 1. (This line first said the Mind then exits by its own hand rather than by SIGKILL. Measured on staging the same day, that is false under `systemctl stop`: with `PrivatePIDs`, a process WITH a handler is also SIGKILLed in 0.02 s, and its handler never runs. See my second comment on OS #1076.) The review comment on OS #1076 is corrected too, and the Mind's `PrivatePIDs=yes` no longer waits for this bundle (Fable's call).
 
+## E.ASKOK1 — PREREG: the Mind reads whether it may ask from an action made for that
+
+**Why:** `approvals_off_for_test` (E.ERASE2) decides whether `forget` may put its Keep/Erase card up. It reads `"approvals_off_for_test": {"on": false}` from the state in `os_describe {shell, actions: "set_approvals"}`. OS #1065 removes state from that form, so on a machine with #1065 the check reads "not plainly on" and `forget` falls back to its typed flow: safe, but silently no card. OS #1079 (not merged) adds `shell.approvals_test_state`, `safe`, not a private read, returning `{on, expires_in_secs, means}`.
+
+**Change:** ask that action first. A clear `on` decides. Anything else (an older OS's "unknown action", a refusal, an unparseable answer) falls back to today's read, and that still fails safe to the typed flow.
+
+**Tests:** on the shape in #1079's description (the envelope is built; to re-record from a live call): `on: false` → may ask, with no describe; `on: true` → may not, with no describe; an unknown action → the old read decides, both ways; garbage from both → may not. **Mutants:** the new action not asked; `on` inverted; the fallback removed.
+
+**E.ASKOK1 — RESULT (code; goes in the next bundle).** Mutants killed (3/3): the action's answer not used; `on` inverted; the fallback removed. On an OS without the action, yos-mcp's guard refuses an unlisted action with no card (`no_such_action`, read in main's `guard_act`), so the fallback is quiet. Not yet seen live: the envelope in the tests is built from #1079's description.
+

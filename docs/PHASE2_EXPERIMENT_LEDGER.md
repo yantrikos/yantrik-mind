@@ -22723,3 +22723,10 @@ The model is told the event is there and to update it or say so. Other events at
 - Turn-level: the existing event on the day → `add_event` never reaches the desktop; an empty day → it does.
 - **Mutants:** the call site's check removed → red; the start-time condition dropped → red; containment replaced by equality → red.
 
+**E.TERM1 + E.DUP1 — RESULT: PASS (unit; Windows and Linux).** Commit decd846.
+- **Mutants killed (7/7):** E.TERM1: the not-served exclusion removed; the account dropped at the call site; every line kept rather than the last per app; refused lines counted as done. E.DUP1: the call site's check removed; the start-time condition loosened; containment replaced by equality.
+- **Caught by the suite, not by the new tests:** E.TERM1's first version said "Done first: (I can't run …)". `made` also holds a call that was refused, so only lines the desktop itself starts with "Done —" now count. An existing test (`a_refused_action_ends_the_turn_in_plain_words`) caught it.
+- **Windows workspace:** 2652 passed, 0 failed. **Linux (staging .95):** mind-conversation 1334 passed, 0 failed.
+- **Bundle:** `yantrik-mind-decd846-linux-amd64.tar.zst`, 63026466 bytes, sha256 `40cc10a4c8f63fc0335929d6b3a512eedee0188067ed59bb5ce17b01159c9c98` (verified locally after copy). It supersedes 03e3fe0.
+- **Live (pending):** dc's battery, 3 runs per arm, with baseline 8/18 done.
+- **R4 reconsidered:** the loop already looks again at an unsettled act, and a settled act's answer carries the app's state (dc, from yos-mcp). So no separate "what the desktop confirms" block was built; enforcing the record belongs to the completion check (R5).

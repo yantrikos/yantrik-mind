@@ -846,6 +846,78 @@ pub(crate) fn within_ceiling(
     ))
 }
 
+/// E.DUP1: what a dated `calendar.add_event` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EventAsked {
+    pub(crate) date: String,
+    pub(crate) time: Option<String>,
+    pub(crate) title: String,
+}
+
+/// E.DUP1: None for anything but `calendar.add_event` with a date and a title.
+pub(crate) fn event_asked(tool: &str, args: &serde_json::Value) -> Option<EventAsked> {
+    let (app, action) = act_target(tool, args)?;
+    if app != "calendar" || action != "add_event" {
+        return None;
+    }
+    let inner = inner_args(args);
+    let text = |k: &str| inner.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    Some(EventAsked { date: text("date")?, time: text("time"), title: text("title")? })
+}
+
+/// E.DUP1: the `events` of a calendar read's answer (first lines, then one JSON object). None when
+/// the answer holds no such list -- a refusal, an older OS, a read that failed.
+pub(crate) fn events_read(obs: &str) -> Option<Vec<serde_json::Value>> {
+    let at = obs.find("\n{")? + 1;
+    let state: serde_json::Value = serde_json::Deserializer::from_str(&obs[at..]).into_iter().next()?.ok()?;
+    state.get("events")?.as_array().cloned()
+}
+
+/// E.DUP1 (541, turn 814): "Hike — Lake Trail" was on 7 Nov at 08:00, and "Hike — Lake Trail (best
+/// morning, 39% precip)" was added at 08:00. A duplicate is the same start with one title inside the
+/// other, or the same title when the new event names no time. A different event at that hour is not.
+pub(crate) fn event_already_there(asked: &EventAsked, events: &[serde_json::Value]) -> Option<String> {
+    let words = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    let new = words(&asked.title);
+    let found = events.iter().find(|e| {
+        let old = words(e.get("title").and_then(|t| t.as_str()).unwrap_or(""));
+        let start = e.get("start").and_then(|s| s.as_str()).unwrap_or("");
+        let same_day = e.get("date").and_then(|d| d.as_str()).map_or(true, |d| d == asked.date);
+        let inside = !old.is_empty() && !new.is_empty() && (format!(" {new} ").contains(&format!(" {old} ")) || format!(" {old} ").contains(&format!(" {new} ")));
+        same_day
+            && match &asked.time {
+                Some(t) => inside && start.split('T').nth(1).is_some_and(|at| at.starts_with(t.as_str())),
+                None => old == new,
+            }
+    })?;
+    let title = found.get("title").and_then(|t| t.as_str()).unwrap_or(&asked.title);
+    let start = found.get("start").and_then(|s| s.as_str()).unwrap_or(&asked.date);
+    Some(format!(
+        "(not sent: the calendar already has \"{title}\" at {start}. Nothing was added. If something about it should change, \
+         update that event; otherwise tell the person it is already there.)"
+    ))
+}
+
+/// E.TERM1 (541, turn 804): a turn that ends on a tool's own text still says what it changed, in the
+/// desktop's first lines, the last per app (twelve `set_cell`s are one spreadsheet).
+pub(crate) fn with_changes_made(reply: &str, made: &[(serde_json::Value, String)]) -> String {
+    let mut last: Vec<(String, String)> = Vec::new();
+    for (args, head) in made {
+        let app = app_of(ACT, args).unwrap_or_default();
+        // Only what the desktop itself calls done: `made` also holds a call that was refused.
+        let Some(line) = head.trim().strip_prefix("Done \u{2014} ").filter(|l| !l.is_empty()) else {
+            continue;
+        };
+        last.retain(|(a, _)| *a != app);
+        last.push((app, line.to_string()));
+    }
+    if last.is_empty() {
+        return reply.to_string();
+    }
+    let lines: Vec<String> = last.into_iter().map(|(_, l)| l).collect();
+    format!("Done first: {}.\n\n{reply}", lines.join("; "))
+}
+
 /// E.POLICY1 (541, turn 812, "Delete budget.ods."): does this action remove something? There
 /// `files_delete` was refused above the machine's limit, F35's note listed the shell's actions within
 /// it, and the model trashed the file with `files_select` + `files_trash_selected`, then said it was
@@ -3227,6 +3299,49 @@ mod tests {
             assert!(!note.contains(above), "{above} is above a standard limit: {note}");
         }
         assert_eq!(ceiling_refusal("REFUSED \u{2014} nothing was run. refused: shell.files_create_folder was not run, because how the OS grades it could not be read"), None, "another refusal");
+    }
+
+    /// E.DUP1, turn 814's values in the recorded shape of `events_between`.
+    #[test]
+    fn an_event_already_on_the_calendar_is_seen() {
+        let read = "Calendar \u{2014} November 2026, 1 thing on day 7\naccepted: True, settled: True\nrevision: 1\n{\n  \"count\": 1,\n  \"events\": [{\"date\": \"2026-11-07\", \"end\": \"2026-11-07T12:00:00\", \"location\": null, \"start\": \"2026-11-07T08:00:00\", \"title\": \"Hike \u{2014} Lake Trail\"}]\n}";
+        let events = events_read(read).expect("the recorded shape");
+        let add = |time: Option<&str>, title: &str| {
+            let mut a = serde_json::json!({"date": "2026-11-07", "title": title});
+            if let Some(t) = time {
+                a["time"] = serde_json::json!(t);
+            }
+            event_asked(ACT, &serde_json::json!({"app": "calendar", "action": "add_event", "args": a})).unwrap()
+        };
+        let note = event_already_there(&add(Some("08:00"), "Hike \u{2014} Lake Trail (best morning, 39% precip)"), &events).expect("the turn 814 duplicate");
+        assert!(note.contains("\"Hike \u{2014} Lake Trail\"") && note.contains("Nothing was added"), "{note}");
+        assert!(event_already_there(&add(Some("08:00"), "hike - lake trail"), &events).is_some(), "the same title, spelled differently");
+        assert!(event_already_there(&add(None, "Hike \u{2014} Lake Trail"), &events).is_some(), "the same title, no time named");
+        assert_eq!(event_already_there(&add(Some("08:00"), "Dentist"), &events), None, "another event at that hour");
+        assert_eq!(event_already_there(&add(Some("14:00"), "Hike \u{2014} Lake Trail"), &events), None, "a second hike that afternoon");
+        assert_eq!(event_already_there(&add(None, "Hike"), &events), None, "no time and a different title");
+        assert_eq!(event_already_there(&add(Some("08:00"), "Trail"), &[serde_json::json!({"title": "Entrail check", "start": "2026-11-07T08:00:00"})]), None, "a whole word, not letters");
+        assert_eq!(events_read("REFUSED \u{2014} nothing was run. refused: calendar.app.act: unknown action"), None);
+        assert_eq!(event_asked(ACT, &serde_json::json!({"app": "calendar", "action": "add_event", "args": {"title": "x"}})), None, "no date to read");
+        assert_eq!(event_asked(ACT, &serde_json::json!({"app": "notes", "action": "add_event", "args": {"title": "x", "date": "2026-11-07"}})), None);
+    }
+
+    /// E.TERM1: the last line per app, in order, without the desktop's "Done --"; nothing made, nothing said.
+    #[test]
+    fn a_tools_text_says_what_the_turn_already_changed() {
+        let made = |app: &str, head: &str| (serde_json::json!({"app": app, "action": "x"}), head.to_string());
+        assert_eq!(with_changes_made("Here.", &[]), "Here.");
+        // The real line of a refused call (`a_refused_action_ends_the_turn_in_plain_words`): nothing changed.
+        assert_eq!(with_changes_made("Here.", &[made("notes", "(I can't run mcp.yantrik-os.os_act \u{2014} outward action appears to contain a secret/credential.)")]), "Here.");
+        let all = [
+            made("spreadsheet", "Done \u{2014} ySheets \u{2014} Untitled \u{b7} A1 selected"),
+            made("notes", "Done \u{2014} Notes \u{2014} \"Packing list\" open (6 lines, saved), 5 notes"),
+            made("spreadsheet", "Done \u{2014} ySheets \u{2014} budget.csv \u{b7} saved"),
+        ];
+        assert_eq!(
+            with_changes_made("Here.", &all),
+            "Done first: Notes \u{2014} \"Packing list\" open (6 lines, saved), 5 notes; ySheets \u{2014} budget.csv \u{b7} saved.\n\nHere."
+        );
     }
 
     /// E.POLICY1 (541, OS 2338, turn 812, "Delete budget.ods."): the refusal's real bytes, as far as

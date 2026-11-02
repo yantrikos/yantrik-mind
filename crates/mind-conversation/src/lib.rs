@@ -2421,6 +2421,9 @@ pub(crate) fn slash_reply(text: &str) -> Option<String> {
 /// The start of the question `forget` puts to the person when it found the text (E.ERASE1).
 pub(crate) const FORGET_ASK: &str = "I found it in ";
 
+/// E.TERM1: how a page the web server did not serve back is worded (`make_dashboard`).
+pub(crate) const PAGE_NOT_SERVED: &str = "my web server didn't serve it back";
+
 fn mutating_mcp_result_ends_the_turn(obs: &str) -> bool {
     let o = obs.trim_start();
     o.starts_with("Ready to ") || o.starts_with("(I can't run ")
@@ -8410,6 +8413,18 @@ impl ConversationEngine {
     /// E.ARENA1-F57: and for ANY repeated call while the goal is missing -- VM 520, E.LONG1 L1c and
     /// L1-r2 re-read a settled `events_between` 4 and 6 times with ~/week-plan.md unwritten, each repeat
     /// meeting the generic "already ran" note.
+    /// E.DUP1: before a dated `add_event`, read that day; the note when the event is already there.
+    async fn event_already_there_now(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> Option<String> {
+        let asked = desktop::event_asked(tool, args)?;
+        let read = crate::calendar::calendar_read(crate::calendar::CALENDAR_READ, &asked.date, &asked.date);
+        let seen = self.run_agent_tool_as(desktop::ACT, &read, id).await;
+        let events = desktop::events_read(&seen);
+        if events.is_none() {
+            eprintln!("[agent] could not read {} before adding an event \u{2014} adding it", asked.date);
+        }
+        desktop::event_already_there(&asked, &events?)
+    }
+
     async fn folder_repeat_note(&self, tool: &str, args: &serde_json::Value, user_text: &str, id: &TurnIdentity) -> Option<String> {
         let (path, folder) = self.missing_goal_now(user_text, id).await?;
         let steps = desktop::goal_steps(&path, folder.as_deref(), self.person_home().as_deref());
@@ -12694,7 +12709,8 @@ WINDOW: all-time, latest 200
         if tool == "research" && obs.starts_with("On it — researching") {
             return true;
         }
-        if matches!(tool, "publish_page" | "make_dashboard") && obs.contains("http") {
+        // E.TERM1 (541, turn 804): a page the server did not serve is a failure, not the answer.
+        if matches!(tool, "publish_page" | "make_dashboard") && obs.contains("http") && !obs.contains(PAGE_NOT_SERVED) {
             return true;
         }
         if matches!(
@@ -15620,6 +15636,10 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.LEDGER1: a note with this title is already in the turn's results.
                 eprintln!("[agent] step {step}: {tool} would create a note that exists \u{2014} not sent");
                 Some(note)
+            } else if let Some(note) = self.event_already_there_now(&tool, &args, id).await {
+                // E.DUP1: the same event already on the calendar, from any turn.
+                eprintln!("[agent] step {step}: {tool} would add an event already on the calendar \u{2014} not sent");
+                Some(note)
             } else {
                 // E.ARENA1-F15: an app acted on without a describe this turn has its grades read
                 // first -- for the loop, not the model -- so the checks below can see them.
@@ -16045,6 +16065,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 }
                 // E.VOICE6 (VM 541): a refusal ends the turn in the person's words, not the gate's.
                 let reply = desktop::person_denial(&obs).unwrap_or_else(|| obs.clone());
+                // E.TERM1: and what this turn already changed is still said.
+                let reply = desktop::with_changes_made(&reply, &made);
                 let _ = self
                     .memory
                     .append_message_scoped("user", user_text, id.write_scope())

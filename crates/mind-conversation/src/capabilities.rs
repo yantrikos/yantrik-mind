@@ -760,7 +760,7 @@ impl CapabilityHandler for DashboardsCapability {
                     Some(url) => match crate::verify_served(&url, &html).await {
                         PageServe::Ok => format!("Done & verified live — the dashboard loads with the right content (works on your home network):\n{url}"),
                         PageServe::Mismatch => format!("Built it, and the server responds, but the content served back didn't match what I generated (possibly a stale file) — worth a look:\n{url}"),
-                        PageServe::Down => format!("I built the dashboard but my web server didn't serve it back (it may be off). File: {url} — tell me if you want me to check the server."),
+                        PageServe::Down => format!("I built the dashboard but {} (it may be off). File: {url} — tell me if you want me to check the server.", crate::PAGE_NOT_SERVED),
                     },
                     None => "(couldn't publish the dashboard)".to_string(),
                 }

@@ -22692,3 +22692,34 @@ These are the model's reasoning; they are the battery's baseline.
 - **Mutant killed (1/1):** the tail dropped → "the outcome was cut". An earlier run of this mutant filtered to the wrong test name and proved nothing; it was rerun on the test that holds the assertions and watched to fail.
 - **Windows workspace:** 2648 passed, 0 failed. **Linux (staging .95):** mind-conversation 1330 passed, 0 failed.
 - **Bundle:** `yantrik-mind-03e3fe0-linux-amd64.tar.zst`, 62775887 bytes, sha256 `8fbe8ce57e0fc134d6fa626239bd73e0a4c438ca55e24a2343b3b59392b1ec0f` (verified locally after copy). It supersedes 6b56dcf.
+
+## E.TERM1 — PREREG: a tool's text never hides what the turn already did (reliability batch 1, R2)
+
+**Why (Pranab, 1 Nov, via dc: a task ends done and verified, or not done with a true named reason. 541, turn 804, "Make a note called Packing list with: water, rain jacket, snacks, headlamp."):** step 1 made the note (verified in the app). Step 2 called `make_dashboard`, unasked. Its result held "http", so `terminal_delivery` made it the whole reply: "I built the dashboard but my web server didn't serve it back (it may be off) …". The person was never told the note was made, and was told about a failed thing they did not ask for. Verbatim delivery exists for good reasons (exact links, no re-delegation, a refusal in its own words), and it stays. Two things are wrong with it.
+
+**Change:**
+- A page the server did not serve is not terminal: it goes back to the loop like any other failure. (The served and mismatch outcomes stay terminal: they carry a link the person should have.)
+- When a turn ends on a terminal result after changing something on the desktop, the reply opens with those changes in the OS's own first lines, the last per app: "Done first: Notes — "Packing list" open (6 lines, saved), 5 notes.", then the terminal text, verbatim. No model call.
+
+**Tests:**
+- `terminal_delivery` on turn 804's real wording: not terminal; the verified wording: terminal.
+- Unit: the account keeps the last line per app, in order, strips "Done — ", and is empty with nothing made.
+- Turn-level: a note made, then a terminal result (`forget`'s question) → the reply holds the note's line and the question whole; a terminal result with nothing made is unchanged.
+- **Mutants:** the not-served exclusion removed → red; the account dropped at the call site → red; every line kept rather than the last per app → red.
+
+## E.DUP1 — PREREG: an event already on the calendar is not added again (reliability batch 1, R3)
+
+**Why (541, turn 814, "Plan my Saturday hike …"):** the calendar already held "Hike — Lake Trail" on 7 Nov at 08:00. Step 1's describe showed day 7 had one event, and step 3 added "Hike — Lake Trail (best morning, 39% precip)" on 7 Nov at 08:00. The app then held both (verified), and the only mention was a line inside the checklist note. E.LOOP9 and E.LEDGER1 only compare against what this turn already made or read.
+
+**Change:** before `calendar.add_event` with a date, the loop reads that day (`events_between`). The call is not sent when an event on that day has:
+- the same start and a title that contains, or is contained in, the new one (after normalising case and punctuation); or
+- the same title, when the new event names no time.
+The model is told the event is there and to update it or say so. Other events at the same time are not duplicates. A read that fails or does not parse lets the call through and says so in the journal: this check must not stop a real add.
+
+**Not done, on purpose:** notes. Their `search` filters the person's visible library, so it is not a clean read, and the battery shows no cross-turn duplicate note. E.LEDGER1 still covers notes within a turn.
+
+**Tests:**
+- Unit, on turn 814's values and the recorded events shape: duplicate → the note names the event; a different title at the same time, the same title at another time, and "Lunch" against "Lunch with Dev" at different times → no note; an unparseable read → no note.
+- Turn-level: the existing event on the day → `add_event` never reaches the desktop; an empty day → it does.
+- **Mutants:** the call site's check removed → red; the start-time condition dropped → red; containment replaced by equality → red.
+

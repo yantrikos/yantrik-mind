@@ -856,6 +856,9 @@ async fn a_one_shot_success_says_it_is_done() {
     assert!(set.contains("Don't set it again"), "{set}");
     assert!(conv.terminal_delivery("research", "On it — researching \"ext4\" in the background. I'll put what I find in my next reply once it's done."));
     assert!(!conv.terminal_delivery("research", "(research isn't configured)"));
+    // E.TERM1 (541, turn 804's words): a page the server did not serve is not the answer; a served one is.
+    assert!(!conv.terminal_delivery("make_dashboard", "I built the dashboard but my web server didn't serve it back (it may be off). File: http://192.168.4.52:8088/packing-list.html \u{2014} tell me if you want me to check the server."));
+    assert!(conv.terminal_delivery("make_dashboard", "Done & verified live \u{2014} the dashboard loads with the right content (works on your home network):\nhttp://192.168.4.52:8088/packing-list.html"));
 }
 
 /// E.REM1d (541, 16 Oct): the tool promises a ping only where one will be delivered.
@@ -18988,6 +18991,49 @@ mod desktop_consent_and_stall_wiring {
         assert!(crate::desktop::DISCOVER_DESKTOP_NOTE.contains("agent_run"));
     }
 
+    /// E.DUP1 (541, turn 814): the hike already on the day is not added again; an empty day's is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_event_already_on_the_calendar_is_not_added_again() {
+        const THERE: &str = "Calendar \u{2014} November 2026, 1 thing on day 7\naccepted: True, settled: True\nrevision: 1\n{\n  \"count\": 1,\n  \"events\": [{\"date\": \"2026-11-07\", \"end\": \"2026-11-07T12:00:00\", \"location\": null, \"start\": \"2026-11-07T08:00:00\", \"title\": \"Hike \u{2014} Lake Trail\"}]\n}";
+        const EMPTY: &str = "Calendar \u{2014} November 2026, nothing on day 7\naccepted: True, settled: True\nrevision: 1\n{\n  \"count\": 0,\n  \"events\": []\n}";
+        const ADDED: &str = "Done \u{2014} Calendar \u{2014} November 2026, 1 thing on day 7\naccepted: True, settled: True\nrevision: 2\n{}";
+        const CAL: &str = "Calendar \u{2014} November 2026\nrevision: 1\n{}";
+        let add = serde_json::json!({"app": "calendar", "action": "add_event", "args": {"date": "2026-11-07", "time": "08:00", "title": "Hike \u{2014} Lake Trail (best morning)"}});
+        let steps = || vec![Step::Call("mcp.yantrik-os.os_act", add.clone()), Step::Say("It is on your calendar."), Step::Say("It is on your calendar.")];
+        let ask = "Put my Saturday hike on the calendar at 8";
+        let actions = |r: &Run| r.reached.iter().filter(|(t, _)| t.ends_with("os_act")).filter_map(|(_, a)| a["action"].as_str().map(str::to_string)).collect::<Vec<_>>();
+        let r = run_with(ask, steps(), vec![CAL, CAL], vec![THERE, ADDED]).await;
+        assert_eq!(actions(&r), vec!["events_between"], "the duplicate was sent: {:?}", r.reached);
+        assert!(r.prompts.join("\n").contains("the calendar already has \\\"Hike \u{2014} Lake Trail\\\"") || r.prompts.join("\n").contains("the calendar already has \"Hike \u{2014} Lake Trail\""), "the model was not told");
+        let r = run_with(ask, steps(), vec![CAL, CAL], vec![EMPTY, ADDED]).await;
+        assert_eq!(actions(&r), vec!["events_between", "add_event"], "an empty day's event was not added: {:?}", r.reached);
+    }
+
+    /// E.TERM1 (541, turn 804): a note made, then a result delivered verbatim: the reply says both.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_verbatim_result_keeps_what_the_turn_changed() {
+        let note = serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Packing list", "text": "water"}});
+        let fact = "My bike is a blue Trek";
+        let steps = |with_note: bool| {
+            let mut s = Vec::new();
+            if with_note {
+                s.push(Step::Call("mcp.yantrik-os.os_act", note.clone()));
+            }
+            s.push(Step::Call("remember", serde_json::json!({"text": fact})));
+            s.push(Step::Call("forget", serde_json::json!({"what": "blue Trek"})));
+            s.push(Step::Say("UNUSED"));
+            s
+        };
+        const NOTES: &str = "Notes \u{2014} nothing open, 4 notes\nrevision: 1\n{}";
+        const MADE: &str = "Done \u{2014} Notes \u{2014} \"Packing list\" open (6 lines, saved), 5 notes\naccepted: True, settled: True\nrevision: 2\n{}";
+        let ask = "Make a note called Packing list, and remember then forget my bike";
+        let r = run_with(ask, steps(true), vec![NOTES, NOTES], vec![MADE]).await;
+        assert!(r.reply.starts_with("Done first: Notes \u{2014} \"Packing list\" open (6 lines, saved), 5 notes.\n\n"), "{}", r.reply);
+        assert!(r.reply.contains(crate::FORGET_ASK), "the verbatim text was lost: {}", r.reply);
+        let r = run_with(ask, steps(false), vec![NOTES], vec!["UNUSED"]).await;
+        assert!(r.reply.starts_with(crate::FORGET_ASK), "nothing changed, nothing to say first: {}", r.reply);
+    }
+
     /// E.POLICY1 (541, turn 812): "Delete budget.ods." -- files_delete refused by the machine's standing
     /// policy, then files_trash_selected. The trash never reaches the desktop, and the model is told why.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -20663,7 +20709,8 @@ mod desktop_consent_and_stall_wiring {
         let adds = reached_acts(&r).iter().filter(|(_, a)| a == "add_event").count();
         assert_eq!(adds, 1, "{:?}", r.reached);
         assert!(r.prompts.iter().any(|p| p.contains("calendar.add_event already ran this turn")), "the model was not told");
-        let refused = run_with(prompt, vec![add(false), add(true)], vec![SHELL, SHELL], vec![NOT_OPEN, ADDED]).await;
+        // E.DUP1: each add reads the day first; a read that fails lets the add through.
+        let refused = run_with(prompt, vec![add(false), add(true)], vec![SHELL, SHELL], vec![NOT_OPEN, NOT_OPEN, NOT_OPEN, ADDED]).await;
         let adds = reached_acts(&refused).iter().filter(|(_, a)| a == "add_event").count();
         assert_eq!(adds, 2, "a call that was not run is not a change made: {:?}", refused.reached);
     }

@@ -3409,6 +3409,15 @@ mod tests {
         assert_eq!(commands_would_ask(&shell), None, "no state, so no word on the mode");
     }
 
+    /// OS #1088's refusal, verbatim from a real Mind turn (520, c20d77ee, the person's Browser first):
+    /// read as a call that did not happen, so no change is claimed and the check takes its reason.
+    #[test]
+    fn the_browsers_refusal_reads_as_nothing_done() {
+        const REFUSED: &str = "REFUSED \u{2014} nothing was run. refused: Nothing was done. The browser on the desktop's debugging port is not Mind View's own browser, so it may be the person's own, with their sign-ins and tabs. A Mind does not use it: no page was opened, read or changed and no tab list is shown. Only the person can change this: they can close that browser, or do this part themselves. Trying again will not change it.";
+        assert!(nothing_was_run(REFUSED));
+        assert_eq!(ceiling_refusal(REFUSED), None, "not a grade limit: no list of other routes");
+    }
+
     /// E.ASKOK1, on the shape OS #1079 describes, bare and in the desktop's envelope.
     #[test]
     fn the_approvals_answer_is_read_or_left_to_the_fallback() {

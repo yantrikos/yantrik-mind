@@ -18257,6 +18257,10 @@ mod desktop_consent_and_stall_wiring {
         assert!(compose.contains("anything they asked for") && compose.contains("say nothing about things they did not ask for"), "{compose}");
         assert!(compose.contains("if something they asked for was not done, say so plainly"), "{compose}");
         assert!(!compose.contains("what you did and did not do") && !compose.contains("anything else, say plainly"), "{compose}");
+        // E.PLAIN1 (541, turn 823): a declined card was answered with the example's reason verbatim --
+        // "I needed your OK ... and I didn't get it in time". The reason is the one in the notes.
+        assert!(compose.contains("the reason your notes give, never a guessed one"), "{compose}");
+        assert!(!compose.contains("didn't get it in time"), "a concrete reason to copy is back: {compose}");
     }
 
     /// E.CITE1: a model that plays tool steps, writes compose's answer, and answers the work-log check.
@@ -18976,6 +18980,32 @@ mod desktop_consent_and_stall_wiring {
         let second = r.prompts.iter().find(|p| p.contains("[0] discover_tools ->")).expect("the search reached the work log");
         assert!(second.contains("[0] discover_tools -> ON THIS COMPUTER"), "the note does not lead: {second}");
         assert!(crate::desktop::DISCOVER_DESKTOP_NOTE.contains("agent_run"));
+    }
+
+    /// E.POLICY1 (541, turn 812): "Delete budget.ods." -- files_delete refused by the machine's standing
+    /// policy, then files_trash_selected. The trash never reaches the desktop, and the model is told why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_removal_the_machine_withholds_is_not_done_another_way() {
+        const REFUSED: &str = include_str!("../fixtures/desktop/act_files_delete_refused_541_2338.txt");
+        let delete = serde_json::json!({"app": "shell", "action": "files_delete", "args": {"name": "budget.ods"}});
+        let trash = serde_json::json!({"app": "shell", "action": "files_trash_selected"});
+        let r = run_with(
+            "Delete budget.ods.",
+            vec![
+                Step::Call("mcp.yantrik-os.os_act", delete),
+                Step::Call("mcp.yantrik-os.os_act", trash),
+                Step::Say("I couldn't delete budget.ods: this computer's settings don't let me remove files."),
+                Step::Say("I couldn't delete budget.ods: this computer's settings don't let me remove files."),
+            ],
+            vec![SHELL, SHELL, SHELL],
+            vec![REFUSED, "Done \u{2014} Yantrik \u{2014} files screen, 0 windows open\naccepted: True, settled: True\nrevision: 1\n{}"],
+        )
+        .await;
+        let acts: Vec<&str> = r.reached.iter().filter(|(t, _)| t.ends_with("os_act")).filter_map(|(_, a)| a["action"].as_str()).collect();
+        assert_eq!(acts, vec!["files_delete"], "a removal went through after the refusal: {:?}", r.reached);
+        let log = r.prompts.join("\n");
+        assert!(log.contains("Do not get the same result another way"), "the refusal's note did not reach the model");
+        assert!(log.contains("not sent: shell.files_trash_selected removes things"), "the trash was not explained");
     }
 
     /// E.FIND2 (520, turns 1190-1191): "search my email" searched only the mind's own tools, twice,

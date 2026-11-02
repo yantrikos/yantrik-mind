@@ -2359,8 +2359,8 @@ pub(crate) fn one_ask(text: &str) -> bool {
 
 pub(crate) const COMPOSE_PLAIN_WORDS: &str = "The work log is your own notes: the person has never seen it. Never mention a log, steps, \
 tools or tool names, refusals or approval cards by those names -- say in plain words what you did, and anything they asked for \
-that you did not do and why when it matters (for example: \"I needed your OK to run a command, and didn't get it in time -- want \
-me to try again?\"); say nothing about things they did not ask for.";
+that you did not do and why when it matters -- the reason your notes give, never a guessed one; say nothing about things they \
+did not ask for.";
 
 /// E.MEM1: a bare `/new` (the desktop's New chat), `/reset` or `/clear`, with or without a bot suffix.
 pub(crate) fn is_fresh_start(user_text: &str) -> bool {
@@ -14558,6 +14558,8 @@ Open reminders you're carrying for them:",
         let mut relooked: std::collections::HashSet<String> = std::collections::HashSet::new();
         // E.ARENA1-F35: apps whose within-the-limit actions the model has been shown this turn.
         let mut ceiling_noted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // E.POLICY1: a removal the machine's standing policy refused this turn.
+        let mut withheld: Option<desktop::CeilingRefusal> = None;
         // E.ARENA1-F26: each desktop action that RAN this turn, with its result's first line.
         let mut made: Vec<(serde_json::Value, String)> = Vec::new();
         // E.ARENA1-F36: each app's latest revision, and each act's revision from its own reply.
@@ -15574,6 +15576,9 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 // E.MEM1 (VM 541): one fact, three phrasings, three beliefs.
                 eprintln!("[agent] step {step}: remember restates a fact saved this turn \u{2014} not saved again");
                 Some(format!("(already remembered this turn: \"{first}\" \u{2014} not saved again)"))
+            } else if let Some(note) = desktop::removal_withheld(&tool, &args, withheld.as_ref()) {
+                eprintln!("[agent] step {step}: {tool} would remove what the machine's standing policy withheld this turn \u{2014} not sent");
+                Some(note)
             } else if let Some(note) = desktop::already_answered(&tool, &args, &answered) {
                 Some(note)
             } else if desktop::another_new_while_unsaved(&tool, &args, unsaved_doc) {
@@ -15822,15 +15827,20 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                 desktop::update_unsaved(&tool, &args, &obs, &mut unsaved_doc);
             }
             // E.ARENA1-F35: refused above the machine's limit -- show what the app offers within it.
-            let ceiling_note = (sent && tool == desktop::ACT)
-                .then(|| desktop::ceiling_refusal(&obs))
-                .flatten()
+            let refused_above = (sent && tool == desktop::ACT).then(|| desktop::ceiling_refusal(&obs)).flatten();
+            if let Some(r) = refused_above.as_ref().filter(|r| desktop::destroys(&r.action)) {
+                eprintln!("[agent] step {step}: {}.{} withheld by the machine's standing policy \u{2014} no other route offered", r.app, r.action);
+                withheld.get_or_insert_with(|| r.clone());
+            }
+            let ceiling_note = refused_above
                 .filter(|r| !ceiling_noted.contains(&r.app))
                 .and_then(|r| desktop::within_ceiling(&r, &described).map(|note| (r.app, note)));
             let obs = match ceiling_note {
                 Some((app, note)) => {
                     ceiling_noted.insert(app.clone());
-                    eprintln!("[agent] step {step}: {app} refused above the limit \u{2014} showing what it offers within it");
+                    if withheld.is_none() {
+                        eprintln!("[agent] step {step}: {app} refused above the limit \u{2014} showing what it offers within it");
+                    }
                     format!("{obs}\n{note}")
                 }
                 None => obs,

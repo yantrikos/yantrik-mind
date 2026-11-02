@@ -812,6 +812,10 @@ pub(crate) fn within_ceiling(
     r: &CeilingRefusal,
     described: &std::collections::HashMap<String, ActionList>,
 ) -> Option<String> {
+    // E.POLICY1: a removal the machine withholds is not a goal to reach another way.
+    if destroys(&r.action) {
+        return Some(withheld_removal_note(r));
+    }
     let limit = grade_rank(&r.ceiling)?;
     let within: Vec<String> = described
         .get(&r.app)?
@@ -840,6 +844,43 @@ pub(crate) fn within_ceiling(
         ceiling = r.ceiling,
         list = within.join("; ")
     ))
+}
+
+/// E.POLICY1 (541, turn 812, "Delete budget.ods."): does this action remove something? There
+/// `files_delete` was refused above the machine's limit, F35's note listed the shell's actions within
+/// it, and the model trashed the file with `files_select` + `files_trash_selected`, then said it was
+/// deleted. What the limit withholds there is the removal itself, whichever action carries it.
+pub(crate) fn destroys(action: &str) -> bool {
+    const REMOVES: [&str; 10] = ["delete", "remove", "trash", "erase", "wipe", "purge", "destroy", "uninstall", "shred", "unlink"];
+    action.to_ascii_lowercase().split(['_', '-', '.']).any(|w| REMOVES.contains(&w))
+}
+
+/// E.POLICY1: the note for a removal refused above the machine's limit -- no alternatives offered.
+pub(crate) fn withheld_removal_note(r: &CeilingRefusal) -> String {
+    format!(
+        "({app}.{action} is graded {grade}, above this machine's {ceiling} limit: this computer's standing \
+         policy does not let you remove it, and no one here can approve that. Do not get the same result \
+         another way -- no trash, move, overwrite or other action that removes it. Tell the person plainly \
+         that it was not done, and that only someone at the keyboard can do it.)",
+        app = r.app,
+        action = r.action,
+        grade = r.grade,
+        ceiling = r.ceiling,
+    )
+}
+
+/// E.POLICY1: after a removal was withheld this turn, another removing desktop action is not sent.
+pub(crate) fn removal_withheld(tool: &str, args: &serde_json::Value, withheld: Option<&CeilingRefusal>) -> Option<String> {
+    let r = withheld?;
+    let (app, action) = act_target(tool, args)?;
+    destroys(&action).then(|| {
+        format!(
+            "(not sent: {app}.{action} removes things, and earlier in this turn the desktop refused {}.{} \
+             under this machine's standing policy. Nothing was removed. Tell the person plainly that it was \
+             not done, and that only someone at the keyboard can do it.)",
+            r.app, r.action
+        )
+    })
 }
 
 /// E.ARENA1-F11: the app the desktop said does not exist, read off its own refusal: "…how the OS
@@ -3186,6 +3227,32 @@ mod tests {
             assert!(!note.contains(above), "{above} is above a standard limit: {note}");
         }
         assert_eq!(ceiling_refusal("REFUSED \u{2014} nothing was run. refused: shell.files_create_folder was not run, because how the OS grades it could not be read"), None, "another refusal");
+    }
+
+    /// E.POLICY1 (541, OS 2338, turn 812, "Delete budget.ods."): the refusal's real bytes, as far as
+    /// the journal keeps them. A removal refused above the limit gets no list of other routes -- the
+    /// list is what led to files_select + files_trash_selected -- and a later removal is not sent.
+    #[test]
+    fn a_withheld_removal_offers_no_other_route() {
+        let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let r = ceiling_refusal(&f("act_files_delete_refused_541_2338.txt")).expect("the guard's refusal was not read");
+        assert_eq!((r.app.as_str(), r.action.as_str(), r.grade.as_str(), r.ceiling.as_str()), ("shell", "files_delete", "dangerous", "sensitive"));
+        let mut d = std::collections::HashMap::new();
+        record_described(&serde_json::json!({"app": "shell"}), &f("shell_describe_541_f486eb5b.txt"), &mut d);
+        let note = within_ceiling(&r, &d).expect("a removal gets its own note");
+        assert!(!note.contains("files_trash_selected") && !note.contains("files_select"), "another route was offered: {note}");
+        assert!(note.contains("Do not get the same result another way") && note.contains("only someone at the keyboard"), "{note}");
+        for a in ["files_delete", "files_trash_selected", "remove_event", "empty-trash", "uninstall"] {
+            assert!(destroys(a), "{a}");
+        }
+        for a in ["files_select", "files_go", "new_note", "search", "add_event", "files_new_folder", "show_desktop"] {
+            assert!(!destroys(a), "{a}");
+        }
+        let trash = serde_json::json!({"app": "shell", "action": "files_trash_selected"});
+        assert!(removal_withheld(ACT, &trash, Some(&r)).is_some_and(|n| n.contains("not sent") && n.contains("Nothing was removed")));
+        let select = serde_json::json!({"app": "shell", "action": "files_select", "args": {"name": "budget.ods"}});
+        assert_eq!(removal_withheld(ACT, &select, Some(&r)), None, "selecting removes nothing");
+        assert_eq!(removal_withheld(ACT, &trash, None), None, "nothing was withheld this turn");
     }
 
     /// E.ARENA1-F38 (yantrik-os #478): a screen read is stale after an act, like any desktop read --

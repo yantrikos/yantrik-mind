@@ -17694,7 +17694,13 @@ mod desktop_consent_and_stall_wiring {
         let refusal = format!("REFUSED \u{2014} nothing was run. refused: the desktop did not start the command; its reason is on the next line.\n`wait` is a number of seconds.{}", "x".repeat(500));
         let kept = crate::journal_head(&refusal, true);
         assert!(kept.contains(" | `wait` is a number of seconds."), "{kept}");
-        assert_eq!(kept.chars().count(), 402, "400 characters plus the line mark");
+        assert_eq!(kept.chars().count(), refusal.chars().count() + 2, "a short refusal is kept whole, plus the line mark");
+        // E.STALL5 (520, turn 1215): yos-mcp's wording -- the preamble, then what the person answered.
+        let tainted = "REFUSED \u{2014} nothing was run. refused: This conversation has already read private state (os_describe), and shell.agent_run runs a command, which can carry anything off this machine \u{2014} a fetch, a lookup, a push \u{2014} and nothing here can tell an innocent command line from one carrying a secret. It is asked about every time, whatever the mode and whatever this conversation was allowed before: not a fault. If the person says no, do not look for another route to the same address or the same data \u{2014} another command, a script, a sub-agent or the browser is the same route. the person at the machine was asked to allow shell.agent_run and said no. Nothing was run and nothing was changed. This is an answer, not an error: do not ask again and do not look for another route to the same effect. Say what you were going to do and leave it with them.";
+        let kept = crate::journal_head(tainted, true);
+        assert!(kept.starts_with("REFUSED \u{2014} nothing was run. refused: This conversation"), "{kept}");
+        assert!(kept.contains("asked to allow shell.agent_run and said no"), "the outcome was cut: {kept}");
+        assert_eq!(kept.chars().count(), 703, "400, the mark, 300: {kept}");
         assert_eq!(crate::journal_head(&"y".repeat(300), false).chars().count(), 120);
         // E.CAP1: compose gets what the turn has left, and its reserve even past the wall.
         let ms = |d: std::time::Duration| d.as_millis() as u64;

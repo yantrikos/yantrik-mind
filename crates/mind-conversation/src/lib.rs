@@ -1770,10 +1770,19 @@ fn push_stage(t: &mut Vec<&'static str>, s: &'static str) {
 
 /// E.STALL4 (c09d: the refusal's reason was on line 2, past the 120 characters kept): what the
 /// step journal keeps of a result -- more, newlines shown, when the desktop refused the act.
+/// E.STALL5 (520, turn 1215): a tainted refusal is about 480 characters of preamble, then what the
+/// person answered -- so a long refusal keeps its end too.
 fn journal_head(obs: &str, refused: bool) -> String {
-    let n = if refused { 400 } else { 120 };
-    let sep = if refused { " | " } else { " " };
-    obs.chars().take(n).collect::<String>().replace('\n', sep)
+    if !refused {
+        return obs.chars().take(120).collect::<String>().replace('\n', " ");
+    }
+    let chars: Vec<char> = obs.chars().collect();
+    let kept = if chars.len() > 700 {
+        format!("{} \u{2026} {}", chars[..400].iter().collect::<String>(), chars[chars.len() - 300..].iter().collect::<String>())
+    } else {
+        obs.to_string()
+    };
+    kept.replace('\n', " | ")
 }
 
 /// Marks a progress message as REASONING rather than a status line, so the transport can route it

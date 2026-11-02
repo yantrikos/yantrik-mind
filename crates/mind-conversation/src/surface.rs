@@ -725,7 +725,9 @@ impl ConversationEngine {
     /// -- R4's T8, R2's T7, B0's T6. The capability report already knew; the menu never asked it.
     /// `catalog_source` stays whole: argument contracts must not depend on what is configured.
     pub(crate) fn offered_catalog(&self) -> String {
-        self.catalog_admitting(|p| self.first_unmet(&p.requires).is_none())
+        // E.EGRESS8: a family's Telegram photo share is not a one-person desktop's tool.
+        let on_desktop = self.desktop_attached();
+        self.catalog_admitting(|p| self.first_unmet(&p.requires).is_none() && !(on_desktop && p.id == crate::desktop::FAMILY_SHARE_PLUGIN))
     }
 
     fn catalog_admitting(&self, can_run: impl Fn(&crate::plugins::PluginSpec) -> bool) -> String {

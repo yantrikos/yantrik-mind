@@ -156,7 +156,8 @@ pub const OUTBOUND: &[Outbound] = &[
         // The ninth pass (b): a ticker or a symbol is a token.
         fields: &[("symbol", Token), ("symbols", Token), ("ticker", Token)],
     },
-    Outbound { names: &["share_with_member", "share"], connector: || Connector::ThirdParty, fields: &[] },
+    // E.EGRESS8 (541, battery task 20): `note` is model-written text that goes to another person.
+    Outbound { names: &["share_with_member", "share"], connector: || Connector::ThirdParty, fields: &[("note", Query)] },
     // The audit (a): no model text, but its follow-up reaches Immich and Telegram from the poll loop.
     Outbound { names: &["ask_whois"], connector: || Connector::ThirdParty, fields: &[] },
     Outbound { names: &["code", "coder"], connector: || Connector::Coder, fields: &[] },

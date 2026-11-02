@@ -33,6 +33,8 @@ pub(crate) const SUPERSEDED_BY_DESKTOP: [&str; 6] = [
 
 /// The plugin whose menu entry changes when the desktop owns the calendar.
 pub(crate) const CALENDAR_PLUGIN: &str = "calendar_tools";
+/// E.EGRESS8: sends a photo and a note to a household member's Telegram; a desktop does not offer it.
+pub(crate) const FAMILY_SHARE_PLUGIN: &str = "photo_sharing";
 
 /// What the menu says for that plugin while the desktop is attached. The desktop's calendar is
 /// reached through its own tools; only the person-profile tool stays here.
@@ -3414,6 +3416,10 @@ mod tests {
         assert_eq!(approvals_test_on(&format!("{{\"on\": false, \"expires_in_secs\": null, {means}}}")), Some(false));
         let wrapped = format!("Done \u{2014} Yantrik \u{2014} desktop screen\naccepted: True, settled: True\nrevision: 1\n{{\n  \"on\": true,\n  \"expires_in_secs\": 120,\n  {means}\n}}");
         assert_eq!(approvals_test_on(&wrapped), Some(true));
+        // The real answer through yos-mcp (OS #1079, 520 gate, f9c61213), its state line cut short.
+        let real = |on: &str, secs: &str| format!("Yantrik \u{2014} desktop screen, 3 windows open, email and perception not running\naccepted: True, settled: True\nrevision: 15b7fc7adb1c0aa1\n{{\n  \"expires_in_secs\": {secs},\n  \"means\": \"Off: approvals work as the mode says.\",\n  \"on\": {on}\n}}\nstate: {{\"active_project\": null}}");
+        assert_eq!(approvals_test_on(&real("false", "null")), Some(false));
+        assert_eq!(approvals_test_on(&real("true", "299")), Some(true));
         // What an older OS says, and what is not this answer.
         assert_eq!(approvals_test_on("That didn't go through: yos: shell.app.act refused: unknown action 'approvals_test_state'; this app offers: x"), None);
         assert_eq!(approvals_test_on("Done \u{2014} Yantrik\nrevision: 1\n{\"on\": true}"), None, "another action's `on`");

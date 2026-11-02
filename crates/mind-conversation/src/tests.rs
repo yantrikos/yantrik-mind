@@ -18384,6 +18384,26 @@ mod desktop_consent_and_stall_wiring {
         assert!(prompts[0].contains("mail is the `email` app"), "the hand list is gone");
     }
 
+    /// E.EGRESS8: a one-person desktop is not offered a family's Telegram photo share; off one it is.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_desktop_is_not_offered_the_family_photo_share() {
+        let script: Arc<dyn LLMBackend> = Arc::new(Script { at: AtomicUsize::new(0), steps: vec![], seen: Arc::new(StdMutex::new(Vec::new())), timeouts: Arc::new(StdMutex::new(Vec::new())) });
+        let engine = |desktop: bool| {
+            let pool = InferencePool::new(Arc::clone(&script), 1).with_provider("script").with_private_backend(Arc::clone(&script), "script");
+            let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+            let conv = ConversationEngine::new(mem, pool, "YM");
+            if !desktop {
+                return conv;
+            }
+            let hub = Arc::new(mind_tools::McpHub::new());
+            let tool = mind_tools::McpTool { server: "yantrik-os".into(), name: "os_act".into(), description: "x".into(), read_only: true, open_world: false, destructive: false, input_schema: serde_json::json!({"type": "object"}) };
+            hub.add_scripted_tool(tool, vec![Ok("x".to_string())]).unwrap();
+            conv.with_mcp(hub)
+        };
+        assert!(engine(false).offered_catalog().contains("share_with_member"), "off a desktop the offer stands");
+        assert!(!engine(true).offered_catalog().contains("share_with_member"), "a desktop was offered it");
+    }
+
     /// E.ASKOK1, on the real check: the new action decides when it answers, with no describe; an older
     /// OS's refusal leaves it to the old read; neither readable means no card.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

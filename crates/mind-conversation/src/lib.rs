@@ -15456,6 +15456,8 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                     kind: guards::RefusalKind::EgressUnsafe,
                     msg,
                 } => {
+                    // E.EGRESS8 (541, turn 919): a refusal here left no line, so nothing said whether the call ran.
+                    eprintln!("[agent] step {step}: {tool} refused before it was sent -> {}", journal_head(&msg, true));
                     // E.WX2 (Pranab, 31 Oct, option A): a remembered place's weather comes from the
                     // person's own Weather app on the desktop -- their city stays on this machine.
                     // Any refusal of the outside call qualifies: reading the person's own app sends nothing.

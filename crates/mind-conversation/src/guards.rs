@@ -90,6 +90,24 @@ pub(crate) fn egress_refusal(tool: &str, failure: crate::egress_planning::CleanA
     )
 }
 
+/// E.EGRESS8 (541, turn 919: "Open my note called Locker code and read it back to me." and the model
+/// called `share_with_member {member: "wife", note: "<the code>"}`): why a send to a person may not
+/// go. On a desktop this family tool never runs. Elsewhere the person must have named who it goes to.
+pub(crate) fn send_to_person_refused(tool: &str, args: &serde_json::Value, user_text: &str, desktop: bool) -> Option<String> {
+    if !matches!(tool, "share_with_member" | "share") {
+        return None;
+    }
+    if desktop {
+        return Some("(not sent: sending to a family member is not available on this desktop. Nothing was sent. Do not try it another way; answer what they asked.)".to_string());
+    }
+    let member = args.get("member").and_then(|m| m.as_str()).unwrap_or("").trim().trim_start_matches('@').to_lowercase();
+    let words = |t: &str| t.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    let said = words(user_text);
+    let want = words(&member);
+    let named = !want.is_empty() && said.windows(want.len()).any(|w| w == want.as_slice());
+    (!named).then(|| format!("(not sent: they did not ask to send anything to {member}. Nothing was sent. Do not send it unless they ask you to; answer what they asked.)"))
+}
+
 /// Everything that must happen BEFORE a tool call reaches dispatch, in guard order:
 /// availability → arg normalization → egress clean-authoring → exact-value tripwire.
 /// `ctx` labels journal lines ("step 3", "bus").
@@ -115,6 +133,11 @@ pub(crate) async fn pre(
     // been wrong in three distinct ways while the model was right on the wire, and each time the
     // only evidence was a rendered line printed AFTER normalisation.
     let grounded = normalize_tool_args(raw_args.clone());
+    // E.EGRESS8: before anything is planned for it.
+    if let Some(msg) = send_to_person_refused(tool, &grounded, user_text, engine.desktop_attached()) {
+        eprintln!("[egress] {ctx}: {tool} refused: not asked for by the person — nothing sent");
+        return PreVerdict::Refuse { kind: RefusalKind::EgressUnsafe, msg };
+    }
     if raw_args != grounded {
         eprintln!("[agent] {ctx}: {tool} args normalised {raw_args} -> {grounded}");
     } else {
@@ -598,6 +621,56 @@ mod tests {
         for not in ["", "weather forecast this week fall color tour", "a b c d e", &"x".repeat(49)] {
             assert!(!crate::egress_planning::name_shaped(not), "{not}");
         }
+    }
+
+    /// E.EGRESS8, turn 919's real words: never on a desktop, and only to someone the person named.
+    #[test]
+    fn a_send_to_a_person_needs_the_person_to_have_asked() {
+        let args = |m: &str| serde_json::json!({"member": m, "note": "Here's the locker code"});
+        let asked = "Open my note called Locker code and read it back to me.";
+        assert!(send_to_person_refused("share_with_member", &args("wife"), asked, false).is_some_and(|m| m.contains("Nothing was sent")));
+        assert!(send_to_person_refused("share", &args("wife"), asked, false).is_some(), "the other name of it");
+        let named = "Share that photo with my wife";
+        assert_eq!(send_to_person_refused("share_with_member", &args("wife"), named, false), None);
+        assert!(send_to_person_refused("share_with_member", &args("wife"), named, true).is_some_and(|m| m.contains("not available on this desktop")), "never on a desktop");
+        assert_eq!(send_to_person_refused("share_with_member", &args("@Priya"), "send it to priya please", false), None);
+        assert!(send_to_person_refused("share_with_member", &args("ann"), "plan the annual review", false).is_some(), "a whole word, not letters");
+        assert!(send_to_person_refused("share_with_member", &args(""), named, false).is_some(), "no one named by the call");
+        assert_eq!(send_to_person_refused("remember", &args("wife"), asked, false), None);
+    }
+
+    /// E.EGRESS8 (541, battery task 20): a note to a family member is held to the person's words. A
+    /// value from what was read this turn does not go out as the model wrote it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_note_to_a_family_member_is_held_to_the_persons_words() {
+        use mind_governance::egress::EgressBroker;
+        const MARKER: &str = "ZEBRA-CANARY-7741";
+        let run = |said: &'static str, note: String| async move {
+            let pool = mind_inference::InferencePool::new(
+                Arc::new(mind_inference::ScriptedLLM::new(r#"{"query":"a photo for you"}"#)) as Arc<dyn yantrik_ml::LLMBackend>,
+                1,
+            );
+            let mem = MemoryHandle::spawn(":memory:", 8).unwrap();
+            let eng = ConversationEngine::new(Arc::new(mem) as Arc<dyn MemoryFacade>, pool, "JARVIS")
+                .with_egress(Arc::new(EgressBroker::open(std::env::temp_dir(), false)));
+            let state = Mutex::new(GuardState::default());
+            match pre(&eng, &state, &TurnIdentity::primary(), said, "share_with_member", serde_json::json!({"member": "priya", "note": note}), "t").await {
+                PreVerdict::Proceed(a) => Ok(a),
+                PreVerdict::Refuse { msg, .. } => Err(msg),
+            }
+        };
+        // Nobody named: the gate, in the pipeline, with its own words.
+        let read_back = run("Read my Weekend note back to me", format!("Here is the note: {MARKER}")).await;
+        let msg = read_back.expect_err("a send nobody asked for went on");
+        assert!(msg.contains("they did not ask to send anything to priya"), "not the gate: {msg}");
+        // Named, so the gate passes it: the note is still held to the person's words.
+        let named = run("Share that photo with Priya", format!("Here is the note: {MARKER}")).await;
+        match &named {
+            Ok(a) => assert!(!a["note"].as_str().unwrap_or("").contains(MARKER), "the marker left: {a}"),
+            Err(msg) => assert!(!msg.contains("did not ask to send"), "refused by the gate, not the note's check: {msg}"),
+        }
+        let own = run("Share that photo with Priya and say happy birthday", "happy birthday".to_string()).await;
+        assert_eq!(own.expect("the person's own words")["note"], "happy birthday");
     }
 
     /// E.EGRESS3b: this turn's web text is capped in all, the newest kept.

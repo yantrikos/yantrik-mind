@@ -22688,3 +22688,7 @@ These are the model's reasoning; they are the battery's baseline.
 
 **Tests:** on yos-mcp's real wording, the kept line holds both the preamble's head and "said no", and a short refusal is kept whole. **Mutant:** the tail dropped → red.
 
+**E.STALL5 — RESULT: PASS (unit; Windows and Linux).** Commit 03e3fe0.
+- **Mutant killed (1/1):** the tail dropped → "the outcome was cut". An earlier run of this mutant filtered to the wrong test name and proved nothing; it was rerun on the test that holds the assertions and watched to fail.
+- **Windows workspace:** 2648 passed, 0 failed. **Linux (staging .95):** mind-conversation 1330 passed, 0 failed.
+- **Bundle:** `yantrik-mind-03e3fe0-linux-amd64.tar.zst`, 62775887 bytes, sha256 `8fbe8ce57e0fc134d6fa626239bd73e0a4c438ca55e24a2343b3b59392b1ec0f` (verified locally after copy). It supersedes 6b56dcf.

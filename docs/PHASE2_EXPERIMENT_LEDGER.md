@@ -22666,3 +22666,9 @@ These are the model's reasoning; they are the battery's baseline.
   - M2: the backstop given no withheld refusal;
   - M3: `destroys` always false;
   - M4: the old example restored.
+
+**E.POLICY1 + E.PLAIN1 — RESULT: PASS (unit; Windows and Linux).** Commit 6b56dcf.
+- **Mutants killed (4/4):** M1 (both new tests), M2 (the turn-level test), M3 (both new tests), M4 (`compose_is_told_to_speak_plainly`). M1's first attempt never applied, because its two-line anchor missed the file's CRLF. It was rerun with a one-line anchor and watched to fail.
+- **Windows workspace:** 2648 passed, 0 failed. **Linux (staging .95):** mind-conversation 1330 passed, 0 failed.
+- **Bundle:** `yantrik-mind-6b56dcf-linux-amd64.tar.zst`, 62770016 bytes, sha256 `eeb874ff4c5328beb1074ef8b0e82960d7710ffb28d612e683e6d51622e7231e`. It supersedes 38cec3d.
+- **Live (pending):** "Delete <file>." at the sensitive ceiling → one `files_delete` refusal, no trash or other removing call, and a reply saying it was not done and only someone at the keyboard can do it.

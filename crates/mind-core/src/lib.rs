@@ -626,6 +626,52 @@ pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
+/// E.SIGTERM1 (OS PR #1076): a SIGTERM ends this process at once, status 143, as the default action
+/// does. With `PrivatePIDs=yes` on its unit the Mind is PID 1, and the kernel drops a signal PID 1 has
+/// no handler for: `systemctl stop` would wait out its timeout and then SIGKILL. Call it on a runtime.
+#[cfg(unix)]
+pub fn exit_on_sigterm() -> std::io::Result<()> {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::spawn(async move {
+        term.recv().await;
+        eprintln!("[mind] SIGTERM: exiting");
+        std::process::exit(143);
+    });
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod sigterm_tests {
+    /// A real signal to a real process: this test binary again, as the child.
+    #[test]
+    fn a_sigterm_ends_the_process_with_143() {
+        use std::io::BufRead;
+        if std::env::var_os("YM_SIGTERM_CHILD").is_some() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                super::exit_on_sigterm().unwrap();
+                println!("ready");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            });
+            panic!("still running thirty seconds after the parent's signal");
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "sigterm_tests::a_sigterm_ends_the_process_with_143", "--nocapture"])
+            .env("YM_SIGTERM_CHILD", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        assert!(out.lines().map_while(Result::ok).any(|l| l.contains("ready")), "the child never got ready");
+        let sent = std::process::Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
+        assert!(sent.success());
+        let started = std::time::Instant::now();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(143), "{status:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+}
+
 /// E.DONE1: the completion check runs with the thin desktop path; `YM_COMPLETION_CHECK=off` (or `0`)
 /// turns it off, so the battery can run with and without it.
 pub fn completion_check_from(get: &dyn Fn(&str) -> Option<String>) -> bool {

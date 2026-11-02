@@ -22801,3 +22801,13 @@ The model is told the event is there and to update it or say so. Other events at
 
 **E.FOLDER1 — RESULT (code; goes in the next bundle).** The mutant (`name` for `path`) was watched to fail in both tests that pin it. Windows workspace: 2658 passed, 0 failed. Three pinned tests were updated from the old form to the new one, on purpose.
 
+## E.SIGTERM1 — PREREG: the Mind can be stopped when it is PID 1
+
+**Why (OS PR #1076, my review, 2 Nov):** two units under one uid are not separated by mount namespaces: from a unit with #1076's own settings, on staging, `/proc/<pid>/root`, `/fd` and `/environ` read a canary and a token, and `PrivatePIDs=yes` closed all of it. The Mind's unit needs `PrivatePIDs=yes` too, so that it cannot read a harness's keys. In a PID namespace the Mind is PID 1, and the kernel drops a signal PID 1 has no handler for. The Mind has no SIGTERM handler, so `systemctl stop` would wait out the timeout and then SIGKILL.
+
+**Change:** on unix, a SIGTERM ends the process at once with exit status 143, which is what the default action does today outside a namespace: no shutdown work is added and nothing new can hang. One journal line. Nothing changes on Windows.
+
+**Not in scope:** reaping orphaned grandchildren as PID 1. Zombies last until the Mind exits. To be looked at on a VM before the unit line is added.
+
+**Tests (Linux only; a unix-only test is unbuilt on Windows):** a child of the test binary installs the handler, the parent sends it a real SIGTERM, and it exits 143 promptly. **Mutant:** the handler not installed → the child's status differs (killed by the signal, no code) → red. **Live, dc's VM:** with `PrivatePIDs=yes` on the unit, `systemctl stop yantrik-mind` returns within a few seconds.
+

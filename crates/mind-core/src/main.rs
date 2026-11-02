@@ -150,6 +150,11 @@ async fn main() -> anyhow::Result<()> {
         println!("{}", mind_core::CAPABILITIES);
         return Ok(());
     }
+    // E.SIGTERM1: stoppable as PID 1 too.
+    #[cfg(unix)]
+    if let Err(e) = mind_core::exit_on_sigterm() {
+        eprintln!("[mind] could not listen for SIGTERM: {e}");
+    }
 
     // Wallet custody is an operator-only bootstrap path. Handle it before model, memory, web, or
     // channel startup so key material cannot accidentally enter a prompt, trace, or live memory.

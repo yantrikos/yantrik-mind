@@ -626,6 +626,13 @@ pub fn thin_desktop_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
     }
 }
 
+/// E.DONE1: the completion check runs with the thin desktop path; `YM_COMPLETION_CHECK=off` (or `0`)
+/// turns it off, so the battery can run with and without it.
+pub fn completion_check_from(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    let off = matches!(get("YM_COMPLETION_CHECK").as_deref().map(str::trim), Some("off" | "0"));
+    !off && thin_desktop_from(get)
+}
+
 /// E.PACE2 / E.PACE2b (Pranab, 14 Oct, after the A/B on 541): the effort compose asks for when the
 /// person picked none. A non-blank `YM_COMPOSE_EFFORT` decides (`default` keeps the model's own);
 /// otherwise a Mind the desktop launched (`YANTRIK_MIND_RUN`, as E.THIN2) composes at "easy", and
@@ -698,7 +705,7 @@ mod pace2_tests {
 
 #[cfg(test)]
 mod thin2_tests {
-    use super::thin_desktop_from;
+    use super::{completion_check_from, thin_desktop_from};
 
     #[test]
     fn thin_by_default_only_for_a_mind_the_desktop_launched() {
@@ -714,6 +721,18 @@ mod thin2_tests {
         assert!(!thin_desktop_from(&env(Some("0"), Some("/run/yantrik-minds"))));
         assert!(thin_desktop_from(&env(Some("1"), None)));
         assert!(!thin_desktop_from(&env(None, Some("  "))));
+        // E.DONE1: with the thin path, unless switched off.
+        let check = |value: Option<&'static str>, run: Option<&'static str>| {
+            move |k: &str| match k {
+                "YM_COMPLETION_CHECK" => value.map(String::from),
+                "YANTRIK_MIND_RUN" => run.map(String::from),
+                _ => None,
+            }
+        };
+        assert!(completion_check_from(&check(None, Some("/run/yantrik-minds"))));
+        assert!(!completion_check_from(&check(Some("off"), Some("/run/yantrik-minds"))));
+        assert!(!completion_check_from(&check(Some(" 0 "), Some("/run/yantrik-minds"))));
+        assert!(!completion_check_from(&check(None, None)), "no thin path, no check");
     }
 }
 
@@ -784,6 +803,7 @@ pub fn engine(mem: &MemoryHandle, pool: mind_inference::InferencePool) -> Conver
         .with_persona_parts(&persona_name, &persona_operator)
         // E.THIN1/E.THIN2 (ARCH9): the thin desktop path, the default for a Mind the desktop launched.
         .with_thin_desktop(thin_desktop_from(&|k| std::env::var(k).ok()))
+        .with_completion_check(completion_check_from(&|k| std::env::var(k).ok()))
         // E.PACE2/E.PACE2b: compose's own effort, "easy" by default for a Mind the desktop launched.
         .with_compose_effort(compose_effort_from(&|k| std::env::var(k).ok()))
         // E.PREFIX1b: one schema block for every turn, off until the A/B on 541 decides.

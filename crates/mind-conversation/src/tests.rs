@@ -18334,6 +18334,119 @@ mod desktop_consent_and_stall_wiring {
         assert!(!reply.contains("Firefox") && !reply.to_lowercase().contains("source"), "{reply}");
     }
 
+    /// E.DONE1: a model that plays tool steps and answers the completion check from a list.
+    struct PartsChecked {
+        steps: StdMutex<Vec<Step>>,
+        verdicts: StdMutex<Vec<&'static str>>,
+        checks: Arc<StdMutex<usize>>,
+        seen: Arc<StdMutex<Vec<String>>>,
+    }
+    impl LLMBackend for PartsChecked {
+        fn chat(&self, m: &[ChatMessage], _c: &GenerationConfig, tools: Option<&[serde_json::Value]>) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            let all: String = m.iter().map(|x| x.content.clone()).collect::<Vec<_>>().join("\n");
+            self.seen.lock().unwrap().push(all.clone());
+            let (text, tool_calls) = if all.contains(crate::completion::SYSTEM) {
+                *self.checks.lock().unwrap() += 1;
+                let mut v = self.verdicts.lock().unwrap();
+                ((!v.is_empty()).then(|| v.remove(0)).unwrap_or("unusable").to_string(), vec![])
+            } else if tools.is_some_and(|t| !t.is_empty()) {
+                let mut steps = self.steps.lock().unwrap();
+                match (!steps.is_empty()).then(|| steps.remove(0)) {
+                    Some(Step::Call(n, a)) => (String::new(), vec![yantrik_ml::ToolCall { name: n.to_string(), arguments: a }]),
+                    Some(Step::Say(s)) => (s.to_string(), vec![]),
+                    Some(Step::Fail) => anyhow::bail!("the endpoint stopped answering"),
+                    None => ("done".to_string(), vec![]),
+                }
+            } else {
+                (COMPOSED.to_string(), vec![])
+            };
+            Ok(yantrik_ml::LLMResponse { thinking: String::new(), text, prompt_tokens: 0, completion_tokens: 0, tool_calls, api_tool_calls: vec![], stop_reason: "stop".to_string() })
+        }
+        fn chat_streaming(&self, m: &[ChatMessage], c: &GenerationConfig, t: Option<&[serde_json::Value]>, _: &mut dyn FnMut(&str)) -> anyhow::Result<yantrik_ml::LLMResponse> {
+            self.chat(m, c, t)
+        }
+        fn count_tokens(&self, t: &str) -> anyhow::Result<usize> {
+            Ok(t.len() / 4)
+        }
+        fn backend_name(&self) -> &str {
+            "parts-checked"
+        }
+    }
+
+    struct PartsRun {
+        reply: String,
+        checks: usize,
+        acts: Vec<String>,
+        log: String,
+    }
+
+    async fn run_parts(on: bool, steps: Vec<Step>, verdicts: Vec<&'static str>, acts: Vec<&str>) -> PartsRun {
+        let checks = Arc::new(StdMutex::new(0usize));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let model: Arc<dyn LLMBackend> = Arc::new(PartsChecked { steps: StdMutex::new(steps), verdicts: StdMutex::new(verdicts), checks: checks.clone(), seen: seen.clone() });
+        let pool = InferencePool::new(Arc::clone(&model), 1).with_provider("script").with_private_backend(model, "script");
+        let hub = Arc::new(mind_tools::McpHub::new());
+        let tool = |name: &str| mind_tools::McpTool {
+            server: "yantrik-os".into(),
+            name: name.into(),
+            description: format!("{name} on this computer"),
+            read_only: true,
+            open_world: false,
+            destructive: false,
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        hub.add_scripted_tool(tool("os_describe"), vec![Ok("Notes \u{2014} nothing open\nrevision: 1\n{}".to_string()); 6]).unwrap();
+        hub.add_scripted_tool(tool("os_act"), acts.iter().map(|a| Ok(a.to_string())).collect()).unwrap();
+        let mem: Arc<dyn MemoryFacade> = Arc::new(MemoryHandle::spawn(":memory:", 8).unwrap());
+        let conv = ConversationEngine::new(mem, pool, "YM").with_mcp(hub.clone()).with_completion_check(on);
+        let reply = conv.agent_loop_for_eval("Put the hike on my calendar and write me a checklist note", &TurnIdentity::primary()).await.unwrap_or_default();
+        let n = *checks.lock().unwrap();
+        let acts = hub.scripted_calls().iter().filter(|(t, _)| t.ends_with("os_act")).filter_map(|(_, a)| a["action"].as_str().map(str::to_string)).collect();
+        let log = seen.lock().unwrap().join("\n");
+        PartsRun { reply, checks: n, acts, log }
+    }
+
+    /// E.DONE1, through the loop. 541's turn 831 is the reason in `DROPPED`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn each_part_of_a_request_ends_done_or_with_a_real_reason() {
+        const DROPPED: &str = r#"{"parts":[{"part":"put the hike on my calendar","status":"done","reason":"none"},{"part":"write me a checklist note","status":"not_done","reason":"I don't have a tool for that"}],"unsupported":[1]}"#;
+        const ALL_DONE: &str = r#"{"parts":[{"part":"put the hike on my calendar","status":"done","reason":"none"},{"part":"write me a checklist note","status":"done","reason":"none"}],"unsupported":[]}"#;
+        const REFUSED_PART: &str = r#"{"parts":[{"part":"write me a checklist note","status":"not_done","reason":"said no"}],"unsupported":[]}"#;
+        const ADDED: &str = "Done \u{2014} Calendar \u{2014} 1 thing on day 7\naccepted: True, settled: True\nrevision: 2\n{}";
+        const NOTE: &str = "Done \u{2014} Notes \u{2014} \"Checklist\" open (3 lines, saved)\naccepted: True, settled: True\nrevision: 3\n{}";
+        const DECLINED: &str = "REFUSED \u{2014} nothing was run. refused: the person at the machine was asked to allow notes.new_note and said no. Nothing was run and nothing was changed.";
+        let add = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "calendar", "action": "add_event", "args": {"title": "Hike"}}));
+        let note = || Step::Call("mcp.yantrik-os.os_act", serde_json::json!({"app": "notes", "action": "new_note", "args": {"title": "Checklist", "text": "water"}}));
+
+        // Dropped, sent back once, done.
+        let r = run_parts(true, vec![add(), Step::Say("The hike is on your calendar."), note(), Step::Say("Both are done.")], vec![DROPPED, ALL_DONE], vec![ADDED, NOTE]).await;
+        assert_eq!(r.acts, vec!["add_event", "new_note"], "the dropped part was not done: {}", r.reply);
+        assert_eq!(r.checks, 2);
+        assert!(r.log.contains("not done yet: write me a checklist note"), "the model was not told");
+        assert_eq!(r.reply, "Both are done.");
+
+        // Dropped twice: the answer stands, and says so. Never sent back a second time.
+        let r = run_parts(true, vec![add(), Step::Say("The hike is on your calendar."), Step::Say("It is on your calendar.")], vec![DROPPED, DROPPED], vec![ADDED]).await;
+        assert_eq!(r.checks, 2);
+        assert_eq!(r.reply, "It is on your calendar.\n\n(I did not finish: write me a checklist note.)");
+
+        // Not done for a reason the record gives: not sent back, nothing added.
+        let r = run_parts(true, vec![note(), Step::Say("You declined the note, so I did not make it.")], vec![REFUSED_PART], vec![DECLINED]).await;
+        assert_eq!(r.checks, 1, "a real reason was sent back");
+        assert_eq!(r.reply, "You declined the note, so I did not make it.");
+
+        // A check with no usable answer changes nothing.
+        let r = run_parts(true, vec![add(), Step::Say("The hike is on your calendar.")], vec!["I think it went fine."], vec![ADDED]).await;
+        assert_eq!(r.checks, 1);
+        assert_eq!(r.reply, "The hike is on your calendar.");
+
+        // Off, or a turn that used no tools: no call.
+        let r = run_parts(false, vec![add(), Step::Say("The hike is on your calendar.")], vec![DROPPED], vec![ADDED]).await;
+        assert_eq!((r.checks, r.reply.as_str()), (0, "The hike is on your calendar."));
+        let r = run_parts(true, vec![Step::Say("What date is the hike?")], vec![DROPPED], vec!["UNUSED"]).await;
+        assert_eq!(r.checks, 0, "nothing was done, so there is no record to hold it against");
+    }
+
     /// E.ANS1 (E.CMP1 run 1, ask 6): the answer filed as `run_skill {"name":"answer"}` is the answer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_answer_filed_as_a_skill_is_the_answer() {

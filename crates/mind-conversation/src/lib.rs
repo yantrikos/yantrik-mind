@@ -42,6 +42,7 @@ pub use plugins::{CapabilityHandler, PluginRegistry, PluginSpec, Provenance, Sec
 mod book;
 mod briefing;
 mod build;
+mod completion;
 mod desktop;
 /// E.HARN1: the desktop's MCP server name, for the boot path that configures it.
 pub use desktop::DESKTOP_SERVER;
@@ -6523,6 +6524,8 @@ pub struct ConversationEngine {
     /// commands and the Mind's own pending questions straight to the agent loop, with no shortcut
     /// answering first and no pass rewriting after. Off by default; `YM_THIN_DESKTOP=1`.
     thin_desktop: bool,
+    /// E.DONE1: see `with_completion_check`.
+    completion_check: bool,
     /// E.SPINE1: whether every turn's grounding carries the ambient "Next 7 days" and "Open
     /// reminders" blocks. On until the A/B decides; `YM_AMBIENT_UPCOMING=0` turns it off and the
     /// `upcoming` tool answers on demand.
@@ -6756,6 +6759,12 @@ impl ConversationEngine {
         self
     }
 
+    /// E.DONE1: hold each answer's parts against the turn's record before it stands.
+    pub fn with_completion_check(mut self, on: bool) -> Self {
+        self.completion_check = on;
+        self
+    }
+
     /// E.REM1d: a host that will deliver due reminders says so (see the field).
     pub fn set_unprompted_delivery(&self, yes: bool) {
         self.unprompted_delivery.store(yes, std::sync::atomic::Ordering::Relaxed);
@@ -6824,6 +6833,7 @@ impl ConversationEngine {
             persona: std::sync::RwLock::new(persona.into()),
             persona_parts: std::sync::RwLock::new(None),
             thin_desktop: false,
+            completion_check: false,
             ambient_upcoming: true,
             compose_effort: None,
             unprompted_delivery: std::sync::atomic::AtomicBool::new(false),
@@ -8413,6 +8423,36 @@ impl ConversationEngine {
     /// E.ARENA1-F57: and for ANY repeated call while the goal is missing -- VM 520, E.LONG1 L1c and
     /// L1-r2 re-read a settled `events_between` 4 and 6 times with ~/week-plan.md unwritten, each repeat
     /// meeting the generic "already ran" note.
+    /// E.DONE1: the check's verdict on this answer; None (journalled) when it has no usable one, and
+    /// the answer then stands as it is.
+    async fn completion_verdict(&self, request: &str, reply: &str, record: &str) -> Option<completion::Verdict> {
+        let messages = vec![
+            yantrik_ml::ChatMessage::system(completion::SYSTEM),
+            yantrik_ml::ChatMessage::user(completion::user_message(request, record, reply)),
+        ];
+        let cfg = yantrik_ml::GenerationConfig {
+            max_tokens: completion::MAX_TOKENS,
+            temperature: 0.0,
+            think: mind_inference::think_for("reasoning", Some(false)),
+            ..yantrik_ml::GenerationConfig::default()
+        };
+        // Private-grounded, as the work-log check is: the record holds what was read this turn.
+        let call = mind_inference::with_step_effort("easy".to_string(), self.inference.chat_grounded(messages, cfg));
+        match mind_inference::with_call_cap(completion::CALL_CAP, call).await {
+            Ok(r) => {
+                let v = completion::parse(&r.text);
+                if v.is_none() {
+                    eprintln!("[agent] completion check: no usable verdict ({} chars) \u{2014} the answer stands", r.text.len());
+                }
+                v
+            }
+            Err(e) => {
+                eprintln!("[agent] completion check failed \u{2014} the answer stands: {e}");
+                None
+            }
+        }
+    }
+
     /// E.DUP1: before a dated `add_event`, read that day; the note when the event is already there.
     async fn event_already_there_now(&self, tool: &str, args: &serde_json::Value, id: &TurnIdentity) -> Option<String> {
         let asked = desktop::event_asked(tool, args)?;
@@ -14528,6 +14568,8 @@ Open reminders you're carrying for them:",
         // At most one reminder that part of the request went untouched; after that the
         // turn ends and says so rather than arguing with itself.
         let mut unfinished_nudged = false;
+        // E.DONE1: sent back once for a part of the request left undone.
+        let mut done_nudged = false;
         let mut looked_first_nudged = false;
         // E.ARENA1-F7: what each app listed this turn, and which sensitive calls were already told
         // about a standard twin (a second identical call is the model choosing to ask the person).
@@ -15230,6 +15272,21 @@ The answer travels inside a JSON string, so newlines and quotes must be         
 
 (I did not {clause} — that part of what you asked has not been done.)"
                     );
+                }
+                // E.DONE1: each part of the request, against the turn's record, before the answer stands.
+                if self.completion_check && steer && !cost.calls.is_empty() {
+                    if let Some(v) = self.completion_verdict(user_text, &a, &scratch).await {
+                        let missing = completion::unfinished(&v, &scratch);
+                        eprintln!("[agent] step {step}: completion check: {}", completion::journal_line(&v, &missing));
+                        if !missing.is_empty() {
+                            if !done_nudged && (started.elapsed().as_millis() as u64).saturating_mul(10) < budget.max_wall_ms.saturating_mul(6) {
+                                done_nudged = true;
+                                scratch.push_str(&completion::nudge(step, &missing));
+                                continue;
+                            }
+                            a = format!("{a}\n\n{}", completion::not_finished_note(&missing));
+                        }
+                    }
                 }
                 eprintln!(
                     "[agent] step {step}: no tool chosen — returning a direct reply ({} chars)",

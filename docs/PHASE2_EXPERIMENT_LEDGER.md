@@ -22730,3 +22730,37 @@ The model is told the event is there and to update it or say so. Other events at
 - **Bundle:** `yantrik-mind-decd846-linux-amd64.tar.zst`, 63026466 bytes, sha256 `40cc10a4c8f63fc0335929d6b3a512eedee0188067ed59bb5ce17b01159c9c98` (verified locally after copy). It supersedes 03e3fe0.
 - **Live (pending):** dc's battery, 3 runs per arm, with baseline 8/18 done.
 - **R4 reconsidered:** the loop already looks again at an unsettled act, and a settled act's answer carries the app's state (dc, from yos-mcp). So no separate "what the desktop confirms" block was built; enforcing the record belongs to the completion check (R5).
+
+## E.DONE1 — PREREG: every part of a request ends done, not done for a real reason, or asked (reliability batch 2, R5)
+
+**Why (Pranab, 1 Nov, via dc): "failure is not accetable, tasks should never fail unless its access issue or limitations."** "Gave up" must stop being an allowed end. On 541 turn 831 the reply said "I don't have a tool for either" about calendar and notes actions it had used minutes earlier; on turn 819 it said it needed a URL it already had. The look-before-refusing guard covers only `unattempted_side_effect`'s phrases.
+
+**Preflight, before any code (18 recorded battery turns, one call each to qwen3.8:27b, reasoning off; 1 Nov):**
+- **The harness failed twice first.** `think: false` is ignored on the gateway's OpenAI path: 17 of 18 came back empty after 30-85 s, with the budget spent on reasoning. Only `chat_template_kwargs.enable_thinking: false` turned it off directly, and the OS gateway sets that for `effort: "easy"`. That first run is no measurement.
+- **Parts:** it named the unfinished part on tasks 7, 8, 12, 13, 14, 15 and 18. On 12 and 18 its "reason" came from the reply ("I don't have a tool"), not the record, which code can check. It missed task 17's unverified "open". 2-15 s per turn.
+- **Sentences:** it flagged sentences on 13 of 18 turns, including 6 of 6 on task 5 and 8 of 9 on task 16. It caught "didn't get it in time", "budget.ods deleted" and task 9's Wednesday error, and missed "driest morning". **This cannot be graded here:** the dumps hold the journal's 120-character lines, far less than the live work log, so false flags are inflated by an unknown amount. Parts were also falsely not_done on tasks 1, 5, 6 and 16, for the same reason.
+
+**Change:**
+- After a turn that used tools reaches its answer, one model call (`effort: easy`, private lane, capped, temperature 0) maps the request to parts and lists unsupported sentences. Closed schema; anything else fails open with a journal line. Skipped when the person forbade tools (E.NOTOOL1).
+- **A part is unfinished** when it is not_done and its reason is "none" or does not appear in the turn's record. A reason taken from the reply is no reason.
+- **Unfinished, first time:** the turn goes back to the loop once, told what is missing and to do it or say what stopped it (within `may_nudge_goal`).
+- **Unfinished, again after that:** the answer stands, with "(I did not finish: …)" appended, as `unattempted_side_effect` already does.
+- **Sentences are SHADOW:** journalled by number, never removed. They stay shadow until a battery has graded them against the apps.
+- Journal, each check: parts done / not_done / asked, unfinished, flagged numbers.
+- Behind `with_completion_check`, on for the thin desktop path; `YM_COMPLETION_CHECK=off` turns it off, so the battery can run with and without.
+
+**Kill criteria, on the battery (3 runs per arm, same bundle and OS):** the check is turned off if, compared with off, tasks done does not rise, or any task regresses from done to not done, or the median acting turn slows by more than 30 s, or a duplicate action appears that the off arm does not have.
+
+**What this cannot do:** the check is the same small model. It moves some failures from silent to named. Task 9's "driest morning" is not addressed by it (R6 may).
+
+**Tests:**
+- Unit: parsing (closed schema; a wrong status → none); `unfinished` on task 18's and task 12's real words; a reason in the record passes; a reason only in the reply fails.
+- Turn-level: a dropped part → one nudge, the model does it, no appended line; dropped twice → the line; a reason in the record → no nudge; the check's reply unusable → the answer unchanged; check off → no extra call.
+- **Mutants:** the record test on reasons removed; the nudge bound removed; the append removed; fail-open changed to treat an unusable reply as unfinished.
+
+**E.DONE1 — RESULT (code; no bundle yet, held for OS #1065 at dc's request).**
+- **Mutants killed (5/5):** reasons accepted without the record; the nudge bound removed; the append removed; an unusable reply treated as unfinished; "tools ran" tested by a non-empty work log.
+- **A defect the turn-level test caught:** the first version tested `!scratch.is_empty()`, but the loop's own nudges write to the work log, so a turn that used no tools ran the check twice. It now tests the turn's calls.
+- **Not covered:** a turn that ends through the barren or budget compose path gets no check. It cannot go back to the loop from there.
+- **Windows workspace:** 2656 passed, 0 failed. Linux pending, with the bundle.
+

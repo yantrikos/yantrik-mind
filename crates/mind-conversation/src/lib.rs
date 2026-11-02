@@ -15310,7 +15310,7 @@ The answer travels inside a JSON string, so newlines and quotes must be         
                         if !missing.is_empty() {
                             if !done_nudged && (started.elapsed().as_millis() as u64).saturating_mul(10) < budget.max_wall_ms.saturating_mul(6) {
                                 done_nudged = true;
-                                scratch.push_str(&completion::nudge(step, &missing));
+                                scratch.push_str(&completion::nudge(step, &missing, self.desktop_attached()));
                                 continue;
                             }
                             a = format!("{a}\n\n{}", completion::not_finished_note(&missing));

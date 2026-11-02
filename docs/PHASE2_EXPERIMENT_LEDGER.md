@@ -22849,3 +22849,8 @@ The model is told the event is there and to update it or say so. Other events at
 
 **E.SIGTERM1 — SECOND CORRECTION (2 Nov), from the real systemd (542, 257.13; dc's runner, OS #1076):** my staging results (container, 257.8) do not hold on the OS. There, under `PrivatePIDs`: a test process with a handler ran it and stopped in 3.04 s; a lone no-handler process took 0.02 s; with 3 children, 30.1 s; the real Mind decd846, 30.1-30.2 s on every stop, with `stop-sigterm` timing out at the unit's `TimeoutStopSec=30`. So the original reason for this change stands on the OS, for a process with children, and both of my "corrections" above overreached from one container. Expected with the handler: about a second, since PID 1's exit ends its namespace. **Not measured with the real Mind.** Bar for the next bundle: `systemctl stop yantrik-mind` under 5 s, `Result=success`.
 
+**Audit before the batch's bundle (dc's ask, 2 Nov): does anything tell the model about a capability the machine lacks?** I read every model-facing string the batch adds. Two findings, fixed; mutants watched to fail (2/2):
+- E.DONE1's retry named `os_describe` with no desktop attached. It now names it only with one.
+- E.MAP1 said to `os_describe` every app's name, while the browser's row has no `describe_as` (the only such row in 520's 36). It now reads "browser (not described): the web".
+Sound as they stand: the catalogue line appears only when the OS itself lists the apps, and an older OS keeps the old text; E.LOOK1 and E.ASKOK1 tell the model nothing new. **One known condition:** E.FOLDER1's call assumes OS #1038. All four VMs have it (nightly 2359); the Mac mini's version is unknown, and a machine rolled back below #1038 would get a refusal from the desktop.
+

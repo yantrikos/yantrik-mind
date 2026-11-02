@@ -109,12 +109,13 @@ pub(crate) fn unfinished(v: &Verdict, record: &str) -> Vec<String> {
     v.parts.iter().filter(|p| p.status == Status::NotDone && !in_record(&p.reason, record)).map(|p| p.part.clone()).collect()
 }
 
-/// Sent back to the loop, once.
-pub(crate) fn nudge(step: usize, missing: &[String]) -> String {
+/// Sent back to the loop, once. Names the desktop's tool only when there is a desktop to use it on.
+pub(crate) fn nudge(step: usize, missing: &[String], desktop: bool) -> String {
+    let look = if desktop { " (mcp.yantrik-os.os_describe {app} lists what an app can do)" } else { "" };
     format!(
         "\n[{step}] (checked against what they asked: not done yet: {}. Your notes give no reason for that. Do it now with the \
-         right tool (mcp.yantrik-os.os_describe {{app}} lists what an app can do), or, if it truly cannot be done, say what \
-         stopped you. Do not say you have no tool for it without having looked.)",
+         right tool{look}, or, if it truly cannot be done, say what stopped you. Do not say you have no tool for it without \
+         having looked.)",
         missing.join("; ")
     )
 }
@@ -174,6 +175,15 @@ mod tests {
         let missing = unfinished(&v, RECORD);
         assert_eq!(missing, vec!["put the hike on my calendar", "write me a checklist note"]);
         assert_eq!(journal_line(&v, &missing), "parts done 1 not_done 3 asked 1; unfinished [\"put the hike on my calendar\", \"write me a checklist note\"]; would flag sentences [3]");
+    }
+
+    /// What the model is told it can use: the desktop's tool only with a desktop.
+    #[test]
+    fn the_nudge_names_only_what_is_there() {
+        let missing = vec!["write the note".to_string()];
+        assert!(nudge(3, &missing, true).contains("mcp.yantrik-os.os_describe"));
+        let off = nudge(3, &missing, false);
+        assert!(!off.contains("os_describe") && off.contains("not done yet: write the note"), "{off}");
     }
 
     #[test]

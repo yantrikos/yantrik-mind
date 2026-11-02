@@ -18372,12 +18372,12 @@ mod desktop_consent_and_stall_wiring {
         };
         let (calls, prompts) = run(CATALOG).await;
         assert_eq!(calls, 1, "one read across two turns");
-        assert!(prompts[0].contains("browser: the web") && prompts[0].contains("email: read and send mail"), "the place line lacks the list");
+        assert!(prompts[0].contains("browser (not described): the web") && prompts[0].contains("email: read and send mail"), "the place line lacks the list");
         assert!(!prompts[0].contains("the calendar and notes are apps of their own"), "the hand list stayed");
         let searched = prompts.iter().find(|p| p.contains("[0] discover_tools ->")).expect("the search reached the work log");
         let answer = searched.split("[0] discover_tools -> ").nth(1).unwrap();
         assert!(answer.starts_with("ON THIS COMPUTER"), "the note no longer leads: {answer}");
-        assert!(prompts.last().unwrap().contains("browser: the web"), "the second turn lost the list");
+        assert!(prompts.last().unwrap().contains("browser (not described): the web"), "the second turn lost the list");
         // An older OS: asked once, no rows, the hand list.
         let (calls, prompts) = run(OLD).await;
         assert_eq!(calls, 1, "a read with no rows is not asked again at once");

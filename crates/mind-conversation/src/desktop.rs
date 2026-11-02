@@ -873,9 +873,12 @@ pub(crate) fn catalog_line(obs: &str) -> Option<String> {
             continue;
         };
         let short: String = purpose.chars().take(60).collect();
-        apps.push(match text("describe_as").filter(|d| *d != name) {
-            Some(via) => format!("{name}, via {via}: {short}"),
-            None => format!("{name}: {short}"),
+        // No `describe_as` is the desktop saying there is nothing to describe (the browser): the
+        // model is not sent to `os_describe` a name that cannot answer.
+        apps.push(match text("describe_as") {
+            Some(via) if via != name => format!("{name}, via {via}: {short}"),
+            Some(_) => format!("{name}: {short}"),
+            None => format!("{name} (not described): {short}"),
         });
     }
     if apps.is_empty() {
@@ -3364,7 +3367,7 @@ mod tests {
     fn the_map_comes_from_the_desktops_own_list() {
         let f = |n: &str| std::fs::read_to_string(format!("{}/fixtures/desktop/{n}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let line = catalog_line(&f("os_apps_catalog_520_pr1065.txt")).expect("the catalogue rows");
-        for want in ["email: read and send mail", "browser: the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "which is the person's own, with their sign-ins"] {
+        for want in ["email: read and send mail", "browser (not described): the web", "spreadsheet: a sheet of numbers", "files, via shell: browse, move, rename and delete files", "which is the person's own, with their sign-ins"] {
             assert!(line.contains(want), "{want} missing: {line}");
         }
         // Not "your own view": on OS main the web tools drive the person's Browser (dc, from the code).
@@ -3379,7 +3382,7 @@ mod tests {
         let hand = desktop_sentence(true, None);
         assert!(hand.contains("mail is the `email` app"), "{hand}");
         let from_os = desktop_sentence(true, Some(&line));
-        assert!(from_os.contains("browser: the web") && from_os.contains("agent_run") && from_os.contains("`editor` app"), "{from_os}");
+        assert!(from_os.contains("browser (not described): the web") && from_os.contains("agent_run") && from_os.contains("`editor` app"), "{from_os}");
         assert!(!from_os.contains("the calendar and notes are apps"), "the hand list stayed: {from_os}");
     }
 
